@@ -309,38 +309,6 @@ fn if_let(pattern: Pattern, scrutinee: Expr, then: Block, els: Option<Block>, li
     Stmt::expr(m)
 }
 
-/// Drops a multi-line quote's closing indentation, Swift's rule: when the text
-/// opens with a newline and its last line holds only whitespace, that
-/// whitespace leaves the start of every line, and the opening newline and the
-/// last line with the newline before it go. A part that starts after a hole
-/// starts mid-line, so only text after a newline is a line start.
-fn dedent(parts: &mut [String]) {
-    let Some(last) = parts.last() else { return };
-    let Some(nl) = last.rfind('\n') else { return };
-    let close = last[nl + 1..].to_string();
-    let opens = parts.first().is_some_and(|p| p.starts_with('\n'));
-    if opens && close.trim().is_empty() {
-        let n = parts.len();
-        parts[n - 1].truncate(nl);
-        for (i, part) in parts.iter_mut().enumerate() {
-            let mut out = String::with_capacity(part.len());
-            for (j, line) in part.split_inclusive('\n').enumerate() {
-                let start = j > 0 || i == 0;
-                out.push_str(match start {
-                    true => line.strip_prefix(close.as_str()).unwrap_or(line),
-                    false => line,
-                });
-            }
-            *part = out;
-        }
-        if let Some(first) = parts.first_mut() {
-            if first.starts_with('\n') {
-                first.remove(0);
-            }
-        }
-    }
-}
-
 /// Whether `src` is a separator `join` puts between items (`", "`, `" else "`):
 /// punctuation and keywords, no bracket, no name and no literal, which no mode
 /// parses alone and no unit of code can open or close.
@@ -356,6 +324,33 @@ fn is_separator(src: &str) -> bool {
             _ => false,
         }
     })
+}
+
+/// Whether every bracket `src` closes was opened in `src` first, and every one
+/// it opens is closed.
+fn balanced(src: &str) -> bool {
+    let Ok(toks) = crate::lexer::lex(src) else {
+        return false;
+    };
+    let mut depth = 0usize;
+    for t in &toks {
+        let (kind, text) = crate::lexer::token_name_and_text(&t.tok);
+        match (kind.as_str(), text.as_str()) {
+            ("punct", "(" | "[" | "{") => depth += 1,
+            ("punct", ")" | "]" | "}") => match depth.checked_sub(1) {
+                Some(d) => depth = d,
+                None => return false,
+            },
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// Whether the hole between parts `before` and `after` is all that stands
+/// between a bracket and its closing one: `f(\{args})`, `P { \{fields} }`.
+fn alone_in_brackets(before: &str, after: &str) -> bool {
+    before.trim_end().ends_with(['(', '[', '{']) && after.trim_start().starts_with([')', ']', '}'])
 }
 
 /// Whether the hole between parts `before` and `after` is alone on its line;
@@ -3868,81 +3863,73 @@ impl Parser {
 
     /// Desugars a `vyrn"..."` code quote into a `Code` expression.
     ///
-    /// A multi-line quote first drops the indentation of its closing `"""`
-    /// line from each of its lines, and the newline after its opening `"""`
-    /// ([`dedent`]). The parts, with each hole replaced by a `__vyrn_holeN`
-    /// placeholder, form a skeleton. It must parse here in one of four modes
-    /// (declarations, statements, expression, type); a failure is a parse
-    /// diagnostic at the literal. A hole alone on its line stands for a list of
-    /// items of its block, so its placeholder may also be a declaration. The
-    /// quote lowers to a `@codeText(part, line, col) + @codeSplice(hole, glued,
-    /// indent, from, to) + ...` chain: `glued` is `1` for a hole touching a word
-    /// character, which the checker requires to be a `Name`, `indent` is the
-    /// leading whitespace of the hole's line, which a multi-line `Code` is
-    /// re-indented to, and `from..to` are the hole's columns, where a refusal
-    /// of it shows.
+    /// The lexer has dropped a `vyrn"""` quote's closing indentation
+    /// (`lexer::dedent`). The parts, with each hole replaced by a `__vyrn_holeN`
+    /// placeholder, form a skeleton. It must parse here as declarations,
+    /// statements, an expression, a type, or one item of a list
+    /// ([`Self::parses_as_item`]); a failure is a parse diagnostic at the
+    /// literal. A hole alone on its line stands for a list of items of its
+    /// block, so its placeholder may also be a declaration; a hole alone in
+    /// its brackets stands for the whole list there, so its placeholder may
+    /// also be empty, though an import list cannot; any other hole's
+    /// placeholder may also be a string literal, which an import's `from`
+    /// needs. The
+    /// quote lowers to one call, [`crate::ast::QUOTE`].
     fn code_quote(
         &self,
-        mut parts: Vec<String>,
+        parts: Vec<String>,
         exprs: Vec<Hole>,
         line: usize,
         col: usize,
     ) -> Result<Expr, Diagnostic> {
-        dedent(&mut parts);
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-        let skeleton = |item: bool| {
+        let skeleton = |item: bool, empty: bool, lit: bool| {
             let mut skel = String::new();
             for (i, part) in parts.iter().enumerate() {
                 skel.push_str(part);
                 if i < exprs.len() {
-                    let alone = item && alone_on_line(&parts[i], &parts[i + 1], i == 0);
-                    match alone {
-                        true => skel.push_str(&format!("let __vyrn_hole{i} = 0")),
-                        false => skel.push_str(&format!("__vyrn_hole{i}")),
-                    }
+                    let (before, after) = (&parts[i], &parts[i + 1]);
+                    let placeholder = if item && alone_on_line(before, after, i == 0) {
+                        format!("let __vyrn_hole{i} = 0")
+                    } else if item && alone_in_brackets(before, after) {
+                        if empty {
+                            String::new()
+                        } else {
+                            format!("__vyrn_hole{i}")
+                        }
+                    } else if lit {
+                        format!("\"__vyrn_hole{i}\"")
+                    } else {
+                        format!("__vyrn_hole{i}")
+                    };
+                    skel.push_str(&placeholder);
                 }
             }
             skel
         };
-        let skel = skeleton(false);
+        let skel = skeleton(false, false, false);
         let separator = exprs.is_empty() && is_separator(&skel);
+        let tries = [(true, true, false), (true, true, true), (true, false, true)];
         if !separator
             && !self.skeleton_parses_any(&skel)
-            && !self.skeleton_parses_any(&skeleton(true))
+            && !(tries.iter()).any(|&(i, e, l)| self.skeleton_parses_any(&skeleton(i, e, l)))
         {
             let (rule, skel_line, skel_col) = self.skeleton_error_detail(&skel);
             let rline = line + skel_line.saturating_sub(1);
             let rcol = if skel_line <= 1 { col } else { skel_col };
             return Err(Diagnostic::refusal(rline, rcol, "parse", rule));
         }
-        let mut acc: Option<Expr> = None;
-        let add = |acc: &mut Option<Expr>, e: Expr| {
-            *acc = Some(match acc.take() {
-                None => e,
-                Some(prev) => Expr::Binary {
-                    id: Id::NEW,
-                    op: BinOp::Add,
-                    lhs: Box::new(prev),
-                    rhs: Box::new(e),
-                    line,
-                },
-            });
-        };
-        // Each part carries where it starts in this file, and the loader adds the
-        // module's key: the part's author.
-        let code_text = |s: &str, (l, c): (usize, usize)| {
-            let pos = [l, c].map(|n| Expr::int(n as i64));
-            Expr::call("@codeText", [vec![Expr::str(s)], pos.into()].concat(), line)
-        };
-        // The first part starts after `vyrn"`, so a triple quote's first column
-        // is two short; each later part starts after its hole's `}`.
+        // Every part, empty ones too, with where it starts in this file; the
+        // loader adds the module's key, the parts' author. The first part
+        // starts after `vyrn"`, so a triple quote's first column is two short;
+        // each later part starts after its hole's `}`.
+        let int = |n: usize| Expr::int(n as i64);
+        let mut args = vec![int(parts.len())];
         let mut at = (line, col + 5);
         // The leading whitespace of the line the next hole sits on.
         let mut indent = String::new();
         for (i, part) in parts.iter().enumerate() {
-            if !part.is_empty() {
-                add(&mut acc, code_text(part, at));
-            }
+            args.extend([Expr::str(part), int(at.0), int(at.1)]);
             if let Some(nl) = part.rfind('\n') {
                 indent.clear();
                 let rest = &part[nl + 1..];
@@ -3952,13 +3939,16 @@ impl Parser {
                 let before = part.chars().next_back().is_some_and(word);
                 let after = parts[i + 1].chars().next().is_some_and(word);
                 let value = self.parse_hole(hole, line, col)?;
-                let glued = Expr::int((before || after) as i64);
                 // `\{` before the hole's source and `}` after it, for a refusal.
                 let len = hole.src.chars().count();
-                let span = [hole.col.saturating_sub(2), hole.col + len];
-                let [from, to] = span.map(|c| Expr::int(c as i64));
-                let args = vec![value, glued, Expr::str(indent.clone()), from, to];
-                add(&mut acc, Expr::call("@codeSplice", args, hole.line));
+                args.extend([
+                    value,
+                    int((before || after) as usize),
+                    Expr::str(indent.clone()),
+                    int(hole.line),
+                    int(hole.col.saturating_sub(2)),
+                    int(hole.col + len),
+                ]);
                 at = hole
                     .src
                     .chars()
@@ -3969,9 +3959,7 @@ impl Parser {
                 at.1 += 1;
             }
         }
-        // The lexer always yields a part, but an all-empty skeleton still needs a
-        // `Code` value.
-        Ok(acc.unwrap_or_else(|| code_text("", at)))
+        Ok(Expr::call(crate::ast::QUOTE, args, line))
     }
 
     /// A sub-parser over `src` with the enclosing generic parameters, so a skeleton
@@ -3980,11 +3968,25 @@ impl Parser {
         Some(self.sub(crate::lexer::lex(src).ok()?))
     }
 
+    /// Statements first: most quotes are statement lists, and each mode that
+    /// fails costs a whole parse.
     fn skeleton_parses_any(&self, src: &str) -> bool {
-        self.parses_as_decls(src)
-            || self.parses_as_stmts(src)
+        self.parses_as_stmts(src)
+            || self.parses_as_decls(src)
             || self.parses_as_expr(src)
             || self.parses_as_type(src)
+            || self.parses_as_item(src)
+    }
+
+    /// List-item mode: `src` is one item of a record literal (`port: v`), a
+    /// `match` (`Some(x) => x`) or a parameter list (`n: Int64`), each wrapped
+    /// in the smallest unit that holds it. Its brackets must balance, so a
+    /// wrapper cannot close one the quote opened.
+    fn parses_as_item(&self, src: &str) -> bool {
+        balanced(src)
+            && (self.parses_as_expr(&format!("__vyrn_r {{ {src} }}"))
+                || self.parses_as_expr(&format!("match __vyrn_m {{ {src} }}"))
+                || self.parses_as_decls(&format!("fn __vyrn_f({src}) {{}}")))
     }
 
     fn parses_as_decls(&self, src: &str) -> bool {

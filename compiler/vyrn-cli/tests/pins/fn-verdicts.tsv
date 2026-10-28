@@ -811,7 +811,7 @@ examples/lib/gen_projection_site.vyrn	d1	yes	no, its effect set is write-output
 examples/lib/gen_projection_site.vyrn	probe	yes	no, `q` is Q, not an integer, Bool or a read array of one
 examples/lib/gen_projection_site.vyrn	mk	yes	no, `a` is String, not an integer, Bool or a read array of one
 examples/lib/gen_shape.vyrn	describe	no, it keeps an index check	no, its effect set is alloc
-examples/lib/gen_shape.vyrn	shapeOf	no, it keeps an index check	no, its effect set is alloc
+examples/lib/gen_shape.vyrn	shapeOf	no, it keeps an index check	no, its effect set is alloc, gen-only
 examples/lib/gen_surface.vyrn	surface	yes	no, its effect set is alloc, gen-only
 examples/lib/gen_table.vyrn	table	no, it keeps an index check	no, its effect set is alloc, fs-read, trap, gen-only
 examples/lib/gen_table.vyrn	reportHereFailed	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
@@ -2302,11 +2302,13 @@ std/cli.vyrn	cliDeclaresHelp	yes	no, `plans` is Array<CliPlan>, not an integer, 
 std/cli.vyrn	cliHelpLeft	yes	no, its effect set is alloc
 std/cli.vyrn	cliHelpRight	yes	no, its effect set is alloc
 std/cli.vyrn	cliHelpText	no, it calls `padEnd`, which is not trap-free	no, its effect set is alloc, trap
-std/cli.vyrn	cliEmitHelp	yes	no, its effect set is alloc, gen-only
-std/cli.vyrn	cliEmitSpec	yes	no, its effect set is alloc
-std/cli.vyrn	cliStore	yes	no, its effect set is alloc
-std/cli.vyrn	cliEmitAccept	yes	no, its effect set is alloc
-std/cli.vyrn	cliEmitField	yes	no, its effect set is alloc
+std/cli.vyrn	cliEmitHelp	yes	no, its effect set is gen-only
+std/cli.vyrn	cliOptRow	yes	no, its effect set is gen-only
+std/cli.vyrn	cliEmitSpec	yes	no, its effect set is alloc, gen-only
+std/cli.vyrn	cliLocal	yes	no, its effect set is alloc, gen-only
+std/cli.vyrn	cliStore	yes	no, its effect set is alloc, gen-only
+std/cli.vyrn	cliEmitAccept	yes	no, its effect set is alloc, gen-only
+std/cli.vyrn	cliEmitField	yes	no, its effect set is alloc, gen-only
 std/cli.vyrn	cliCommand	no, it calls `cliPlansOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/cli.vyrn	cli	no, it calls `panic`	no, its effect set is alloc, trap, gen-only
 std/cli.vyrn	twoOpts	yes	no, its effect set is alloc
@@ -2743,8 +2745,8 @@ std/icons.vyrn	beforeColon	yes	no, its effect set is alloc
 std/icons.vyrn	afterColon	yes	no, its effect set is alloc
 std/icons.vyrn	jsonKind	yes	no, `j` is Json, not an integer, Bool or a read array of one
 std/icons.vyrn	toyCollection	yes	no, the result is String, not an integer, Bool or a read array of one
-std/imports.vyrn	procImports	yes	no, its effect set is alloc
-std/imports.vyrn	importBlock	yes	no, its effect set is alloc
+std/imports.vyrn	procImports	yes	no, its effect set is alloc, gen-only
+std/imports.vyrn	importBlock	yes	no, its effect set is alloc, gen-only
 std/json.vyrn	json$copyJson	yes	no, its effect set is alloc
 std/json.vyrn	json$copyJsonArray	yes	no, its effect set is alloc
 std/json.vyrn	json$copyJsonFields	yes	no, its effect set is alloc
@@ -2762,9 +2764,10 @@ std/json.vyrn	json$spaces	no, it calls `panic`	no, its effect set is alloc, trap
 std/json.vyrn	json$prettyIntoAt	no, it calls `emitNumber`, which is not trap-free	no, its effect set is alloc, module-state, trap
 std/json.vyrn	json$emitPretty	no, it calls `prettyIntoAt`, which is not trap-free	no, its effect set is alloc, module-state, trap
 std/json.vyrn	json$jsonEq	no, it calls `emit`, which is not trap-free	no, its effect set is alloc, trap
-std/json.vyrn	json$jsonEncoders	no, it keeps an index check	no, its effect set is alloc
-std/json.vyrn	json$jsonEncoderBody	no, it keeps an index check	no, its effect set is alloc
-std/json.vyrn	json$jsonVariant	no, it keeps an index check	no, its effect set is alloc
+std/json.vyrn	json$jsonEncoders	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/json.vyrn	json$jsonEncoder	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/json.vyrn	json$jsonEncoderBody	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/json.vyrn	json$jsonVariant	no, it calls `jsonEncoder`, which is not trap-free	no, its effect set is alloc, gen-only
 std/json.vyrn	Copy$json$Json$copy	yes	no, its effect set is alloc
 std/json.vyrn	Owned$json$Json$release	yes	no, it is recursive
 std/json5.vyrn	maxDepth	yes	yes, emulated Int64
@@ -2831,14 +2834,19 @@ std/jsondec.vyrn	jsondec$dIntRange	no, it calls `readJsonNumber`, which is not t
 std/jsondec.vyrn	jsondec$dUIntMax	no, it calls `readJsonNumber`, which is not trap-free	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$dFloat64	no, it calls `readJsonNumber`, which is not trap-free	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$dFloat32	no, it calls `readJsonNumber`, which is not trap-free	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonDecoders	no, it keeps an index check	no, its effect set is alloc
+std/jsondec.vyrn	jsondec$jsonDecoders	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/jsondec.vyrn	jsondec$jsonDecoder	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/jsondec.vyrn	jsondec$isName	yes	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$expectLine	yes	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonDecoderBody	no, it keeps an index check	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonRecordBody	no, it keeps an index check	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonVariantsBody	no, it calls `jsonPayloadArm`, which is not trap-free	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonPayloadArm	no, it keeps an index check	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonScalarBody	yes	no, its effect set is alloc
+std/jsondec.vyrn	jsondec$expectLine	yes	no, its effect set is gen-only
+std/jsondec.vyrn	jsondec$arm	yes	no, its effect set is gen-only
+std/jsondec.vyrn	jsondec$ifChain	yes	no, its effect set is gen-only
+std/jsondec.vyrn	jsondec$ifChainOr	yes	no, its effect set is gen-only
+std/jsondec.vyrn	jsondec$jsonDecoderBody	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/jsondec.vyrn	jsondec$jsonRecordBody	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/jsondec.vyrn	jsondec$jsonVariantsBody	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/jsondec.vyrn	jsondec$jsonPayloadArm	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/jsondec.vyrn	jsondec$jsonScalarBody	no, it keeps an index check	no, its effect set is gen-only
+std/jsondec.vyrn	jsondec$narrowed	yes	no, its effect set is gen-only
 std/jsonread.vyrn	maxDepth	yes	yes, emulated Int64
 std/jsonread.vyrn	jsonReader	yes	no, its effect set is alloc
 std/jsonread.vyrn	peek	yes	no, `p` is JsonReader, not an integer, Bool or a read array of one

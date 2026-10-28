@@ -9,16 +9,16 @@ re-emitted copy would collide in the flat namespace.
 ```vyrn
 import { importBlock, procImports } from "std/imports"
 
-export gen fn server(contract: String) -> String {
+export gen fn server(contract: String) -> Code {
     let iface = moduleInterface(contract)
-    return importBlock(iface, contract, procImports(iface, false)) + "..."
+    return importBlock(iface, contract, procImports(iface, false)) + vyrn"..."
 }
 ```
 
 ## procImports
 
 ```vyrn
-fn procImports(iface: ModuleInterface, procAlias: Bool) -> Array<String>
+fn procImports(iface: ModuleInterface, procAlias: Bool) -> Array<Code>
 ```
 
 Returns the names `iface`'s procedures import under: each as is, or with
@@ -27,7 +27,7 @@ Returns the names `iface`'s procedures import under: each as is, or with
 ## importBlock
 
 ```vyrn
-fn importBlock(iface: ModuleInterface, contract: String, procs: Array<String>) -> String
+fn importBlock(iface: ModuleInterface, contract: String, procs: Array<Code>) -> Code
 ```
 
 Returns one `import { ... } from "<module>"` line for each module that

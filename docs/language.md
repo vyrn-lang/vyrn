@@ -622,12 +622,12 @@ import { squareOf } from squares()
 - `moduleInterface(path)` reflects a module's exported functions and types as a `ModuleInterface` record. `contractOf(Name)` reflects a contract. Both work only during generation.
 - A `TypeInfo`'s `shape` is its declaration as an array of `TypeNode`s, node 0 the root: record fields, enum variants and their payloads, arrays, `Option`, `Result`, `Map`, and each `where` as source. A declared name is a `named` leaf, found in `ModuleInterface.types`.
 - `lex(src)` runs the compiler's lexer over text. `std/scan` is a comment- and string-aware cursor for other languages.
-- `derive(g, x)` runs generator `g` after the check, on the type the checker gave `x`, and calls the function it wrote for that type. `g` is a `gen fn g(t: TypeArg) -> String`; for each root node `r` of `t` it defines `fn <t.nodes[r].name>(v: <t.nodes[r].spelling>) -> String`, and `vyrn check` refuses an entry of another signature at the call. Each node is a checked type, with its wire form as `kind`. `g` runs once per program, and its code is checked with the program.
+- `derive(g, x)` runs generator `g` after the check, on the type the checker gave `x`, and calls the function it wrote for that type. `g` is a `gen fn g(t: TypeArg)` that returns `Code` or `String`; for each root node `r` of `t` it defines `fn <t.nodes[r].shape.name>(v: <t.nodes[r].code>) -> String`, and `vyrn check` refuses an entry of another signature at the call. Each node pairs a checked type's `shape`, a `TypeNode` with its wire form as `kind`, with the type as `code`, a `Code` value the call site wrote, so a generator can write only a type the checker resolved. `g` runs once per program, and its code is checked with the program.
 - A generator reports a diagnostic with `std/diag`'s `report`, which returns `Code`; every tool shows it at the file and line the generator read.
 
 ### Code quotes
 
-A generator returns `Code`, a value only generation has. `vyrn"..."` and `vyrn"""..."""` are code quotes, legal only in generation. The quote's text is parsed when the generator itself is checked, so a typo in it is a diagnostic in the generator's file. A quote holds holes only; logic lives in ordinary functions that return `Code`.
+A generator returns `Code`, a value only generation has. `vyrn"..."` and `vyrn"""..."""` are code quotes, legal only in generation. The quote's text is parsed when the generator itself is checked, so a typo in it is a diagnostic in the generator's file. It parses as declarations, statements, an expression, a type, or one item of a record literal, a `match` or a parameter list. A quote holds holes only; logic lives in ordinary functions that return `Code`.
 
 ```vyrn
 import { join } from "std/code"

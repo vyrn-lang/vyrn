@@ -401,6 +401,191 @@ fn gettwo() -> Int64 { return 4 }
     assert_eq!(code, Some(7), "{err}");
 }
 
+/// A quote may be one item of a list: a record field, a `match` arm or a
+/// parameter, each joined into its list.
+#[test]
+fn a_quote_is_one_item_of_a_list() {
+    let gen = r#"import { join } from "std/code"
+export gen fn mk() -> Code {
+    let mut fields: Array<Code> = []
+    let mut params: Array<Code> = []
+    for f in ["x", "y"] {
+        fields.push(vyrn"\{name(f)}: \{name(f)}")
+        params.push(vyrn"\{name(f)}: Int64")
+    }
+    let arms: Array<Code> = [vyrn"Some(v) => v.x + v.y", vyrn"None => 0"]
+    return vyrn"""
+        type P = { x: Int64, y: Int64 }
+        fn mkP(\{join(params, vyrn", ")}) -> P { return P { \{join(fields, vyrn", ")} } }
+        export fn sum() -> Int64 {
+            let o: Option<P> = Some(mkP(3, 4))
+            return match o { \{join(arms, vyrn", ")} }
+        }
+        """
+}
+"#;
+    let app = "import { mk } from \"./gen\"\nimport { sum } from mk()\nfn main() -> Int64 { return sum() }\n";
+    let (code, err) = run_gen("items", gen, app);
+    assert_eq!(code, Some(7), "{err}");
+}
+
+/// An import's list may be one joined hole and its `from` a `String` hole.
+#[test]
+fn a_quote_writes_an_import_from_a_string() {
+    let gen = r#"import { join } from "std/code"
+export gen fn mk(spec: String) -> Code {
+    let names: Array<Code> = [vyrn"seven"]
+    return vyrn"""
+        import { \{join(names, vyrn", ")} } from \{spec}
+        export fn got() -> Int64 { return seven() }
+        """
+}
+"#;
+    let app = "import { mk } from \"./gen\"\nimport { got } from mk(\"./lib\")\nfn main() -> Int64 { return got() }\n";
+    let app = gen_app("import_from", gen, app);
+    write(
+        &app.with_file_name("lib.vyrn"),
+        "export fn seven() -> Int64 { return 7 }\n",
+    );
+    let out = vyrn().arg("run").arg(&app).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(7), "{err}");
+}
+
+/// A one-line quote of an escaped newline keeps it: only a `"""` quote dedents.
+#[test]
+fn a_newline_separator_survives() {
+    let gen = r#"import { join } from "std/code"
+export gen fn mk() -> Code {
+    let fns: Array<Code> = [vyrn"fn one() -> Int64 { return 3 }", vyrn"export fn two() -> Int64 { return one() + 4 }"]
+    return join(fns, vyrn"\n")
+}
+"#;
+    let app = "import { mk } from \"./gen\"\nimport { two } from mk()\nfn main() -> Int64 { return two() }\n";
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(gen_app("newline", gen, app))
+        .output()
+        .unwrap();
+    let src = String::from_utf8_lossy(&out.stdout);
+    assert!(src.contains("return 3 }\nexport fn two"), "{src}");
+}
+
+/// `derive` runs a generator that returns `Code`.
+#[test]
+fn derive_runs_a_code_generator() {
+    let app = r#"export gen fn kindOf(t: TypeArg) -> Code {
+    let n = t.nodes[t.roots[0]]
+    return vyrn"fn \{name(n.shape.name)}(v: \{n.code}) -> String { return \{n.shape.kind} }"
+}
+
+type Point = { x: Int64, y: Int64 }
+
+fn main() -> Int64 {
+    print(derive(kindOf, Point { x: 1, y: 2 }))
+    return 0
+}
+"#;
+    let out = vyrn()
+        .arg("run")
+        .arg(gen_app("derive_code", "", app))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "record\n", "{err}");
+}
+
+/// A reflected type's `code` writes a type no identifier spells, and only a
+/// type the checker resolved.
+#[test]
+fn a_derive_generator_splices_each_reflected_type_as_code() {
+    let app = r#"import { join } from "std/code"
+
+export gen fn kindOf(t: TypeArg) -> Code {
+    let mut fns: Array<Code> = []
+    for r in t.roots {
+        let n = t.nodes[r]
+        fns.push(vyrn"fn \{name(n.shape.name)}(v: \{n.code}) -> String { return \{n.shape.kind} }")
+    }
+    return join(fns, vyrn"\n")
+}
+
+type Point = { x: Int64, y: Int64 }
+
+fn main() -> Int64 {
+    let pts: Array<Point> = [Point { x: 1, y: 2 }]
+    print(derive(kindOf, pts))
+    let m: Map<String, Int64> = [:]
+    print(derive(kindOf, m))
+    let r: Result<Int64, String> = Ok(1)
+    print(derive(kindOf, r))
+    return 0
+}
+"#;
+    let out = vyrn()
+        .arg("run")
+        .arg(gen_app("derive_types", "", app))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "array\nmap\nenum\n",
+        "{err}"
+    );
+}
+
+/// A derive generator's own program may call `derive`: its `toJson` runs
+/// `std/json`'s generator in a load one deeper.
+#[test]
+fn a_derive_generator_may_call_to_json() {
+    let app = r#"export gen fn tagged(t: TypeArg) -> String {
+    let mut out = ""
+    for r in t.roots {
+        let n = t.nodes[r].shape
+        out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String { return " + toJson(n.kind) + " }
+"
+    }
+    return out
+}
+
+type Point = { x: Int64, y: Int64 }
+
+fn main() -> Int64 {
+    print(derive(tagged, Point { x: 1, y: 2 }))
+    return 0
+}
+"#;
+    let out = vyrn()
+        .arg("run")
+        .arg(gen_app("derive_nested", "", app))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "record
+",
+        "{err}"
+    );
+}
+
+/// A quote that closes a bracket it did not open is no unit, though a wrapper
+/// would pair it.
+#[test]
+fn a_quote_that_closes_what_it_did_not_open_is_refused() {
+    let gen = "export gen fn mk() -> Code {\n    return vyrn\") {} fn g(\"\n}\n";
+    let app =
+        "import { mk } from \"./gen\"\nimport { g } from mk()\nfn main() -> Int64 { return 0 }\n";
+    let out = vyrn()
+        .arg("check")
+        .arg(gen_app("unbalanced", gen, app))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("skeleton does not parse"), "{err}");
+}
+
 /// A multi-line quote drops its closing indentation, a hole alone on its line
 /// takes declarations, and a spliced quote is re-indented to its hole.
 #[test]

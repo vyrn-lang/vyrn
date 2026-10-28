@@ -26,6 +26,7 @@ use vyrn_frontend::gen::{compiler_identity, GenEngine, GenRead};
 use vyrn_frontend::gen::{
     Author, GenError, GenInputs, GenOutput, Kind, Pos, Rope, Shown, Span, Spliced, Written,
 };
+use vyrn_frontend::loader::GEN_HOST;
 
 /// Calls this path cannot serve; a module containing one is declined (see
 /// [`engine`]). A `gen fn` may not call the write capabilities, so this only
@@ -335,7 +336,7 @@ pub fn run_pure(
 fn dispatchable(f: &Function) -> bool {
     f.is_gen
         && f.exported
-        && (f.ret == Type::Str || returns_code(f))
+        && vyrn_frontend::gen::writes_module(&f.ret)
         && (takes_type_arg(f)
             || f.params
                 .iter()
@@ -366,9 +367,15 @@ fn wrapper_program(program: &Program) -> Option<Program> {
     let mut p = program.clone();
     // The locals are spelled with `@`, which no source can write: a bare call
     // resolves to a local first, so a generator named `g` would hit one.
-    let argv = |i: usize| Expr::call("@at", vec![Expr::var("@argv", 0), Expr::int(i as i64)], 0);
+    let argv = |i: usize| {
+        Expr::call(
+            GEN_HOST.at,
+            vec![Expr::var("@argv", 0), Expr::int(i as i64)],
+            0,
+        )
+    };
     let mut body = vec![
-        Stmt::let_("@argv", Expr::call("args", vec![], 0), 0),
+        Stmt::let_("@argv", Expr::call(GEN_HOST.args, vec![], 0), 0),
         Stmt::Let {
             id: Id::NEW,
             name: "@g".into(),
@@ -401,9 +408,9 @@ fn wrapper_program(program: &Program) -> Option<Program> {
             ))],
             // Framed between marker lines; see `unframe_result`.
             false => vec![
-                Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_BEGIN)], 0)),
-                Stmt::expr(Expr::call("print", vec![call], 0)),
-                Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_END)], 0)),
+                Stmt::expr(Expr::call(GEN_HOST.print, vec![Expr::str(RESULT_BEGIN)], 0)),
+                Stmt::expr(Expr::call(GEN_HOST.print, vec![call], 0)),
+                Stmt::expr(Expr::call(GEN_HOST.print, vec![Expr::str(RESULT_END)], 0)),
             ],
         };
         body.push(Stmt::If {
@@ -439,7 +446,7 @@ fn wrapper_program(program: &Program) -> Option<Program> {
     // Unreachable: `run` checks the target first. Falling off the chain would
     // emit an empty module, so read past the end of `args()` and trap instead.
     body.push(Stmt::expr(Expr::call(
-        "print",
+        GEN_HOST.print,
         vec![argv(1_000_000_000)],
         0,
     )));
@@ -522,7 +529,7 @@ fn at_type(e: Expr, ty: &Type) -> Expr {
     Expr::Match {
         id: Id::NEW,
         stmt_pos: false,
-        scrutinee: Box::new(Expr::call("parse", vec![e], 0)),
+        scrutinee: Box::new(Expr::call(GEN_HOST.parse, vec![e], 0)),
         arms: vec![
             MatchArm {
                 pattern: Pattern::Variant("Some".into(), vec![Binder::synthetic("v")]),
@@ -652,6 +659,11 @@ impl Decoders {
     fn decode(&mut self, ty: &Type) -> Option<Expr> {
         Some(match vyrn_frontend::types::resolve(ty, &self.types) {
             Type::Str => Expr::call(vyrn_codegen::GEN_NEXT_STR, vec![], 0),
+            Type::Named(n) if n == "Code" => Expr::call(
+                vyrn_codegen::GEN_CODE,
+                vec![Expr::call(vyrn_codegen::GEN_NEXT_STR, vec![], 0)],
+                0,
+            ),
             Type::Int | Type::IntN { .. } => Expr::call(vyrn_codegen::GEN_NEXT_INT, vec![], 0),
             Type::Bool => Expr::Binary {
                 id: Id::NEW,
@@ -740,7 +752,11 @@ impl Decoders {
                                 Stmt::Assign {
                                     id: Id::NEW,
                                     name: "xs".into(),
-                                    value: Expr::call("@push", vec![Expr::var("xs", 0), elem], 0),
+                                    value: Expr::call(
+                                        GEN_HOST.push,
+                                        vec![Expr::var("xs", 0), elem],
+                                        0,
+                                    ),
                                     line: 0,
                                 },
                                 Stmt::Assign {
@@ -1120,6 +1136,16 @@ pub fn encode(
         },
         Type::Bool => match lit {
             Expr::Bool(b, _) => out.push(Atom::Int(*b as i64)),
+            _ => return Err(wrong()),
+        },
+        // A reflected type: its spelling, which the decoder turns into `Code`.
+        Type::Named(n) if n == "Code" => match lit {
+            Expr::Call { name, args, .. } if name == vyrn_codegen::GEN_CODE => {
+                match args.as_slice() {
+                    [Expr::Str(s, _)] => out.push(Atom::Str(s.clone().into_bytes())),
+                    _ => return Err(wrong()),
+                }
+            }
             _ => return Err(wrong()),
         },
         // One presence atom, then the payload if there is one.

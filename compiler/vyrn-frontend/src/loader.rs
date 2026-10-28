@@ -68,6 +68,46 @@ pub fn set_gen_budgets_for_test(fuel: Option<u64>, max_output: Option<usize>) {
     GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.set(max_output));
 }
 
+/// `resolver` with the root's text served at the root's key. A host holds the
+/// root as text (an editor buffer, the playground's page), and a `derive`
+/// generator the root declares loads the root again as its own root
+/// ([`crate::gen::derive`]).
+pub struct WithRoot<'a> {
+    key: String,
+    source: &'a str,
+    resolver: &'a dyn ModuleResolver,
+}
+
+impl<'a> WithRoot<'a> {
+    /// `resolver` with `source` served at the key the load gives `root_path`.
+    pub fn new(root_path: &str, source: &'a str, resolver: &'a dyn ModuleResolver) -> Self {
+        let key = normalize(root_path);
+        WithRoot {
+            key,
+            source,
+            resolver,
+        }
+    }
+}
+
+impl ModuleResolver for WithRoot<'_> {
+    fn read(&self, resolved: &str) -> Result<String, String> {
+        match resolved == self.key {
+            true => Ok(self.source.to_string()),
+            false => self.resolver.read(resolved),
+        }
+    }
+    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        self.resolver.list_kinds(resolved)
+    }
+    fn gen_cache_get(&self, key: &str) -> Option<String> {
+        self.resolver.gen_cache_get(key)
+    }
+    fn gen_cache_put(&self, key: &str, value: &str) {
+        self.resolver.gen_cache_put(key, value)
+    }
+}
+
 /// A resolver over an in-memory map, for tests.
 pub struct MapResolver(pub HashMap<String, String>);
 
@@ -319,8 +359,7 @@ fn stamp_sites(program: &mut Program, file: &str, key: &str) {
 /// - `panic(msg)` becomes [`PANIC_AT`]`(msg, "file:line")`. None in the runtime
 ///   module: its `panic` is a fixed `trap.rs` wording (`malloc`'s `out of
 ///   memory`), printed without a site.
-/// - a quote's part `@codeText(text, line, col)` gains the module key,
-///   `@codeText(text, key, line, col)`: the part's author.
+/// - a quote ([`crate::ast::QUOTE`]) gains the module key, its parts' author.
 fn site_stamp<'a>(file: &'a str, key: &'a str) -> impl FnMut(&mut Expr) + 'a {
     let runtime = file.strip_suffix(".vyrn") == Some(RUNTIME_SPEC);
     move |e: &mut Expr| {
@@ -337,7 +376,9 @@ fn site_stamp<'a>(file: &'a str, key: &'a str) -> impl FnMut(&mut Expr) + 'a {
             if name == "panic" && args.len() == 1 && !runtime {
                 *name = PANIC_AT.to_string();
                 args.push(Expr::str(format!("{file}:{line}")));
-            } else if name == "@codeText" && args.len() == 3 {
+            } else if name == crate::ast::QUOTE
+                && crate::ast::Quote::of(args).is_some_and(|q| q.key().is_none())
+            {
                 args.insert(1, Expr::str(key));
             }
         }
@@ -564,8 +605,16 @@ pub struct Nest {
     /// How many loads enclose this one. A generator import's own load and a
     /// load its run makes are one deeper than the load that imports it.
     pub(crate) depth: u32,
-    /// The `derive` generators running, outermost first.
+    /// The `derive` generators running, outermost first, each as its module
+    /// key and declared name ([`crate::gen::derive`]).
     pub(crate) deriving: Vec<String>,
+    /// The gen fn whose own load this is, as its module declares it. The link
+    /// keeps only what it reaches ([`keep_reached`]). Only
+    /// [`checked_generator`] sets it, and the loads a generator's run makes
+    /// clear it ([`generator_opts`]). No host can set it, so no host narrows
+    /// its own load, and `LoadOptions { .., ..Default::default() }` still
+    /// builds.
+    pub(crate) gen: Option<String>,
 }
 
 /// Returns the objection, if any, to `importer` importing `imported`.
@@ -971,6 +1020,42 @@ pub const MEM_PREFIX: &str = "mem$";
 
 /// The reserved prefix of every `std/runtime` declaration.
 pub const RUNTIME_PREFIX: &str = "runtime$";
+
+/// The builtins `vyrn-genwasm` calls in what it adds to a generator's program
+/// after the load: its `main` wrapper and its `TypeArg` decoders. The engine
+/// spells each call by its field here, and a generator's own load keeps what
+/// [`GenHost::calls`] route to ([`keep_reached`]).
+#[derive(Clone, Copy)]
+pub struct GenHost {
+    pub args: &'static str,
+    pub at: &'static str,
+    pub print: &'static str,
+    pub parse: &'static str,
+    pub push: &'static str,
+}
+
+/// The one [`GenHost`].
+pub const GEN_HOST: GenHost = GenHost {
+    args: "args",
+    at: "@at",
+    print: "print",
+    parse: "parse",
+    push: "@push",
+};
+
+impl GenHost {
+    /// Every call, read by destructuring, so a new field cannot be left out.
+    pub const fn calls(self) -> [&'static str; 5] {
+        let GenHost {
+            args,
+            at,
+            print,
+            parse,
+            push,
+        } = self;
+        [args, at, print, parse, push]
+    }
+}
 
 /// One word of a runtime call's wasm signature ([`RUNTIME_CALLS`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1558,17 +1643,11 @@ fn load_modules(
             format!("{h:x}:{}", text.len())
         };
         // An imported std module's top-level bodies are parsed when a root
-        // reaches them ([`parse_reached`]), and `std/runtime`'s where
-        // [`lazy_runtime`] holds. The floor reads every body's carriers at load,
-        // so a load that declares artifacts parses them all.
-        let skim = !is_root && opts.artifacts.is_none() && {
-            let spec = import_specifier("", key, opts.std_root.as_deref());
-            spec.starts_with("std/")
-                && match spec == RUNTIME_SPEC {
-                    true => lazy_runtime(opts),
-                    false => RT_MODULES.iter().all(|rt| rt.spec != spec),
-                }
-        };
+        // reaches them ([`parse_reached`]). The floor reads every body's
+        // carriers at load, so a load that declares artifacts parses them all.
+        let skim = !is_root
+            && opts.artifacts.is_none()
+            && import_specifier("", key, opts.std_root.as_deref()).starts_with("std/");
         // The root parses its `test` and `bench` blocks, an imported module skips
         // them, so one text loaded as both parses twice.
         let cache_key = match (is_root, skim) {
@@ -2331,11 +2410,9 @@ struct Site<'a> {
 }
 
 /// Runs `name` of the generator module `gen_mod_key` on `consts`, as a call
-/// written in `importer`: the cache, the sandbox's input roots, the load and
-/// check of the generator's program, and the run. Returns the output text.
-/// `(cache, memo)`: with `cache` false the output is neither looked up nor
-/// stored; with `memo` a checked generator program is reused while its sources
-/// are unchanged, which the editor's and the tools' calls ask for.
+/// written in `importer` ([`generation`]), with the sandbox's input roots its
+/// path arguments name. Returns the output text, or the diagnostics at the
+/// call. `(cache, memo)` is [`generation`]'s.
 #[allow(clippy::too_many_arguments)]
 fn run_resolved(
     importer: &str,
@@ -2351,7 +2428,6 @@ fn run_resolved(
 ) -> Result<Written, Vec<Diagnostic>> {
     let Site { line, root_key } = site;
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
-    let gen_mod_key = gen_mod_key.to_string();
     let arg_repr = args_repr(consts);
     let importer_dir = dir_of(generated_importer(importer).unwrap_or(importer)).to_string();
     let join_dir = |s: &str| join_importer_dir(importer, s);
@@ -2380,12 +2456,101 @@ fn run_resolved(
             }
         }
     }
-    let sources_hash = generator_cache_key(
-        &crate::gen::compiler_identity(),
+    let call = GenCall {
+        consts,
+        type_arg: None,
+        arg_repr: arg_repr.clone(),
+        importer_dir,
+        allowed,
+        aliased,
+    };
+    let inner = generator_opts(opts);
+    generation(
         &gen_mod_key,
         name,
-        &arg_repr,
-        &allowed,
+        call,
+        (cache, memo),
+        &inner,
+        resolver,
+        engine,
+        read,
+    )
+    .map_err(|f| match f {
+        GenFault::Load(ds) => ds,
+        GenFault::Reread(why) => err(rule!(GenModuleReread, module = gen_mod_key, why)),
+        // The generator's module is the root of its own load, so a refusal
+        // there carries no file; in this load it names the module.
+        GenFault::Run(crate::gen::GenError::Refused(ds)) => ds
+            .into_iter()
+            .map(|d| match d.file {
+                Some(_) => d,
+                None => in_module(d, &gen_mod_key, root_key),
+            })
+            .collect(),
+        GenFault::Run(crate::gen::GenError::Failed(trap)) => {
+            err(rule!(GenFailed, name, args = arg_repr, trap))
+        }
+        GenFault::Run(crate::gen::GenError::Unchecked) => err(rule!(
+            GenFailed,
+            name,
+            args = arg_repr,
+            trap = "the engine asked to check a checked program"
+        )),
+    })
+}
+
+/// What one generation runs on ([`generation`]): an import line's constants,
+/// or a `derive` site's `TypeArg`.
+pub(crate) struct GenCall<'a> {
+    pub(crate) consts: &'a [crate::consteval::ConstVal],
+    pub(crate) type_arg: Option<&'a Expr>,
+    /// The arguments as the cache key spells them: the constants, or the
+    /// `TypeArg` literal.
+    pub(crate) arg_repr: String,
+    /// The directory a relative read resolves against.
+    pub(crate) importer_dir: String,
+    /// The sandbox's input roots, and the alias pairs it cannot resolve.
+    pub(crate) allowed: Vec<String>,
+    pub(crate) aliased: Vec<(String, String)>,
+}
+
+/// Why a generation wrote nothing ([`generation`]).
+pub(crate) enum GenFault {
+    /// The generator's own load refused; a diagnostic with no file is its module's.
+    Load(Vec<Diagnostic>),
+    /// The generator's module could not be read again.
+    Reread(String),
+    /// The run failed.
+    Run(crate::gen::GenError),
+}
+
+/// Runs gen fn `name` of the module `gen_mod_key` on `call`, under `inner`
+/// ([`generator_opts`]): the cache, the load and check of the generator's
+/// program, and the run. An import line's generator and a `derive` generator
+/// share this path and its cache. The key names the compiler, the module, the
+/// gen fn, the arguments and the input roots ([`generator_cache_key`]); the
+/// entry records every input the run read and the generator's sources, and a
+/// hit re-hashes each one. `(cache, memo)`: with `cache` false the output is
+/// neither looked up nor stored; with `memo` a checked generator program is
+/// reused while its sources are unchanged, which the editor's and the tools'
+/// calls ask for.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generation(
+    gen_mod_key: &str,
+    name: &str,
+    call: GenCall<'_>,
+    (cache, memo): (bool, bool),
+    inner: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+    read: &mut HashMap<String, Option<String>>,
+) -> Result<Written, GenFault> {
+    let sources_hash = generator_cache_key(
+        &crate::gen::compiler_identity(),
+        gen_mod_key,
+        name,
+        &call.arg_repr,
+        &call.allowed,
     );
     let no_cache = !cache || std::env::var("VYRN_NO_GEN_CACHE").is_ok();
 
@@ -2397,7 +2562,7 @@ fn run_resolved(
         // forged list passes `all`. The call site decides first: an entry that
         // does not record `gen_mod_key` is not this generation.
         let valid = |inputs: &[(String, String)], read: &mut HashMap<String, Option<String>>| {
-            inputs.iter().any(|(path, _)| path == &gen_mod_key)
+            inputs.iter().any(|(path, _)| path == gen_mod_key)
                 && inputs.iter().all(|(path, hash)| {
                     current_input_hash(resolver, path, read).unwrap_or_else(|| ABSENT.to_string())
                         == *hash
@@ -2409,7 +2574,7 @@ fn run_resolved(
         let remembered = GEN_ENTRIES.with(|m| m.borrow().get(&sources_hash).cloned());
         let hit = remembered.filter(|e| valid(&e.0, read)).or_else(|| {
             let cached = resolver.gen_cache_get(&sources_hash)?;
-            let entry = read_cache_entry(&sources_hash, &cached, opts.session.as_deref())?;
+            let entry = read_cache_entry(&sources_hash, &cached, inner.session.as_deref())?;
             valid(&entry.0, read).then(|| Rc::new(entry))
         });
         if let Some(entry) = hit {
@@ -2430,15 +2595,6 @@ fn run_resolved(
     // Cache miss: load and check the generator as a runnable program. Skipping
     // this on a hit is sound: an entry is written only after a run that passed
     // this check, and an edit to the generator's sources misses.
-    // The generator's load, its check and every load its run makes nest one
-    // deeper than this load.
-    let mut inner = opts.clone();
-    inner.nest.depth += 1;
-    // A generator program's node ids repeat the importer's, so its sites
-    // expand in a table of their own.
-    if opts.expansions.is_shared() {
-        inner.expansions = crate::project::Expansions::shared();
-    }
     // Run the generator in the mediated sandbox. The engine judges its
     // program with the lowering's judgments first. An editor call (`memo`)
     // runs a generator unchecked while the engine holds its compiled module
@@ -2447,27 +2603,36 @@ fn run_resolved(
     // turn with `check` set is the last.
     let mut check = !memo;
     let (checked, out) = loop {
-        let checked = checked_generator(&gen_mod_key, memo, check, &inner, resolver, engine, read)
-            .map_err(|e| {
-                e.unwrap_or_else(|why| err(rule!(GenModuleReread, module = gen_mod_key, why)))
-            })?;
+        let checked = checked_generator(
+            gen_mod_key,
+            name,
+            (memo, check),
+            inner,
+            resolver,
+            engine,
+            read,
+        )
+        .map_err(|e| match e {
+            Ok(ds) => GenFault::Load(ds),
+            Err(why) => GenFault::Reread(why),
+        })?;
         let out = crate::gen::generate(
             &checked.program,
-            name,
-            consts,
+            &checked.name,
+            call.consts,
             crate::gen::GenInputs {
                 engine,
                 resolver,
-                opts: &inner,
-                importer_dir: importer_dir.clone(),
-                allowed: allowed.clone(),
-                aliased: aliased.clone(),
+                opts: inner,
+                importer_dir: call.importer_dir.clone(),
+                allowed: call.allowed.clone(),
+                aliased: call.aliased.clone(),
                 fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
                 max_output: GEN_MAX_OUTPUT_OVERRIDE
                     .with(|c| c.get())
                     .unwrap_or(GEN_MAX_OUTPUT),
                 sources_fingerprint: checked.fingerprint.clone(),
-                type_arg: None,
+                type_arg: call.type_arg.cloned(),
                 checked: checked.checked,
             },
         );
@@ -2476,25 +2641,7 @@ fn run_resolved(
             out => break (checked, out),
         }
     };
-    let (gen_sources, describable) = (checked.sources.clone(), checked.describable);
-    let out = out.map_err(|e| match e {
-        // The generator's module is the root of its own load, so a refusal
-        // there carries no file; in this load it names the module.
-        crate::gen::GenError::Refused(ds) => ds
-            .into_iter()
-            .map(|d| match d.file {
-                Some(_) => d,
-                None => in_module(d, &gen_mod_key, root_key),
-            })
-            .collect(),
-        crate::gen::GenError::Failed(trap) => err(rule!(GenFailed, name, args = arg_repr, trap)),
-        crate::gen::GenError::Unchecked => err(rule!(
-            GenFailed,
-            name,
-            args = arg_repr,
-            trap = "the engine asked to check a checked program"
-        )),
-    })?;
+    let out = out.map_err(GenFault::Run)?;
     bump_gen_runs();
 
     // Cache the output under its recorded inputs, for the next load and the
@@ -2513,15 +2660,15 @@ fn run_resolved(
             .collect();
         // The generator's own transitive sources join the recorded inputs, so
         // the entry carries its own validity and the lookup key stays cheap.
-        inputs.extend(gen_sources);
+        inputs.extend(checked.sources.iter().cloned());
         // Recorded unconditionally: a hit is validated against the generator
         // module the call site named.
-        if !inputs.iter().any(|(p, _)| p == &gen_mod_key) {
-            if let Some(h) = current_input_hash(resolver, &gen_mod_key, read) {
-                inputs.push((gen_mod_key.clone(), h));
+        if !inputs.iter().any(|(p, _)| p == gen_mod_key) {
+            if let Some(h) = current_input_hash(resolver, gen_mod_key, read) {
+                inputs.push((gen_mod_key.to_string(), h));
             }
         }
-        if describable {
+        if checked.describable {
             resolver.gen_cache_put(
                 &sources_hash,
                 &render_cache_entry(&sources_hash, &inputs, &out.written),
@@ -2535,6 +2682,8 @@ fn run_resolved(
 /// transitive sources and the fingerprint the engine keys its artifact on.
 struct CheckedGen {
     program: Program,
+    /// The gen fn's name in `program` ([`own_gen`]).
+    name: String,
     /// Each source of the generator's closure with its content hash.
     sources: Vec<(String, String)>,
     /// Whether every source has a readable file. A generated module's banner key
@@ -2553,14 +2702,30 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
-/// Loads and checks the generator module `gen_mod_key` under `inner`. With
+/// The options of a generator's load and of every load its run makes, under a
+/// load with `opts`: one deeper, and with no [`Nest::gen`].
+pub(crate) fn generator_opts(opts: &LoadOptions) -> LoadOptions {
+    let mut inner = opts.clone();
+    inner.nest.depth += 1;
+    inner.nest.gen = None;
+    // A generator program's node ids repeat the importer's, so its sites
+    // expand in a table of their own.
+    if opts.expansions.is_shared() {
+        inner.expansions = crate::project::Expansions::shared();
+    }
+    inner
+}
+
+/// Loads the generator module `gen_mod_key` as its own root, keeping what its
+/// gen fn `name` reaches, and checks it, under `inner` ([`generator_opts`]).
+/// An import line's generator and a `derive` generator both load here. With
 /// `memo`, a program checked before under the same context is reused while its
 /// sources are unchanged. The error is the loader's diagnostics, or the reason
 /// the module could not be read again.
 fn checked_generator(
     gen_mod_key: &str,
-    memo: bool,
-    check: bool,
+    name: &str,
+    (memo, check): (bool, bool),
     inner: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
@@ -2572,7 +2737,7 @@ fn checked_generator(
         aliases.sort();
         let n = &inner.nest;
         format!(
-            "{gen_mod_key}\u{0}{std_root:?}\u{0}{}\u{0}{:?}\u{0}{aliases:?}",
+            "{gen_mod_key}\u{0}{name}\u{0}{std_root:?}\u{0}{}\u{0}{:?}\u{0}{aliases:?}",
             n.depth, n.deriving
         )
     });
@@ -2587,8 +2752,10 @@ fn checked_generator(
         }
     }
     let gen_source = resolver.read(gen_mod_key).map_err(Err)?;
+    let mut own = inner.clone();
+    own.nest.gen = Some(name.to_string());
     let (loaded, _, _, gen_graph, _) =
-        load_with_origins(&gen_source, gen_mod_key, inner, resolver, engine);
+        load_with_origins(&gen_source, gen_mod_key, &own, resolver, engine);
     let mut gen_program = loaded.map_err(Ok)?;
 
     // The generator's transitive sources, hashed: the cache entry records them
@@ -2607,14 +2774,15 @@ fn checked_generator(
     // The fingerprint names every input of the check, so an artifact the engine
     // holds for it was compiled from a program that passed this check: the
     // closure's keys and content hashes (`gen_graph` holds the generator, its
-    // imports and the runtime modules the load links), the std root the contract
-    // restamping resolves against, and the nest, because a `derive` in the check
-    // refuses a generator already deriving and runs its own loads one deeper.
-    // The engine adds the compiler's identity (`vyrn_genwasm::artifact_key`).
+    // imports and the runtime modules the load links), the gen fn the link
+    // keeps, the std root the contract restamping resolves against, and the
+    // nest, because a `derive` in the check refuses a generator already
+    // deriving and runs its own loads one deeper. The engine adds the
+    // compiler's identity (`vyrn_genwasm::artifact_key`).
     let fingerprint = describable.then(|| {
         let n = &inner.nest;
         let mut fp = format!(
-            "{gen_mod_key}\u{0}{}\u{0}{}\u{0}{:?}\u{0}",
+            "{gen_mod_key}\u{0}{name}\u{0}{}\u{0}{}\u{0}{:?}\u{0}",
             std_root.unwrap_or(""),
             n.depth,
             n.deriving
@@ -2633,7 +2801,8 @@ fn checked_generator(
     // fingerprint or answers `Unchecked`, so no unchecked program compiles.
     let checked = check || fingerprint.is_none();
     if checked {
-        let (gdiags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine, &inner.nest);
+        let linker = (gen_mod_key, inner, resolver);
+        let (gdiags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine, Some(linker));
         if !gdiags.is_empty() {
             return Err(Ok(gdiags));
         }
@@ -2641,6 +2810,7 @@ fn checked_generator(
     restamp_contracts(&mut gen_program, gen_mod_key, std_root);
 
     let checked = Rc::new(CheckedGen {
+        name: own_gen(&gen_program, name).unwrap_or(name).to_string(),
         program: gen_program,
         sources: gen_sources,
         describable,
@@ -3057,9 +3227,13 @@ fn fresh_secret() -> Vec<u8> {
         h.write_u64(i);
         seed.extend_from_slice(&h.finish().to_le_bytes());
     }
-    seed.extend_from_slice(&std::process::id().to_le_bytes());
-    if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        seed.extend_from_slice(&d.as_nanos().to_le_bytes());
+    // A page has neither a process id nor a clock (`vyrn-play`), and its
+    // entries never leave it.
+    if !cfg!(target_os = "unknown") {
+        seed.extend_from_slice(&std::process::id().to_le_bytes());
+        if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            seed.extend_from_slice(&d.as_nanos().to_le_bytes());
+        }
     }
     crate::hash::sha256_hex(&seed).into_bytes()
 }
@@ -4488,6 +4662,7 @@ fn link(
         let imports = m.program.imports.iter().flat_map(|imp| &imp.names);
         named.extend(imports.map(|n| n.original.clone()));
     }
+    let generators: HashSet<String> = generator_calls(&modules).map(str::to_string).collect();
     let unparsed: HashMap<String, Vec<(usize, usize)>> = (modules.iter())
         .filter(|m| !m.unparsed.is_empty())
         .map(|m| (m.key.clone(), m.unparsed.clone()))
@@ -4567,7 +4742,10 @@ fn link(
             .cloned()
             .collect();
     }
-    drop_unreached(&mut program, lazy, named, &unparsed);
+    match &opts.nest.gen {
+        Some(gen) => keep_reached(&mut program, gen, &unparsed),
+        None => drop_unreached(&mut program, lazy, named, &generators, &unparsed),
+    }
     program.number();
     Ok(program)
 }
@@ -4575,7 +4753,9 @@ fn link(
 /// Whether a skimmed body's tokens can mention a builtin whose mention links a
 /// runtime module ([`RT_MODULES`]): its name, or a `save`, `load`, `loadOr` or
 /// template, which the parser desugars to `toJson`, `fromJson` and `@str`
-/// (`Parser::storage_desugar`, `Parser::template`).
+/// (`Parser::storage_desugar`, `Parser::template`). A code quote `vyrn"..."`
+/// desugars to host calls, so it mentions only what its holes mention: a
+/// runtime name, or a template.
 fn mentions_runtime(tokens: &[lexer::Token]) -> bool {
     static NAMES: std::sync::OnceLock<HashSet<&'static str>> = std::sync::OnceLock::new();
     let names = NAMES.get_or_init(|| {
@@ -4589,10 +4769,27 @@ fn mentions_runtime(tokens: &[lexer::Token]) -> bool {
         .chain(["save", "load", "loadOr"])
         .collect()
     });
-    tokens.iter().any(|t| match &t.tok {
+    let quote = |at: usize| match (at.checked_sub(1)).map(|i| &tokens[i]) {
+        Some(t) => t.tok == lexer::Tok::Ident("vyrn".into()) && t.line == tokens[at].line,
+        None => false,
+    };
+    tokens.iter().enumerate().any(|(at, t)| match &t.tok {
         lexer::Tok::Ident(n) => names.contains(n.as_str()),
+        lexer::Tok::TemplateStr { exprs, .. } if quote(at) => exprs.iter().any(|h| {
+            let word = |c: char| c.is_alphanumeric() || c == '_';
+            h.src.contains("\\{") || h.src.split(|c| !word(c)).any(|w| names.contains(w))
+        }),
         lexer::Tok::TemplateStr { .. } => true,
         _ => false,
+    })
+}
+
+/// Every `gen fn` name an import line of `modules` calls (`from g(..)`). A
+/// generator call names the exported `gen fn` it runs by its declared name.
+fn generator_calls(modules: &[Module]) -> impl Iterator<Item = &str> {
+    (modules.iter().flat_map(|m| &m.program.imports)).filter_map(|imp| match &imp.source {
+        ImportSource::Generator { name, .. } => Some(name.as_str()),
+        ImportSource::Path(_) => None,
     })
 }
 
@@ -4607,6 +4804,7 @@ fn mentions_runtime(tokens: &[lexer::Token]) -> bool {
 /// function the link's walk keeps ([`drop_unreached`]) is parsed, and it
 /// asserts so. A program that calls `derive` parses every skimmed body.
 fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<Diagnostic>> {
+    let generators: HashSet<String> = generator_calls(modules).map(str::to_string).collect();
     // The skimmed modules' top-level functions no spelling reached yet, by
     // name. A body that mentions a runtime builtin was parsed at load.
     let mut waiting: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
@@ -4630,6 +4828,15 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     };
     let mut names: Vec<&str> = opts.host_calls.to_vec();
     for (mi, m) in modules.iter().enumerate() {
+        if called_by_name(&m.key, opts) {
+            names.extend(
+                m.program
+                    .functions
+                    .iter()
+                    .filter(|f| !f.is_gen)
+                    .map(|f| f.name.as_str()),
+            );
+        }
         for f in m.program.functions.iter().filter(|f| !unparsed(mi, f)) {
             crate::ast::spelled(&f.body, &mut names);
         }
@@ -4655,9 +4862,13 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             crate::ast::expr_spelled(d, &mut names);
         }
         let imports = m.program.imports.iter().flat_map(|imp| &imp.names);
-        names.extend(imports.map(|n| n.original.as_str()));
+        let imported = imports.map(|n| n.original.as_str());
+        names.extend(imported.filter(|n| !generators.contains(*n)));
     }
     names.extend(RUNTIME_CALLS.iter().map(|(n, ..)| *n));
+    if opts.nest.gen.is_some() {
+        names.extend(GEN_HOST.calls());
+    }
     let mut derive = names.contains(&"derive");
     let mut work: Vec<(usize, usize)> = Vec::new();
     for n in names {
@@ -4713,20 +4924,22 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     Ok(())
 }
 
-/// Whether the load parses and keeps only the `std/runtime` functions a spelling
-/// or [`RUNTIME_CALLS`] reaches. A generator's own load keeps them all, because
-/// its engine adds calls to the program after the load (`vyrn-genwasm`'s
-/// wrapper and decoders).
-fn lazy_runtime(opts: &LoadOptions) -> bool {
-    opts.nest.depth == 0
+/// Whether `key` is a runtime module ([`RT_MODULES`]) other than `std/runtime`:
+/// the emitter and the desugars call each of its functions but its gen fns by
+/// its reserved spelling, which no source spells, so each is a root.
+fn called_by_name(key: &str, opts: &LoadOptions) -> bool {
+    let spec = import_specifier("", key, opts.std_root.as_deref());
+    spec != RUNTIME_SPEC && RT_MODULES.iter().any(|rt| rt.spec == spec)
 }
 
 /// The modules whose unreached functions, tests and benches the link drops:
-/// every `std/` module but the root and the injected runtime modules other than
-/// `std/runtime`, whose functions the emitter and the desugars call by name.
-/// `std/runtime` keeps what [`RUNTIME_CALLS`] names. Std checks each of its
-/// bodies as the root of its own load (`tests/std_suite.rs`, the corpus), and a
-/// body no root reaches adds no verdict to another program's.
+/// every `std/` module but the root. A runtime module's other functions stay,
+/// because the emitter and the desugars call them by name ([`called_by_name`]);
+/// only its unreached gen fns leave. `std/runtime` keeps what [`RUNTIME_CALLS`]
+/// names.
+/// Std checks each of its bodies as the root of its own load
+/// (`tests/std_suite.rs`, the corpus), and a body no root reaches adds no
+/// verdict to another program's.
 fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashSet<String> {
     let Some(std_root) = &opts.std_root else {
         return HashSet::new();
@@ -4735,10 +4948,6 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
     let std_root = format!("{}/", normalize(std_root));
     (modules.iter())
         .filter(|m| m.key != root_key && !is_remote(&m.key))
-        .filter(|m| {
-            m.injected
-                .is_none_or(|p| p == RUNTIME_PREFIX && lazy_runtime(opts))
-        })
         .filter(|m| normalize(&m.key).starts_with(&std_root))
         .map(|m| m.key.clone())
         .collect()
@@ -4755,13 +4964,17 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
 /// A program that calls `derive` drops nothing: its generator writes calls
 /// after the check, to any function of the program.
 ///
+/// `generators` names each `gen fn` an import line calls ([`generator_calls`]).
+/// Its import is no root, so a `lazy` one is kept only where a kept body spells
+/// it.
+///
 /// `unparsed` names, by module and position, each function whose body
-/// [`parse_reached`] left unparsed. The walk reaching one panics: the link
-/// would hand the checker an empty block for a body it never read.
+/// [`parse_reached`] left unparsed ([`assert_parsed`]).
 fn drop_unreached(
     program: &mut Program,
     lazy: &HashSet<String>,
     named: Vec<String>,
+    generators: &HashSet<String>,
     unparsed: &HashMap<String, Vec<(usize, usize)>>,
 ) {
     if lazy.is_empty() {
@@ -4775,7 +4988,12 @@ fn drop_unreached(
     let calls: Vec<String> = (RUNTIME_CALLS.iter())
         .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
         .collect();
-    let mut roots: Vec<&str> = named.iter().chain(&calls).map(String::as_str).collect();
+    // A gen fn runs only in its own load, an import line's or a derive's
+    // (checked_generator), so neither the import nor a toJson or fromJson site
+    // reaches it. Only a std one drops: std bodies are judged as their own load
+    // roots, and a user module's functions are all roots.
+    let named = named.iter().filter(|n| !generators.contains(*n));
+    let mut roots: Vec<&str> = named.chain(&calls).map(String::as_str).collect();
     for f in &program.functions {
         if !is_lazy(&f.module) || f.is_extern || f.is_export_extern {
             roots.push(&f.name);
@@ -4800,11 +5018,69 @@ fn drop_unreached(
         );
         return;
     }
-    for f in program
-        .functions
+    assert_parsed(program, &keep, unparsed);
+    let kept: Vec<bool> = (program.functions.iter())
+        .map(|f| !is_lazy(&f.module) || keep.contains(f.name.as_str()))
+        .collect();
+    let functions = std::mem::take(&mut program.functions).into_iter().zip(kept);
+    program.functions = functions.filter_map(|(f, k)| k.then_some(f)).collect();
+}
+
+/// Keeps what the gen fn `gen` reaches ([`reached`]) in every module and drops
+/// each other function and module-state binding, and every test and bench: a
+/// generator's own load ([`Nest::gen`]). The roots are `gen`, each
+/// `std/runtime` function the emitter calls by name ([`RUNTIME_CALLS`]), each
+/// call the engine adds after the load ([`GEN_HOST`]) and each name a `where`
+/// predicate spells.
+fn keep_reached(program: &mut Program, gen: &str, unparsed: &HashMap<String, Vec<(usize, usize)>>) {
+    let calls: Vec<String> = (RUNTIME_CALLS.iter())
+        .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
+        .collect();
+    let mut roots: Vec<&str> = own_gen(program, gen).into_iter().collect();
+    roots.extend(calls.iter().map(String::as_str));
+    roots.extend(GEN_HOST.calls());
+    for p in program
+        .type_decls
         .iter()
-        .filter(|f| keep.contains(f.name.as_str()))
+        .filter_map(|t| t.predicate.as_ref())
     {
+        crate::ast::expr_spelled(p, &mut roots);
+    }
+    let keep = reached(program, roots);
+    assert_parsed(program, &keep, unparsed);
+    let fns: Vec<bool> = (program.functions.iter())
+        .map(|f| keep.contains(f.name.as_str()))
+        .collect();
+    let state: Vec<bool> = (program.globals.iter())
+        .map(|g| keep.contains(g.name.as_str()))
+        .collect();
+    let functions = std::mem::take(&mut program.functions).into_iter().zip(fns);
+    program.functions = functions.filter_map(|(f, k)| k.then_some(f)).collect();
+    let globals = std::mem::take(&mut program.globals).into_iter().zip(state);
+    program.globals = globals.filter_map(|(g, k)| k.then_some(g)).collect();
+    program.tests.clear();
+    program.benches.clear();
+}
+
+/// The name the root's gen fn `declared` links as in `program`: its own, or
+/// its reserved spelling where the root is an injected module (`std/json`'s
+/// `json$jsonEncoders`).
+fn own_gen<'a>(program: &'a Program, declared: &str) -> Option<&'a str> {
+    (program.functions.iter())
+        .filter(|f| f.module.is_none())
+        .map(|f| f.name.as_str())
+        .find(|n| program.spellings.written(n) == declared)
+}
+
+/// Panics if `keep` holds a function whose body [`parse_reached`] left
+/// unparsed: the link would hand the checker an empty block for a body it
+/// never read.
+fn assert_parsed(
+    program: &Program,
+    keep: &HashSet<&str>,
+    unparsed: &HashMap<String, Vec<(usize, usize)>>,
+) {
+    for f in (program.functions.iter()).filter(|f| keep.contains(f.name.as_str())) {
         let left = f.module.as_ref().and_then(|k| unparsed.get(k));
         let at = (f.line, f.col);
         assert!(
@@ -4813,19 +5089,13 @@ fn drop_unreached(
             f.name
         );
     }
-    let kept: Vec<bool> = (program.functions.iter())
-        .map(|f| !is_lazy(&f.module) || keep.contains(f.name.as_str()))
-        .collect();
-    let functions = std::mem::take(&mut program.functions).into_iter().zip(kept);
-    program.functions = functions.filter_map(|(f, k)| k.then_some(f)).collect();
 }
 
 /// Returns every name `roots` reach in `program`: its functions and module
 /// state, each other name their bodies spell, a builtin's included, and the
 /// functions a reached builtin routes to. A local that shares a function's
-/// name reaches the function, so the set holds every name the scoped walk of
-/// `gen::generator_program` reaches. Its implicit roots are that walk's: every
-/// `$` name but `std/runtime`'s (an injected runtime module's, which the
+/// name reaches the function. Its implicit roots are every `$` name but
+/// `std/runtime`'s and a gen fn's (an injected runtime module's, which the
 /// emitter calls by name, and an impl's flattened method, which dispatch
 /// reaches by type) and every name a contract default, an impl method or a
 /// projection spells.
@@ -4838,7 +5108,7 @@ fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str>
         .collect();
     work.extend(
         (program.functions.iter())
-            .filter(|f| f.name.contains('$') && !f.name.starts_with(RUNTIME_PREFIX))
+            .filter(|f| f.name.contains('$') && !f.name.starts_with(RUNTIME_PREFIX) && !f.is_gen)
             .map(|f| f.name.as_str()),
     );
     let defaults = (program.contracts.iter().flat_map(|c| &c.members)).filter_map(|m| m.default());
@@ -4868,7 +5138,7 @@ fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str>
 /// Attaches `key` to a diagnostic as its file, unless `key` is the root: a root
 /// diagnostic renders without one, as a single-file program's does. Every load
 /// diagnostic learns its file here.
-fn in_module(mut d: Diagnostic, key: &str, root_key: &str) -> Diagnostic {
+pub(crate) fn in_module(mut d: Diagnostic, key: &str, root_key: &str) -> Diagnostic {
     if key != root_key {
         d.file = Some(key.to_string());
     }
@@ -5579,6 +5849,17 @@ mod tests {
             "{}",
             e[0].message
         );
+    }
+
+    /// A code quote in an unreached body costs no parse at load; a template
+    /// in its hole still does, because it desugars to `@str`.
+    #[test]
+    fn a_code_quote_mentions_only_what_its_holes_mention() {
+        let mentions = |src: &str| mentions_runtime(&lexer::lex(src).unwrap());
+        assert!(!mentions(r#"return vyrn"let \{a} = f(\{b})""#));
+        assert!(mentions(r#"return vyrn"let \{a} = \{toJson(b)}""#));
+        assert!(mentions(r#"return vyrn"let x = \{name("v\{n}")}""#));
+        assert!(mentions(r#"return "let \{a}""#));
     }
 
     /// A `String` result's text, as a cache entry holds it.

@@ -422,33 +422,63 @@ export fn dFloat32(p: modify JsonReader, path: String, seg: String, idx: Int64, 
 /// the value at a reader's cursor into zero or one value. Generated source
 /// cannot spell reserved names, so it writes `VyrnRt_` for `std/json`'s,
 /// `VyrnRd_` for this module's and `VyrnWp_` for a `where` type's predicate.
-export gen fn jsonDecoders(t: TypeArg) -> String {
-    let mut out = ""
+export gen fn jsonDecoders(t: TypeArg) -> Code {
+    let mut out = vyrn""
     for r in t.roots {
         let n = t.nodes[r]
         // `consume` walks: a borrowed walk leaks the decoded snapshot on every
         // call.
-        out = out + "fn " + n.name + "(src: String) -> Validation<" + n.spelling + "> {\n"
-        out = out + "    let mut iss: Array<Issue> = []\n    let mut p = VyrnRd_openDoc(src)\n"
-        out = out + "    let val = d" + n.name + "(p, \"\", \"\", 0 - 2, iss)\n    let bad = VyrnRd_closeDoc(p)\n"
-        out = out + "    if bad.length > 0 {\n        return Invalid(consume bad)\n    }\n"
-        out = out + "    if iss.length > 0 {\n        return Invalid(consume iss)\n    }\n"
-        out = out + "    for x in consume val {\n        return Valid(x)\n    }\n    return Invalid(consume iss)\n}\n"
+        out = out + vyrn"""
+            fn \{name(n.shape.name)}(src: String) -> Validation<\{n.code}> {
+                let mut iss: Array<Issue> = []
+                let mut p = VyrnRd_openDoc(src)
+                let val = \{jsonDecoder(t, r)}(p, "", "", 0 - 2, iss)
+                let bad = VyrnRd_closeDoc(p)
+                if bad.length > 0 {
+                    return Invalid(consume bad)
+                }
+                if iss.length > 0 {
+                    return Invalid(consume iss)
+                }
+                for x in consume val {
+                    return Valid(x)
+                }
+                return Invalid(consume iss)
+            }
+
+            """
     }
-    for n in t.nodes {
-        out = out + "fn d" + n.name + "(p: modify VyrnRt_JsonReader, path: String, seg: String, idx: Int64, iss: modify Array<Issue>) -> Array<" + n.spelling + "> {\n"
-        out = out + jsonDecoderBody(t, n) + "}\n"
+    let mut i = 0
+    for each in t.nodes {
+        let n = each.shape
+        out = out + vyrn"""
+            fn \{jsonDecoder(t, i)}(p: modify VyrnRt_JsonReader, path: String, seg: String, idx: Int64, iss: modify Array<Issue>) -> Array<\{each.code}> {
+                \{jsonDecoderBody(t, i)}
+            }
+
+            """
         // `{ c: 1 }` is not an expression, so a record without a name gets an
         // alias for its literal.
         if n.kind == "record" && !isName(n.spelling) {
-            let mut fs = ""
+            let mut fs = vyrn""
+            let mut sep = vyrn""
             for m in n.members {
-                fs = fs + (if fs == "" { "" } else { ", " }) + m.name + ": " + t.nodes[m.args[0]].spelling
+                fs = fs + sep + vyrn"\{name(m.name)}: \{t.nodes[m.args[0]].code}"
+                sep = vyrn", "
             }
-            out = out + "type r" + n.name + " = { " + fs + " }\n"
+            out = out + vyrn"""
+                type \{name("r" + n.name)} = { \{fs} }
+
+                """
         }
+        i = i + 1
     }
     return out
+}
+
+/// The decoder of node `i`: `d` and the node's name.
+gen fn jsonDecoder(t: TypeArg, i: Int64) -> Name {
+    return name("d" + t.nodes[i].shape.name)
 }
 
 gen fn isName(s: String) -> Bool {
@@ -462,75 +492,180 @@ gen fn isName(s: String) -> Bool {
 }
 
 /// The statement that returns `out` unless the value at the cursor is of
-/// `kind`, a `kindAt` kind written as a byte literal, worded `what` in the
-/// Issue.
-gen fn expectLine(kind: String, what: String) -> String {
-    return "    if VyrnRd_expect(p, path, seg, idx, iss, '" + kind + "', \"" + what + "\") == false {\n        return out\n    }\n"
+/// `kind`, a `kindAt` kind as a byte literal, worded `what` in the Issue.
+gen fn expectLine(kind: Code, what: String) -> Code {
+    return vyrn"""
+        if VyrnRd_expect(p, path, seg, idx, iss, \{kind}, \{what}) == false {
+            return out
+        }
+        """
+}
+
+/// One arm of an `if` chain ([`ifChain`]): `if cond { body }`.
+gen fn arm(cond: Code, body: Code) -> Code {
+    return vyrn"""
+        if \{cond} {
+            \{body}
+        }
+        """
+}
+
+/// The `arms` in order, each after the first behind `else`: `if c0 { b0 }
+/// else if c1 { b1 }`. Each arm is one [`arm`]; no arms is no chain.
+gen fn ifChain(arms: Array<Code>) -> Code {
+    let mut out = vyrn""
+    let mut sep = vyrn""
+    for a in arms {
+        out = out + sep + a
+        sep = vyrn" else "
+    }
+    return out
+}
+
+/// [`ifChain`] closed by `else { last }`; no arms is `last` alone.
+gen fn ifChainOr(arms: Array<Code>, last: Code) -> Code {
+    if arms.length == 0 {
+        return last
+    }
+    return ifChain(arms) + vyrn" else " + vyrn"{ \{last} }"
 }
 
 /// A decoder's body. A composite constructs only when every part produced a
 /// value; each part's issues are already recorded.
-gen fn jsonDecoderBody(t: TypeArg, n: TypeNode) -> String {
-    let out = "    let mut out: Array<" + n.spelling + "> = []\n"
+gen fn jsonDecoderBody(t: TypeArg, i: Int64) -> Code {
+    let n = t.nodes[i].shape
+    let ty = t.nodes[i].code
     // Decode the base, then run the declaration's predicate, or a union's
     // members' predicates until one holds. The push into `Array<T>` is the
     // construction, and it holds for a record base too.
     if n.kind == "where" || n.kind == "union" {
-        let mut binds = ""
-        let mut holds = ""
+        let mut holds = vyrn""
+        let mut binds = vyrn"b"
+        let mut first = true
         for m in n.members {
+            let sep = if first { vyrn"" } else { vyrn", " }
             if n.kind == "union" {
-                holds = holds + (if holds == "" { "" } else { " || " }) + "VyrnWp_" + m.name + "(b)"
+                let or = if first { vyrn"" } else { vyrn" || " }
+                holds = holds + or + vyrn"VyrnWp_\{name(m.name)}(b)"
+            } else if first {
+                binds = vyrn"b.\{name(m.name)}"
             } else {
-                binds = binds + (if binds == "" { "" } else { ", " }) + "b." + m.name
+                binds = binds + sep + vyrn"b.\{name(m.name)}"
             }
+            first = false
         }
         if n.kind == "where" {
-            holds = "VyrnWp_" + n.spelling + "(" + (if binds == "" { "b" } else { binds }) + ")"
+            holds = vyrn"VyrnWp_\{name(n.spelling)}(\{binds})"
         }
-        let base = "    for b in d" + t.nodes[n.args[0]].name + "(p, path, seg, idx, iss) {\n"
-        let test = "        if " + holds + " {\n            out.push(b)\n"
-        let fail = "        } else {\n            VyrnRd_pushValidate(iss, VyrnRd_pathAt(path, seg, idx), \"" + n.predicate + "\")\n        }\n    }\n"
-        return out + base + test + fail + "    return out\n"
+        return vyrn"""
+            let mut out: Array<\{ty}> = []
+            for b in \{jsonDecoder(t, n.args[0])}(p, path, seg, idx, iss) {
+                if \{holds} {
+                    out.push(b)
+                } else {
+                    VyrnRd_pushValidate(iss, VyrnRd_pathAt(path, seg, idx), \{n.predicate})
+                }
+            }
+            return out
+            """
     }
     if n.kind == "record" {
-        return out + expectLine("{", "object") + jsonRecordBody(t, n)
+        let expect = expectLine(vyrn"'{'", "object")
+        return vyrn"""
+            let mut out: Array<\{ty}> = []
+            \{expect}
+            \{jsonRecordBody(t, n)}
+            """
     }
     // Each element decodes at `path[i]`; a bad element is an issue, not a
     // missing array.
     if n.kind == "array" {
-        let e = t.nodes[n.args[0]]
-        let walk = "    let here = VyrnRd_pathAt(path, seg, idx)\n    let mut acc: Array<" + e.spelling + "> = []\n    if VyrnRd_enterArray(p) {\n        let mut i = 0\n        while true {\n"
-        let each = "            for e in d" + e.name + "(p, here, \"\", i, iss) {\n                acc.push(e)\n            }\n            i = i + 1\n"
-        let next = "            if VyrnRd_nextItem(p) == false {\n                break\n            }\n        }\n    }\n"
-        return out + expectLine("[", "array") + walk + each + next + "    out.push(acc)\n    return out\n"
+        let expect = expectLine(vyrn"'['", "array")
+        return vyrn"""
+            let mut out: Array<\{ty}> = []
+            \{expect}
+            let here = VyrnRd_pathAt(path, seg, idx)
+            let mut acc: Array<\{t.nodes[n.args[0]].code}> = []
+            if VyrnRd_enterArray(p) {
+                let mut i = 0
+                while true {
+                    for e in \{jsonDecoder(t, n.args[0])}(p, here, "", i, iss) {
+                        acc.push(e)
+                    }
+                    i = i + 1
+                    if VyrnRd_nextItem(p) == false {
+                        break
+                    }
+                }
+            }
+            out.push(acc)
+            return out
+            """
     }
     // Document order becomes insertion order; the reader refuses a repeated
     // key. An `Int64` key must be canonical decimal text, and a refused key's
     // value is read past.
     if n.kind == "map" {
-        let k = t.nodes[n.args[0]]
-        let val = t.nodes[n.args[1]]
-        let mut put = "                for x in d" + val.name + "(p, here, key, 0 - 1, iss) {\n                    m[key.copy()] = x\n                }\n"
-        if k.kind != "String" {
-            put = "                let kn = VyrnRd_dIntKey(key, here, iss)\n                if kn.length == 1 {\n"
-            put = put + "                    for x in d" + val.name + "(p, here, key, 0 - 1, iss) {\n                        m[kn[0]] = x\n                    }\n"
-            put = put + "                } else {\n                    VyrnRd_skipValue(p)\n                }\n"
+        let val = jsonDecoder(t, n.args[1])
+        let mut put = vyrn"""
+            for x in \{val}(p, here, key, 0 - 1, iss) {
+                m[key.copy()] = x
+            }
+            """
+        if t.nodes[n.args[0]].shape.kind != "String" {
+            put = vyrn"""
+                let kn = VyrnRd_dIntKey(key, here, iss)
+                if kn.length == 1 {
+                    for x in \{val}(p, here, key, 0 - 1, iss) {
+                        m[kn[0]] = x
+                    }
+                } else {
+                    VyrnRd_skipValue(p)
+                }
+                """
         }
-        let m = "    let here = VyrnRd_pathAt(path, seg, idx)\n    let mut m: Map<" + k.spelling + ", " + val.spelling + "> = [:]\n    let mut keys = VyrnRd_keySet()\n"
-        let walk = "    if VyrnRd_enterObject(p) {\n        while true {\n            let key = VyrnRd_readKey(p)\n            if VyrnRd_mapMember(p, keys, key) {\n"
-        let next = "            }\n            if VyrnRd_nextMember(p) == false {\n                break\n            }\n        }\n    }\n"
-        return out + expectLine("{", "object") + m + walk + put + next + "    out.push(m)\n    return out\n"
+        let expect = expectLine(vyrn"'{'", "object")
+        return vyrn"""
+            let mut out: Array<\{ty}> = []
+            \{expect}
+            let here = VyrnRd_pathAt(path, seg, idx)
+            let mut m: Map<\{t.nodes[n.args[0]].code}, \{t.nodes[n.args[1]].code}> = [:]
+            let mut keys = VyrnRd_keySet()
+            if VyrnRd_enterObject(p) {
+                while true {
+                    let key = VyrnRd_readKey(p)
+                    if VyrnRd_mapMember(p, keys, key) {
+                        \{put}
+                    }
+                    if VyrnRd_nextMember(p) == false {
+                        break
+                    }
+                }
+            }
+            out.push(m)
+            return out
+            """
     }
     if n.kind == "option" {
-        let none = "    if VyrnRd_readNull(p) {\n        out.push(None)\n        return out\n    }\n"
-        let some = "    for x in d" + t.nodes[n.args[0]].name + "(p, path, seg, idx, iss) {\n        out.push(Some(x))\n    }\n"
-        return out + none + some + "    return out\n"
+        return vyrn"""
+            let mut out: Array<\{ty}> = []
+            if VyrnRd_readNull(p) {
+                out.push(None)
+                return out
+            }
+            for x in \{jsonDecoder(t, n.args[0])}(p, path, seg, idx, iss) {
+                out.push(Some(x))
+            }
+            return out
+            """
     }
     if n.kind == "enum" {
-        return out + jsonVariantsBody(t, n)
+        return vyrn"""
+            let mut out: Array<\{ty}> = []
+            \{jsonVariantsBody(t, i)}
+            """
     }
-    return jsonScalarBody(n)
+    return jsonScalarBody(t, i)
 }
 
 /// A record: each member decodes into its own slot in the document's key order,
@@ -539,67 +674,140 @@ gen fn jsonDecoderBody(t: TypeArg, n: TypeNode) -> String {
 /// inner decode leaves `None` with its issue recorded. Member `i`'s Issues are
 /// `iss[base + a_i .. base + b_i]`; if any Issue or a missing member exists,
 /// they are put back in declaration order, each missing member's in its place.
-gen fn jsonRecordBody(t: TypeArg, n: TypeNode) -> String {
-    let mut slots = "    let here = VyrnRd_pathAt(path, seg, idx)\n    let base = iss.length\n    let mut unk = VyrnRd_keySet()\n"
-    let mut arms = ""
-    let mut fast = ""
-    let mut slow = ""
-    let mut order = ""
-    let mut missing = ""
-    let mut guards = ""
-    let mut inits = ""
+gen fn jsonRecordBody(t: TypeArg, n: TypeNode) -> Code {
+    let mut slots = vyrn"""
+        let here = VyrnRd_pathAt(path, seg, idx)
+        let base = iss.length
+        let mut unk = VyrnRd_keySet()
+
+        """
+    let mut spelled: Array<Code> = []
+    let mut named: Array<Code> = []
+    let mut arms: Array<Code> = []
+    let mut order = vyrn""
+    let mut again = vyrn"iss.length > base"
+    let mut guards = vyrn""
+    let mut and = vyrn""
+    let mut required = false
+    let mut inits = vyrn""
     let mut i = 0
     for m in n.members {
-        let f = t.nodes[m.args[0]]
+        let f = t.nodes[m.args[0]].shape
         let ix = i.toString()
-        let name = "\"" + m.name + "\""
-        let at = "(p, here, " + name + ", 0 - 1, iss)"
-        slots = slots + "    let mut s" + ix + " = false\n    let mut a" + ix + " = 0\n    let mut b" + ix + " = 0\n"
-        inits = inits + (if i == 0 { "" } else { ", " }) + m.name + ": f" + ix
-        let put = "        if s" + ix + " {\n            VyrnRd_putIssues(iss, late, a" + ix + ", b" + ix + ")\n        }"
-        let mut read = ""
+        let s = name("s" + ix)
+        let a = name("a" + ix)
+        let b = name("b" + ix)
+        let v = name("f" + ix)
+        slots = slots + vyrn"""
+            let mut \{s} = false
+            let mut \{a} = 0
+            let mut \{b} = 0
+
+            """
+        if i > 0 {
+            inits = inits + vyrn", "
+        }
+        let mut read = vyrn""
         if f.kind == "option" {
-            let inner = t.nodes[f.args[0]]
-            slots = slots + "    let mut f" + ix + ": Option<" + inner.spelling + "> = None\n"
-            read = "                if VyrnRd_readNull(p) == false {\n                    for x in d" + inner.name + at + " {\n"
-            read = read + "                        f" + ix + " = Some(x)\n                    }\n                }\n"
-            order = order + put + "\n"
+            slots = slots + vyrn"""
+                let mut \{v}: Option<\{t.nodes[f.args[0]].code}> = None
+
+                """
+            read = vyrn"""
+                if VyrnRd_readNull(p) == false {
+                    for x in \{jsonDecoder(t, f.args[0])}(p, here, \{m.name}, 0 - 1, iss) {
+                        \{v} = Some(x)
+                    }
+                }
+                """
+            order = order + vyrn"""
+                if \{s} {
+                    VyrnRd_putIssues(iss, late, \{a}, \{b})
+                }
+
+                """
+            inits = inits + vyrn"\{name(m.name)}: \{v}"
         } else {
-            slots = slots + "    let mut f" + ix + ": Array<" + f.spelling + "> = []\n"
-            read = "                f" + ix + " = d" + f.name + at + "\n"
-            order = order + put + " else {\n            VyrnRd_pushMissing(iss, VyrnRd_fieldPath(here, " + name + "), " + name + ")\n        }\n"
-            missing = missing + " || s" + ix + " == false"
-            guards = guards + (if guards == "" { "" } else { " && " }) + "f" + ix + ".length == 1"
+            slots = slots + vyrn"""
+                let mut \{v}: Array<\{t.nodes[m.args[0]].code}> = []
+
+                """
+            read = vyrn"\{v} = \{jsonDecoder(t, m.args[0])}(p, here, \{m.name}, 0 - 1, iss)"
+            order = order + vyrn"""
+                if \{s} {
+                    VyrnRd_putIssues(iss, late, \{a}, \{b})
+                } else {
+                    VyrnRd_pushMissing(iss, VyrnRd_fieldPath(here, \{m.name}), \{m.name})
+                }
+
+                """
+            again = again + vyrn" || " + vyrn"\{s} == false"
+            required = true
+            guards = guards + and + vyrn"\{v}.length == 1"
+            and = vyrn" && "
             // Take the value out of its one-element carrier: an element read
             // borrows its container.
-            inits = inits + ".swapRemove(0)"
+            inits = inits + vyrn"\{name(m.name)}: \{v}.swapRemove(0)"
         }
-        let first = i == 0
-        fast = fast + (if first { "            if" } else { " else if" }) + " VyrnRd_keyIs(p, " + name + ") {\n                ix = " + ix + "\n            }"
-        slow = slow + (if first { "                if" } else { " else if" }) + " key == " + name + " {\n                    ix = " + ix + "\n                }"
-        arms = arms + (if first { "            if" } else { " else if" }) + " ix == " + ix + " {\n"
-        arms = arms + "                VyrnRd_member(p, s" + ix + ", " + name + ")\n                s" + ix + " = true\n"
-        arms = arms + "                a" + ix + " = iss.length - base\n" + read + "                b" + ix + " = iss.length - base\n            }"
+        let found = vyrn"ix = \{i}"
+        spelled.push(arm(vyrn"VyrnRd_keyIs(p, \{m.name})", found))
+        named.push(arm(vyrn"key == \{m.name}", found))
+        let member = vyrn"""
+            VyrnRd_member(p, \{s}, \{m.name})
+            \{s} = true
+            \{a} = iss.length - base
+            \{read}
+            \{b} = iss.length - base
+            """
+        arms.push(arm(vyrn"ix == \{i}", member))
         i = i + 1
     }
     // A key spelled as its member is matched in place; any other key is read,
     // so an escaped spelling still names its member and an unknown key is kept
     // for the duplicate check.
-    let skip = "VyrnRd_skipMember(p, unk, key)\n"
-    let mut claim = "            let key = VyrnRd_readKey(p)\n            " + skip
-    if arms != "" {
-        claim = "            let mut key = \"\"\n            let mut ix = 0 - 1\n" + fast + " else {\n                key = VyrnRd_readKey(p)\n" + slow + "\n            }\n"
-        claim = claim + arms + " else {\n                " + skip + "            }\n"
+    let skip = vyrn"VyrnRd_skipMember(p, unk, key)"
+    let mut claim = vyrn"""
+        let key = VyrnRd_readKey(p)
+        \{skip}
+        """
+    if i > 0 {
+        let read = vyrn"""
+            key = VyrnRd_readKey(p)
+            \{ifChain(named)}
+            """
+        claim = vyrn"""
+            let mut key = ""
+            let mut ix = 0 - 1
+            \{ifChainOr(spelled, read)}
+            \{ifChainOr(arms, skip)}
+            """
     }
-    let walk = "    if VyrnRd_enterObject(p) {\n        while true {\n" + claim
-    let next = "            if VyrnRd_nextMember(p) == false {\n                break\n            }\n        }\n    }\n"
-    let fix = "    if iss.length > base" + missing + " {\n        let late = VyrnRd_takeIssues(iss, base)\n" + order + "    }\n"
-    let lit = (if isName(n.spelling) { n.spelling.copy() } else { "r" + n.name }) + " { " + inits + " }"
-    let body = slots + walk + next + fix
-    if guards == "" {
-        return body + "    out.push(" + lit + ")\n    return out\n"
+    let record = if isName(n.spelling) { name(n.spelling) } else { name("r" + n.name) }
+    let mut push = vyrn"out.push(\{record} { \{inits} })"
+    if required {
+        push = vyrn"""
+            if \{guards} {
+                \{push}
+            }
+            """
     }
-    return body + "    if " + guards + " {\n        out.push(" + lit + ")\n    }\n    return out\n"
+    return vyrn"""
+        \{slots}
+        if VyrnRd_enterObject(p) {
+            while true {
+                \{claim}
+                if VyrnRd_nextMember(p) == false {
+                    break
+                }
+            }
+        }
+        if \{again} {
+            let late = VyrnRd_takeIssues(iss, base)
+            \{order}
+        }
+        \{push}
+        return out
+        """
 }
 
 /// A sum in wire form: a bare string is a nullary variant, and a one-key
@@ -607,120 +815,202 @@ gen fn jsonRecordBody(t: TypeArg, n: TypeNode) -> String {
 /// other form is a `json.type` issue that names every variant. A payload's
 /// value waits in `got` and its Issues in `late` until the object proves to
 /// hold one member.
-gen fn jsonVariantsBody(t: TypeArg, n: TypeNode) -> String {
-    let mut out = "    let k = VyrnRd_kindAt(p)\n"
+gen fn jsonVariantsBody(t: TypeArg, i: Int64) -> Code {
+    let n = t.nodes[i].shape
     let mut expected = ""
-    let mut tags = ""
-    let mut keys = ""
+    let mut tags = vyrn""
+    let mut nullary = false
+    let mut arms: Array<Code> = []
     for m in n.members {
         expected = expected + (if expected == "" { "one of `" } else { ", `" }) + m.name + "`"
         if m.args.length == 0 {
-            tags = tags + "        if tag == \"" + m.name + "\" {\n            out.push(" + m.name + ")\n            return out\n        }\n"
+            nullary = true
+            tags = tags + vyrn"""
+                if tag == \{m.name} {
+                    out.push(\{name(m.name)})
+                    return out
+                }
+
+                """
         } else {
-            keys = keys + (if keys == "" { "            if" } else { " else if" }) + " key == \"" + m.name + "\" {\n                hit = true\n"
-            keys = keys + jsonPayloadArm(t, m) + "            }"
+            let payload = vyrn"""
+                hit = true
+                \{jsonPayloadArm(t, m)}
+                """
+            arms.push(arm(vyrn"key == \{m.name}", payload))
         }
     }
-    let wrong = "VyrnRd_pushType(iss, VyrnRd_pathAt(path, seg, idx), \"" + expected + "\", "
-    if tags != "" {
-        out = out + "    if k == '\"' {\n        let tag = VyrnRd_readString(p)\n" + tags
-        out = out + "        " + wrong + "\"string\")\n        return out\n    }\n"
+    let mut strings = vyrn""
+    if nullary {
+        strings = vyrn"""
+            if k == '"' {
+                let tag = VyrnRd_readString(p)
+                \{tags}
+                VyrnRd_pushType(iss, VyrnRd_pathAt(path, seg, idx), \{expected}, "string")
+                return out
+            }
+            """
     }
-    if keys != "" {
-        out = out + "    if k == '{' {\n        let here = VyrnRd_pathAt(path, seg, idx)\n        let mut got: Array<" + n.spelling + "> = []\n        let mut late: Array<Issue> = []\n        let mut hit = false\n        let mut one = false\n"
-        out = out + "        let mut keys = VyrnRd_keySet()\n        if VyrnRd_enterObject(p) {\n"
-        out = out + "            let key = VyrnRd_readKey(p)\n            VyrnRd_mapMember(p, keys, key)\n"
-        out = out + keys + " else {\n                VyrnRd_skipValue(p)\n            }\n            one = true\n"
-        out = out + "            while VyrnRd_nextMember(p) {\n                one = false\n                let more = VyrnRd_readKey(p)\n"
-        out = out + "                VyrnRd_skipMember(p, keys, more)\n            }\n        }\n"
-        out = out + "        if one && hit {\n            VyrnRd_putIssues(iss, late, 0, late.length)\n            return got\n        }\n"
-        out = out + "        " + wrong + "\"object\")\n        return out\n    }\n"
+    let mut objects = vyrn""
+    if arms.length > 0 {
+        let pick = ifChainOr(arms, vyrn"VyrnRd_skipValue(p)")
+        objects = vyrn"""
+            if k == '{' {
+                let here = VyrnRd_pathAt(path, seg, idx)
+                let mut got: Array<\{t.nodes[i].code}> = []
+                let mut late: Array<Issue> = []
+                let mut hit = false
+                let mut one = false
+                let mut keys = VyrnRd_keySet()
+                if VyrnRd_enterObject(p) {
+                    let key = VyrnRd_readKey(p)
+                    VyrnRd_mapMember(p, keys, key)
+                    \{pick}
+                    one = true
+                    while VyrnRd_nextMember(p) {
+                        one = false
+                        let more = VyrnRd_readKey(p)
+                        VyrnRd_skipMember(p, keys, more)
+                    }
+                }
+                if one && hit {
+                    VyrnRd_putIssues(iss, late, 0, late.length)
+                    return got
+                }
+                VyrnRd_pushType(iss, VyrnRd_pathAt(path, seg, idx), \{expected}, "object")
+                return out
+            }
+            """
     }
-    return out + "    " + wrong + "VyrnRd_kindName(k))\n    VyrnRd_skipValue(p)\n    return out\n"
+    return vyrn"""
+        let k = VyrnRd_kindAt(p)
+        \{strings}
+        \{objects}
+        VyrnRd_pushType(iss, VyrnRd_pathAt(path, seg, idx), \{expected}, VyrnRd_kindName(k))
+        VyrnRd_skipValue(p)
+        return out
+        """
 }
 
 /// One payload variant's arm, decoding at `path.Tag` and a tuple's members at
 /// `path.Tag[i]`, with Issues into `late`. A tuple's arity is checked once the
 /// array is read; its members' Issues count only when the arity holds, so they
 /// wait in `el`.
-gen fn jsonPayloadArm(t: TypeArg, m: TypeMember) -> String {
-    let c = "                let c = VyrnRd_fieldPath(here, \"" + m.name + "\")\n"
+gen fn jsonPayloadArm(t: TypeArg, m: TypeMember) -> Code {
+    let tag = name(m.name)
     if m.args.length == 1 {
-        let each = "                for a0 in d" + t.nodes[m.args[0]].name + "(p, here, \"" + m.name + "\", 0 - 1, late) {\n"
-        return each + "                    got.push(" + m.name + "(a0))\n                }\n"
+        return vyrn"""
+            for a0 in \{jsonDecoder(t, m.args[0])}(p, here, \{m.name}, 0 - 1, late) {
+                got.push(\{tag}(a0))
+            }
+            """
     }
-    let arity = m.args.length.toString()
-    let mut out = c + "                if VyrnRd_expect(p, c, \"\", 0 - 2, late, '[', \"array\") {\n"
-    out = out + "                    let mut el: Array<Issue> = []\n"
-    let mut reads = ""
-    let mut guards = ""
-    let mut binds = ""
+    let mut decls = vyrn""
+    let mut reads: Array<Code> = []
+    let mut guards = vyrn""
+    let mut binds = vyrn""
     let mut i = 0
     for a in m.args {
-        let ix = i.toString()
-        let sep = if i == 0 { "" } else { ", " }
-        let e = t.nodes[a]
-        out = out + "                    let mut a" + ix + ": Array<" + e.spelling + "> = []\n"
-        reads = reads + "if n == " + ix + " {\n                                a" + ix + " = d" + e.name + "(p, c, \"\", " + ix + ", el)\n                            } else "
-        guards = guards + (if i == 0 { "" } else { " && " }) + "a" + ix + ".length == 1"
-        binds = binds + sep + "a" + ix + ".swapRemove(0)"
+        let v = name("a" + i.toString())
+        let sep = if i == 0 { vyrn"" } else { vyrn", " }
+        let and = if i == 0 { vyrn"" } else { vyrn" && " }
+        decls = decls + vyrn"""
+            let mut \{v}: Array<\{t.nodes[a].code}> = []
+
+            """
+        let read = vyrn"""
+            \{v} = \{jsonDecoder(t, a)}(p, c, "", \{i}, el)
+            """
+        reads.push(arm(vyrn"n == \{i}", read))
+        guards = guards + and + vyrn"\{v}.length == 1"
+        binds = binds + sep + vyrn"\{v}.swapRemove(0)"
         i = i + 1
     }
-    out = out + "                    let mut n = 0\n                    if VyrnRd_enterArray(p) {\n                        while true {\n"
-    out = out + "                            " + reads + "{\n                                VyrnRd_skipValue(p)\n                            }\n"
-    out = out + "                            n = n + 1\n                            if VyrnRd_nextItem(p) == false {\n                                break\n                            }\n                        }\n                    }\n"
-    out = out + "                    if n != " + arity + " {\n"
-    out = out + "                        VyrnRd_pushType(late, c, \"array of length " + arity + "\", \"array of length \" + n.toString())\n"
-    out = out + "                    } else {\n                        VyrnRd_putIssues(late, el, 0, el.length)\n"
-    out = out + "                        if " + guards + " {\n                            got.push(" + m.name + "(" + binds + "))\n                        }\n"
-    return out + "                    }\n                }\n"
+    let arity = m.args.length
+    let want = "array of length " + arity.toString()
+    return vyrn"""
+        let c = VyrnRd_fieldPath(here, \{m.name})
+        if VyrnRd_expect(p, c, "", 0 - 2, late, '[', "array") {
+            let mut el: Array<Issue> = []
+            \{decls}
+            let mut n = 0
+            if VyrnRd_enterArray(p) {
+                while true {
+                    \{ifChainOr(reads, vyrn"VyrnRd_skipValue(p)")}
+                    n = n + 1
+                    if VyrnRd_nextItem(p) == false {
+                        break
+                    }
+                }
+            }
+            if n != \{arity} {
+                VyrnRd_pushType(late, c, \{want}, "array of length " + n.toString())
+            } else {
+                VyrnRd_putIssues(late, el, 0, el.length)
+                if \{guards} {
+                    got.push(\{tag}(\{binds}))
+                }
+            }
+        }
+        """
 }
 
 /// A scalar. A sized integer decodes through an `Int64` or `UInt64` helper
 /// that refuses every value outside the type's bounds, so the narrowing
-/// conversion cannot wrap.
-gen fn jsonScalarBody(n: TypeNode) -> String {
-    let k = n.kind
-    let whole = if k == "Int64" {
-        "VyrnRd_dInt64(p, path, seg, idx, iss)"
-    } else if k == "UInt64" {
-        "VyrnRd_dUIntMax(p, path, seg, idx, iss, 18446744073709551615)"
-    } else if k == "Float64" {
-        "VyrnRd_dFloat64(p, path, seg, idx, iss)"
-    } else if k == "Float32" {
-        "VyrnRd_dFloat32(p, path, seg, idx, iss)"
-    } else if k == "Bool" {
-        "VyrnRd_dBool(p, path, seg, idx, iss)"
-    } else if k == "String" {
-        "VyrnRd_dStr(p, path, seg, idx, iss)"
-    } else {
-        ""
+/// conversion cannot wrap. Any other kind writes no `return`, and the check of
+/// the written code refuses it.
+gen fn jsonScalarBody(t: TypeArg, i: Int64) -> Code {
+    let k = t.nodes[i].shape.kind
+    if k == "Int64" {
+        return vyrn"return VyrnRd_dInt64(p, path, seg, idx, iss)"
     }
-    if whole != "" {
-        return "    return " + whole + "\n"
+    if k == "UInt64" {
+        return vyrn"return VyrnRd_dUIntMax(p, path, seg, idx, iss, 18446744073709551615)"
     }
-    // Any other kind writes no `return`, and the check of the written code
-    // refuses it.
-    let narrow = if k == "Int8" {
-        "VyrnRd_dIntRange(p, path, seg, idx, iss, 0 - 128, 127)"
-    } else if k == "Int16" {
-        "VyrnRd_dIntRange(p, path, seg, idx, iss, 0 - 32768, 32767)"
-    } else if k == "Int32" {
-        "VyrnRd_dIntRange(p, path, seg, idx, iss, 0 - 2147483648, 2147483647)"
-    } else if k == "UInt8" {
-        "VyrnRd_dUIntMax(p, path, seg, idx, iss, 255)"
-    } else if k == "UInt16" {
-        "VyrnRd_dUIntMax(p, path, seg, idx, iss, 65535)"
-    } else if k == "UInt32" {
-        "VyrnRd_dUIntMax(p, path, seg, idx, iss, 4294967295)"
-    } else {
-        ""
+    if k == "Float64" {
+        return vyrn"return VyrnRd_dFloat64(p, path, seg, idx, iss)"
     }
-    if narrow == "" {
-        return ""
+    if k == "Float32" {
+        return vyrn"return VyrnRd_dFloat32(p, path, seg, idx, iss)"
     }
-    let out = "    let mut out: Array<" + n.spelling + "> = []\n    for n in " + narrow + " {\n"
-    return out + "        out.push(" + n.spelling + "(n))\n    }\n    return out\n"
+    if k == "Bool" {
+        return vyrn"return VyrnRd_dBool(p, path, seg, idx, iss)"
+    }
+    if k == "String" {
+        return vyrn"return VyrnRd_dStr(p, path, seg, idx, iss)"
+    }
+    let ty = t.nodes[i].code
+    if k == "Int8" {
+        return narrowed(ty, vyrn"VyrnRd_dIntRange(p, path, seg, idx, iss, 0 - 128, 127)")
+    }
+    if k == "Int16" {
+        return narrowed(ty, vyrn"VyrnRd_dIntRange(p, path, seg, idx, iss, 0 - 32768, 32767)")
+    }
+    if k == "Int32" {
+        return narrowed(ty, vyrn"VyrnRd_dIntRange(p, path, seg, idx, iss, 0 - 2147483648, 2147483647)")
+    }
+    if k == "UInt8" {
+        return narrowed(ty, vyrn"VyrnRd_dUIntMax(p, path, seg, idx, iss, 255)")
+    }
+    if k == "UInt16" {
+        return narrowed(ty, vyrn"VyrnRd_dUIntMax(p, path, seg, idx, iss, 65535)")
+    }
+    if k == "UInt32" {
+        return narrowed(ty, vyrn"VyrnRd_dUIntMax(p, path, seg, idx, iss, 4294967295)")
+    }
+    return vyrn""
+}
+
+/// The body that decodes a sized integer through `call`, a helper that yields
+/// only a value of `ty`'s bounds, and converts it to `ty`.
+gen fn narrowed(ty: Code, call: Code) -> Code {
+    return vyrn"""
+        let mut out: Array<\{ty}> = []
+        for n in \{call} {
+            out.push(\{ty}(n))
+        }
+        return out
+        """
 }
 
 test "a decode result is zero or one element" {

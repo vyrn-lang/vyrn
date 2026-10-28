@@ -1,7 +1,7 @@
 export gen fn wrong(t: TypeArg) -> String {
     let mut out = ""
     for r in t.roots {
-        out = out + "fn " + t.nodes[r].name + "(v: " + t.nodes[r].spelling + ") -> String {\n    return 7\n}\n"
+        out = out + "fn " + t.nodes[r].shape.name + "(v: " + t.nodes[r].shape.spelling + ") -> String {\n    return 7\n}\n"
     }
     return out
 }

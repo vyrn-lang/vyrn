@@ -7,24 +7,24 @@
 /// ```vyrn
 /// import { importBlock, procImports } from "std/imports"
 ///
-/// export gen fn server(contract: String) -> String {
+/// export gen fn server(contract: String) -> Code {
 ///     let iface = moduleInterface(contract)
-///     return importBlock(iface, contract, procImports(iface, false)) + "..."
+///     return importBlock(iface, contract, procImports(iface, false)) + vyrn"..."
 /// }
 /// ```
 
-import { joinWith } from "std/strings"
 import { includes } from "std/arrays"
+import { join } from "std/code"
 
 /// Returns the names `iface`'s procedures import under: each as is, or with
 /// `procAlias` as `<name> as <name>__real`.
-export fn procImports(iface: ModuleInterface, procAlias: Bool) -> Array<String> {
-    let mut names: Array<String> = []
+export gen fn procImports(iface: ModuleInterface, procAlias: Bool) -> Array<Code> {
+    let mut names: Array<Code> = []
     for f in iface.functions {
         if procAlias {
-            names.push(f.name + " as " + f.name + "__real")
+            names.push(vyrn"\{name(f.name)} as \{name(f.name + "__real")}")
         } else {
-            names.push(f.name.copy())
+            names.push(vyrn"\{name(f.name)}")
         }
     }
     return names
@@ -34,30 +34,29 @@ export fn procImports(iface: ModuleInterface, procAlias: Bool) -> Array<String> 
 /// declares a type of `iface.types`, in first-use order. The module named
 /// `contract` comes first and also imports `procs`. An empty `contract` with
 /// no `procs` imports the types alone.
-export fn importBlock(iface: ModuleInterface, contract: String, procs: Array<String>) -> String {
+export gen fn importBlock(iface: ModuleInterface, contract: String, procs: Array<Code>) -> Code {
     let mut specs: Array<String> = [contract.copy()]
     for t in iface.types {
         if includes(specs, t.module) == false {
             specs.push(t.module.copy())
         }
     }
-    let mut out = ""
+    let mut lines: Array<Code> = []
     for spec in specs {
-        let mut names: Array<String> = []
+        let mut names: Array<Code> = []
         if spec == contract {
             for p in procs {
-                names.push(p.copy())
+                names.push(p)
             }
         }
         for t in iface.types {
             if t.module == spec {
-                names.push(t.name.copy())
+                names.push(vyrn"\{name(t.name)}")
             }
         }
         if names.length > 0 {
-            out = out + "import { " + joinWith(names, ", ") + " } from \"" + spec + "\"
-"
+            lines.push(vyrn"import { \{join(names, vyrn", ")} } from \{spec}")
         }
     }
-    return out
+    return join(lines, vyrn"\n")
 }

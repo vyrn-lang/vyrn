@@ -1268,11 +1268,11 @@ fn table() -> Vec<Builtin> {
             .effect(GenOnly)
             .takes(&[4], |n, want, got| rule!(GenArity, name = n, want, got))
             .typed(vec![code(), Str, Int, Int], code(), None),
-        b("@codeText").spec(Spec::Host).effect(GenOnly),
-        b("@codeSplice").spec(Spec::Host).effect(GenOnly),
+        b(crate::ast::QUOTE).spec(Spec::Host).effect(GenOnly),
         b(crate::checker::GEN_REFLECT).spec(Spec::Host),
         b(crate::checker::GEN_NEXT_INT).spec(Spec::Host),
         b(crate::checker::GEN_NEXT_STR).spec(Spec::Host),
+        b(crate::checker::GEN_CODE).spec(Spec::Host),
         b(crate::checker::GEN_RESULT).spec(Spec::Host),
     ]);
     rows
@@ -1368,9 +1368,9 @@ pub enum Spec {
     /// instruction; a lane index is a literal the checker proved in range.
     Lanes,
     /// A host import a compiled generator calls:
-    /// `@codeText`, `raw`, `rawAt` and `@codeSplice` answer a `Code` handle,
+    /// A quote, `raw` and `rawAt` answer a `Code` handle,
     /// `render` answers a String, and `__vyrnGen*` move a value out of the
-    /// host as atoms. `@codeSplice`'s tag is its operand's type. Only a
+    /// host as atoms. A quote's hole tag is its operand's type. Only a
     /// generator reaches one.
     Host,
     /// A call to the named function, which the program links: an entry a
@@ -1488,7 +1488,7 @@ mod tests {
     /// reordered prelude moves every declaration index. Anything but a type
     /// or a protocol here would enter every program.
     #[test]
-    fn the_prelude_declares_eighteen_types_five_protocols_and_nothing_else() {
+    fn the_prelude_declares_nineteen_types_five_protocols_and_nothing_else() {
         let names: Vec<&str> = type_decls().iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1511,6 +1511,7 @@ mod tests {
                 "TypeNode",
                 "TypeMember",
                 "TypeArg",
+                "TypeArgNode",
             ]
         );
         assert!(

@@ -236,7 +236,11 @@ type TypeMember = { name: String, args: Array<Int64> }
 // name the member types: its value holds where one member's predicate does. A recursive type
 // points back at its own node. `spelling` is the type as generated code
 // writes it.
-type TypeArg = { roots: Array<Int64>, nodes: Array<TypeNode> }
+type TypeArg = { roots: Array<Int64>, nodes: Array<TypeArgNode> }
+
+// One node of a `TypeArg`: its shape, and its type as `Code`, which the
+// generator splices. Only generation makes or reads one.
+type TypeArgNode = { shape: TypeNode, code: Code }
 
 // The protocols the compiler gives a meaning: how a type is released
 // (`Owned`), that a value must be disposed of by name (`MustUse`), how it

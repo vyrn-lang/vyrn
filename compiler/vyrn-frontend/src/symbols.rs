@@ -286,6 +286,7 @@ pub struct Judge {
         &mut crate::ast::Program,
         Option<&crate::gen::GenEngine>,
         Option<crate::floor::Pending>,
+        Option<Linker<'_>>,
     ) -> Judged,
 }
 
@@ -459,9 +460,13 @@ fn analyze_inner(
     let locals = match &mut checked {
         Some(prog) => {
             let cs = crate::prof::phase("check: the analysis's own");
+            let rooted = (linker.as_ref())
+                .map(|(path, _, resolver)| crate::loader::WithRoot::new(path, source, *resolver));
+            let linker =
+                (linker.zip(rooted.as_ref())).map(|((path, opts, _), r)| (path, opts, r as _));
             let (checked_diags, binders) = checker::with_uses(|| match judge {
                 Some(judge) => {
-                    let judged = (judge.check)(prog, engine, pending);
+                    let judged = (judge.check)(prog, engine, pending, linker);
                     memory = judged.memory;
                     cost = judged.cost;
                     waits = judged.waits;
@@ -511,13 +516,13 @@ fn analyze_inner(
     let decl_lines = decl_lines(&program);
     let fn_lines = fn_lines(&program);
     let mut symbols = index_symbols(&program, &tok_info, &decl_lines, &spellings);
-    // Declarations the root imports, indexed from the linked program with their
-    // file, so hover and go-to-definition reach the imported module.
-    if let Some(linked) = &checked {
+    // Declarations the root imports, indexed from each module's own parse with
+    // their file, so hover and go-to-definition reach the imported module.
+    if checked.is_some() {
         symbols.extend(index_imported_symbols(
             &program,
-            linked,
             &graph,
+            linker,
             &origin_index,
         ));
     }
@@ -1726,20 +1731,19 @@ enum Of {
 /// variants. A variant's line is its type's.
 struct Decl {
     of: Of,
-    module: Option<String>,
     sym: Symbol,
     members: Vec<Symbol>,
 }
 
-/// The declarations of `program` that `keep` admits, given their kind, name,
-/// module and `export`, in outline order: functions, module state, impl
+/// The declarations of `program` that `keep` admits, given their kind, name
+/// and `export`, in outline order: functions, module state, impl
 /// methods, protocols, types, tests, benches. A parser-injected type (line 0)
 /// and a synthetic refinement type (`User.age`) are not declarations. `keep`
 /// runs before any detail is rendered, so an index pays only for what it shows.
 fn decl_symbols(
     program: &ast::Program,
     sp: &Spellings,
-    keep: impl Fn(Of, &str, &Option<String>, bool) -> bool,
+    keep: impl Fn(Of, &str, bool) -> bool,
 ) -> Vec<Decl> {
     let sym = |name: &str, kind, line, detail, doc: Option<String>| Symbol {
         name: name.to_string(),
@@ -1752,25 +1756,23 @@ fn decl_symbols(
         file: None,
         mutable: false,
     };
-    let one = |of, module: &Option<String>, sym| Decl {
+    let one = |of, sym| Decl {
         of,
-        module: module.clone(),
         sym,
         members: Vec::new(),
     };
     let mut out = Vec::new();
     for f in &program.functions {
-        if keep(Of::Function, &f.name, &f.module, f.exported) {
+        if keep(Of::Function, &f.name, f.exported) {
             let detail = function_detail(f, sp);
             out.push(one(
                 Of::Function,
-                &f.module,
                 sym(&f.name, SymbolKind::Function, f.line, detail, f.doc.clone()),
             ));
         }
     }
     for g in &program.globals {
-        if keep(Of::Global, &g.name, &g.module, false) {
+        if keep(Of::Global, &g.name, false) {
             let mut s = sym(
                 &g.name,
                 SymbolKind::Global,
@@ -1779,31 +1781,29 @@ fn decl_symbols(
                 g.doc.clone(),
             );
             s.mutable = g.mutable;
-            out.push(one(Of::Global, &g.module, s));
+            out.push(one(Of::Global, s));
         }
     }
     for imp in &program.impls {
         for m in imp
             .methods
             .iter()
-            .filter(|m| keep(Of::ImplMethod, &m.name, &m.module, false))
+            .filter(|m| keep(Of::ImplMethod, &m.name, false))
         {
             let doc = (m.doc.clone())
                 .or_else(|| signature_doc(&program.protocols, &imp.protocol, &m.name));
             let detail = function_detail(m, sp);
             out.push(one(
                 Of::ImplMethod,
-                &m.module,
                 sym(&m.name, SymbolKind::Method, m.line, detail, doc),
             ));
         }
     }
     for p in &program.protocols {
-        if keep(Of::Protocol, &p.name, &p.module, p.exported) {
+        if keep(Of::Protocol, &p.name, p.exported) {
             let detail = protocol_detail(p, sp);
             let mut d = one(
                 Of::Protocol,
-                &p.module,
                 sym(&p.name, SymbolKind::Type, p.line, detail, p.doc.clone()),
             );
             d.members = (p.methods.iter())
@@ -1821,16 +1821,12 @@ fn decl_symbols(
         }
     }
     for t in &program.type_decls {
-        if t.line == 0
-            || ast::is_synthetic(&t.name)
-            || !keep(Of::Type, &t.name, &t.module, t.exported)
-        {
+        if t.line == 0 || ast::is_synthetic(&t.name) || !keep(Of::Type, &t.name, t.exported) {
             continue;
         }
         let detail = type_decl_detail(t, &program.type_decls, sp);
         let mut d = one(
             Of::Type,
-            &t.module,
             sym(&t.name, SymbolKind::Type, t.line, detail, t.doc.clone()),
         );
         d.members = (crate::types::declared_variants(&t.base)
@@ -1852,11 +1848,10 @@ fn decl_symbols(
         (Of::Test, "test", &program.tests),
         (Of::Bench, "bench", &program.benches),
     ] {
-        for b in blocks.iter().filter(|b| keep(of, &b.name, &None, false)) {
+        for b in blocks.iter().filter(|b| keep(of, &b.name, false)) {
             let detail = format!("{word} {:?}", b.name);
             out.push(one(
                 of,
-                &None,
                 sym(&b.name, SymbolKind::Method, b.line, detail, b.doc.clone()),
             ));
         }
@@ -1874,7 +1869,7 @@ fn index_symbols(
     sp: &Spellings,
 ) -> Vec<Symbol> {
     let mut out = Vec::new();
-    for d in decl_symbols(program, sp, |_, _, _, _| true) {
+    for d in decl_symbols(program, sp, |_, _, _| true) {
         let mut s = d.sym;
         let anchor = match d.of {
             Of::Test => "test",
@@ -1905,75 +1900,77 @@ fn index_symbols(
     out
 }
 
-/// Indexes the declarations the root imports, from the linked program. Only
+/// Indexes the declarations the root imports, each read from its declaring
+/// module's own parse ([`declared`]), so what the link kept never shows. Only
 /// names the root's imports bring into scope are indexed, with an imported
 /// enum's variants and an imported protocol's methods. Columns are 0, since the
 /// foreign file's tokens are not at hand; `file` names the source module.
 /// `graph` is the load's, which resolves each root import to its module.
 fn index_imported_symbols(
     root: &ast::Program,
-    linked: &ast::Program,
     graph: &crate::loader::ModuleGraph,
+    linker: Option<Linker<'_>>,
     origins: &OriginIndex,
 ) -> Vec<Symbol> {
-    let sp = &*linked.spellings;
-    let Some((_, targets, _)) = graph.iter().find(|(k, _, _)| *k == sp.root) else {
+    let Some((root_path, _, resolver)) = linker else {
         return Vec::new();
     };
-    // Each imported (module, original name) mapped to the local name the root
-    // uses (the alias, or the original). A symbol is keyed by the local name,
-    // to line up with the root's tokens, and an alias notes its original in
-    // hover. The module is in the key because the linker renames one of two
-    // modules' declarations of one name, and either may be the root's.
-    let mut imported: std::collections::HashMap<(&str, &str), &str> =
+    let root_key = crate::loader::normalize(root_path);
+    let Some((_, targets, _)) = graph.iter().find(|(k, _, _)| *k == root_key) else {
+        return Vec::new();
+    };
+    // Each imported original name mapped to the local name the root uses (the
+    // alias, or the original). A symbol is keyed by the local name, to line up
+    // with the root's tokens, and an alias notes its original in hover.
+    let mut out = Vec::new();
+    let mut original_of: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for (imp, target) in root.imports.iter().zip(targets) {
-        for n in &imp.names {
-            imported.insert((target.as_str(), n.original.as_str()), n.local());
+        if imp.names.is_empty() {
+            continue;
         }
-    }
-    if imported.is_empty() {
-        return Vec::new();
-    }
-    let local_of = |module: &Option<String>, linked_name: &str| {
-        let module = module.as_deref()?;
-        imported.get(&(module, sp.written(linked_name))).copied()
-    };
-    let keep = |of, name: &str, module: &Option<String>, _| {
-        matches!(of, Of::Function | Of::Protocol | Of::Type) && local_of(module, name).is_some()
-    };
-    let mut out = Vec::new();
-    for d in decl_symbols(linked, sp, keep) {
-        let mut s = d.sym;
-        let local = local_of(&d.module, &s.name).expect("`keep` admitted it");
-        let original = sp.written(&s.name).to_string();
-        if local != original {
-            s.detail = format!("{}\n\n— alias of `{original}`", s.detail);
+        let gen = graph
+            .iter()
+            .find(|(k, _, _)| k == target)
+            .and_then(|(_, _, g)| g.as_deref());
+        let Some(program) = declared(target, resolver, gen) else {
+            continue;
+        };
+        let own = graph.iter().find(|(k, _, _)| k == target);
+        let sp = declared_spellings(
+            (&root_key, root, targets),
+            (target, &program, own.map_or(&[][..], |(_, t, _)| t)),
+        );
+        let local_of = |name: &str| imp.names.iter().find(|n| n.original == name);
+        let keep = |of, name: &str, exported| {
+            exported
+                && matches!(of, Of::Function | Of::Protocol | Of::Type)
+                && local_of(name).is_some()
+        };
+        for d in decl_symbols(&program, &sp, keep) {
+            let mut s = d.sym;
+            let local = local_of(&s.name).expect("`keep` admitted it").local();
+            if local != s.name {
+                s.detail = format!("{}\n\n— alias of `{}`", s.detail, s.name);
+            }
+            original_of.insert(local.to_string(), s.name.clone());
+            s.name = local.to_string();
+            s.file = Some(target.clone());
+            out.push(s);
+            out.extend(d.members.into_iter().map(|m| Symbol {
+                file: Some(target.clone()),
+                ..m
+            }));
         }
-        s.name = local.to_string();
-        s.file = d.module.clone();
-        out.push(s);
-        out.extend(d.members.into_iter().map(|m| Symbol {
-            file: d.module.clone(),
-            ..m
-        }));
     }
 
     // A name imported from a generated module carries a banner as its file.
     // Where the module's map claims the symbol, it stands for a real
     // declaration, looked up by original name, since the map is keyed
     // by what the generator emitted.
-    let original_of: std::collections::HashMap<&str, &str> = imported
-        .iter()
-        .map(|((_, orig), local)| (*local, *orig))
-        .collect();
     for s in &mut out {
         if let Some(module) = s.file.clone() {
-            let generated = original_of
-                .get(s.name.as_str())
-                .copied()
-                .unwrap_or(s.name.as_str())
-                .to_string();
+            let generated = original_of.get(&s.name).unwrap_or(&s.name).clone();
             origins.apply(&module, &generated, s);
         }
     }
@@ -2039,18 +2036,10 @@ fn namespace_members(
     resolver: &dyn crate::loader::ModuleResolver,
     gen_source: Option<&str>,
 ) -> Vec<Symbol> {
-    let text = match gen_source {
-        Some(g) => g.to_string(),
-        None => match resolver.read(target) {
-            Ok(t) => t,
-            Err(_) => return Vec::new(),
-        },
-    };
-    let file = gen_source.is_none().then(|| target.to_string());
-    let Ok(tokens) = lexer::lex(&text) else {
+    let Some(program) = declared(target, resolver, gen_source) else {
         return Vec::new();
     };
-    let (program, _errs) = parser::parse_accum(tokens);
+    let file = gen_source.is_none().then(|| target.to_string());
     let mut real_paths = std::collections::HashMap::new();
     let qualified = (program.functions.iter().map(|f| (&f.name, &f.export_to)))
         .chain(program.protocols.iter().map(|p| (&p.name, &p.export_to)))
@@ -2064,7 +2053,7 @@ fn namespace_members(
         })
         .map(|(name, _)| name.as_str())
         .collect();
-    let exported = |of, name: &str, _: &Option<String>, exported| {
+    let exported = |of, name: &str, exported| {
         exported && matches!(of, Of::Function | Of::Protocol | Of::Type) && !shut_out.contains(name)
     };
     let mut out = Vec::new();
@@ -2082,6 +2071,55 @@ fn namespace_members(
         }
     }
     out
+}
+
+/// How a hover in `root` spells the declarations of `target`'s own parse, each
+/// module given with its parse and its import targets in the load's graph
+/// order. A type `target` declares is its own; an import, under its local
+/// name, is the name it imported from the module the graph resolved; any other
+/// name, a builtin's, stays bare. `paths` holds what `root` wrote to import each
+/// module, which the [`Speech`] adds to a name two shown types share.
+fn declared_spellings(
+    (root_key, root, root_targets): (&str, &ast::Program, &[String]),
+    (target, program, targets): (&str, &ast::Program, &[String]),
+) -> Spellings {
+    let mut sp = Spellings {
+        root: root_key.to_string(),
+        ..Spellings::default()
+    };
+    for (imp, key) in root.imports.iter().zip(root_targets) {
+        if let ast::ImportSource::Path(path) = &imp.source {
+            (sp.paths).insert((root_key.to_string(), key.clone()), path.clone());
+        }
+    }
+    for t in &program.type_decls {
+        (sp.decls).insert(t.name.clone(), (t.name.clone(), target.to_string()));
+    }
+    for (imp, key) in program.imports.iter().zip(targets) {
+        for n in &imp.names {
+            (sp.decls).insert(n.local().to_string(), (n.original.clone(), key.clone()));
+        }
+    }
+    sp
+}
+
+/// The declarations of `target` as its own source writes them, bodies
+/// skimmed: `gen_source` when `target` is a generated module, else what
+/// `resolver` reads. `None` for a target neither holds or that does not lex.
+fn declared(
+    target: &str,
+    resolver: &dyn crate::loader::ModuleResolver,
+    gen_source: Option<&str>,
+) -> Option<ast::Program> {
+    let read;
+    let text = match gen_source {
+        Some(g) => g,
+        None => {
+            read = resolver.read(target).ok()?;
+            read.as_str()
+        }
+    };
+    Some(parser::parse_imported(lexer::lex(text).ok()?, true).0)
 }
 
 /// The symbol maps of every generated module the linked program reached,

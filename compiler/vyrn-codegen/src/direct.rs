@@ -5378,13 +5378,42 @@ impl<'p> Fn_<'_, 'p> {
         };
         let code = Type::Named("Code".to_string());
         match (name, args.len()) {
-            // A quote's part, with the key the loader stamped and the part's position.
-            ("@codeText", 4) => {
-                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
-                self.core_arg(m, b, name, args, 1, Some(&Type::Str), line)?;
-                self.core_arg(m, b, name, args, 2, Some(&Type::Int), line)?;
-                self.core_arg(m, b, name, args, 3, Some(&Type::Int), line)?;
-                b.ins(&Instruction::Call(g.text));
+            // A quote: each non-empty part a `text` with the key the loader stamped and
+            // the part's position, each hole a `splice`, folded left to right by `concat`.
+            // A quote of one empty part is one empty `text`.
+            (vyrn_frontend::ast::QUOTE, _) => {
+                let q = match args.first() {
+                    Some((Val::Lit(Lit::Int(n)), _)) => {
+                        vyrn_frontend::ast::Quote::of_count(*n, args.len())
+                    }
+                    _ => None,
+                };
+                let Some((q, key)) = q.and_then(|q| Some((q, q.key()?))) else {
+                    return unsupported("a code quote the loader did not stamp", line);
+                };
+                let mut pieces = 0;
+                for i in 0..q.parts() {
+                    let p = q.part(i);
+                    let empty = matches!(&args[p].0, Val::Lit(Lit::Str(t)) if t.is_empty());
+                    if !empty || q.parts() == 1 {
+                        self.core_arg(m, b, name, args, p, Some(&Type::Str), line)?;
+                        self.core_arg(m, b, name, args, key, Some(&Type::Str), line)?;
+                        self.core_arg(m, b, name, args, p + 1, Some(&Type::Int), line)?;
+                        self.core_arg(m, b, name, args, p + 2, Some(&Type::Int), line)?;
+                        b.ins(&Instruction::Call(g.text));
+                        pieces += 1;
+                        if pieces > 1 {
+                            b.ins(&Instruction::Call(g.concat));
+                        }
+                    }
+                    if i + 1 < q.parts() {
+                        self.splice(m, b, g, name, args, q.hole(i), line)?;
+                        pieces += 1;
+                        if pieces > 1 {
+                            b.ins(&Instruction::Call(g.concat));
+                        }
+                    }
+                }
                 Ok(code)
             }
             ("raw", 1) => {
@@ -5452,73 +5481,84 @@ impl<'p> Fn_<'_, 'p> {
                 self.fetch_str(b, g);
                 Ok(Type::Str)
             }
+            // A reflected type's spelling as `Code`, the call site's data, as `raw` makes it.
+            (crate::GEN_CODE, 1) => {
+                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
+                b.ins(&Instruction::Call(g.raw));
+                Ok(code)
+            }
             (crate::GEN_RESULT, 1) => {
                 self.core_arg(m, b, name, args, 0, Some(&code), line)?;
                 b.ins(&Instruction::Call(g.result));
                 Ok(Type::Unit)
             }
-            // The value crosses as a compile-time tag naming the `Val` the host rebuilds, a
-            // 64-bit word and a String pointer. The tag goes first, so the type is asked first.
-            // Whether the hole is glued to a word, and its columns, are the checker's.
-            ("@codeSplice", 5) => {
-                let Some((v, _)) = args.first() else {
-                    return unsupported(&format!("`{name}` with too few operands"), line);
-                };
-                let vty = self.cx.resolve(&self.core_ty(v, &Type::Int));
-                let tag = match &vty {
-                    Type::Str => crate::TAG_STR,
-                    // A `Name` is a handle to its identifier's span, spliced as `Code` is.
-                    Type::Named(n) if vyrn_frontend::ast::is_gen_handle(n) => crate::TAG_CODE,
-                    Type::Bool => crate::TAG_BOOL,
-                    Type::Float => crate::TAG_F64,
-                    Type::Float32 => crate::TAG_F32,
-                    _ => match Num::of(&vty) {
-                        Some(n) if n.signed => crate::TAG_INT,
-                        Some(_) => crate::TAG_UINT,
-                        None => {
-                            return unsupported(
-                                &format!("splicing `{vty}` into a code quote"),
-                                line,
-                            )
-                        }
-                    },
-                };
-                b.ins(&Instruction::I32Const(tag));
-                // `bits` then `ptr`: a String is a zero word and the pointer, anything else
-                // the word and a null pointer.
-                if vty == Type::Str {
-                    b.ins(&Instruction::I64Const(0));
-                    self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
-                } else {
-                    self.core_arg(m, b, name, args, 0, Some(&vty), line)?;
-                    match &vty {
-                        // Lossless; the host formats.
-                        Type::Float => {
-                            b.ins(&Instruction::I64ReinterpretF64);
-                        }
-                        Type::Float32 => {
-                            b.ins(&Instruction::I32ReinterpretF32)
-                                .ins(&Instruction::I64ExtendI32U);
-                        }
-                        Type::Bool => {
-                            b.ins(&Instruction::I64ExtendI32U);
-                        }
-                        // A sized integer's carrier is extended for its signedness, so widening
-                        // agrees with the tag. A `Code` handle is already the word.
-                        _ => {
-                            if let Some(n) = Num::of(&vty) {
-                                widen(b, n);
-                            }
-                        }
-                    }
-                    b.ins(&Instruction::I32Const(0));
-                }
-                self.core_arg(m, b, name, args, 2, Some(&Type::Str), line)?;
-                b.ins(&Instruction::Call(g.splice));
-                Ok(code)
-            }
             _ => unsupported(&format!("`{name}` at {} operands", args.len()), line),
         }
+    }
+
+    /// One hole of a quote, at `args[h]`, its indent at `h + 2`.
+    // The value crosses as a compile-time tag naming the `Val` the host rebuilds, a
+    // 64-bit word and a String pointer. The tag goes first, so the type is asked first.
+    // Whether the hole is glued to a word, and its columns, are the checker's.
+    #[allow(clippy::too_many_arguments)]
+    fn splice(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        g: Gen,
+        name: &str,
+        args: &[(Val, Capability)],
+        h: usize,
+        line: usize,
+    ) -> Result<(), String> {
+        let (v, _) = &args[h];
+        let vty = self.cx.resolve(&self.core_ty(v, &Type::Int));
+        let tag = match &vty {
+            Type::Str => crate::TAG_STR,
+            // A `Name` is a handle to its identifier's span, spliced as `Code` is.
+            Type::Named(n) if vyrn_frontend::ast::is_gen_handle(n) => crate::TAG_CODE,
+            Type::Bool => crate::TAG_BOOL,
+            Type::Float => crate::TAG_F64,
+            Type::Float32 => crate::TAG_F32,
+            _ => match Num::of(&vty) {
+                Some(n) if n.signed => crate::TAG_INT,
+                Some(_) => crate::TAG_UINT,
+                None => return unsupported(&format!("splicing `{vty}` into a code quote"), line),
+            },
+        };
+        b.ins(&Instruction::I32Const(tag));
+        // `bits` then `ptr`: a String is a zero word and the pointer, anything else
+        // the word and a null pointer.
+        if vty == Type::Str {
+            b.ins(&Instruction::I64Const(0));
+            self.core_arg(m, b, name, args, h, Some(&Type::Str), line)?;
+        } else {
+            self.core_arg(m, b, name, args, h, Some(&vty), line)?;
+            match &vty {
+                // Lossless; the host formats.
+                Type::Float => {
+                    b.ins(&Instruction::I64ReinterpretF64);
+                }
+                Type::Float32 => {
+                    b.ins(&Instruction::I32ReinterpretF32)
+                        .ins(&Instruction::I64ExtendI32U);
+                }
+                Type::Bool => {
+                    b.ins(&Instruction::I64ExtendI32U);
+                }
+                // A sized integer's carrier is extended for its signedness, so widening
+                // agrees with the tag. A `Code` handle is already the word.
+                _ => {
+                    if let Some(n) = Num::of(&vty) {
+                        widen(b, n);
+                    }
+                }
+            }
+            b.ins(&Instruction::I32Const(0));
+        }
+        self.core_arg(m, b, name, args, h + 2, Some(&Type::Str), line)?;
+        b.ins(&Instruction::Call(g.splice));
+        Ok(())
     }
 
     /// The guest half of the stash protocol: with the host's length on the stack, allocates a
@@ -12473,7 +12513,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 };
                 return self.lanes(m, b, callee, args, span, line);
             }
-            // A generator host import: `@codeSplice` takes its tag from the type the row put
+            // A generator host import: a quote's hole takes its tag from the type the row put
             // on its operand.
             Some(Spec::Host) => {
                 return self.host(m, b, callee, args, line);
@@ -15445,9 +15485,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// The first name the statement `s` reads, which is the only one the
     /// operand stack can be carrying for it. None for an aggregate call, a
     /// variant and a store into a place, whose destination goes on the stack
-    /// before their parts, for `@codeSplice`, whose tag goes before its
-    /// value, and for a call through a stored value, whose value goes there
-    /// first.
+    /// before their parts, for a quote, whose first push is a part's pointer
+    /// or a hole's tag, and for a call through a stored value, whose value goes
+    /// there first.
     fn core_first_read(&self, s: Option<&St>) -> Option<Name> {
         let body = self.body();
         match s? {
@@ -15463,7 +15503,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     || self.core_rebuild(rhs)
                     || matches!(rhs, Rhs::Call { callee, kind, args, .. }
                         if self.core_removes( callee, *kind, args).is_some()
-                            || callee == "@codeSplice") =>
+                            || callee == vyrn_frontend::ast::QUOTE) =>
             {
                 None
             }

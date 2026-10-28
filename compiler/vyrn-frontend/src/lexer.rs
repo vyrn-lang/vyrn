@@ -20,6 +20,38 @@ pub struct Token {
     pub col: usize,
 }
 
+/// Drops a `vyrn"""` quote's closing indentation, Swift's rule: when the text
+/// opens with a newline and its last line holds only whitespace, that
+/// whitespace leaves the start of every line, and the opening newline and the
+/// last line with the newline before it go. A part that starts after a hole
+/// starts mid-line, so only text after a newline is a line start.
+fn dedent(parts: &mut [String]) {
+    let Some(last) = parts.last() else { return };
+    let Some(nl) = last.rfind('\n') else { return };
+    let close = last[nl + 1..].to_string();
+    let opens = parts.first().is_some_and(|p| p.starts_with('\n'));
+    if opens && close.trim().is_empty() {
+        let n = parts.len();
+        parts[n - 1].truncate(nl);
+        for (i, part) in parts.iter_mut().enumerate() {
+            let mut out = String::with_capacity(part.len());
+            for (j, line) in part.split_inclusive('\n').enumerate() {
+                let start = j > 0 || i == 0;
+                out.push_str(match start {
+                    true => line.strip_prefix(close.as_str()).unwrap_or(line),
+                    false => line,
+                });
+            }
+            *part = out;
+        }
+        if let Some(first) = parts.first_mut() {
+            if first.starts_with('\n') {
+                first.remove(0);
+            }
+        }
+    }
+}
+
 /// Returns the `(kind, text)` pair the `lex()` builtin gives generators: `kind` is
 /// a stable category name, `text` a literal's decoded value or the spelling.
 pub fn token_name_and_text(tok: &Tok) -> (String, String) {
@@ -514,12 +546,26 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                 cur.push(ch);
                 i += 1;
             }
+            // A `vyrn"""` code quote, its tag the item before it on its line as the
+            // parser reads it, drops its closing indentation. Only here are the raw
+            // delimiters known: `vyrn"\n"` is no multi-line quote.
+            let quote = triple
+                && out.last().is_some_and(|t| {
+                    t.end_line == start_line
+                        && matches!(&t.kind, TrivKind::Tok(Tok::Ident(n)) if n == "vyrn")
+                });
             // Anchor the token at the opening quote, so a diagnostic on a multi-line
             // string points where it starts.
             let tok = if exprs.is_empty() {
+                if quote {
+                    dedent(std::slice::from_mut(&mut cur));
+                }
                 Tok::Str(cur)
             } else {
                 parts.push(cur); // the trailing fragment after the last hole
+                if quote {
+                    dedent(&mut parts);
+                }
                 Tok::TemplateStr { parts, exprs }
             };
             out.push(Triv {

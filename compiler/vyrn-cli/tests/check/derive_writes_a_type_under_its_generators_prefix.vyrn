@@ -1,7 +1,7 @@
 export gen fn boxed(t: TypeArg) -> String {
     let mut out = "type Box = { v: Int64 }\n"
     for r in t.roots {
-        out = out + "fn " + t.nodes[r].name + "(v: " + t.nodes[r].spelling + ") -> String {\n"
+        out = out + "fn " + t.nodes[r].shape.name + "(v: " + t.nodes[r].shape.spelling + ") -> String {\n"
         out = out + "    let b = Box { v: v }\n    return b.w\n}\n"
     }
     return out

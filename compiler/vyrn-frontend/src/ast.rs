@@ -379,6 +379,61 @@ pub fn is_word_builtin(name: &str) -> bool {
     matches!(name, "name" | "diag" | "codeAt" | "at")
 }
 
+/// The one call a `vyrn"..."` quote desugars to:
+/// `@codeQuote(n, key, part_0, line_0, col_0, [hole, glued, indent, line, from, to,
+/// part, line, col]...)`, with all `n` parts, empty ones too, and a hole between each
+/// pair. A part is its text and where it starts in its module; a hole is its value,
+/// `1` when it touches a word character, its line's leading whitespace and its
+/// line and columns. The parser writes the call without `key`; the loader inserts
+/// the module's key, the parts' author, at index 1 ([`Quote::of`] reads either).
+pub const QUOTE: &str = "@codeQuote";
+
+/// Where a quote call's arguments sit (see [`QUOTE`]).
+#[derive(Clone, Copy)]
+pub struct Quote {
+    parts: usize,
+    /// `1` once the loader inserted the key, else `0`.
+    keyed: usize,
+}
+
+impl Quote {
+    /// The layout of a quote call of `len` arguments whose first, its part
+    /// count, is `n`, with or without its key; `None` for any other shape.
+    pub fn of_count(n: i64, len: usize) -> Option<Self> {
+        let parts = usize::try_from(n).ok().filter(|p| *p >= 1)?;
+        let keyed = len.checked_sub(9 * parts - 5).filter(|k| *k <= 1)?;
+        Some(Quote { parts, keyed })
+    }
+
+    /// The layout of the quote call `args` hold.
+    pub fn of(args: &[Expr]) -> Option<Self> {
+        match args.first() {
+            Some(Expr::Int(n, _)) => Self::of_count(*n, args.len()),
+            _ => None,
+        }
+    }
+
+    /// The index of the module key, once the loader inserted it.
+    pub fn key(&self) -> Option<usize> {
+        (self.keyed == 1).then_some(1)
+    }
+
+    /// The number of parts; one more than the holes.
+    pub fn parts(&self) -> usize {
+        self.parts
+    }
+
+    /// The index of part `i`'s text; its line and column follow.
+    pub fn part(&self, i: usize) -> usize {
+        1 + self.keyed + 9 * i
+    }
+
+    /// The index of hole `i`'s value; glued, indent, line, from and to follow.
+    pub fn hole(&self, i: usize) -> usize {
+        4 + self.keyed + 9 * i
+    }
+}
+
 /// The builtin generation-only types a compiled generator holds as an `i64`
 /// handle into the host's code arena: `Code`, and `Name`, which only `name(s)`
 /// makes. A user declaration of the name wins.

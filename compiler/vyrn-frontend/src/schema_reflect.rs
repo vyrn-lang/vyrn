@@ -479,6 +479,14 @@ pub(crate) const PLACEHOLDERS: &[(&str, &str)] = &[
     ("VyrnWp_", crate::ctor::PRED_PREFIX),
 ];
 
+/// A reflected type as `Code`: its spelling, which the generator host turns
+/// into a span the call site wrote (`checker::GEN_CODE`), because the type
+/// resolves in the importer's scope. A type holds no import or specifier, so
+/// its author cannot change a verdict.
+fn type_code(spelling: String) -> Expr {
+    Expr::call(crate::checker::GEN_CODE, vec![Expr::str(spelling)], 0)
+}
+
 /// Spells a type as generated source, with `std/json`'s `$` names folded onto
 /// [`PH`].
 fn spell(ty: &Type) -> String {
@@ -614,6 +622,7 @@ fn member(name: String, args: Vec<usize>) -> Expr {
     )
 }
 
+/// A `TypeArgNode`: the node's shape, paired with its type as `Code`.
 fn type_node(
     kind: &str,
     key: &str,
@@ -622,7 +631,7 @@ fn type_node(
     members: Vec<Expr>,
     predicate: String,
 ) -> Expr {
-    struct_lit(
+    let shape = struct_lit(
         "TypeNode",
         vec![
             ("kind", Expr::str(kind)),
@@ -632,6 +641,10 @@ fn type_node(
             ("members", array_lit(members)),
             ("predicate", Expr::str(predicate)),
         ],
+    );
+    struct_lit(
+        "TypeArgNode",
+        vec![("shape", shape), ("code", type_code(spell(ty)))],
     )
 }
 
@@ -966,7 +979,9 @@ mod tests {
             .map(|e| format!("{e:?}"))
             .collect();
         assert_eq!(ints, ["Int(0, _)", "Int(3, _)"]);
-        let rows: Vec<String> = shape_rows(field(&lit, "nodes"))
+        let nodes = elems(field(&lit, "nodes"));
+        let shapes = array_lit(nodes.iter().map(|n| field(n, "shape").clone()).collect());
+        let rows: Vec<String> = shape_rows(&shapes)
             .into_iter()
             .map(|r| {
                 let (kind, rest) = r.split_once(' ').unwrap();

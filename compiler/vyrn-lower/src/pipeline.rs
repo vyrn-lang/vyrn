@@ -64,7 +64,9 @@ pub fn load_admitting(
         Ok(p) => p,
         Err(diags) => return (Err(diags), warnings),
     };
-    let (judged, world) = check(&mut program, engine, pending);
+    let rooted = loader::WithRoot::new(root_path, root_source, resolver);
+    let linker = (root_path, opts, &rooted as &dyn loader::ModuleResolver);
+    let (judged, world) = check(&mut program, engine, pending, Some(linker));
     let mut diags = judged.diagnostics;
     if let (true, Some(world)) = (diags.iter().all(admitted), world) {
         (Ok((program, world)), warnings)
@@ -89,18 +91,20 @@ pub fn check_and_synthesize(
     program: &mut ast::Program,
     engine: Option<&GenEngine>,
 ) -> Vec<Diagnostic> {
-    check(program, engine, None).0.diagnostics
+    check(program, engine, None, None).0.diagnostics
 }
 
 /// [`check_and_synthesize`] with the floor decision the load returned, if any,
-/// and the World the kernel judged, for a program that type-checks.
+/// and the load that linked `program`, and the World the kernel judged, for a
+/// program that type-checks.
 fn check(
     program: &mut ast::Program,
     engine: Option<&GenEngine>,
     pending: Option<floor::Pending>,
+    linker: Option<symbols::Linker<'_>>,
 ) -> (symbols::Judged, Option<Arc<crate::World>>) {
     let (mut diags, refused, binders, record) =
-        vyrn_frontend::check_and_synthesize(program, engine, &Default::default());
+        vyrn_frontend::check_and_synthesize(program, engine, linker);
     // One type record for the readers below: the check's own, or a new one
     // where the check made none. The synthesis is over, so no node moves under
     // its keys.
@@ -194,13 +198,13 @@ pub fn gen_engine(
 /// The pipeline the editor runs after its load: [`check_and_synthesize`] with
 /// the load's floor decision.
 pub const JUDGE: symbols::Judge = symbols::Judge {
-    check: |program, engine, pending| for_editor(program, engine, pending, false),
+    check: |program, engine, pending, linker| for_editor(program, engine, pending, linker, false),
 };
 
 /// [`JUDGE`] and the cost of each function of the root file ([`crate::insight::fn_costs`]),
 /// which decides the root's bodies: about 9 ms of a keystroke on `site/export.vyrn`.
 pub const JUDGE_COST: symbols::Judge = symbols::Judge {
-    check: |program, engine, pending| for_editor(program, engine, pending, true),
+    check: |program, engine, pending, linker| for_editor(program, engine, pending, linker, true),
 };
 
 /// [`check`] with what the editor shows of the World: the functions that wait, and the cost of
@@ -209,9 +213,10 @@ fn for_editor(
     program: &mut ast::Program,
     engine: Option<&GenEngine>,
     pending: Option<floor::Pending>,
+    linker: Option<symbols::Linker<'_>>,
     cost: bool,
 ) -> symbols::Judged {
-    let (mut judged, world) = check(program, engine, pending);
+    let (mut judged, world) = check(program, engine, pending, linker);
     if let Some(world) = world {
         judged.waits = world
             .waiting(program)

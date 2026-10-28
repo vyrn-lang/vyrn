@@ -657,7 +657,9 @@ pub fn compiler_identity() -> String {
                 std::fs::read(exe.as_ref()?).ok()
             }),
             // A build that cannot be identified must not reuse outputs across
-            // processes.
+            // processes. A page has no executable and no process id, and its
+            // cache never leaves the page (`vyrn-play`).
+            None if cfg!(target_os = "unknown") => "page".to_string(),
             None => format!("unknown-{}", std::process::id()),
         };
         format!("{}:{exe_id}", env!("CARGO_PKG_VERSION"))
@@ -683,6 +685,12 @@ fn executable_id(
             None => format!("unknown-{}", std::process::id()),
         },
     }
+}
+
+/// Whether a `gen fn` returning `ret` writes a module a load can link or
+/// `derive` can call: its text as a `String`, or its spans as `Code`.
+pub fn writes_module(ret: &crate::ast::Type) -> bool {
+    matches!(ret, crate::ast::Type::Str) || matches!(ret, crate::ast::Type::Named(n) if n == "Code")
 }
 
 /// Runs `fn_name` in `program` as a generation target on `inputs.engine`,
@@ -714,14 +722,6 @@ pub fn derived_name(g: &str, ty: &crate::ast::Type) -> String {
     format!("derive${g}$t{}", crate::types::struct_key(ty))
 }
 
-thread_local! {
-    /// Each generator run's parsed output, keyed by the generator, its program
-    /// and its `TypeArg`, so the editor's re-check of an unchanged program does
-    /// not run the generator again.
-    static DERIVED: std::cell::RefCell<HashMap<[u64; 2], Derived>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
 /// What a derive generator wrote: its functions and type declarations, each
 /// renamed under `derive$g$`, which no source can spell.
 pub type Derived = (Vec<crate::ast::Function>, Vec<crate::ast::TypeDecl>);
@@ -741,17 +741,18 @@ pub struct Site {
 ///
 /// `sites` are in source order. Each generator runs once per
 /// program, over all of its types as one `TypeArg`: a run per type would write a
-/// shared subtype's function twice. Its program is `program` cut down to the
-/// functions the generator reaches, checked as a generator's own program is.
-/// The output is not checked here, except each entry's signature against its
-/// site; the caller checks the program it joins. `nest` names the generators
-/// running: a generator's own program may call `derive` (a `std/ui` generator
-/// reaches `toJson`), but not reach itself.
+/// shared subtype's function twice. It runs through `linker` as an import
+/// line's generator does ([`crate::loader::generation`]): its module loaded as
+/// its own root, and its output cached under the `TypeArg`. With no `linker`,
+/// every site fails. The output is not
+/// checked here, except each entry's signature against its site; the caller
+/// checks the program it joins. A generator's own program may call `derive` (a
+/// `std/ui` generator reaches `toJson`), but not reach itself.
 pub fn derive(
     program: &Program,
     sites: &[Site],
     engine: Option<&GenEngine>,
-    nest: &crate::loader::Nest,
+    linker: Option<crate::symbols::Linker<'_>>,
 ) -> Result<Derived, Diagnostic> {
     let unplaced = |e: String| Diagnostic::error(0, 0, "check", e);
     let mut out: Derived = (Vec::new(), Vec::new());
@@ -778,34 +779,66 @@ pub fn derive(
                 roots[i]
             )));
         }
-        let gen_program = generator_program(program, g);
-        let text = canonical(&gen_program);
-        // 128 bits of SipHash, because a hit needs no SHA-256 of the program's
-        // text: only the engine's cache across processes reads that digest.
-        let key = [0u8, 1].map(|salt| {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (salt, g, &text, format!("{arg:?}")).hash(&mut h);
-            h.finish()
-        });
-        let cached = DERIVED.with(|d| d.borrow().get(&key).cloned());
-        let (fns, decls) = match cached {
-            Some(d) => d,
-            None => {
-                if nest.deriving.iter().any(|r| r == g) {
-                    return Err(unplaced(format!(
-                        "generator `{g}` reaches `derive({g}, ..)`"
-                    )));
-                }
-                let mut inner = nest.clone();
-                inner.deriving.push(g.to_string());
-                let fingerprint = crate::hash::sha256_hex(text.as_bytes());
-                let written = run_derive(gen_program, g, arg, fingerprint, engine, inner);
-                let written = written.map_err(unplaced)?;
-                DERIVED.with(|d| d.borrow_mut().insert(key, written.clone()));
-                written
-            }
+        let Some((_, opts, resolver)) = linker else {
+            return Err(unplaced(format!(
+                "cannot run the generator `{g}`: no load links its module"
+            )));
         };
+        let (key, name) = declared(program, g);
+        let identity = format!("{key}\u{0}{name}");
+        if opts.nest.deriving.contains(&identity) {
+            return Err(unplaced(format!(
+                "generator `{g}` reaches `derive({g}, ..)`"
+            )));
+        }
+        let mut inner = crate::loader::generator_opts(opts);
+        inner.nest.deriving.push(identity);
+        let mut read = HashMap::new();
+        let root = program.spellings.root.as_str();
+        let refused = |ds: Vec<Diagnostic>| -> String {
+            ds.into_iter()
+                .take(1)
+                .map(|d| match d.file {
+                    Some(_) => d,
+                    None => crate::loader::in_module(d, key, root),
+                })
+                .map(|d| format!("generator `{g}` does not check: {}", d.render()))
+                .collect()
+        };
+        // The cache key holds the `TypeArg` literal, so a change to a reflected
+        // type misses and any other edit of the program hits.
+        let call = crate::loader::GenCall {
+            consts: &[],
+            type_arg: Some(&arg),
+            arg_repr: format!("{arg:?}"),
+            importer_dir: String::new(),
+            allowed: Vec::new(),
+            aliased: Vec::new(),
+        };
+        let gen = crate::loader::generation;
+        let written = gen(
+            key,
+            name,
+            call,
+            (true, false),
+            &inner,
+            resolver,
+            engine,
+            &mut read,
+        );
+        let written = written.map_err(|f| match f {
+            crate::loader::GenFault::Load(ds) => unplaced(refused(ds)),
+            crate::loader::GenFault::Reread(why) => {
+                let rule = crate::rules::rule!(GenModuleReread, module = key, why);
+                Diagnostic::refusal(0, 0, "check", rule)
+            }
+            crate::loader::GenFault::Run(GenError::Refused(ds)) => unplaced(refused(ds)),
+            crate::loader::GenFault::Run(GenError::Failed(trap)) => unplaced(trap),
+            crate::loader::GenFault::Run(GenError::Unchecked) => {
+                unplaced("the engine asked to check a checked program".to_string())
+            }
+        })?;
+        let (fns, decls) = adopt(&written.source, g).map_err(unplaced)?;
         for s in sites.iter().filter(|s| s.g == g) {
             let Some(f) = fns.iter().find(|f| f.name == derived_name(g, &s.ty)) else {
                 return Err(unplaced(format!(
@@ -830,176 +863,24 @@ pub fn derive(
     Ok(out)
 }
 
-/// `program` with the functions and module state `g` does not reach, the tests
-/// and the benches removed: what a generator's own load would link.
-fn generator_program(program: &Program, g: &str) -> Program {
-    let by_name: HashMap<&str, &crate::ast::Function> = program
-        .functions
-        .iter()
-        .map(|f| (f.name.as_str(), f))
-        .collect();
-    let state: HashMap<&str, &Expr> = program
-        .globals
-        .iter()
-        .map(|s| (s.name.as_str(), &s.init))
-        .collect();
-    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Every `$` name stays whole: an injected runtime module's, because the
-    // emitter calls into `std/runtime` where no source does, and an impl's
-    // flattened method. The contracts stay whole, so what their defaults call
-    // stays too.
-    let mut work: Vec<String> = vec![g.to_string()];
-    work.extend(
-        program
-            .functions
-            .iter()
-            .filter(|f| f.name.contains('$'))
-            .map(|f| f.name.clone()),
-    );
-    for d in program
-        .contracts
-        .iter()
-        .flat_map(|c| &c.members)
-        .filter_map(|m| m.default())
-    {
-        work.extend(crate::checker::expr_refs(d));
+/// The module key and the declared name of the generator `program` links as
+/// `g`. A declaration the loader renamed apart, or one of an injected module,
+/// is in [`Program::spellings`]; any other is declared as linked, in the
+/// module its function names.
+fn declared<'a>(program: &'a Program, g: &'a str) -> (&'a str, &'a str) {
+    if let Some((written, key)) = program.spellings.decls.get(g) {
+        return (key, written);
     }
-    for m in program
-        .impls
-        .iter()
-        .flat_map(|i| i.methods.iter().chain(&i.places))
-    {
-        work.extend(crate::checker::fn_refs(m));
-    }
-    while let Some(n) = work.pop() {
-        if let Some(f) = by_name.get(n.as_str()) {
-            if keep.insert(n) {
-                work.extend(crate::checker::fn_refs(f));
-            }
-        } else if let Some(init) = state.get(n.as_str()) {
-            if keep.insert(n) {
-                work.extend(crate::checker::expr_refs(init));
-            }
-        }
-    }
-    // Built field by field, not cloned and cut: the dropped bodies are most of
-    // a large program.
-    Program {
-        functions: program
-            .functions
-            .iter()
-            .filter(|f| keep.contains(&f.name))
-            .cloned()
-            .collect(),
-        globals: program
-            .globals
-            .iter()
-            .filter(|s| keep.contains(&s.name))
-            .cloned()
-            .collect(),
-        tests: Vec::new(),
-        benches: Vec::new(),
-        imports: program.imports.clone(),
-        type_decls: program.type_decls.clone(),
-        protocols: program.protocols.clone(),
-        contracts: program.contracts.clone(),
-        impls: program.impls.clone(),
-        surface_shadows: program.surface_shadows.clone(),
-        log_level: program.log_level,
-        log_sink: program.log_sink.clone(),
-        units: program.units,
-        host: program.host,
-        // Not the program's: they hash the root's text, and [`canonical`]
-        // keys the derive memo on this program, so any edit would run the
-        // generator again.
-        module_hashes: Default::default(),
-        expansions: program.expansions.clone(),
-        spellings: program.spellings.clone(),
-        orders: program.orders.clone(),
-        prove: program.prove.clone(),
-        proved: program.proved.clone(),
-        session: program.session.clone(),
-    }
+    let module = (program.functions.iter())
+        .find(|f| f.name == g)
+        .and_then(|f| f.module.as_deref());
+    (module.unwrap_or(&program.spellings.root), g)
 }
 
-/// Returns a text that names `p` alike in every process: its `Debug`, with the
-/// AST's three hash containers (`surface_shadows` and each function's and
-/// impl's `type_bounds`) moved out and sorted, because a hash container's
-/// `Debug` order differs per process.
-fn canonical(p: &Program) -> String {
-    use std::collections::{BTreeMap, BTreeSet};
-    let mut c = p.clone();
-    let shadows: BTreeSet<_> = c.surface_shadows.drain().collect();
-    let mut bounds: Vec<BTreeMap<String, Vec<String>>> = Vec::new();
-    for i in &mut c.impls {
-        bounds.push(i.type_bounds.drain().collect());
-    }
-    let methods = c
-        .impls
-        .iter_mut()
-        .flat_map(|i| i.methods.iter_mut().chain(i.places.iter_mut()));
-    for f in c.functions.iter_mut().chain(methods) {
-        bounds.push(f.type_bounds.drain().collect());
-    }
-    format!("{c:?}\u{0}{shadows:?}\u{0}{bounds:?}")
-}
-
-/// Checks and runs generator `g` on `arg`, parses what it wrote, and renames
-/// each function and type it defines to `derive$g$<name>`. `fingerprint`
-/// names the generator's program, so the engine keeps its compiled module
-/// across processes. `nest` names `g` among the generators running.
-fn run_derive(
-    mut gen_program: Program,
-    g: &str,
-    arg: Expr,
-    fingerprint: String,
-    engine: Option<&GenEngine>,
-    nest: crate::loader::Nest,
-) -> Result<Derived, String> {
-    // The first refusal alone, for the checker and the engine's judgments alike.
-    let refused = |ds: &[Diagnostic]| -> String {
-        ds.iter()
-            .take(1)
-            .map(|d| format!("generator `{g}` does not check: {}", d.render()))
-            .collect()
-    };
-    let (diags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine, &nest);
-    if !diags.is_empty() {
-        return Err(refused(&diags));
-    }
-    let resolver = crate::loader::MapResolver(HashMap::new());
-    let opts = crate::loader::LoadOptions {
-        expansions: gen_program.expansions.clone(),
-        session: gen_program.session.0.clone(),
-        nest,
-        ..Default::default()
-    };
-    let src = generate(
-        &gen_program,
-        g,
-        &[],
-        GenInputs {
-            engine,
-            resolver: &resolver,
-            opts: &opts,
-            importer_dir: String::new(),
-            allowed: Vec::new(),
-            aliased: Vec::new(),
-            fuel: crate::loader::GEN_FUEL,
-            max_output: crate::loader::GEN_MAX_OUTPUT,
-            sources_fingerprint: Some(fingerprint),
-            type_arg: Some(arg),
-            checked: true,
-        },
-    )
-    .map_err(|e| match e {
-        GenError::Refused(ds) => refused(&ds),
-        GenError::Failed(trap) => trap,
-        GenError::Unchecked => "the engine asked to check a checked program".to_string(),
-    })?
-    .written
-    .source;
-    let tokens = crate::lexer::lex(&src).map_err(|d| {
+/// Parses what generator `g` wrote, `src`, and renames each function and type
+/// it defines to `derive$g$<name>`.
+fn adopt(src: &str, g: &str) -> Result<Derived, String> {
+    let tokens = crate::lexer::lex(src).map_err(|d| {
         format!(
             "generator `{g}` wrote text that does not lex: {}\n{src}",
             d.message

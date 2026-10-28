@@ -6966,6 +6966,7 @@ impl<'a> Builder<'a> {
             vyrn_frontend::checker::GEN_REFLECT
                 | vyrn_frontend::checker::GEN_NEXT_INT
                 | vyrn_frontend::checker::GEN_NEXT_STR
+                | vyrn_frontend::checker::GEN_CODE
                 | vyrn_frontend::checker::GEN_RESULT
         ) {
             // The generation host's primitives, which exist only

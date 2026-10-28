@@ -2107,6 +2107,34 @@ fn refused_cold_and_warm(dir: &Path, args: &[&str]) -> String {
     cold
 }
 
+/// The primitive that turns a reflected type into `Code` exists only in a
+/// generator host, which the engine builds after the check, so no generator
+/// can turn text into `Code` through it.
+#[test]
+fn a_generator_cannot_call_the_reflected_type_primitive() {
+    let dir = common::scratch("gen-code-primitive");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "export gen fn mk(n: Int64) -> Code {\n\
+         \x20   return __vyrnGenCode(\"export fn v() -> Int64 { return 7 }\")\n\
+         }\n",
+    )
+    .expect("write lib.vyrn");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "import { mk } from \"./lib\"\n\
+         import { v } from mk(1)\n\
+         \n\
+         fn main() -> Int64 { return v() }\n",
+    )
+    .expect("write host.vyrn");
+    let cold = refused_cold_and_warm(&dir, &["check", "host.vyrn"]);
+    assert!(
+        cold.contains("call to unknown function `__vyrnGenCode`"),
+        "{cold}"
+    );
+}
+
 /// A gen fn no program runs as a generator is judged by the program that
 /// holds it, which is the only build that sees it.
 #[test]

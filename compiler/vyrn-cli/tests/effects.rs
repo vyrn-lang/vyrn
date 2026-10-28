@@ -858,8 +858,7 @@ const LATTICE: &[(&str, &str, bool)] = &[
     ("diag", "gen-only", true),
     ("codeAt", "gen-only", true),
     ("at", "gen-only", true),
-    ("@codeText", "gen-only", true),
-    ("@codeSplice", "gen-only", true),
+    ("@codeQuote", "gen-only", true),
 ];
 
 #[test]

@@ -93,11 +93,17 @@ the playground serves an embedded `std/`. The loader:
   root can reach them by spelling (`parse_reached`), and drops each function,
   test and bench of such a module that no root reaches by name
   (`drop_unreached`), so an importer pays to lex the module and to parse and
-  check what it calls. `std/runtime` is such a module, and its roots include
+  check what it calls. A gen fn that only an import line or a `toJson` or
+  `fromJson` site names is not reached, because it runs only in its own load.
+  An injected runtime module's other functions are roots, because the emitter
+  and the desugars call them by name, except `std/runtime`'s: its roots include
   every function the emitter calls by name (`loader::RUNTIME_CALLS`, the one
-  table both read) and every function a reached builtin routes to; a
-  generator's own load keeps it whole, because its engine adds calls after the
-  load (`lazy_runtime`);
+  table both read) and every function a reached builtin routes to. A
+  generator's own load also roots each builtin its engine calls in what it adds
+  after the load (`loader::GEN_HOST`, which `vyrn-genwasm` spells its calls by);
+- loads a generator's module as its own root, for an import line's generator
+  and a `derive` generator alike (`checked_generator`), and links only what its
+  gen fn reaches (`keep_reached`);
 - links `std/runtime` into every program, each declaration renamed with the
   `runtime$` prefix, `std/task` with the `task$` prefix into a program that
   imports it, and `std/json` and similar modules when a builtin that lives in
@@ -126,7 +132,9 @@ generator input on every load. Every load links the whole program again.
    synthesis appends add their types to it (`Recorded::extend`), so the
    judgments read the one record this check made.
    If the program calls `derive(g, x)`, `gen::derive` runs each generator
-   once over a `TypeArg` of the types its sites need, and the functions it
+   once over a `TypeArg` of the types its sites need, through the load that
+   linked the program and the generator cache import lines use
+   (`loader::generation`). The functions it
    writes join the program with the type declarations it writes and the
    `where` constructors. Each site's entry must have the signature its call
    needs. `checker::check_appended` types their bodies
@@ -584,9 +592,10 @@ installed generation engine declined it".
 
 A `Code` value is a rope of spans (`gen::Rope`): concatenation is a node, not
 a copy. Each span carries its author (`gen::Author`) and where its errors show
-(`gen::Shown`). The loader stamps each quote part `@codeText(text, line, col)`
-with its module's key after the parse, in the walk that stamps `panic`, so a
-quote's text is written by the module that holds it. A `String`, number or
+(`gen::Shown`). A quote desugars to one call (`ast::QUOTE`) holding every part
+with its position and every hole; the loader stamps it with its module's key
+after the parse, in the walk that stamps `panic`, so a quote's text is written
+by the module that holds it. A `String`, number or
 `Bool` in a hole, and `raw` text, is the call site's. A `Code` result reaches
 the loader as `gen::Written`: the text and a span table sorted by offset. The
 cache entry stores the table inside the authenticated body, and `OriginMaps`
