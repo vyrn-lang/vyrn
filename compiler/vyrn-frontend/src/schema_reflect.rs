@@ -18,7 +18,7 @@
 //! author's `mut fn` marker; `origin` is where the declaration is written;
 //! `shape` is the declaration's base as a tree (`push_node`). `moduleCode(path)`
 //! returns the same literal inside a `ModuleCode`, with each type a generator
-//! writes paired with itself as `Code` ([`Reflect::Code`]).
+//! writes, and each shape node, paired with itself as `Code` ([`Reflect::Code`]).
 //!
 //! `contractOf(Name)` reflects a `contract` declaration the same
 //! way, so `std/contract:checkContract` compares expectation against reality
@@ -106,7 +106,8 @@ impl Origins {
 /// specifier a generator uses to reach it; a missing entry gives `""`.
 ///
 /// `Reflect::Code` wraps the same literal in a `ModuleCode`, which pairs each
-/// parameter type, return type and type declaration with itself as `Code`.
+/// parameter type, return type, type declaration and shape node with itself as
+/// `Code`.
 pub fn module_lit(
     program: &Program,
     specifiers: &HashMap<Option<String>, String>,
@@ -160,7 +161,8 @@ pub fn module_lit(
         .collect();
     let type_info = |t: &TypeDecl| {
         let spec = specifiers.get(&t.module).map(|s| s.as_str()).unwrap_or("");
-        type_info_lit(t, spec, &types, origins)
+        let shape = shape_nodes(t, &types);
+        (type_info_lit(t, spec, &shape, &types, origins), shape)
     };
     let iface = |fns: Vec<Expr>, tys: Vec<Expr>| {
         struct_lit(
@@ -176,7 +178,7 @@ pub fn module_lit(
                 .zip(params)
                 .map(|(f, ps)| fn_info(f, ps))
                 .collect(),
-            decls.iter().map(|t| type_info(t)).collect(),
+            decls.iter().map(|t| type_info(t).0).collect(),
         ),
         Reflect::Code => {
             let mut fn_infos = Vec::new();
@@ -206,12 +208,14 @@ pub fn module_lit(
             let mut type_infos = Vec::new();
             let mut type_codes = Vec::new();
             for t in decls {
-                let info = type_info(t);
+                let (info, shape) = type_info(t);
+                let nodes = shape.into_iter().map(|(n, spelling)| arg_node(n, spelling));
                 type_codes.push(struct_lit(
                     "TypeCode",
                     vec![
                         ("info", info.clone()),
                         ("decl", type_code(render_type_decl(t, &types))),
+                        ("nodes", array_lit(nodes.collect())),
                     ],
                 ));
                 type_infos.push(info);
@@ -368,6 +372,7 @@ fn uncodable_of(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> S
 fn type_info_lit(
     t: &TypeDecl,
     module_spec: &str,
+    shape: &[(Expr, String)],
     types: &HashMap<String, TypeDecl>,
     origins: &Origins,
 ) -> Expr {
@@ -379,18 +384,21 @@ fn type_info_lit(
             ("module", Expr::str(module_spec)),
             ("schema", crate::types::schema_struct_lit(t)),
             ("origin", origins.lit(&t.module, &t.name, t.line)),
-            ("shape", shape_lit(t, types)),
+            (
+                "shape",
+                array_lit(shape.iter().map(|(n, _)| n.clone()).collect()),
+            ),
         ],
     )
 }
 
 /// Builds `TypeInfo.shape`: the declaration's base flattened into `TypeNode`s,
-/// parents before children, node 0 the root.
-fn shape_lit(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> Expr {
+/// each with its spelling, parents before children, node 0 the root.
+fn shape_nodes(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> Vec<(Expr, String)> {
     let mut nodes = Vec::new();
     let pred = t.predicate.as_ref().map(crate::checker::pred_summary);
     push_node(&t.base, pred, types, &mut nodes);
-    array_lit(nodes)
+    nodes
 }
 
 /// Appends the node for `ty` and its descendants to `nodes`, and returns its
@@ -405,7 +413,7 @@ fn push_node(
     ty: &Type,
     pred: Option<String>,
     types: &HashMap<String, TypeDecl>,
-    nodes: &mut Vec<Expr>,
+    nodes: &mut Vec<(Expr, String)>,
 ) -> (i64, String) {
     if let Some(d) = synthetic_decl(ty, |n| types.get(n)) {
         let pred = d.predicate.as_ref().map(crate::checker::pred_summary);
@@ -450,7 +458,7 @@ fn push_node(
         _ => ("other", "", Vec::new(), Vec::new()),
     };
     let at = nodes.len();
-    nodes.push(none());
+    nodes.push((none(), String::new()));
     let mut kids = |ts: &[Type]| -> (Expr, Vec<String>) {
         let (ix, spelled): (Vec<Expr>, Vec<String>) = ts
             .iter()
@@ -485,7 +493,7 @@ fn push_node(
         Some(p) => format!("{written} where {p}"),
         None => written.clone(),
     };
-    nodes[at] = struct_lit(
+    let node = struct_lit(
         "TypeNode",
         vec![
             (
@@ -503,6 +511,7 @@ fn push_node(
             ("predicate", Expr::str(pred.unwrap_or_default())),
         ],
     );
+    nodes[at] = (node, spelling.clone());
     (at as i64, spelling)
 }
 
@@ -725,9 +734,14 @@ fn type_node(
             ("predicate", Expr::str(predicate)),
         ],
     );
+    arg_node(shape, spell(ty))
+}
+
+/// A `TypeArgNode`: `shape`, paired with `spelling` as `Code`.
+fn arg_node(shape: Expr, spelling: String) -> Expr {
     struct_lit(
         "TypeArgNode",
-        vec![("shape", shape), ("code", type_code(spell(ty)))],
+        vec![("shape", shape), ("code", type_code(spelling))],
     )
 }
 
@@ -981,6 +995,10 @@ mod tests {
             Expr::ArrayLit { elems, .. } => elems,
             other => panic!("expected an array literal, got {other:?}"),
         }
+    }
+
+    fn shape_lit(d: &TypeDecl, t: &HashMap<String, TypeDecl>) -> Expr {
+        array_lit(shape_nodes(d, t).into_iter().map(|(n, _)| n).collect())
     }
 
     /// One row per node: kind, name, spelling, args, and the members' names.

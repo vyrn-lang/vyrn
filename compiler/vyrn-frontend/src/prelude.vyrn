@@ -134,11 +134,12 @@ type TypeInfo = {
 type ModuleInterface = { functions: Array<FnInfo>, types: Array<TypeInfo> }
 
 // `moduleCode(p)`: `moduleInterface(p)` with each type a generator writes
-// paired with it as `Code`. `ret` is `None` for a `Unit` return, and `decl`
-// is `TypeInfo.source`. Only generation makes or reads one.
+// paired with it as `Code`. `ret` is `None` for a `Unit` return, `decl` is
+// `TypeInfo.source`, and `nodes[i]` pairs `info.shape[i]` with its spelling.
+// Only generation makes or reads one.
 type ParamCode = { info: ParamInfo, ty: Code }
 type FnCode = { info: FnInfo, params: Array<ParamCode>, ret: Option<Code> }
-type TypeCode = { info: TypeInfo, decl: Code }
+type TypeCode = { info: TypeInfo, decl: Code, nodes: Array<TypeArgNode> }
 type ModuleCode = { iface: ModuleInterface, functions: Array<FnCode>, types: Array<TypeCode> }
 
 // Contract reflection: `contractOf(Name)` returns the declared
