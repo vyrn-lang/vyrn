@@ -288,7 +288,9 @@ and exits 1 if any would.
 The printer reads the token stream with comments and chooses only the
 whitespace between raw token texts. It sets indentation (4 spaces per brace
 depth) and intra-line spacing, drops semicolons, collapses runs of blank lines
-to one and ends the file with one newline. It never joins or splits a line and
+to one and ends the file with one newline. It keeps a `;` whose removal would
+join two statements: one before a token that continues an expression, as in
+`let x = 1; -2`, or after a bare `return`. It never joins or splits a line and
 never rewrites a literal.
 
 The safety invariant: `lex(fmt(src))` equals `lex(src)` with the `;` tokens

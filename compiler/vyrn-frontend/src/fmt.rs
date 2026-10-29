@@ -6,8 +6,9 @@
 //! returns an error and the caller leaves the file untouched.
 //!
 //! Line structure is the author's: the printer never joins or splits lines. It
-//! sets indentation, intra-line spacing ([`wants_space`]), drops semicolons,
-//! collapses blank-line runs to one and ends the file with one newline.
+//! sets indentation, intra-line spacing ([`wants_space`]), drops each semicolon
+//! [`semi_separates`] does not keep, collapses blank-line runs to one and ends
+//! the file with one newline.
 
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{self, Tok, Triv, TrivKind};
@@ -35,6 +36,35 @@ fn strip_semi(toks: &[lexer::Token]) -> Vec<&Tok> {
         .map(|t| &t.tok)
         .filter(|t| !matches!(t, Tok::Semi | Tok::Eof))
         .collect()
+}
+
+/// Whether the `;` between the token `prev` and the items `rest` ends a statement
+/// that the next token would otherwise continue: `let x = 1; -2` must not print as
+/// `let x = 1 -2`, and `return; f()` must not print as `return f()`.
+fn semi_separates(prev: Option<&Triv>, rest: &[Triv]) -> bool {
+    use Tok::*;
+    let next = rest.iter().find_map(|it| match &it.kind {
+        TrivKind::Tok(t) => Some(t),
+        _ => None,
+    });
+    let Some(next) = next else {
+        return false;
+    };
+    let after_return = matches!(prev.map(|p| &p.kind), Some(TrivKind::Tok(Return)));
+    // A binary operator, a postfix link, a call, a struct literal or a tagged string.
+    let continues = crate::parser::Parser::binop(next).is_some()
+        || matches!(
+            next,
+            QuestionQuestion
+                | Question
+                | Dot
+                | LBracket
+                | LParen
+                | LBrace
+                | Str(_)
+                | TemplateStr { .. }
+        );
+    continues || (after_return && !matches!(next, RBrace | Semi | Eof))
 }
 
 /// The role of each ambiguous operator, computed over tokens only.
@@ -269,7 +299,9 @@ fn print(source: &str, items: &[Triv]) -> String {
 
         // Drop a semicolon but advance the line cursor, so the next item's blank-line
         // count starts from the semicolon's line.
-        if matches!(tok, Some(Tok::Semi)) {
+        if matches!(tok, Some(Tok::Semi))
+            && !semi_separates(prev_tok.map(|p| &items[p]), &items[idx + 1..])
+        {
             prev_end_line = Some(it.end_line);
             continue;
         }
@@ -372,6 +404,20 @@ mod tests {
         assert_eq!(f("fn main()->Int64{let x=1+2;return x;}"), {
             "fn main() -> Int64 { let x = 1 + 2 return x }\n"
         });
+    }
+
+    #[test]
+    fn keeps_a_semicolon_whose_removal_joins_two_statements() {
+        assert_eq!(
+            f("fn m() -> Int64 { let x = 1; -2; return x; }"),
+            "fn m() -> Int64 { let x = 1; -2 return x }
+"
+        );
+        assert_eq!(
+            f("fn m() { g(); return; (h)() }"),
+            "fn m() { g() return; (h)() }
+"
+        );
     }
 
     #[test]

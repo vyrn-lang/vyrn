@@ -216,7 +216,7 @@ fn parse_with(
     (program, errors, skimmed)
 }
 
-struct Parser {
+pub(crate) struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     /// Whether this parser reads an interpolation hole rather than the file.
@@ -3167,7 +3167,7 @@ impl Parser {
     /// The bitwise family sits between comparison and arithmetic, so
     /// `x & mask == 0` is `(x & mask) == 0` and `a + b << c` is `(a + b) << c`.
     /// Within it, tightest first: `~` (in [`unary`]), `<< >>`, `&`, `^`, `|`.
-    fn binop(tok: &Tok) -> Option<(BinOp, u8)> {
+    pub(crate) fn binop(tok: &Tok) -> Option<(BinOp, u8)> {
         Some(match tok {
             Tok::OrOr => (BinOp::Or, 1),
             Tok::AndAnd => (BinOp::And, 2),
