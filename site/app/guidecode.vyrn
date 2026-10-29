@@ -1,7 +1,7 @@
 import { substring } from "std/strings"
 import { startsWith } from "std/strpred"
 import { highlightRows } from "./hl"
-import { quoted, quotedList, branch, lookup, vyrnStems } from "./gensrc"
+import { quotedList, branch, lookup, vyrnStems } from "./gensrc"
 
 type Block = { id: String, src: String, names: Array<String>, playable: Bool }
 
@@ -86,7 +86,7 @@ export gen fn importsOf(toks: Array<Token>) -> Imports {
     return Imports { uses: uses, names: names, standalone: standalone }
 }
 
-export gen fn guideCode(dir: String) -> String {
+export gen fn guideCode(dir: String) -> Code {
     let mut blocks: Array<Block> = []
     for id in vyrnStems(dir) {
         let file = match readFile(dir + "/" + id + ".vyrn") {
@@ -105,30 +105,37 @@ export gen fn guideCode(dir: String) -> String {
     }
 
     let mut ids: Array<String> = []
-    let mut srcs: Array<String> = []
-    let mut lines: Array<String> = []
-    let mut names: Array<String> = []
-    let mut playable: Array<String> = []
+    let mut srcs: Array<Code> = []
+    let mut lines: Array<Code> = []
+    let mut names: Array<Code> = []
+    let mut playable: Array<Code> = []
     for b in blocks {
         ids.push(b.id.copy())
-        srcs.push(branch("id", b.id, quoted(b.src)))
+        srcs.push(branch("id", b.id, vyrn"\{b.src}"))
         lines.push(branch("id", b.id, quotedList(highlightRows(b.src, lex(b.src)))))
         names.push(branch("id", b.id, quotedList(b.names)))
-        playable.push(branch("id", b.id, if b.playable { "true" } else { "false" }))
+        playable.push(branch("id", b.id, vyrn"\{b.playable}"))
     }
 
-    let mut out = "/// The guide's programs, read off `site/guide/` by `site/app/guidecode.vyrn`\n/// while the site compiled. Do not edit.\n"
-    out = out + "/// Every block id, sorted.\n"
-    out = out + "export fn guideBlocks() -> Array<String> { return " + quotedList(ids) + " }\n"
-    out = out + "/// A block's program, as it is shown and as the playground link carries it.\n"
-    out = out + lookup("guideSrc", "id", "String", srcs, "\"\"")
-    out = out + "/// A block's program, coloured, one string per line.\n"
-    out = out + lookup("guideLines", "id", "Array<String>", lines, "[]")
-    out = out + "/// The names a block imports, each as `<module>:<name>`.\n"
-    out = out + lookup("guideImports", "id", "Array<String>", names, "[]")
-    out = out + "/// Whether a block is a whole program, so the playground can run it.\n"
-    out = out + lookup("guidePlayable", "id", "Bool", playable, "false")
-    return out
+    let blockIds = quotedList(ids)
+    let strings = vyrn"Array<String>"
+    let srcFn = lookup("guideSrc", "id", vyrn"String", srcs, vyrn"\"\"")
+    let linesFn = lookup("guideLines", "id", strings, lines, vyrn"[]")
+    let importsFn = lookup("guideImports", "id", strings, names, vyrn"[]")
+    let playableFn = lookup("guidePlayable", "id", vyrn"Bool", playable, vyrn"false")
+    return vyrn"""
+        /// Every block id, sorted.
+        export fn guideBlocks() -> Array<String> { return \{blockIds} }
+        /// A block's program, as it is shown and as the playground link carries it.
+        \{srcFn}
+        /// A block's program, coloured, one string per line.
+        \{linesFn}
+        /// The names a block imports, each as `<module>:<name>`.
+        \{importsFn}
+        /// Whether a block is a whole program, so the playground can run it.
+        \{playableFn}
+
+        """
 }
 
 test "the main every block is shown with prints what demo answered" {

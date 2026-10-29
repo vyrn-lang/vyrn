@@ -1,22 +1,26 @@
 import { highlightSrc } from "./hl"
-import { quoted, branch, lookup } from "./gensrc"
+import { branch, lookup } from "./gensrc"
 import { substring, split, joinWith, indexOf } from "std/strings"
 import { startsWith, contains } from "std/strpred"
 
-export gen fn demoCode(path: String) -> String {
+export gen fn demoCode(path: String) -> Code {
     let raw = match readFile(path) {
         Ok(text) => text,
         Err(_) => "",
     }
-    let mut hits: Array<String> = []
+    let mut hits: Array<Code> = []
     for step in stepsOf(raw) {
         if looksLikeSource(step[1]) {
-            hits.push(branch("id", step[0], quoted(highlightSrc(step[1], lex(step[1])))))
+            let hl = highlightSrc(step[1], lex(step[1]))
+            hits.push(branch("id", step[0], vyrn"\{hl}"))
         }
     }
-    let mut out = "/// Coloured by the compiler's own lexer while the site compiled. Do not edit.\n"
-    out = out + "/// One step's output as source, or \"\" when it is a transcript.\n"
-    return out + lookup("demoHl", "id", "String", hits, "\"\"")
+    let demoHl = lookup("demoHl", "id", vyrn"String", hits, vyrn"\"\"")
+    return vyrn"""
+        /// One step's output as source, or "" when it is a transcript.
+        \{demoHl}
+
+        """
 }
 
 /// A hand walk, not the JSON reader, because this runs inside a generator.

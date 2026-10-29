@@ -1,50 +1,33 @@
 /// Call each generator from one site: the cache keys on argument strings, so a second spelling emits colliding exports.
-import { substring, joinWith } from "std/strings"
+import { join } from "std/code"
+import { substring } from "std/strings"
 import { endsWith } from "std/strpred"
 
-export fn quoted(s: String) -> String {
-    let raw = bytes(s)
-    let mut out = "\""
-    let mut plain = 0
-    let mut i = 0
-    while i < raw.length {
-        let b = raw[i]
-        if b == 92 || b == '"' || b == 10 || b == 9 {
-            out = out + substring(s, plain, i)
-            if b == 10 {
-                out = out + "\\n"
-            } else if b == 9 {
-                out = out + "\\t"
-            } else if b == 92 {
-                out = out + "\\\\"
-            } else {
-                out = out + "\\\""
-            }
-            plain = i + 1
-        }
-        i = i + 1
-    }
-    return out + substring(s, plain, raw.length) + "\""
-}
-
-export fn quotedList(items: Array<String>) -> String {
-    let mut parts: Array<String> = []
+/// `items` as an array literal of strings.
+export gen fn quotedList(items: Array<String>) -> Code {
+    let mut parts: Array<Code> = []
     for it in items {
-        parts.push(quoted(it))
+        parts.push(vyrn"\{it}")
     }
-    return "[" + joinWith(parts, ", ") + "]"
+    let list = join(parts, vyrn", ")
+    return vyrn"[\{list}]"
 }
 
-export fn branch(param: String, key: String, value: String) -> String {
-    return "    if " + param + " == " + quoted(key) + " { return " + value + " }\n"
+/// One branch of a [`lookup`]: `if param == key { return value }`.
+export gen fn branch(param: String, key: String, value: Code) -> Code {
+    return vyrn"if \{name(param)} == \{key} { return \{value} }"
 }
 
-export fn lookup(name: String, param: String, ret: String, branches: Array<String>, fallback: String) -> String {
-    let mut out = "export fn " + name + "(" + param + ": String) -> " + ret + " {\n"
-    for b in branches {
-        out = out + b
-    }
-    return out + "    return " + fallback + "\n}\n"
+/// `export fn fnName(param: String) -> ret`: one branch per key, then
+/// `fallback`.
+export gen fn lookup(fnName: String, param: String, ret: Code, branches: Array<Code>, fallback: Code) -> Code {
+    let body = join(branches, vyrn"\n")
+    return vyrn"""
+        export fn \{name(fnName)}(\{name(param)}: String) -> \{ret} {
+            \{body}
+            return \{fallback}
+        }
+        """
 }
 
 export fn entriesOf(dir: String) -> Array<String> {
@@ -69,16 +52,21 @@ export fn vyrnStems(dir: String) -> Array<String> {
     return out
 }
 
-test "a string with a quote, a backslash, a newline and a tab survives the literal" {
-    assertEq(quoted("a\"b"), "\"a\\\"b\"")
-    assertEq(quoted("a\\b"), "\"a\\\\b\"")
-    assertEq(quoted("a\nb"), "\"a\\nb\"")
-    assertEq(quoted("a\tb"), "\"a\\tb\"")
-    assertEq(quotedList([]), "[]")
-    assertEq(quotedList(["a", "b"]), "[\"a\", \"b\"]")
+/// A one-branch lookup's text, which a test can read.
+gen fn sampleLookup() -> String {
+    return render(lookup("f", "m", vyrn"Int64", [branch("m", "json", vyrn"[]")], vyrn"0"))
+}
+
+/// A list's text, which a test can read.
+gen fn sampleList(items: Array<String>) -> String {
+    return render(quotedList(items))
+}
+
+test "a list holds each string as a literal" {
+    assertEq(sampleList([]), "[]")
+    assertEq(sampleList(["a\"b", "c\nd"]), "[\"a\\\"b\", \"c\\nd\"]")
 }
 
 test "a lookup is a Vyrn function with one branch per key" {
-    assertEq(branch("m", "json", "[]"), "    if m == \"json\" { return [] }\n")
-    assertEq(lookup("f", "m", "Int64", [], "0"), "export fn f(m: String) -> Int64 {\n    return 0\n}\n")
+    assertEq(sampleLookup(), "export fn f(m: String) -> Int64 {\n    if m == \"json\" { return [] }\n    return 0\n}")
 }

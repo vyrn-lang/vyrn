@@ -1,7 +1,7 @@
 import { substring, split } from "std/strings"
 import { includes } from "std/arrays"
 import { escapeHtml } from "./code"
-import { quoted, quotedList, branch, lookup } from "./gensrc"
+import { quotedList, branch, lookup } from "./gensrc"
 
 type Piece = { id: String, src: String }
 
@@ -352,19 +352,22 @@ export gen fn highlightRows(src: String, toks: Array<Token>) -> Array<String> {
     return out
 }
 
-export gen fn vyrnCode() -> String {
-    let mut lines: Array<String> = []
-    let mut sources: Array<String> = []
+export gen fn vyrnCode() -> Code {
+    let mut lines: Array<Code> = []
+    let mut sources: Array<Code> = []
     for p in pieces() {
         lines.push(branch("id", p.id, quotedList(highlightRows(p.src, lex(p.src)))))
-        sources.push(branch("id", p.id, quoted(p.src)))
+        sources.push(branch("id", p.id, vyrn"\{p.src}"))
     }
-    let mut out = "/// Coloured by the compiler's own lexer while the site compiled. Do not edit.\n"
-    out = out + "/// The lines of one snippet, already coloured, one string per source line.\n"
-    out = out + lookup("hlLines", "id", "Array<String>", lines, "[]")
-    out = out + "/// The raw source of one snippet, exactly as `hlLines` was measured from.\n"
-    out = out + lookup("hlSource", "id", "String", sources, "\"\"")
-    return out
+    let linesFn = lookup("hlLines", "id", vyrn"Array<String>", lines, vyrn"[]")
+    let sourceFn = lookup("hlSource", "id", vyrn"String", sources, vyrn"\"\"")
+    return vyrn"""
+        /// The lines of one snippet, already coloured, one string per source line.
+        \{linesFn}
+        /// The raw source of one snippet, exactly as `hlLines` was measured from.
+        \{sourceFn}
+
+        """
 }
 
 test "a coloured run never crosses a newline, so every line is balanced markup" {
