@@ -781,7 +781,6 @@ rules! {
     UnterminatedInterp {} "unterminated `\\{{` interpolation";
     EmptyInterp {} "empty `\\{{ }}` interpolation";
     UnknownEscape { other } "unknown escape `\\{other}`";
-    InvalidFloat { text } "invalid float literal: {text}";
     IntOutOfRange { text } "integer literal out of range: {text}";
     UnexpectedChar { c } "unexpected character {c}";
     ExpectedIdent { found } "expected identifier, found {found}";
@@ -867,7 +866,6 @@ rules! {
         "`fn {name}` cannot return a capability — a projection's result \
         is a place inside its receiver, and a free function has none. \
         Declare it on an `impl`.";
-    NameStringExpected { word, found } "expected a {word} name string, found {found}";
     ExportedExternBody {}
         "an exported extern needs a body — a body-less `extern fn` is an import";
     ExternBody {} "an `extern fn` has no body";

@@ -907,10 +907,11 @@ impl Parser {
                 }
                 // `test "name" { body }`: `test` is a starter only before a string
                 // literal.
-                Tok::Ident(name)
-                    if name == "test" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
+                Tok::Ident(word)
+                    if word == "test"
+                        && let Tok::Str(name) = &self.tokens[self.pos + 1].tok =>
                 {
-                    match self.named_block("test") {
+                    match self.named_block(name.clone()) {
                         Ok(Some(mut t)) => {
                             t.doc = doc;
                             tests.push(t);
@@ -923,10 +924,11 @@ impl Parser {
                     }
                 }
                 // `bench "name" { body }`, contextual like `test`.
-                Tok::Ident(name)
-                    if name == "bench" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
+                Tok::Ident(word)
+                    if word == "bench"
+                        && let Tok::Str(name) = &self.tokens[self.pos + 1].tok =>
                 {
-                    match self.named_block("bench") {
+                    match self.named_block(name.clone()) {
                         Ok(Some(mut b)) => {
                             b.doc = doc;
                             benches.push(b);
@@ -2178,26 +2180,14 @@ impl Parser {
         })
     }
 
-    /// `test "name" { body }` and `bench "name" { body }`: one declaration.
-    /// The caller has checked the lookahead, so `word` only words the
-    /// refusal. The checker allows `assert`/`assertEq` in a test and `blackBox` in
-    /// a bench. `None` for an imported module's block, skipped unparsed.
-    fn named_block(&mut self, word: &str) -> Result<Option<NamedBlock>, Diagnostic> {
+    /// `test "name" { body }` and `bench "name" { body }`: one declaration, at the
+    /// word, whose string the caller read as `name`. The checker allows
+    /// `assert`/`assertEq` in a test and `blackBox` in a bench. `None` for an
+    /// imported module's block, skipped unparsed.
+    fn named_block(&mut self, name: String) -> Result<Option<NamedBlock>, Diagnostic> {
         let line = self.line();
-        self.advance();
-        let name = match self.advance() {
-            Tok::Str(s) => s,
-            other => {
-                return Err(refuse!(
-                    "parse",
-                    self.line(),
-                    self.col(),
-                    NameStringExpected,
-                    word,
-                    found = format!("{other:?}")
-                ))
-            }
-        };
+        // Past the word and the string, without copying them; `Eof` follows the string.
+        self.pos += 2;
         if self.imported {
             self.skip_braces()?;
             return Ok(None);

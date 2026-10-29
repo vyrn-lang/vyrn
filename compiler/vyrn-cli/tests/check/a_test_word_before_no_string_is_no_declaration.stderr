@@ -1,0 +1,4 @@
+a_test_word_before_no_string_is_no_declaration.vyrn:1:1: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found Ident("test")
+a_test_word_before_no_string_is_no_declaration.vyrn:1:6: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found Int(5)
+a_test_word_before_no_string_is_no_declaration.vyrn:1:8: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found LBrace
+a_test_word_before_no_string_is_no_declaration.vyrn:1:10: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found RBrace
