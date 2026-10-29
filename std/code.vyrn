@@ -28,3 +28,32 @@ export gen fn join(xs: Array<Code>, sep: Code) -> Code {
     }
     return out
 }
+
+/// One arm of an `if` chain ([`ifChain`]): `if cond { body }`.
+export gen fn arm(cond: Code, body: Code) -> Code {
+    return vyrn"""
+        if \{cond} {
+            \{body}
+        }
+        """
+}
+
+/// The `arms` in order, each after the first behind `else`: `if c0 { b0 }
+/// else if c1 { b1 }`. Each arm is one [`arm`]; no arms is no chain.
+export gen fn ifChain(arms: Array<Code>) -> Code {
+    let mut out = vyrn""
+    let mut sep = vyrn""
+    for a in arms {
+        out = out + sep + a
+        sep = vyrn" else "
+    }
+    return out
+}
+
+/// [`ifChain`] closed by `else { last }`; no arms is `last` alone.
+export gen fn ifChainOr(arms: Array<Code>, last: Code) -> Code {
+    if arms.length == 0 {
+        return last
+    }
+    return ifChain(arms) + vyrn" else " + vyrn"{ \{last} }"
+}

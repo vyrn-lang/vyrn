@@ -24,3 +24,28 @@ fn join(xs: Array<Code>, sep: Code) -> Code
 ```
 
 Joins `xs` with `sep` between each pair; no element gives empty `Code`.
+
+## arm
+
+```vyrn
+fn arm(cond: Code, body: Code) -> Code
+```
+
+One arm of an `if` chain ([`ifChain`](#ifchain)): `if cond { body }`.
+
+## ifChain
+
+```vyrn
+fn ifChain(arms: Array<Code>) -> Code
+```
+
+The `arms` in order, each after the first behind `else`: `if c0 { b0 }
+else if c1 { b1 }`. Each arm is one [`arm`](#arm); no arms is no chain.
+
+## ifChainOr
+
+```vyrn
+fn ifChainOr(arms: Array<Code>, last: Code) -> Code
+```
+
+[`ifChain`](#ifchain) closed by `else { last }`; no arms is `last` alone.
