@@ -1938,6 +1938,16 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// The projection `name` that `recv`'s type declares. Another type's
+    /// projection of that name is no callee here: `at(c, path, 1, 1)` on a
+    /// `Code` is the `at` builtin while `std/json` declares an `at`.
+    fn placed(&self, name: &str, recv: Option<&Expr>) -> Option<&'a Function> {
+        // No projection of the name: no type key to build.
+        self.projection(name)?;
+        let rty = self.ty_of(recv?).ok()?;
+        (self.program.impls.place(&rty, name)).map(|(_, f)| f)
+    }
+
     fn projection(&self, name: &str) -> Option<&'a Function> {
         self.program
             .impls
@@ -6923,7 +6933,7 @@ impl<'a> Builder<'a> {
             kind = Callee::Method;
             let m = &self.program.functions[id.index()];
             m.params.iter().map(|p| p.capability).collect()
-        } else if let Some(p) = self.projection(name) {
+        } else if let Some(p) = self.placed(name, args.first()) {
             kind = Callee::Projection;
             p.params.iter().map(|p| p.capability).collect()
         } else if let Some((id, sig)) = (args.first()).and_then(|r| self.protocol_member(name, r)) {
