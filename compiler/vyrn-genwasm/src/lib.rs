@@ -980,7 +980,10 @@ impl Arena {
             line: line as usize,
             col: col as usize,
         };
-        let author = Author::File { key, at };
+        let author = Author::File {
+            key: key.into(),
+            at,
+        };
         let kind = Kind::Code;
         self.leaf(Span {
             text,
@@ -999,7 +1002,10 @@ impl Arena {
             line: line as usize,
             col: col as usize,
         };
-        let shown = Some(Shown { path, at });
+        let shown = Some(Shown {
+            path: path.into(),
+            at,
+        });
         self.leaf(Span {
             shown,
             ..Span::data(text)
