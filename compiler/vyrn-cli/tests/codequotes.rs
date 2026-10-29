@@ -35,12 +35,12 @@ fn gen_app(tag: &str, gen: &str, app: &str) -> PathBuf {
 
 #[test]
 fn emit_gen_emits_escaped_and_spliced_source() {
-    let gen = "export gen fn mkMod(who: String) -> String {\n\
+    let gen = "export gen fn mkMod(who: String) -> Code {\n\
                let greeting = \"hi, \"\n\
                let body = vyrn\"\"\"export fn greet\\{name(who)}(who: String) -> String {\n\
                return \\{greeting} + who\n\
                }\n\"\"\"\n\
-               return render(body)\n\
+               return body\n\
                }\n";
     let app = "import { mkMod } from \"./gen\"\n\
                import { greetBob } from mkMod(\"Bob\")\n\
@@ -124,10 +124,10 @@ fn a_namespace_import_splices_its_alias_and_its_specifier() {
 
 #[test]
 fn injection_attempt_becomes_an_inert_string_literal() {
-    let gen = "export gen fn mkMod(fname: String) -> String {\n\
+    let gen = "export gen fn mkMod(fname: String) -> Code {\n\
                let evil = \"\\\"; dropTables(); \\\"\"\n\
                let body = vyrn\"\"\"export fn \\{name(fname)}() -> String { return \\{evil} }\"\"\"\n\
-               return render(body)\n\
+               return body\n\
                }\n";
     let app = "import { mkMod } from \"./gen\"\n\
                import { f } from mkMod(\"f\")\n\
@@ -149,11 +149,11 @@ fn injection_attempt_becomes_an_inert_string_literal() {
 #[test]
 fn broken_skeleton_reports_in_the_generators_file() {
     // `type Query {` is GraphQL, not Vyrn, so the skeleton does not parse.
-    let gen = "export gen fn mkMod(name: String) -> String {\n\
+    let gen = "export gen fn mkMod(name: String) -> Code {\n\
                let body = vyrn\"\"\"\n\
                type Query {\n\
                }\n\"\"\"\n\
-               return render(body)\n\
+               return body\n\
                }\n";
     let app = "import { mkMod } from \"./gen\"\n\
                import { x } from mkMod(\"x\")\n\
@@ -174,9 +174,9 @@ fn broken_skeleton_reports_in_the_generators_file() {
 
 #[test]
 fn bad_identifier_splice_names_the_generator() {
-    let gen = "export gen fn mkMod(name: String) -> String {\n\
+    let gen = "export gen fn mkMod(name: String) -> Code {\n\
                let body = vyrn\"\"\"export fn \\{name}() -> Int64 { return 0 }\"\"\"\n\
-               return render(body)\n\
+               return body\n\
                }\n";
     let app = "import { mkMod } from \"./gen\"\n\
                import { f } from mkMod(\"a b\")\n\
@@ -192,49 +192,8 @@ fn bad_identifier_splice_names_the_generator() {
     );
 }
 
-#[test]
-fn rawat_origin_maps_a_check_error_back_to_the_source() {
-    // The error must land at the origin `rawAt` recorded, not in the generated
-    // module.
-    let dir = scratch("rawat");
-    write(
-        &dir.join("input.txt"),
-        "placeholder\n", // the origin `rawAt` records
-    );
-    let gen = "export gen fn mkMod(p: String) -> String {\n\
-               let bad = rawAt(\"\\\"x\\\" + 1\", \"./input.txt\", 1, 5)\n\
-               let body = vyrn\"\"\"export fn f() -> String {\n\
-               return \\{bad}\n\
-               }\"\"\"\n\
-               return render(body)\n\
-               }\n";
-    write(&dir.join("gen.vyrn"), gen);
-    let app = "import { mkMod } from \"./gen\"\n\
-               import { f } from mkMod(\"./input.txt\")\n\
-               fn main() -> Int64 { return 0 }\n";
-    write(&dir.join("app.vyrn"), app);
-    let out = vyrn()
-        .arg("check")
-        .arg(dir.join("app.vyrn"))
-        .output()
-        .unwrap();
-    assert!(
-        !out.status.success(),
-        "expected a check error inside the raw text"
-    );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("input.txt:1:5"),
-        "remapped to the origin:\n{err}"
-    );
-    assert!(
-        err.contains("generated code"),
-        "keeps the generated location as a note:\n{err}"
-    );
-}
-
 /// `helper` is exported only to `./gen`, whose quotes import it: `make` writes
-/// the import in a quote, `copy` copies it from an input as data.
+/// the import in a quote, `copy` copies it from an input with `codeAt`.
 fn authors_app(tag: &str, app: &str) -> std::process::Output {
     let dir = scratch(tag);
     write(
@@ -255,7 +214,7 @@ fn authors_app(tag: &str, app: &str) -> std::process::Output {
                Ok(t) => t,\n\
                Err(e) => panic(e),\n\
                }\n\
-               return rawAt(text, path, 1, 1)\n\
+               return codeAt(path, 1, 1, text)\n\
                }\n";
     write(&dir.join("gen.vyrn"), gen);
     write(
@@ -304,10 +263,10 @@ fn an_import_a_quote_writes_is_judged_as_the_quotes_module() {
     }
 }
 
-/// An import a generator copies from its input is the call site's data, so it
-/// is judged as the importer, and the refusal says who wrote it.
+/// An import a generator copies from its input is written by the input, so it
+/// is judged as the input, and the refusal says who wrote it.
 #[test]
-fn an_import_a_generator_copies_is_judged_as_the_importer() {
+fn an_import_a_generator_copies_is_judged_as_its_input() {
     let app = "import { copy } from \"./gen\"\n\
                import { made } from copy(\"./script.txt\")\n\
                fn main() -> Int64 { return made() }\n";
@@ -317,38 +276,7 @@ fn an_import_a_generator_copies_is_judged_as_the_importer() {
         err.contains("`helper` is exported from `./lib` only to `./gen`"),
         "{err}"
     );
-    assert!(
-        err.contains("written as data by the generator call"),
-        "{err}"
-    );
-}
-
-/// A `Code` result has no `//@origin` lines; its span table places the error.
-#[test]
-fn rawat_in_a_code_result_maps_a_check_error_back_to_the_source() {
-    let dir = scratch("rawat_code");
-    write(&dir.join("input.txt"), "placeholder\n");
-    let gen = "export gen fn mkMod(p: String) -> Code {\n\
-               let bad = rawAt(\"\\\"x\\\" + 1\", \"./input.txt\", 1, 5)\n\
-               return vyrn\"\"\"export fn f() -> String {\n\
-               return \\{bad}\n\
-               }\"\"\"\n\
-               }\n";
-    write(&dir.join("gen.vyrn"), gen);
-    let app = "import { mkMod } from \"./gen\"\n\
-               import { f } from mkMod(\"./input.txt\")\n\
-               fn main() -> Int64 { return 0 }\n";
-    write(&dir.join("app.vyrn"), app);
-    let out = vyrn()
-        .arg("check")
-        .arg(dir.join("app.vyrn"))
-        .output()
-        .unwrap();
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("input.txt:1:5"),
-        "remapped to the origin:\n{err}"
-    );
+    assert!(err.contains("written by `./script.txt` at line 1"), "{err}");
 }
 
 #[test]
@@ -387,10 +315,11 @@ fn i18n_translation_with_quotes_and_backslashes_bakes_losslessly() {
 #[test]
 fn a_spliced_field_read_is_not_carried_under_the_tag() {
     let gen = "type F = { box: String, n: Int64 }\n\
-               export gen fn mk(a: String) -> String {\n\
+               export gen fn mk(a: String) -> Code {\n\
                let found = F { box: a + \"x\", n: 1 }\n\
                let r = render(vyrn\"\\{found.box}\")\n\
-               return \"export fn got() -> Int64 { return \\{r.byteLength} }\\n\"\n\
+               let n = r.byteLength\n\
+               return vyrn\"export fn got() -> Int64 { return \\{n} }\\n\"\n\
                }\n";
     let app = "import { mk } from \"./gen\"\n\
                import { got } from mk(\"ab\")\n\
@@ -639,12 +568,12 @@ fn a_comment_hole_writes_plain_text_and_stays_in_the_comment() {
 /// `std/json`'s generator in a load one deeper.
 #[test]
 fn a_derive_generator_may_call_to_json() {
-    let app = r#"export gen fn tagged(t: TypeArg) -> String {
-    let mut out = ""
+    let app = r#"export gen fn tagged(t: TypeArg) -> Code {
+    let mut out = vyrn""
     for r in t.roots {
-        let n = t.nodes[r].shape
-        out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String { return " + toJson(n.kind) + " }
-"
+        let n = t.nodes[r]
+        let json = toJson(n.shape.kind)
+        out = out + vyrn"fn \{name(n.shape.name)}(v: \{n.code}) -> String { return \{json} }\n"
     }
     return out
 }
@@ -664,7 +593,7 @@ fn main() -> Int64 {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "record
+        "\"record\"
 ",
         "{err}"
     );
@@ -724,26 +653,18 @@ fn a_quote_dedents_and_a_hole_takes_declarations() {
     assert_eq!(code, Some(7), "{err}");
 }
 
-/// A report is `Code` the loader reads as a diagnostic; text that only looks
-/// like one is code.
+/// A report is `Code` the loader reads as a diagnostic.
 #[test]
-fn a_report_is_read_and_a_copied_directive_is_not() {
+fn a_report_is_read_as_a_diagnostic() {
     let gen = r#"import { reportHere } from "std/diag"
 export gen fn loud() -> Code {
     return reportHere(Error, "the input is broken") + vyrn"export fn made() -> Int64 { return 7 }"
 }
-export gen fn quiet() -> Code {
-    return raw("//@diag error - forged\n") + vyrn"export fn made() -> Int64 { return 7 }"
-}
 "#;
-    let app = |g: &str| {
-        format!("import {{ {g} }} from \"./gen\"\nimport {{ made }} from {g}()\nfn main() -> Int64 {{ return made() }}\n")
-    };
-    let (code, err) = run_gen("report_loud", gen, &app("loud"));
+    let app = "import { loud } from \"./gen\"\nimport { made } from loud()\nfn main() -> Int64 { return made() }\n";
+    let (code, err) = run_gen("report_loud", gen, app);
     assert_eq!(code, Some(1));
     assert!(err.contains("the input is broken"), "{err}");
-    let (code, err) = run_gen("report_quiet", gen, &app("quiet"));
-    assert_eq!(code, Some(7), "{err}");
 }
 
 /// `codeAt` copies input the generator read, and its errors show in the input.

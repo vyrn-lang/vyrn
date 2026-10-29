@@ -18,8 +18,7 @@ export gen fn table(path: String) -> Code {
 A `Warning` changes no exit code and no output byte, unless the build passes
 `--deny-warnings`. An `Error` fails the load at the anchor. The anchor is a
 1-based line and column, resolved against the module that imported the
-generator. A generator that returns a `String` writes `render(report(..))`,
-a `//@diag` line, until the last `String` generator is gone.
+generator.
 
 ## Severity
 

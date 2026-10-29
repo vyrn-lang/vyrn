@@ -1,74 +1,26 @@
-//! Origin maps. A generator's output may carry
-//! `//@origin <path>:<line>:<col>` comments; each governs the generated lines
-//! after it, until the next one or `//@origin end`. `path` is relative to the
-//! importing module and positions are 1-based. A `Code` result carries no
-//! directives: its span table's `shown` column states the same regions
-//! ([`OriginMaps::add_spans`]). [`OriginMaps::remap`] moves a
-//! diagnostic to its origin, and [`OriginMaps::regions_for`] inverts the table
-//! for the LSP. A malformed directive never loses a diagnostic: it stays at the
-//! generated location with a note.
+//! Origin maps. A generated module's span table says where each span's errors
+//! show: a `shown` path, relative to the importing module, and a 1-based
+//! position. [`OriginMaps::add_spans`] reads those regions,
+//! [`OriginMaps::remap`] moves a diagnostic to its origin, and
+//! [`OriginMaps::regions_for`] inverts the table for the LSP. A malformed
+//! origin never loses a diagnostic: it stays at the generated location with a
+//! note.
 
 use crate::diagnostics::{Diagnostic, Severity};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-/// What a synthesized module's directives are read under: where they resolve,
-/// how far they may reach, and which lines may carry one.
-///
-/// A generator copies input through verbatim (`std/vyx` does), so a directive
-/// counts only on a line where the lexer starts a comment; a string literal is
-/// data.
+/// What a generated module's origins resolve under.
 pub struct Context<'a> {
-    /// Directory of the module that wrote the generator call; directive paths
+    /// Directory of the module that wrote the generator call; origin paths
     /// resolve against it.
     pub importer_dir: &'a str,
-    /// The manifest's directory, or the entry file's when there is none. A
-    /// directive naming a file outside it is malformed. Empty only in unit
-    /// tests, where only `importer_dir`'s root bounds a path.
+    /// The manifest's directory, or the entry file's when there is none. An
+    /// origin naming a file outside it is malformed. Empty only in unit tests,
+    /// where only `importer_dir`'s root bounds a path.
     pub project: &'a str,
-    /// The 1-based lines where a `//` comment begins. `None` when the text does
-    /// not lex: every line is then honoured, because such a module still owes
-    /// its errors an origin map.
-    comment_lines: Option<HashSet<usize>>,
 }
 
-impl<'a> Context<'a> {
-    /// The context of a text whose [`comment_lines`] are `comment_lines`.
-    pub fn new(
-        comment_lines: Option<HashSet<usize>>,
-        importer_dir: &'a str,
-        project: &'a str,
-    ) -> Self {
-        Context {
-            importer_dir,
-            project,
-            comment_lines,
-        }
-    }
-
-    fn honors(&self, line: usize) -> bool {
-        match &self.comment_lines {
-            Some(lines) => lines.contains(&line),
-            None => true,
-        }
-    }
-}
-
-/// Returns the 1-based lines of `source` where a `//` comment begins, or `None`
-/// when the text does not lex. Every control-line scan over generated text uses
-/// it, so a directive inside a string literal stays data.
-pub fn comment_lines(source: &str) -> Option<HashSet<usize>> {
-    Some(comments_of(&crate::lexer::lex_with_trivia(source).ok()?))
-}
-
-/// [`comment_lines`] of a text already scanned.
-pub fn comments_of(items: &[crate::lexer::Triv]) -> HashSet<usize> {
-    (items.iter())
-        .filter(|t| t.kind == crate::lexer::TrivKind::Comment)
-        .map(|t| t.start_line)
-        .collect()
-}
-
-/// The input position an origin directive points at.
+/// The input position an origin points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin {
     /// A module-resolver key (slash path).
@@ -81,11 +33,11 @@ pub struct Origin {
 
 #[derive(Debug, Clone)]
 struct Directive {
-    /// The first governed generated line (1-based): the line after the directive.
+    /// The first governed generated line (1-based).
     gen_line: usize,
-    /// `None` for `//@origin end` or a malformed directive.
+    /// `None` where a region ends, or for a malformed origin.
     origin: Option<Origin>,
-    /// Why the directive is malformed. Its region is recorded but not remapped.
+    /// Why the origin is malformed. Its region is recorded but not remapped.
     malformed: Option<String>,
 }
 
@@ -93,7 +45,7 @@ struct Directive {
 /// LSP's forward requests.
 #[derive(Debug, Clone)]
 pub struct Region {
-    /// The synthesized module's banner key.
+    /// The generated module's key.
     pub gen_module: String,
     pub origin: Origin,
     /// 1-based, inclusive.
@@ -104,7 +56,7 @@ pub struct Region {
 
 #[derive(Debug, Clone, Default)]
 pub struct OriginMaps {
-    /// Banner key to its directives, sorted by `gen_line`.
+    /// Module key to its regions' starts, sorted by `gen_line`.
     modules: HashMap<String, Vec<Directive>>,
     /// Generated line count per module, for the last region's end.
     module_lines: HashMap<String, usize>,
@@ -115,47 +67,7 @@ impl OriginMaps {
         OriginMaps::default()
     }
 
-    /// Parses the `//@origin` directives of the synthesized module `banner`.
-    pub fn add_module(&mut self, banner: &str, source: &str, ctx: &Context<'_>) {
-        let mut dirs: Vec<Directive> = Vec::new();
-        let mut total = 0usize;
-        for (i, raw) in source.lines().enumerate() {
-            total = i + 1;
-            let trimmed = raw.trim_start();
-            let Some(rest) = trimmed.strip_prefix("//@origin") else {
-                continue;
-            };
-            if !ctx.honors(i + 1) {
-                continue;
-            }
-            let rest = rest.trim();
-            let gen_line = i + 2;
-            if rest == "end" {
-                dirs.push(Directive {
-                    gen_line,
-                    origin: None,
-                    malformed: None,
-                });
-                continue;
-            }
-            match anchor(rest, ctx) {
-                Ok(origin) => dirs.push(Directive {
-                    gen_line,
-                    origin: Some(origin),
-                    malformed: None,
-                }),
-                Err(reason) => dirs.push(Directive {
-                    gen_line,
-                    origin: None,
-                    malformed: Some(reason),
-                }),
-            }
-        }
-        self.insert(banner, dirs, total);
-    }
-
-    /// Reads the regions of the synthesized module `banner`, a `Code` result,
-    /// from its span table: a span with a `shown` position governs from the line
+    /// Reads the regions of the generated module `banner` from its span table: a span with a `shown` position governs from the line
     /// it starts on, and the next span without one ends the region after the
     /// last line the region touches. A run of spans with one `shown` position
     /// is one region, as `at` writes it.
@@ -219,7 +131,7 @@ impl OriginMaps {
     }
 
     /// Moves `d` to its origin when it sits on a governed generated line, and
-    /// returns whether it moved. Under `//@origin end` or a malformed directive
+    /// returns whether it moved. Past a region's end or under a malformed origin
     /// `d` keeps its generated location; the malformed case adds a note.
     pub fn remap(&self, d: &mut Diagnostic) -> bool {
         let Some(file) = d.file.clone() else {
@@ -233,7 +145,7 @@ impl OriginMaps {
         };
         if let Some(reason) = &gov.malformed {
             d.note = Some(format!(
-                "malformed `//@origin` directive ({reason}); reported at generated location"
+                "malformed origin ({reason}); reported at generated location"
             ));
             return false;
         }
@@ -265,12 +177,12 @@ impl OriginMaps {
                 if Self::norm_path_key(&origin.file) != want {
                     continue;
                 }
-                // The region ends before the next directive's own line
-                // (`gen_line - 2`), or at EOF. Back-to-back directives clamp to
-                // `end == start`, never a backwards span.
+                // The region ends on the line before the next start, or at
+                // EOF. Back-to-back starts clamp to `end == start`, never a
+                // backwards span.
                 let end = dirs
                     .get(idx + 1)
-                    .map(|n| n.gen_line.saturating_sub(2))
+                    .map(|n| n.gen_line.saturating_sub(1))
                     .unwrap_or(total)
                     .max(dir.gen_line);
                 out.push(Region {
@@ -296,7 +208,7 @@ impl OriginMaps {
         }
     }
 
-    /// Returns every input file some directive names, in first-seen order.
+    /// Returns every input file some origin names, in first-seen order.
     pub fn input_files(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for dirs in self.modules.values() {
@@ -312,85 +224,69 @@ impl OriginMaps {
     }
 }
 
-/// The anchor a `//@diag` line writes when it has no position to give.
+/// The anchor a report writes when it has no position to give.
 const NO_POSITION: &str = "-";
 
-/// Returns the `//@diag <error|warning> <anchor> <message>` lines of a
-/// synthesized module as diagnostics; `//@warning` is
-/// `//@diag warning`. The report rides the output text, so a gen-cache hit
-/// keeps it. The anchor uses `//@origin` notation; `-` or an unparseable anchor
-/// reports at the generated location, the latter keeping it in the message. An
-/// unknown severity becomes a warning holding the whole line, so a newer
-/// generator neither fails nor vanishes.
-pub fn diagnostics(banner: &str, source: &str, ctx: &Context<'_>) -> Vec<Diagnostic> {
-    let mut out = Vec::new();
-    for (i, raw) in source.lines().enumerate() {
-        let trimmed = raw.trim_start();
-        if !ctx.honors(i + 1) {
-            continue;
-        }
-        let (severity, rest, unknown) = if let Some(body) = trimmed.strip_prefix("//@diag") {
-            let body = body.trim();
-            match body.split_once(char::is_whitespace) {
-                Some(("error", tail)) => (Severity::Error, tail.trim(), None),
-                Some(("warning", tail)) => (Severity::Warning, tail.trim(), None),
-                // Unknown severity: the anchor is not parsed.
-                Some((word, _)) => (Severity::Warning, body, Some(word.to_string())),
-                None if body.is_empty() => continue,
-                None => (Severity::Warning, body, Some(body.to_string())),
-            }
-        } else if let Some(body) = trimmed.strip_prefix("//@warning") {
-            (Severity::Warning, body.trim(), None)
-        } else {
-            continue;
-        };
-        let (pos, message) = match unknown {
-            Some(_) => (None, rest),
-            None => match rest.split_once(char::is_whitespace) {
-                Some((NO_POSITION, tail)) => (None, tail.trim()),
-                Some((head, tail)) => match anchor(head, ctx) {
-                    Ok(origin) => (Some(origin), tail.trim()),
-                    Err(_) => (None, rest),
-                },
-                None => (None, rest),
+/// Returns the report `line`, `<error|warning> <anchor> <message>`, that
+/// generated module `banner` carries at generated line `gen_line`, as a
+/// diagnostic; `None` for a report without a message. The anchor is a
+/// `path:line:col` origin; `-` or a malformed anchor reports at the generated
+/// location, the latter keeping it in the message. An unknown severity becomes
+/// a warning holding the whole line, so a newer generator neither fails nor
+/// vanishes.
+pub fn report(banner: &str, gen_line: usize, line: &str, ctx: &Context<'_>) -> Option<Diagnostic> {
+    let body = line.trim();
+    let (severity, rest, unknown) = match body.split_once(char::is_whitespace) {
+        Some(("error", tail)) => (Severity::Error, tail.trim(), None),
+        Some(("warning", tail)) => (Severity::Warning, tail.trim(), None),
+        // Unknown severity: the anchor is not parsed.
+        Some((word, _)) => (Severity::Warning, body, Some(word.to_string())),
+        None => (Severity::Warning, body, Some(body.to_string())),
+    };
+    let (pos, message) = match unknown {
+        Some(_) => (None, rest),
+        None => match rest.split_once(char::is_whitespace) {
+            Some((NO_POSITION, tail)) => (None, tail.trim()),
+            Some((head, tail)) => match anchor(head, ctx) {
+                Ok(origin) => (Some(origin), tail.trim()),
+                Err(_) => (None, rest),
             },
-        };
-        if message.is_empty() {
-            continue;
-        }
-        let stage = match severity {
-            Severity::Error => "generated.error",
-            Severity::Warning => "generated.warning",
-        };
-        let mut d = Diagnostic::error(i + 1, 0, stage, message.to_string());
-        d.severity = severity;
-        match pos {
-            Some(origin) => {
-                d.file = Some(origin.file);
-                d.line = origin.line;
-                d.col = origin.col;
-                d.from_generated = true;
-                d.note = Some(format!(
-                    "in generated code {}:{} (see `vyrn emit-gen`)",
-                    crate::loader::readable(banner),
-                    i + 1
-                ));
-            }
-            None => d.file = Some(banner.to_string()),
-        }
-        if let Some(word) = unknown {
+            None => (None, rest),
+        },
+    };
+    if message.is_empty() {
+        return None;
+    }
+    let stage = match severity {
+        Severity::Error => "generated.error",
+        Severity::Warning => "generated.warning",
+    };
+    let mut d = Diagnostic::error(gen_line, 0, stage, message.to_string());
+    d.severity = severity;
+    match pos {
+        Some(origin) => {
+            d.file = Some(origin.file);
+            d.line = origin.line;
+            d.col = origin.col;
+            d.from_generated = true;
             d.note = Some(format!(
-                "unrecognized severity `{word}` in a `//@diag` directive; reported as a warning"
+                "in generated code {}:{gen_line} (see `vyrn emit-gen`)",
+                crate::loader::readable(banner),
             ));
         }
-        out.push(d);
+        None => d.file = Some(banner.to_string()),
     }
-    out
+    if let Some(word) = unknown {
+        d.note = Some(format!(
+            "unrecognized severity `{word}` in a report; reported as a warning"
+        ));
+    }
+    Some(d)
 }
 
-/// Parses an anchor in `//@origin` notation, `<path>:<line>:<col>`, splitting
-/// from the right so the path keeps any interior colon, and resolves the path.
-/// `Err` says why the anchor is malformed.
+/// Parses an anchor, `<path>:<line>:<col>`, splitting from the right so the
+/// path keeps any interior colon, and resolves the path. `Err` says why the
+/// anchor is malformed.
 pub fn anchor(body: &str, ctx: &Context<'_>) -> Result<Origin, String> {
     let (rest, col) = body
         .rsplit_once(':')
@@ -413,7 +309,7 @@ pub fn anchor(body: &str, ctx: &Context<'_>) -> Result<Origin, String> {
     })
 }
 
-/// Resolves a directive path against the importer into a normalized slash key.
+/// Resolves an origin path against the importer into a normalized slash key.
 /// An absolute path, a climb out of the importer's root, and a path outside the
 /// project are refused as malformed.
 fn resolve_origin_path(ctx: &Context<'_>, path: &str) -> Result<String, String> {
@@ -478,6 +374,8 @@ fn normalize_slashes(p: &str) -> (String, bool) {
 mod tests {
     use super::*;
     use crate::diagnostics::Diagnostic;
+    use crate::gen::{Author, Pos, Shown, SpanRow};
+    use std::sync::Arc;
 
     fn diag(file: &str, line: usize, col: usize) -> Diagnostic {
         let mut d = Diagnostic::error(line, col, "check", "boom".to_string());
@@ -486,21 +384,52 @@ mod tests {
     }
 
     /// A context with no project bound, as an in-memory load has.
-    fn ctx<'a>(source: &str, importer_dir: &'a str) -> Context<'a> {
-        Context::new(comment_lines(source), importer_dir, "")
+    fn ctx(importer_dir: &str) -> Context<'_> {
+        Context {
+            importer_dir,
+            project: "",
+        }
     }
 
     fn resolved(importer_dir: &str, path: &str) -> Result<String, String> {
-        resolve_origin_path(&ctx("", importer_dir), path)
+        resolve_origin_path(&ctx(importer_dir), path)
+    }
+
+    /// Maps of module `banner`, written as `spans`: each a text and the
+    /// `path:line:col` its errors show at, if any.
+    fn maps(banner: &str, spans: &[(&str, Option<&str>)], c: &Context<'_>) -> OriginMaps {
+        let (mut source, mut rows) = (String::new(), Vec::new());
+        for (text, shown) in spans {
+            let shown = shown.map(|s| {
+                let mut f = s.rsplitn(3, ':');
+                let col = f.next().unwrap().parse().unwrap();
+                let line = f.next().unwrap().parse().unwrap();
+                let at = Pos { line, col };
+                let path = Arc::from(f.next().unwrap());
+                Shown { path, at }
+            });
+            let (offset, author) = (source.len(), Author::CallSite);
+            rows.push(SpanRow {
+                offset,
+                author,
+                shown,
+            });
+            source.push_str(text);
+        }
+        let mut maps = OriginMaps::new();
+        maps.add_spans(banner, &source, &rows, c);
+        maps
     }
 
     #[test]
     fn remaps_a_governed_line_to_its_origin() {
         let banner = "generated by components(\"./comp\") at app.vyrn";
-        let src = "line1\n//@origin ./comp/Item.vyx:14:9\nrow.push(x)\nmore\n";
-        let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, &ctx(src, ""));
-        let mut d = diag(banner, 3, 5);
+        let spans = [
+            ("line1\n", None),
+            ("row.push(x)\nmore\n", Some("./comp/Item.vyx:14:9")),
+        ];
+        let maps = maps(banner, &spans, &ctx(""));
+        let mut d = diag(banner, 2, 5);
         assert!(maps.remap(&mut d));
         assert_eq!(d.file.as_deref(), Some("comp/Item.vyx"));
         assert_eq!(d.line, 14);
@@ -522,9 +451,8 @@ mod tests {
         assert_eq!(resolved("examples", "./a.vyx").unwrap(), "examples/a.vyx");
 
         let banner = "generated by components(\"./comp\") at /tmp/probe/app.vyrn";
-        let src = "//@origin ./comp/Widget.vyx:6:8\n<expr>\n";
-        let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, &ctx(src, "/tmp/probe"));
+        let spans = [("<expr>\n", Some("./comp/Widget.vyx:6:8"))];
+        let maps = maps(banner, &spans, &ctx("/tmp/probe"));
         assert_eq!(
             maps.input_files(),
             vec!["/tmp/probe/comp/Widget.vyx".to_string()]
@@ -533,25 +461,21 @@ mod tests {
     }
 
     #[test]
-    fn end_directive_stops_governing() {
-        let banner = "b";
-        let src = "//@origin ./a.vyx:1:1\nx\n//@origin end\ny\n";
-        let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, &ctx(src, ""));
-        let mut governed = diag(banner, 2, 1);
+    fn a_span_without_an_origin_ends_the_region() {
+        let spans = [("x\n", Some("./a.vyx:1:1")), ("y\n", None)];
+        let maps = maps("b", &spans, &ctx(""));
+        let mut governed = diag("b", 1, 1);
         assert!(maps.remap(&mut governed));
-        let mut ungoverned = diag(banner, 4, 1);
+        let mut ungoverned = diag("b", 2, 1);
         assert!(!maps.remap(&mut ungoverned));
         assert_eq!(ungoverned.file.as_deref(), Some("b"));
     }
 
     #[test]
-    fn malformed_directive_never_loses_the_diagnostic() {
-        let banner = "b";
-        let src = "//@origin not-a-valid-directive\nx\n";
-        let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, &ctx(src, ""));
-        let mut d = diag(banner, 2, 1);
+    fn malformed_origin_never_loses_the_diagnostic() {
+        let spans = [("x\n", Some("../../../../../../../../outside.vyx:1:1"))];
+        let maps = maps("b", &spans, &ctx("app"));
+        let mut d = diag("b", 1, 1);
         assert!(!maps.remap(&mut d));
         assert_eq!(d.file.as_deref(), Some("b"));
         assert!(d.note.as_deref().unwrap().contains("malformed"));
@@ -559,179 +483,76 @@ mod tests {
 
     #[test]
     fn resolves_paths_against_the_importer_dir() {
-        let banner = "b";
-        let src = "//@origin ./ItemRow.vyx:2:3\nx\n";
-        let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, &ctx(src, "src/ui"));
-        let mut d = diag(banner, 2, 1);
+        let maps = maps("b", &[("x\n", Some("./ItemRow.vyx:2:3"))], &ctx("src/ui"));
+        let mut d = diag("b", 1, 1);
         maps.remap(&mut d);
         assert_eq!(d.file.as_deref(), Some("src/ui/ItemRow.vyx"));
     }
 
     #[test]
     fn inverts_to_regions_for_forward_mapping() {
-        let banner = "b";
-        let src = "a\n//@origin ./x.vyx:5:2\nb\nc\n//@origin end\nd\n";
-        let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, &ctx(src, ""));
-        let regions = maps.regions_for("x.vyx");
+        let spans = [
+            ("a\n", None),
+            ("b\nc\n", Some("./x.vyx:5:2")),
+            ("d\n", None),
+        ];
+        let regions = maps("b", &spans, &ctx("")).regions_for("x.vyx");
         assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0].gen_start_line, 3);
-        assert_eq!(regions[0].gen_end_line, 4);
+        assert_eq!(regions[0].gen_start_line, 2);
+        assert_eq!(regions[0].gen_end_line, 3);
         assert_eq!(regions[0].origin.line, 5);
     }
 
     #[test]
-    fn adjacent_directives_yield_a_well_formed_empty_region() {
-        let banner = "b";
-        let src = "\n//@origin ./a.vyx:1:1\n//@origin ./b.vyx:2:2\nx\n";
-        let mut maps = OriginMaps::new();
-        maps.add_module(banner, src, &ctx(src, ""));
-        let mut regions = maps.regions_for("a.vyx");
-        regions.extend(maps.regions_for("b.vyx"));
-        assert_eq!(regions.len(), 2);
-        assert!(
-            regions.iter().all(|r| r.gen_end_line >= r.gen_start_line),
-            "backwards region: {regions:?}"
-        );
-        let first = regions
-            .iter()
-            .find(|r| r.origin.file.ends_with("a.vyx"))
-            .unwrap();
-        assert_eq!(first.gen_start_line, 3);
-        assert_eq!(first.gen_end_line, 3);
-    }
-
-    #[test]
     fn a_positioned_warning_points_at_the_input_file() {
-        let src = "//@warning ./routes/p/[id].vyx:13:1 `fn old` is deprecated
-fn x() {}
-";
-        let ds = diagnostics("b", src, &ctx(src, "app"));
-        assert_eq!(ds.len(), 1);
-        assert_eq!(ds[0].severity, crate::diagnostics::Severity::Warning);
-        assert_eq!(ds[0].file.as_deref(), Some("app/routes/p/[id].vyx"));
-        assert_eq!(ds[0].line, 13);
-        assert_eq!(ds[0].col, 1);
-        assert_eq!(ds[0].message, "`fn old` is deprecated");
-        assert!(ds[0]
-            .note
-            .as_deref()
-            .unwrap()
-            .contains("generated code b:1"));
-        assert!(ds[0].from_generated);
+        let line = "warning ./routes/p/[id].vyx:13:1 `fn old` is deprecated";
+        let d = report("b", 1, line, &ctx("app")).unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(d.file.as_deref(), Some("app/routes/p/[id].vyx"));
+        assert_eq!((d.line, d.col), (13, 1));
+        assert_eq!(d.message, "`fn old` is deprecated");
+        assert!(d.note.as_deref().unwrap().contains("generated code b:1"));
+        assert!(d.from_generated);
     }
 
     #[test]
     fn the_no_position_marker_is_consumed_not_spoken() {
-        let src = "//@warning - `fn old` is deprecated
-";
-        let ds = diagnostics("b", src, &ctx(src, "app"));
-        assert_eq!(ds.len(), 1);
-        assert_eq!(ds[0].message, "`fn old` is deprecated");
-        assert_eq!(ds[0].file.as_deref(), Some("b"));
-        assert!(!ds[0].from_generated);
+        let d = report("b", 1, "warning - `fn old` is deprecated", &ctx("app")).unwrap();
+        assert_eq!(d.message, "`fn old` is deprecated");
+        assert_eq!(d.file.as_deref(), Some("b"));
+        assert!(!d.from_generated);
     }
 
     #[test]
     fn a_malformed_position_keeps_the_whole_line_as_the_message() {
-        let src = "//@warning whoops something is off
-";
-        let ds = diagnostics("b", src, &ctx(src, ""));
-        assert_eq!(ds.len(), 1);
-        assert_eq!(ds[0].message, "whoops something is off");
-        assert_eq!(ds[0].file.as_deref(), Some("b"));
+        let d = report("b", 1, "warning whoops something is off", &ctx("")).unwrap();
+        assert_eq!(d.message, "whoops something is off");
+        assert_eq!(d.file.as_deref(), Some("b"));
     }
 
     #[test]
-    fn an_empty_directive_says_nothing() {
-        let src = "//@warning\n//@warning\n//@diag\n//@diag\n";
-        assert!(diagnostics("b", src, &ctx(src, "")).is_empty());
+    fn an_empty_report_says_nothing() {
+        assert!(report("b", 1, "", &ctx("")).is_none());
     }
 
     #[test]
     fn the_severity_is_the_generators_to_choose() {
-        let src = "//@diag error ./schema/users.tbl:14:3 column `id` is declared twice
-//@diag warning ./schema/users.tbl:9:3 column `email` has no length limit
-";
-        let ds = diagnostics("b", src, &ctx(src, "app"));
-        assert_eq!(ds.len(), 2);
-        assert_eq!(ds[0].severity, Severity::Error);
-        assert_eq!(ds[0].file.as_deref(), Some("app/schema/users.tbl"));
-        assert_eq!((ds[0].line, ds[0].col), (14, 3));
-        assert_eq!(ds[0].message, "column `id` is declared twice");
-        assert!(ds[0].from_generated);
-        assert_eq!(ds[1].severity, Severity::Warning);
-        assert_eq!((ds[1].line, ds[1].col), (9, 3));
-    }
-
-    #[test]
-    fn the_warning_directive_is_the_warning_severity() {
-        let a = diagnostics(
-            "b",
-            "//@warning ./x.vyx:1:1 hi\n",
-            &ctx("//@warning ./x.vyx:1:1 hi\n", "app"),
-        );
-        let d = diagnostics(
-            "b",
-            "//@diag warning ./x.vyx:1:1 hi\n",
-            &ctx("//@diag warning ./x.vyx:1:1 hi\n", "app"),
-        );
-        assert_eq!(a.len(), 1);
-        assert_eq!(d.len(), 1);
-        assert_eq!(a[0].severity, d[0].severity);
-        assert_eq!(a[0].file, d[0].file);
-        assert_eq!(a[0].message, d[0].message);
+        let line = "error ./schema/users.tbl:14:3 column `id` is declared twice";
+        let d = report("b", 1, line, &ctx("app")).unwrap();
+        assert_eq!(d.severity, Severity::Error);
+        assert_eq!(d.file.as_deref(), Some("app/schema/users.tbl"));
+        assert_eq!((d.line, d.col), (14, 3));
+        assert_eq!(d.message, "column `id` is declared twice");
+        assert!(d.from_generated);
     }
 
     #[test]
     fn an_unrecognized_severity_neither_escalates_nor_vanishes() {
-        let src = "//@diag hint ./x.vyx:1:1 consider a shorter name\n";
-        let ds = diagnostics("b", src, &ctx(src, ""));
-        assert_eq!(ds.len(), 1);
-        assert_eq!(ds[0].severity, Severity::Warning);
-        assert_eq!(ds[0].message, "hint ./x.vyx:1:1 consider a shorter name");
-        assert!(ds[0].note.as_deref().unwrap().contains("hint"));
-    }
-
-    #[test]
-    fn a_directive_inside_a_string_literal_is_data_not_a_control_line() {
-        let src = "fn banner() -> String {\n    return \"first\n\
-                   //@diag error ./elsewhere.vyx:1:1 injected by a string literal\n\
-                   last\"\n}\n";
-        assert!(diagnostics("b", src, &ctx(src, "app")).is_empty());
-
-        // Outside the literal the same line is a control line.
-        let real = format!("//@diag error ./elsewhere.vyx:1:1 reported by the generator\n{src}");
-        let ds = diagnostics("b", &real, &ctx(&real, "app"));
-        assert_eq!(ds.len(), 1);
-        assert_eq!(ds[0].severity, Severity::Error);
-    }
-
-    #[test]
-    fn an_origin_inside_a_string_literal_does_not_hijack_the_map() {
-        let src = "//@origin ./real.vyx:3:1\n\
-                   fn s() -> String {\n    return \"a\n\
-                   //@origin ./hijacked.vyx:7:7\n\
-                   b\"\n}\nlet x = nope()\n";
-        let mut maps = OriginMaps::new();
-        maps.add_module("b", src, &ctx(src, "app"));
-        let mut d = diag("b", 7, 1);
-        assert!(maps.remap(&mut d));
-        assert_eq!(d.file.as_deref(), Some("app/real.vyx"));
-        assert_eq!(d.line, 3);
-        assert!(maps.regions_for("app/hijacked.vyx").is_empty());
-    }
-
-    #[test]
-    fn text_that_does_not_lex_keeps_its_directives() {
-        let src = "//@origin ./x.vyx:2:2\n<not vyrn at all$$$\n";
-        assert!(crate::lexer::lex_with_trivia(src).is_err());
-        let mut maps = OriginMaps::new();
-        maps.add_module("b", src, &ctx(src, ""));
-        let mut d = diag("b", 2, 1);
-        assert!(maps.remap(&mut d));
-        assert_eq!(d.file.as_deref(), Some("x.vyx"));
+        let line = "hint ./x.vyx:1:1 consider a shorter name";
+        let d = report("b", 1, line, &ctx("")).unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(d.message, line);
+        assert!(d.note.as_deref().unwrap().contains("hint"));
     }
 
     #[test]
@@ -745,21 +566,15 @@ fn x() {}
             resolved("n:/proj/client", "../app/routes/index.vyx").unwrap(),
             "n:/proj/app/routes/index.vyx"
         );
-
-        let c = Context::new(comment_lines(""), "n:/proj/app", "n:/proj");
+        let c = Context {
+            importer_dir: "n:/proj/app",
+            project: "n:/proj",
+        };
         assert!(resolve_origin_path(&c, "../../other/x.vyx").is_err());
         assert_eq!(
             resolve_origin_path(&c, "../shared/x.vyx").unwrap(),
             "n:/proj/shared/x.vyx"
         );
-
-        let src = "//@origin ../../../../../../../../outside.vyx:1:1\nlet x = nope()\n";
-        let mut maps = OriginMaps::new();
-        maps.add_module("b", src, &ctx(src, "n:/proj/app"));
-        let mut d = diag("b", 2, 1);
-        assert!(!maps.remap(&mut d));
-        assert_eq!(d.file.as_deref(), Some("b"));
-        assert!(d.note.as_deref().unwrap().contains("malformed"));
     }
 
     #[test]
@@ -789,7 +604,10 @@ fn x() {}
     #[test]
     fn a_climb_spelled_with_backslashes_is_the_same_climb() {
         assert!(resolved("n:/proj/app", r"..\..\..\..\outside.vyx").is_err());
-        let c = Context::new(comment_lines(""), "n:/proj/app", "n:/proj");
+        let c = Context {
+            importer_dir: "n:/proj/app",
+            project: "n:/proj",
+        };
         assert!(resolve_origin_path(&c, r"..\..\outside.vyx").is_err());
         assert_eq!(
             resolve_origin_path(&c, r"..\shared\x.vyx").unwrap(),

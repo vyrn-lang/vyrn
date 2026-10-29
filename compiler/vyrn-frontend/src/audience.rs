@@ -556,8 +556,8 @@ pub fn input_view(
 /// Returns the definition the editor companion of `claim`'s generator module
 /// gives for 1-based `line` and `col` of the input `file`, through its
 /// `gen fn vyrnDefinition*(root, path, line, col) -> String`
-/// ([`crate::loader::call_generator`]). The answer is an anchor in `//@origin`
-/// notation, resolved as an origin path is. `None` when the claim names no
+/// ([`crate::loader::call_generator`]). The answer is a `path:line:col`
+/// anchor, resolved as an origin path is. `None` when the claim names no
 /// module, no companion declares such a function, the run fails, or the answer
 /// is empty or malformed.
 #[allow(clippy::too_many_arguments)]
@@ -595,7 +595,10 @@ pub fn input_definition(
     } else {
         opts.alias_base.as_str()
     };
-    let ctx = crate::origin::Context::new(None, dir, project);
+    let ctx = crate::origin::Context {
+        importer_dir: dir,
+        project,
+    };
     crate::origin::anchor(out.trim(), &ctx).ok()
 }
 

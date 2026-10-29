@@ -1,5 +1,5 @@
-export gen fn names(t: TypeArg) -> String {
-    return ""
+export gen fn names(t: TypeArg) -> Code {
+    return vyrn""
 }
 
 fn one() -> Int64 {

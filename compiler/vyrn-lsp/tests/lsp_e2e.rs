@@ -1266,7 +1266,7 @@ fn vyx_type_error_publishes_into_the_vyx_buffer() {
 }
 
 /// Mistypes `title` as `titel` in a dynamic attribute, which the emitter hoists
-/// onto its own `let` line with a `rawAt` origin.
+/// onto its own `let` line with a `codeAt` origin.
 const VYX_ATTR_BAD: &str = "<script>\n\
     type Row = { title: String }\n\
     props { item: Row }\n\
@@ -2768,12 +2768,12 @@ fn ownerless_vyx_says_what_was_searched() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-const TBL_GEN: &str = "export gen fn table(path: String) -> String {\n\
+const TBL_GEN: &str = "export gen fn table(path: String) -> Code {\n\
     let src = match readFile(path) {\n\
     Ok(s) => s,\n\
     Err(e) => \"\",\n\
     }\n\
-    return \"//@origin \" + path + \":1:1\\n\" + src\n\
+    return codeAt(path, 1, 1, src)\n\
     }\n";
 const TBL_APP: &str = "import { table } from \"./gen\"\n\
     import { f } from table(\"./users.tbl\")\n\
@@ -3475,11 +3475,11 @@ fn broken_skeleton_publishes_in_the_generator_file() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     // `type Query {` is GraphQL, not Vyrn, so the skeleton parses in no mode.
-    let gen = "export gen fn mk(name: String) -> String {\n\
+    let gen = "export gen fn mk(name: String) -> Code {\n\
                let body = vyrn\"\"\"\n\
                type Query {\n\
                }\"\"\"\n\
-               return render(body)\n\
+               return body\n\
                }\n";
     let gen_path = dir.join("gen.vyrn");
     std::fs::write(&gen_path, gen).unwrap();
@@ -3580,11 +3580,12 @@ fn is_dev_entry_positive_and_negative() {
     let _ = client.child.kill();
 }
 
-/// Emits one `//@warning` directive positioned at `legacy.vyrn:2:1`. No std
-/// generator emits warnings, so the channel's fixture is synthetic.
-const WARN_GEN: &str = "export gen fn legacy(path: String) -> String {\n    \
-    return \"//@warning \" + path + \":2:1 `fn old` is deprecated — write `fn new` instead\n\" +\n        \
-    \"export fn greeting() -> String {\n    return \\\"hi\\\"\n}\n\"\n}\n";
+/// Emits one warning report anchored at `legacy.vyrn:2:1`. No std generator
+/// emits warnings, so the channel's fixture is synthetic.
+const WARN_GEN: &str = "import { report, Severity } from \"std/diag\"\n\
+    export gen fn legacy(path: String) -> Code {\n    \
+    return report(Warning, path, 2, 1, \"`fn old` is deprecated — write `fn new` instead\") +\n        \
+    vyrn\"export fn greeting() -> String {\n    return \\\"hi\\\"\n}\n\"\n}\n";
 
 const WARN_LEGACY: &str = "// A module on the old form.\nfn old() -> Int64 {\n    return 1\n}\n";
 
@@ -4169,8 +4170,8 @@ fn a_user_authored_contract_gets_the_same_editor_support() {
         \n\
         fn untitled() -> String {\n    return \"untitled\"\n}\n\
         \n\
-        export gen fn screens(dir: String) -> String {\n\
-        \x20   return \"export fn mounted() -> Int64 {\\n    return 1\\n}\\n\"\n\
+        export gen fn screens(dir: String) -> Code {\n\
+        \x20   return vyrn\"export fn mounted() -> Int64 {\\n    return 1\\n}\\n\"\n\
         }\n";
     let app = "import { screens } from \"./gen\"\n\
         import { mounted } from screens(\"./screens\")\n\
@@ -5530,9 +5531,9 @@ fn project_diagnostics(tag: &str, files: &[(&str, &str)], root: &str) -> Vec<(u6
 /// `-> String`.
 fn derive_gen(ret: &str) -> String {
     format!(
-        "export gen fn bad(t: TypeArg) -> String {{\n    let mut out = \"\"\n    \
-         for r in t.roots {{\n        let n = t.nodes[r].shape\n        \
-         out = out + \"fn \" + n.name + \"(v: \" + n.spelling + \") -> String {{\n    \
+        "export gen fn bad(t: TypeArg) -> Code {{\n    let mut out = vyrn\"\"\n    \
+         for r in t.roots {{\n        let n = t.nodes[r]\n        \
+         out = out + vyrn\"fn \\{{name(n.shape.name)}}(v: \\{{n.code}}) -> String {{\n    \
          return {ret}\n}}\n\"\n    }}\n    return out\n}}\n"
     )
 }

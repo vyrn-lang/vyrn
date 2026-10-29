@@ -1245,17 +1245,6 @@ fn table() -> Vec<Builtin> {
             .takes(&[1], takes_one)
             .typed(vec![code()], Str, Some(|_, _, _, t| rule!(RenderType, t)))
             .stops(0),
-        b("raw")
-            .spec(Spec::Host)
-            .effect(GenOnly)
-            .takes(&[1], takes_one)
-            .typed(vec![Str], code(), None),
-        // The origin lets `render` map diagnostics inside the text back.
-        b("rawAt")
-            .spec(Spec::Host)
-            .effect(GenOnly)
-            .takes(&[4], |_, _, got| rule!(RawAtArity, got))
-            .typed(vec![Str, Str, Int, Int], code(), None),
         b("name")
             .spec(Spec::Host)
             .effect(GenOnly)
@@ -1378,7 +1367,7 @@ pub enum Spec {
     /// instruction; a lane index is a literal the checker proved in range.
     Lanes,
     /// A host import a compiled generator calls:
-    /// A quote, `raw` and `rawAt` answer a `Code` handle,
+    /// A quote and the `Code` builtins answer a `Code` handle,
     /// `render` answers a String, and `__vyrnGen*` move a value out of the
     /// host as atoms. A quote's hole tag is its operand's type. Only a
     /// generator reaches one.

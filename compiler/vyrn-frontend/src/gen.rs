@@ -18,8 +18,8 @@ pub struct Pos {
 
 /// Who wrote a span of generated code. A quote's text is written by the module
 /// that holds the `vyrn"..."`, at the part's position there; a `String`, number
-/// or `Bool` a hole turns into code, and `raw` text, are the call site's data. A
-/// generator cannot name an author.
+/// or `Bool` a hole turns into code is the call site's data. A generator cannot
+/// name an author.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Author {
     File { key: Arc<str>, at: Pos },
@@ -27,8 +27,7 @@ pub enum Author {
 }
 
 /// Where a diagnostic inside a span shows: a path relative to the importing
-/// module and a position, as `//@origin` writes them (`rawAt`). It never
-/// changes the author.
+/// module and a position (`at`, `codeAt`). It never changes the author.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shown {
     pub path: Arc<str>,
@@ -42,8 +41,9 @@ pub enum Kind {
     Code,
     /// Input `codeAt` copied, byte for byte: never re-indented.
     Copied,
-    /// One `//@diag` line `report` wrote: the loader reads it as a
-    /// diagnostic, and only from a span of this kind.
+    /// One report `diag` wrote, its text `<severity> <anchor> <message>`: the
+    /// loader reads it as a diagnostic, and only from a span of this kind. It
+    /// writes no text into the module.
     Diag,
 }
 
@@ -85,68 +85,66 @@ impl Rope {
 }
 
 /// One row of a generated module's span table: the byte offset in the module's
-/// text where a span starts, its author, where its errors show and its kind.
+/// text where a span starts, its author, and where its errors show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpanRow {
     pub offset: usize,
     pub author: Author,
     pub shown: Option<Shown>,
-    pub kind: Kind,
 }
 
-/// What a generator wrote: the module's text and, for a `Code` result, its span
-/// table sorted by offset. A `String` result has no table; its module is judged
-/// by its banner and maps errors through `//@origin` lines.
-#[derive(Debug, Clone, PartialEq)]
+/// One report a generator returned: the byte offset in the module's text it
+/// stands at, and its [`Kind::Diag`] text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    pub offset: usize,
+    pub line: String,
+}
+
+/// What a generator wrote: the module's text, its span table and its reports,
+/// each sorted by offset.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Written {
     pub source: String,
-    pub spans: Option<Vec<SpanRow>>,
+    pub spans: Vec<SpanRow>,
+    pub reports: Vec<Report>,
 }
 
 impl Written {
-    /// A `Code` result: the spans' text, one row per non-empty span.
+    /// The text of `rope`'s code spans, one row per non-empty span, and its
+    /// reports.
     pub fn code(rope: &Rope) -> Written {
-        let mut source = String::new();
-        let mut rows = Vec::new();
-        for s in rope.spans().into_iter().filter(|s| !s.text.is_empty()) {
-            rows.push(SpanRow {
-                offset: source.len(),
-                author: s.author.clone(),
-                shown: s.shown.clone(),
-                kind: s.kind,
-            });
-            source.push_str(&s.text);
+        let mut w = Written::default();
+        for s in rope.spans() {
+            let offset = w.source.len();
+            match s.kind {
+                Kind::Diag => w.reports.push(Report {
+                    offset,
+                    line: s.text.clone(),
+                }),
+                _ if s.text.is_empty() => {}
+                _ => {
+                    w.spans.push(SpanRow {
+                        offset,
+                        author: s.author.clone(),
+                        shown: s.shown.clone(),
+                    });
+                    w.source.push_str(&s.text);
+                }
+            }
         }
-        Written {
-            source,
-            spans: Some(rows),
-        }
+        w
     }
 }
 
-/// Renders a `Code` value to source text (`render`). A span with a `shown`
-/// position is wrapped in `//@origin path:line:col` ... `//@origin end`, each
-/// directive on its own line, because it governs the lines that follow.
+/// Renders a `Code` value to source text (`render`): the text of its code
+/// spans. A report writes none.
 pub fn render_code(rope: &Rope) -> String {
-    let mut out = String::new();
-    let ensure_nl = |out: &mut String| {
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-    };
-    for s in rope.spans() {
-        match &s.shown {
-            None => out.push_str(&s.text),
-            Some(Shown { path, at }) => {
-                ensure_nl(&mut out);
-                out.push_str(&format!("//@origin {path}:{}:{}\n", at.line, at.col));
-                out.push_str(&s.text);
-                ensure_nl(&mut out);
-                out.push_str("//@origin end\n");
-            }
-        }
-    }
-    out
+    let spans = rope.spans().into_iter();
+    spans
+        .filter(|s| s.kind != Kind::Diag)
+        .map(|s| s.text.as_str())
+        .collect()
 }
 
 /// A value in a code-quote hole, as the splice rule reads it.
@@ -260,17 +258,16 @@ pub fn name_span(s: &str) -> Result<Span, String> {
     }
 }
 
-/// Returns the `Diag` span of one report: `//@diag <severity> <anchor>
-/// <message>`, the line `render` prints for a `String` generator. A newline in
-/// any part would end the comment and hand the rest to the parser as code.
+/// Returns the `Diag` span of one report, `<severity> <anchor> <message>`. The
+/// loader splits it at whitespace, and a report is one line.
 pub fn diag_span(severity: &str, anchor: &str, message: &str) -> Result<Span, String> {
-    let line = format!("//@diag {severity} {anchor} {message}");
+    let line = format!("{severity} {anchor} {message}");
     if line.contains(['\n', '\r']) {
         return Err(format!("a report is one line, and {line:?} is not"));
     }
     Ok(Span {
         kind: Kind::Diag,
-        ..Span::data(format!("{line}\n"))
+        ..Span::data(line)
     })
 }
 
@@ -709,12 +706,6 @@ fn executable_id(
             None => format!("unknown-{}", std::process::id()),
         },
     }
-}
-
-/// Whether a `gen fn` returning `ret` writes a module a load can link or
-/// `derive` can call: its text as a `String`, or its spans as `Code`.
-pub fn writes_module(ret: &crate::ast::Type) -> bool {
-    matches!(ret, crate::ast::Type::Str) || matches!(ret, crate::ast::Type::Named(n) if n == "Code")
 }
 
 /// Runs `fn_name` in `program` as a generation target on `inputs.engine`,

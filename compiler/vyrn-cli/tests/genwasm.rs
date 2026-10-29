@@ -114,12 +114,14 @@ fn the_reflected_type_closure_is_a_cache_input() {
     .unwrap();
     std::fs::write(
         dir.join("gen.vyrn"),
-        "export gen fn stub(path: String) -> String {\n\
+        "export gen fn stub(path: String) -> Code {\n\
          \x20   let iface = moduleInterface(path)\n\
-         \x20   let mut out = \"\"\n\
-         \x20   for f in iface.functions { out = out + \"export fn \" + f.name + \
-         \"Arity() -> Int64 { return \" + f.params.length.toString() + \" }\\n\" }\n\
-         \x20   for t in iface.types { out = out + \"// \" + t.source + \"\\n\" }\n\
+         \x20   let mut out = vyrn\"\"\n\
+         \x20   for f in iface.functions {\n\
+         \x20       let arity = name(f.name + \"Arity\")\n\
+         \x20       out = out + vyrn\"export fn \\{arity}() -> Int64 { return \\{f.params.length} }\\n\"\n\
+         \x20   }\n\
+         \x20   for t in iface.types { out = out + vyrn\"// \\{t.source}\\n\" }\n\
          \x20   return out\n\
          }\n",
     )
@@ -225,8 +227,8 @@ fn a_splice_with_no_rule_traps() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("gen.vyrn"),
-        "export gen fn mk(fname: String) -> String {\n\
-         \x20   return render(vyrn\"export fn \\{name(fname)}() -> Int64 { return 1 }\")\n\
+        "export gen fn mk(fname: String) -> Code {\n\
+         \x20   return vyrn\"export fn \\{name(fname)}() -> Int64 { return 1 }\"\n\
          }\n",
     )
     .unwrap();
@@ -269,13 +271,13 @@ fn an_accumulator_seeded_by_a_call_does_not_grow_a_literal_in_place() {
          \x20   }\n\
          \x20   return \"\"\n\
          }\n\
-         export gen fn mk(tag: String) -> String {\n\
+         export gen fn mk(tag: String) -> Code {\n\
          \x20   let mut doc = \"# head\\n\"\n\
          \x20   let mut notes = note(tag)\n\
          \x20   doc = doc + \"type a\\n\"\n\
          \x20   notes = notes + \"// the note\\n\"\n\
          \x20   notes = notes + note(tag)\n\
-         \x20   return notes + render(vyrn\"export fn text() -> String { return \\{doc} }\")\n\
+         \x20   return vyrn\"export fn text() -> String { return \\{doc} }\\nexport fn notes() -> String { return \\{notes} }\"\n\
          }\n",
     )
     .unwrap();
@@ -342,9 +344,9 @@ fn a_read_outside_the_declared_inputs_traps() {
     std::fs::write(dir.join("data/ok.txt"), "fine").unwrap();
     std::fs::write(
         dir.join("gen.vyrn"),
-        "export gen fn peek(dir: String) -> String {\n\
+        "export gen fn peek(dir: String) -> Code {\n\
          \x20   let s = match readFile(dir + \"/../secret.txt\") { Ok(t) => t, Err(e) => \"\" }\n\
-         \x20   return \"export fn n() -> Int64 { return \" + s.byteLength.toString() + \" }\"\n\
+         \x20   return vyrn\"export fn n() -> Int64 { return \\{s.byteLength} }\"\n\
          }\n",
     )
     .unwrap();
@@ -380,21 +382,24 @@ fn a_generator_trap_reads_with_the_language_wording() {
     // Each failing value comes through a loop, so it is not const-folded away.
     std::fs::write(
         dir.join("gen.vyrn"),
-        "export gen fn oob(tag: String) -> String {\n\
+        "export gen fn oob(tag: String) -> Code {\n\
          \x20   let xs = [1, 2, 3]\n\
          \x20   let mut i = 0\n\
          \x20   while i < 10 { i = i + 1 }\n\
-         \x20   return \"export fn n() -> Int64 { return \" + xs[i].toString() + \" }\"\n\
+         \x20   let v = xs[i]\n\
+         \x20   return vyrn\"export fn n() -> Int64 { return \\{v} }\"\n\
          }\n\
-         export gen fn dz(tag: String) -> String {\n\
+         export gen fn dz(tag: String) -> Code {\n\
          \x20   let mut i = 0\n\
          \x20   while i < 3 { i = i + 1 }\n\
-         \x20   return \"export fn n() -> Int64 { return \" + (10 / (i - 3)).toString() + \" }\"\n\
+         \x20   let v = 10 / (i - 3)\n\
+         \x20   return vyrn\"export fn n() -> Int64 { return \\{v} }\"\n\
          }\n\
-         export gen fn si(tag: String) -> String {\n\
+         export gen fn si(tag: String) -> Code {\n\
          \x20   let mut i = 0\n\
          \x20   while i < 99 { i = i + 1 }\n\
-         \x20   return \"export fn n() -> Int64 { return \" + tag[i].toString() + \" }\"\n\
+         \x20   let v = tag[i].toString()\n\
+         \x20   return vyrn\"export fn n() -> Int64 { return \\{v.byteLength} }\"\n\
          }\n",
     )
     .unwrap();
@@ -437,14 +442,14 @@ fn a_runaway_generator_is_killed() {
         // The unreachable append keeps the loop from being optimized away. The
         // bound is 10^12 because the fuel budget counts wasm instructions: at
         // 10^9 an efficient emitter finishes the loop inside the budget.
-        "export gen fn spin(tag: String) -> String {\n\
+        "export gen fn spin(tag: String) -> Code {\n\
          \x20   let mut i = 0\n\
          \x20   let mut s = \"\"\n\
          \x20   while i < 1000000000000 {\n\
          \x20       i = i + 1\n\
          \x20       if i < 0 { s = s + tag }\n\
          \x20   }\n\
-         \x20   return \"export fn n() -> Int64 { return 1 }\"\n\
+         \x20   return vyrn\"export fn n() -> Int64 { return 1 }\"\n\
          }\n",
     )
     .unwrap();
@@ -483,8 +488,8 @@ fn editing_a_generator_recompiles_its_artifact() {
     std::fs::write(
         dir.join("gen.vyrn"),
         "import { v } from \"./part\"\n\
-         export gen fn mk(tag: String) -> String {\n\
-         \x20   return \"export fn n() -> Int64 { return \" + v().toString() + \" }\"\n\
+         export gen fn mk(tag: String) -> Code {\n\
+         \x20   return vyrn\"export fn n() -> Int64 { return \\{v()} }\"\n\
          }\n",
     )
     .unwrap();

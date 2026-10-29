@@ -1713,7 +1713,7 @@ struct Frame {
     in_gen: bool,
     /// The module being checked; `None` is the root. With `shadows`
     /// ([`ast::Program::surface_shadows`], filled by the loader), it decides
-    /// whether `render`, `rawAt`, `raw` or `lex` is the builtin or a function
+    /// whether a surface builtin such as `render` or `lex` is the builtin or a function
     /// this module declares or imports.
     here: Option<String>,
     /// Whether the module is the root. Only the root is indexed: two modules
@@ -5038,8 +5038,6 @@ impl<'a> Checker<'a> {
             if !self.frame.borrow().in_gen {
                 let surface = match name {
                     "render" => "`render` is",
-                    "rawAt" => "`rawAt` is",
-                    "raw" => "`raw` is",
                     "lex" => "`lex` is",
                     "name" => "`name` is",
                     "diag" => "`diag` is",
@@ -5367,7 +5365,7 @@ impl<'a> Checker<'a> {
                 _ => return Err(cerr!(line, DeriveArity)),
             };
             let arg = Type::Named("TypeArg".to_string());
-            let takes = matches!(self.sig(g), Some((ps, r)) if *ps == [arg] && crate::gen::writes_module(r));
+            let takes = matches!(self.sig(g), Some((ps, r)) if *ps == [arg] && *r == Type::Named("Code".into()));
             if !takes || !self.gen_fns.contains(g) {
                 return Err(cerr!(line, DeriveUnknownGen, g));
             }

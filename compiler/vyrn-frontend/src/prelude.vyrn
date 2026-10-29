@@ -107,9 +107,8 @@ type FnInfo = {
     // bit, three spellings — `std/graphql` reads it as Mutation vs
     // Query, an HTTP projection as not-a-`GET`, gRPC ignores it.
     mutates: Bool,
-    // Where the procedure was declared — the half of
-    // `//@origin` that line-granular mapping cannot carry: a generated
-    // stub knows which declaration it stands for, and can say so.
+    // Where the procedure was declared: a generated stub knows which
+    // declaration it stands for, and can say so.
     origin: Origin
 }
 

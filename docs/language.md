@@ -575,7 +575,7 @@ import type { User, Port } from "./user.schema.json"
 - A relative specifier resolves beside the importing file, with `.vyrn` appended. `std/name` is the standard library. A bare name resolves through the manifest's `dependencies`.
 - `import { a as b }` binds `a` under the local name `b`. `import * as ns` reaches the exports as `ns.name`.
 - Importing a name the module does not export is refused. An import cycle is refused.
-- `export to "./editor", "std/ui" fn f()` names the only modules that may import `f`. Each path resolves as an import written in the exporting module would; one that does not resolve is refused. Any other import of `f`, a namespace use of it, or a generator call of it is refused with a sentence naming the permitted importers. An import a generator writes is judged as whoever wrote its `import` keyword: in a `Code` result, the module that holds the quote for quote text, and the file that wrote the generator call for a `String`, number or `Bool` a hole spliced, or `raw` text. A `String` result imports as the module that declares the `gen fn`. The declaration is still an export everywhere else: in `moduleInterface`, a contract and the module's own uses. `vyrn doc` leaves it off the module's page, and editor completion offers it only where it may be imported. `to` is a word only after `export`, before a path; an `extern fn` takes none.
+- `export to "./editor", "std/ui" fn f()` names the only modules that may import `f`. Each path resolves as an import written in the exporting module would; one that does not resolve is refused. Any other import of `f`, a namespace use of it, or a generator call of it is refused with a sentence naming the permitted importers. An import a generator writes is judged as whoever wrote its `import` keyword: the module that holds the quote for quote text, and the input file for text `codeAt` copied. The declaration is still an export everywhere else: in `moduleInterface`, a contract and the module's own uses. `vyrn doc` leaves it off the module's page, and editor completion offers it only where it may be imported. `to` is a word only after `export`, before a path; an `extern fn` takes none.
 - Every module links into one program. An exported name is program-wide, so two flat imports of the same name from two modules are refused, even under an alias. Import one of them as a namespace instead. A private name stays private to its module.
 - An `impl` applies program-wide, wherever it is written.
 - `main` and `logging` are root-module only. Module state exists in every module and is private to it; `export let` is refused, so export accessor functions.
@@ -597,18 +597,25 @@ An exported handler reads and writes module state across calls from a host, so a
 
 ## Generators
 
-A `gen fn` is ordinary Vyrn that runs while the program compiles and returns Vyrn source. An import target can be a call to one.
+A `gen fn` is ordinary Vyrn that runs while the program compiles and returns Vyrn code. An import target can be a call to one.
 
 ```vyrn
 // gentable.vyrn
-export gen fn squares() -> String {
-    let mut out = "export fn squareOf(n: Int64) -> Int64 {\n"
+import { join } from "std/code"
+
+export gen fn squares() -> Code {
+    let mut arms: Array<Code> = []
     let mut i = 1
     while i <= 9 {
-        out = out + "    if n == \{i} { return \{i * i} }\n"
+        arms.push(vyrn"if n == \{i} { return \{i * i} }")
         i = i + 1
     }
-    return out + "    return 0\n}\n"
+    return vyrn"""
+        export fn squareOf(n: Int64) -> Int64 {
+            \{join(arms, vyrn"\n")}
+            return 0
+        }
+        """
 }
 
 // main.vyrn
@@ -616,13 +623,13 @@ import { squares } from "./gentable"
 import { squareOf } from squares()
 ```
 
-- The loader runs the call with constant arguments, caches the result by content, and links the returned text as an ordinary module. `vyrn emit-gen file.vyrn` prints what each generator wrote.
+- The loader runs the call with constant arguments, caches the result by content, and links the returned code as an ordinary module. An imported generator that does not return `Code` is refused. `vyrn emit-gen file.vyrn` prints what each generator wrote.
 - A generator is comptime-pure, and so is everything it calls: no `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, clock, entropy, logging sink or wait. A call to one is refused, naming it. So a generator gives the same answer on every machine.
 - A generator may read with `readFile`, `listDir` and `listDirKinds`, limited to the paths its caller passed.
 - `moduleInterface(path)` reflects a module's exported functions and types as a `ModuleInterface` record. `moduleCode(path)` answers the same record inside a `ModuleCode`, with each type a generator writes paired with itself as `Code`. `contractOf(Name)` reflects a contract. All three work only during generation.
 - A `TypeInfo`'s `shape` is its declaration as an array of `TypeNode`s, node 0 the root: record fields, enum variants and their payloads, arrays, `Option`, `Result`, `Map`, and each `where` as source. A declared name is a `named` leaf, found in `ModuleInterface.types`.
 - `lex(src)` runs the compiler's lexer over text. `std/scan` is a comment- and string-aware cursor for other languages.
-- `derive(g, x)` runs generator `g` after the check, on the type the checker gave `x`, and calls the function it wrote for that type. `g` is a `gen fn g(t: TypeArg)` that returns `Code` or `String`; for each root node `r` of `t` it defines `fn <t.nodes[r].shape.name>(v: <t.nodes[r].code>) -> String`, and `vyrn check` refuses an entry of another signature at the call. Each node pairs a checked type's `shape`, a `TypeNode` with its wire form as `kind`, with the type as `code`, a `Code` value the call site wrote, so a generator can write only a type the checker resolved. `g` runs once per program, and its code is checked with the program.
+- `derive(g, x)` runs generator `g` after the check, on the type the checker gave `x`, and calls the function it wrote for that type. `g` is a `gen fn g(t: TypeArg)` that returns `Code`; for each root node `r` of `t` it defines `fn <t.nodes[r].shape.name>(v: <t.nodes[r].code>) -> String`, and `vyrn check` refuses an entry of another signature at the call. Each node pairs a checked type's `shape`, a `TypeNode` with its wire form as `kind`, with the type as `code`, a `Code` value the call site wrote, so a generator can write only a type the checker resolved. `g` runs once per program, and its code is checked with the program.
 - A generator reports a diagnostic with `std/diag`'s `report`, which returns `Code`; every tool shows it at the file and line the generator read.
 
 ### Code quotes
@@ -670,10 +677,9 @@ The whole `Code` API:
 | `codeAt(path, line, col, text) -> Code` | none | copies `text` from an input the generator read, checked against the bytes the host read there |
 | `at(c, path, line, col) -> Code` | none | shows an error in `c` at `path:line:col` |
 | `report(..)`, `reportHere(..) -> Code` | `std/diag` | a diagnostic the loader shows |
-| `render(c) -> String` | none | the text, for a test or a `String` generator |
-| `raw(text)`, `rawAt(text, path, line, col)` | none | trusted text, until the last `String` generator is gone |
+| `render(c) -> String` | none | the text, for a test; a report writes none |
 
-Each span of a `Code` value has an author: a quote's text is written by the module that holds the quote, text `codeAt` copied by its input file, and a `String`, number, `Bool` or `Name` in a hole, or `raw` text, by the call site. `at` moves where an error shows, never the author. An import a generator writes is judged as its author (see `export to`), so `export to` a generator's module admits the imports its quotes write, and a generator cannot copy past it an import its caller may not write. A relative specifier resolves beside its author: text `codeAt` copied beside its input file, quote text beside the module that holds the quote, and a `String` in a hole beside the file that wrote the generator call. A `String` result resolves beside that file too. `name`, `codeAt`, `at` and `diag` mean the builtin only in a call that is no method call and passes their argument count, so `w.at(1)` and `at(w, 1)` stay `Index`'s.
+Each span of a `Code` value has an author: a quote's text is written by the module that holds the quote, text `codeAt` copied by its input file, and a `String`, number, `Bool` or `Name` in a hole by the call site. `at` moves where an error shows, never the author. An import a generator writes is judged as its author (see `export to`), so `export to` a generator's module admits the imports its quotes write, and a generator cannot copy past it an import its caller may not write. A relative specifier resolves beside its author: text `codeAt` copied beside its input file, quote text beside the module that holds the quote, and a `String` in a hole beside the file that wrote the generator call. A name the call site wrote, such as a handler's `Name`, resolves in the file that wrote the generator call without an import; a name a quote spells resolves in the quote's module. `name`, `codeAt`, `at` and `diag` mean the builtin only in a call that is no method call and passes their argument count, so `w.at(1)` and `at(w, 1)` stay `Index`'s.
 
 ### Contracts
 

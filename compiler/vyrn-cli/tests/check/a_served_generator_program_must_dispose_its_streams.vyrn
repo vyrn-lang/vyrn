@@ -3,9 +3,9 @@ fn feed() -> Stream<Int64> {
     return fromArray(xs)
 }
 
-export gen fn g(t: TypeArg) -> String {
+export gen fn g(t: TypeArg) -> Code {
     let s = feed()
-    return "fn f(x: Int64) -> String { return \"a\" }"
+    return vyrn"fn f(x: Int64) -> Int64 { return 1 }"
 }
 
 fn main() -> Int64 {

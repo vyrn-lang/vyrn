@@ -19,6 +19,6 @@ fn probe(q: Q) -> Int64 {
     return q.pick(1)
 }
 
-export gen fn mk(a: String) -> String {
-    return "export fn v() -> Int64 { return 7 }"
+export gen fn mk(a: String) -> Code {
+    return vyrn"export fn v() -> Int64 { return 7 }"
 }

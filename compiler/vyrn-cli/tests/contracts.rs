@@ -40,6 +40,7 @@ fn scratch(tag: &str) -> PathBuf {
 /// Each `gen fn` reflects a module and bakes `checkContract`'s issues into a
 /// function returning them.
 const GEN: &str = r#"import { checkContract, suppliesMember } from "std/contract"
+import { join } from "std/code"
 
 /// What a page module may export.
 export contract Page {
@@ -73,32 +74,32 @@ export contract Views {
     fn *(..) -> String
 }
 
-fn report(name: String, issues: Array<Issue>) -> String {
-    let mut out = "export fn " + name + "() -> Array<String> {\n"
-    out = out + "    let mut out: Array<String> = []\n"
+gen fn report(fnName: String, issues: Array<Issue>) -> Code {
+    let mut items: Array<Code> = []
     for i in issues {
-        out = out + "    out.push(\"" + i.key + " | " + i.message + "\")\n"
+        let line = i.key + " | " + i.message
+        items.push(vyrn"\{line}")
     }
-    out = out + "    return out\n}\n"
-    return out
+    let f = name(fnName)
+    return vyrn"export fn \{f}() -> Array<String> { return [\{join(items, vyrn", ")}] }\n"
 }
 
-export gen fn pageReport(path: String) -> String {
+export gen fn pageReport(path: String) -> Code {
     let iface = moduleInterface(path)
     return report("pageIssues", checkContract(iface, contractOf(Page)))
 }
 
-export gen fn apiReport(path: String) -> String {
+export gen fn apiReport(path: String) -> Code {
     let iface = moduleInterface(path)
     return report("apiIssues", checkContract(iface, contractOf(Api)))
 }
 
-export gen fn widgetReport(path: String) -> String {
+export gen fn widgetReport(path: String) -> Code {
     let iface = moduleInterface(path)
     let mut out = report("widgetIssues", checkContract(iface, contractOf(Widget)))
     out = out + report("viewIssues", checkContract(iface, contractOf(Views)))
     let has = suppliesMember(iface, contractOf(Widget), "label")
-    return out + "export fn widgetHasLabel() -> Bool {\n    return " + has.toString() + "\n}\n"
+    return out + vyrn"export fn widgetHasLabel() -> Bool { return \{has} }\n"
 }
 "#;
 
@@ -397,6 +398,7 @@ fn contract_of_is_comptime_only_and_has_no_native_lowering() {
 /// Alternative signatures: a member name declared more than once is satisfied
 /// by any one shape. The generator reports the issues and which shape matched.
 const ALT_GEN: &str = r#"import { checkContract, matchedMember } from "std/contract"
+import { join } from "std/code"
 
 /// One name, three shapes.
 export contract Shaped {
@@ -406,19 +408,21 @@ export contract Shaped {
     fn render(a: T, b: R) -> String
 }
 
-fn report(name: String, issues: Array<Issue>) -> String {
-    let mut out = "export fn " + name + "() -> Array<String> {\n    let mut xs: Array<String> = []\n"
+gen fn report(fnName: String, issues: Array<Issue>) -> Code {
+    let mut items: Array<Code> = []
     for iss in issues {
-        out = out + "    xs.push(\"" + iss.key + ": " + iss.message + "\")\n"
+        let line = iss.key + ": " + iss.message
+        items.push(vyrn"\{line}")
     }
-    return out + "    return xs\n}\n"
+    let f = name(fnName)
+    return vyrn"export fn \{f}() -> Array<String> { return [\{join(items, vyrn", ")}] }\n"
 }
 
-export gen fn shapedReport(path: String) -> String {
+export gen fn shapedReport(path: String) -> Code {
     let iface = moduleInterface(path)
     let mut out = report("shapedIssues", checkContract(iface, contractOf(Shaped)))
     let m = matchedMember(iface, contractOf(Shaped), "render")
-    return out + "export fn shapedMatch() -> Int64 {\n    return " + m.toString() + "\n}\n"
+    return out + vyrn"export fn shapedMatch() -> Int64 { return \{m} }\n"
 }
 "#;
 
@@ -778,8 +782,8 @@ fn why_contract_reports_what_the_generator_reports() {
          \n\
          fn untitled() -> String {\n    return \"untitled\"\n}\n\
          \n\
-         export gen fn screens(dir: String) -> String {\n\
-         \x20   return \"export fn mounted() -> Int64 {\n    return 1\n}\n\"\n\
+         export gen fn screens(dir: String) -> Code {\n\
+         \x20   return vyrn\"export fn mounted() -> Int64 {\n    return 1\n}\n\"\n\
          }\n",
     )
     .unwrap();
@@ -928,8 +932,8 @@ fn why_contract_without_a_manifest_roots_at_the_files_directory() {
     fn title() -> String
 }
 
-         export gen fn pages(dir: String) -> String {
-    return \"\"
+         export gen fn pages(dir: String) -> Code {
+    return vyrn\"\"
 }
 ",
     )

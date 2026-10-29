@@ -1981,14 +1981,14 @@ fn a_gen_body_is_refused_once_at_its_own_line_cold_and_warm() {
         dir.join("lib.vyrn"),
         "fn sink(t: consume String) -> Int64 { drop t return 0 }\n\
          \n\
-         export gen fn gen1(d: String) -> String {\n\
+         export gen fn gen1(d: String) -> Code {\n\
          \x20   if d == \"never\" {\n\
          \x20       let x = \"a\" + \"b\"\n\
          \x20       let n = sink(x)\n\
          \x20       region { let x = 9 }\n\
-         \x20       return x + \"!\"\n\
+         \x20       return vyrn\"\\{x}\"\n\
          \x20   }\n\
-         \x20   return \"export fn v() -> Int64 { return 7 }\"\n\
+         \x20   return vyrn\"export fn v() -> Int64 { return 7 }\"\n\
          }\n",
     )
     .expect("write lib.vyrn");
@@ -2012,11 +2012,11 @@ fn a_failed_generator_says_its_typed_refusal_cold_and_warm() {
     let dir = common::scratch("gen-typed-trap");
     std::fs::write(
         dir.join("lib.vyrn"),
-        "export gen fn g() -> String {\n\
+        "export gen fn g() -> Code {\n\
          \x20   let n = 1\n\
          \x20   n = 2\n\
          \x20   panic(\"stop\")\n\
-         \x20   return \"export fn f() -> Int64 { return 1 }\"\n\
+         \x20   return vyrn\"export fn f() -> Int64 { return 1 }\"\n\
          }\n",
     )
     .expect("write lib.vyrn");
@@ -2039,10 +2039,10 @@ fn a_generator_programs_must_use_refusal_names_its_module() {
     let dir = common::scratch("gen-must-use");
     std::fs::write(
         dir.join("lib.vyrn"),
-        "export gen fn g() -> String {\n\
+        "export gen fn g() -> Code {\n\
          \x20   let xs: Array<Int64> = [1, 2]\n\
          \x20   let s = fromArray(xs)\n\
-         \x20   return \"export fn f() -> Int64 { return 1 }\"\n\
+         \x20   return vyrn\"export fn f() -> Int64 { return 1 }\"\n\
          }\n",
     )
     .expect("write lib.vyrn");
@@ -2065,10 +2065,10 @@ fn a_refused_generator_program_is_refused_when_its_run_succeeds() {
     let dir = common::scratch("gen-typed-ran");
     std::fs::write(
         dir.join("lib.vyrn"),
-        "export gen fn g() -> String {\n\
+        "export gen fn g() -> Code {\n\
          \x20   let n = 1\n\
          \x20   n = 2\n\
-         \x20   return \"export fn f() -> Int64 { return 1 }\"\n\
+         \x20   return vyrn\"export fn f() -> Int64 { return 1 }\"\n\
          }\n",
     )
     .expect("write lib.vyrn");
@@ -2131,6 +2131,37 @@ fn a_generator_cannot_call_the_reflected_type_primitive() {
     let cold = refused_cold_and_warm(&dir, &["check", "host.vyrn"]);
     assert!(
         cold.contains("call to unknown function `__vyrnGenCode`"),
+        "{cold}"
+    );
+}
+
+/// A module a generator writes is `Code`, whose spans name its authors, so an
+/// imported generator that returns a `String` is refused before it runs.
+#[test]
+fn an_imported_generator_returns_code() {
+    let dir = common::scratch("gen-returns-string");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "export gen fn mk(n: Int64) -> String {
+             return \"export fn v() -> Int64 { return 7 }\"
+         }
+",
+    )
+    .expect("write lib.vyrn");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "import { mk } from \"./lib\"
+         import { v } from mk(1)
+         
+         fn main() -> Int64 { return v() }
+",
+    )
+    .expect("write host.vyrn");
+    let cold = refused_cold_and_warm(&dir, &["check", "host.vyrn"]);
+    assert!(
+        cold.contains(
+            "host.vyrn:2:0: generator `mk` returns `String`; an imported generator returns `Code`"
+        ),
         "{cold}"
     );
 }
@@ -2198,11 +2229,11 @@ fn a_gen_body_no_program_runs_is_refused() {
          \n\
          export fn plain() -> Int64 { return 3 }\n\
          \n\
-         export gen fn unran(d: String) -> String {\n\
+         export gen fn unran(d: String) -> Code {\n\
          \x20   let x = \"a\" + \"b\"\n\
          \x20   let n = sink(x)\n\
          \x20   region { let x = 9 }\n\
-         \x20   return x + \"!\"\n\
+         \x20   return vyrn\"\\{x}\"\n\
          }\n",
     )
     .expect("write lib.vyrn");
@@ -2224,7 +2255,7 @@ fn a_gen_body_no_program_runs_is_refused() {
 /// A module whose `secret` and `mk` only `./friend` may import.
 const QUALIFIED_LIB: &str = "export to \"./friend\" fn secret() -> Int64 { return 7 }\n\
      export fn open() -> Int64 { return 1 }\n\
-     export to \"./friend\" gen fn mk(x: String) -> String { return \"export fn made() -> Int64 { return 3 }\" }\n";
+     export to \"./friend\" gen fn mk(x: String) -> Code { return vyrn\"export fn made() -> Int64 { return 3 }\" }\n";
 
 /// What `vyrn check` says of `src`, saved as `file` beside [`QUALIFIED_LIB`]
 /// saved as `lib.vyrn`: success, and standard error.
@@ -2288,7 +2319,7 @@ fn a_generator_import_of_an_export_to_gen_fn_is_refused() {
 fn check_beside_generator(tag: &str, to: &str, file: &str, src: &str) -> (bool, String) {
     let dir = common::scratch(tag);
     let lib = format!("export to \"{to}\" fn helper() -> Int64 {{ return 7 }}\n");
-    let g = "export gen fn make(x: String) -> String {\n    return \"import { helper } from \\\"./lib\\\"\\nexport fn made() -> Int64 { return helper() }\\n\"\n}\n";
+    let g = "export gen fn make(x: String) -> Code {\n    return vyrn\"import { helper } from \\\"./lib\\\"\\nexport fn made() -> Int64 { return helper() }\\n\"\n}\n";
     std::fs::write(dir.join("lib.vyrn"), lib).expect("write lib.vyrn");
     std::fs::write(dir.join("g.vyrn"), g).expect("write g.vyrn");
     std::fs::write(dir.join(file), src).expect("write the importer");
@@ -2323,7 +2354,9 @@ fn a_generated_import_of_an_export_to_its_importer_is_refused() {
     assert!(!ok, "accepted");
     assert!(err.starts_with("generated by make(\"a\")"), "{err}");
     assert!(
-        err.ends_with("main.vyrn:1:0: `helper` is exported from `./lib` only to `./main`\n"),
+        err.ends_with(
+            "main.vyrn:1:0: `helper` is exported from `./lib` only to `./main`\n  note: written by `./g` at line 2\n"
+        ),
         "{err}"
     );
 }

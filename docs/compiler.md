@@ -583,8 +583,9 @@ prints the `FAILED:` line, and the next body runs.
 
 A `gen fn` runs inside the load. `vyrn-genwasm` compiles the generator's
 module with a synthesized `main` that dispatches on its first argument, runs
-it in wasmtime, and reads the result: a `String` between two sentinel lines on
-stdout, a `Code` value through the `vyrn_gen.result` import. File reads
+it in wasmtime, and reads the result through the `vyrn_gen.result` import. A
+module generator returns `Code`; an editor companion's `String` answer crosses
+as one span of the call site's data. File reads
 go through the loader's resolver and are recorded as the generator's inputs;
 `lex`, `moduleInterface`, `moduleCode` and `contractOf` cross as a host
 encoding and a synthesized decoder. A generator the engine declines is an
@@ -596,23 +597,22 @@ a copy. Each span carries its author (`gen::Author`) and where its errors show
 with its position and every hole; the loader stamps it with its module's key
 after the parse, in the walk that stamps `panic`, so a quote's text is written
 by the module that holds it. A `String`, number or
-`Bool` in a hole, and `raw` text, is the call site's. A `Code` result reaches
-the loader as `gen::Written`: the text and a span table sorted by offset. The
-cache entry stores the table inside the authenticated body, and `OriginMaps`
-reads its regions from the table's `shown` column (`add_spans`). A `String`
-result has no table: its regions come from `//@origin` lines and its imports
-are judged by its banner. A report is a `Diag` span (`gen::Kind::Diag`): the
-loader lifts a `Code` result's diagnostics from its `Diag` spans alone, and
-`render` prints a `Diag` span as the `//@diag` line a `String` generator
-writes. No module generator in std returns `String`; both paths stand while a
-test or example generator does, and the commit that deletes the last one
-deletes the directive scan, the `//@diag` text and the banner rule.
+`Bool` in a hole is the call site's. A result reaches the loader as
+`gen::Written`: the text, a span table sorted by offset, and the reports. A
+report is a `Diag` span (`gen::Kind::Diag`) that writes no text; the loader
+reads it as a diagnostic, and `render` skips it. The cache entry stores the
+table and the reports inside the authenticated body, and `OriginMaps` reads
+its regions from the table's `shown` column (`add_spans`). The loader refuses
+an imported generator that does not return `Code` before it runs.
 
 The link judges each import of a generated module by the span under its
 `import` keyword (`loader::author_of`, the parser records the keyword's column
 in `ImportDecl::col`): a `File` span as that module, a `CallSite` span as the
 file that wrote the generator call. `admits` stays the one visibility rule. A
-refusal there carries a note naming the author and its line (`written_by`).
+refusal there carries a note naming the author and its line (`written_by`). A
+name the call site wrote, a `CallSite` span, resolves in the importer without
+an import (`call_site_wrote`); a name a quote spells resolves in the quote's
+module.
 
 ## What each gate proves
 

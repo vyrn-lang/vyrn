@@ -507,7 +507,6 @@ rules! {
     QuoteGlued { t } "a hole glued to a word writes part of a name, so it takes a `Name`, found {t}"
         fix "make the `Name` with `name(s)`, which checks the identifier";
     RenderType { t } "`render` needs a Code value, found {t}";
-    RawAtArity { got } "`rawAt` takes 4 arguments (text, path, line, col), got {got}";
     BytesArity { got } "`bytes` takes 1 argument, or 3 with a byte range, got {got}";
     BytesType { t } "`bytes` needs a String, found {t}";
     UnaryOperand { what, admits, t } "`{what}` needs {admits}, found {t}";
@@ -555,7 +554,7 @@ rules! {
     ToJsonArity { got } "`toJson` takes 1 argument (a value), got {got}";
     ToJsonUncodable { off } "`toJson` cannot encode `{off}` (not a codable type)";
     DeriveArity {} "`derive` takes a generator's name and a value: `derive(g, x)`";
-    DeriveUnknownGen { g } "`derive` needs a `gen fn {g}(t: TypeArg)` returning `Code` or `String`; `{g}` is not one";
+    DeriveUnknownGen { g } "`derive` needs a `gen fn {g}(t: TypeArg)` returning `Code`; `{g}` is not one";
     DeriveUncodable { g, off } "`derive({g}, ..)` cannot reflect `{off}`: it has no wire form";
     DeriveEntryMismatch { g, got, want }
         "generator `{g}` wrote the entry `{got}`, and this call needs `{want}`";
@@ -986,6 +985,7 @@ rules! {
         "`{name}` is not an imported `gen fn` — a generator import target must be an \
         exported `gen fn` in a module this file imports";
     GenImportArity { name, want, got } "generator `{name}` takes {want} argument(s), got {got}";
+    GenImportNotCode { name, ret } "generator `{name}` returns `{ret}`; an imported generator returns `Code`";
     GenModuleReread { module, why } "cannot re-read generator module `{module}`: {why}";
     GenFailed { name, args, trap } "generator `{name}({args})` failed: {trap}";
     NamespaceBoundTwice { ns } "namespace `{ns}` is bound twice in this module";

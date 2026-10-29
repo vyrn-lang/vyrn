@@ -1,5 +1,5 @@
-gen fn helper(t: TypeArg) -> String {
-    return "x"
+gen fn helper(t: TypeArg) -> Code {
+    return vyrn"x"
 }
 
 fn twice(x: Int64) -> Int64 {

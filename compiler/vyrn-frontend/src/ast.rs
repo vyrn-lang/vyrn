@@ -269,7 +269,7 @@ pub struct Program {
     ///
     /// The loader fills this and the checker reads it: the checker never sees
     /// `imports`, and the loader does not resolve calls. Asking the linked
-    /// program instead lets one module's `fn raw` disable the builtin in every
+    /// program instead lets one module's `fn name` disable the builtin in every
     /// module (`examples/shadowbuiltin.vyrn`). `None` is the root module, as on
     /// [`Function::module`].
     pub surface_shadows: std::collections::HashSet<(Option<String>, String)>,
@@ -364,9 +364,7 @@ pub const DEFAULT_LOG_LEVEL: usize = 2;
 /// They are not reserved: a module that declares or imports one means its own.
 /// The question is asked of the calling module's scope, never of the linked
 /// program (see [`Program::surface_shadows`]).
-pub const SURFACE_BUILTINS: [&str; 8] = [
-    "render", "rawAt", "raw", "lex", "name", "diag", "codeAt", "at",
-];
+pub const SURFACE_BUILTINS: [&str; 6] = ["render", "lex", "name", "diag", "codeAt", "at"];
 
 pub fn is_surface_builtin(name: &str) -> bool {
     SURFACE_BUILTINS.contains(&name)

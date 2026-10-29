@@ -853,8 +853,6 @@ const LATTICE: &[(&str, &str, bool)] = &[
     ("contractOf", "gen-only", true),
     ("lex", "gen-only", true),
     ("render", "gen-only", true),
-    ("raw", "gen-only", true),
-    ("rawAt", "gen-only", true),
     ("name", "gen-only", true),
     ("diag", "gen-only", true),
     ("codeAt", "gen-only", true),
