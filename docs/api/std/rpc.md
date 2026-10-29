@@ -27,7 +27,7 @@ runtime lowering. Exported for `std/http`'s REST projection and
 ## rpcServer
 
 ```vyrn
-fn rpcServer(contract: String) -> String
+fn rpcServer(contract: String) -> Code
 ```
 
 Emits a module that imports the contract's procedures and exposes
@@ -36,7 +36,7 @@ Emits a module that imports the contract's procedures and exposes
 ## rpcClient
 
 ```vyrn
-fn rpcClient(contract: String) -> String
+fn rpcClient(contract: String) -> Code
 ```
 
 Emits the client: the contract's type declarations, one stub per procedure
@@ -46,16 +46,17 @@ passes the callback inline: `createPaste(req, |res| match res { .. })`.
 ## rpcInProcess
 
 ```vyrn
-fn rpcInProcess(contract: String) -> String
+fn rpcInProcess(contract: String) -> Code
 ```
 
 Emits the deterministic test and SSR flavor: a stub per procedure under the
-same name the wire client exposes, running the real procedure synchronously.
+same name the wire client exposes, running the real procedure synchronously
+through its `__real` import alias.
 
 ## rpc
 
 ```vyrn
-fn rpc(dir: String) -> String
+fn rpc(dir: String) -> Code
 ```
 
 Mounts every procedure module under `dir` at its derived path. Two procedures
@@ -64,7 +65,7 @@ deriving one path fail the build naming both.
 ## client
 
 ```vyrn
-fn client(dir: String) -> String
+fn client(dir: String) -> Code
 ```
 
 The calling side of an api directory. It reads interfaces, re-emits types and
@@ -73,7 +74,7 @@ never imports an api module, so no procedure body reaches a client bundle.
 ## clientInProcess
 
 ```vyrn
-fn clientInProcess(dir: String) -> String
+fn clientInProcess(dir: String) -> Code
 ```
 
 `client(dir)` with direct dispatch. A separate generator, because a generator

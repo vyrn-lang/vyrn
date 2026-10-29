@@ -90,6 +90,11 @@ fn origins(json: &str) -> Vec<Origin> {
             .next()
             .unwrap()
             .to_string();
+        // A page has no one declaration, so its origin is unlocated
+        // (`line == 0 && col == 0`) and points at nothing.
+        if line == 0 && col == 0 {
+            continue;
+        }
         out.push(Origin {
             symbol: symbol.to_string(),
             file,

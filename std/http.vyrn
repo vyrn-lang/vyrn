@@ -27,6 +27,7 @@ import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, to
 import { fnv1aStr, sha1 } from "std/hash"
 import { includes } from "std/arrays"
 import { importBlock, procImports } from "std/imports"
+import { join } from "std/code"
 // A path segment is wire text and a placeholder binds a value: `httpMatch`
 // decodes on the way in, `httpFill` encodes on the way out, with the RFC 3986
 // alphabet `std/ui` uses.
@@ -1196,109 +1197,144 @@ fn httpNamesOf(fields: Array<HttpField>) -> Array<String> {
 }
 
 /// The numeric field names as a Vyrn array literal.
-fn httpNumericLit(fields: Array<HttpField>) -> String {
-    let mut names: Array<String> = []
+gen fn httpNumericLit(fields: Array<HttpField>) -> Code {
+    let mut names: Array<Code> = []
     for f in fields {
         if f.numeric {
-            names.push("\"" + f.name + "\"")
+            names.push(vyrn"\{f.name}")
         }
     }
-    return "[" + joinWith(names, ", ") + "]"
+    return vyrn"[\{join(names, vyrn", ")}]"
 }
 
 /// The `where` regex of a procedure's path type: plain bytes, or a placeholder
-/// the input type has a field for. Emitted into a Vyrn string literal, so each
-/// output backslash is doubled.
+/// the input type has a field for.
 fn httpPathRegex(fields: Array<String>) -> String {
     let mut alts = "[^{}]"
     for f in fields {
-        alts = alts + "|\\\\{" + f + "\\\\}"
+        alts = alts + "|\\{" + f + "\\}"
     }
     return "(" + alts + ")*"
 }
 
-/// One procedure's projection: the path type that checks its placeholders, the
-/// decode-call-encode adapter, and the constructor the projection file calls.
-gen fn httpProcedure(f: FnInfo, iface: ModuleInterface, base: String) -> String {
-    let cap = httpCapFirst(f.name)
-    let run = "httpRun" + cap
-    let pathType = "Path" + cap
-    let mut fields: Array<HttpField> = []
+/// The decode-call-encode adapter `httpRun<cap>`: a decode failure is a 422,
+/// a `Unit` return a 204.
+gen fn httpAdapter(f: FnCode, fields: Array<HttpField>, cap: String) -> Code {
+    let run = name("httpRun" + cap)
+    let unit = name("httpRun" + cap + "Unit")
+    let call = name(f.info.name + "__real")
+    let unprocessable = vyrn"""Some(Response { status: 422, contentType: "application/json", body: toJson(HttpIssues { issues: issues }), vary: "", headers: [:] })"""
     if f.params.length == 1 {
-        fields = httpFields(f.params[0].spelling, iface)
-    }
-    let names = httpNamesOf(fields)
-    let mut out = "/// Path patterns `" + f.name + "` accepts"
-    if fields.length > 0 {
-        out = out + ": " + joinWith(httpBraced(names), ", ") + " (the fields of `" + f.params[0].spelling + "`)"
-    } else {
-        out = out + " — no placeholders (it takes no input)"
-    }
-    out = out + ".\n"
-    out = out + "export type " + pathType + " = String where value =~ \"" + httpPathRegex(names) + "\"\n"
-    out = out + "fn " + run + "(req: Request, ps: Map<String, String>) -> Option<Response> {\n"
-    let call = f.name + "__real"
-    if f.params.length == 1 {
-        let reqType = f.params[0].spelling
-        out = out + "    return match fromJson<" + reqType + ">(httpInput(ps, req.body, " + httpNumericLit(fields) + ")) {\n"
-        if f.ret == "" {
-            out = out + "        Valid(input) => " + run + "Unit(input),\n"
-            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\", headers: [:] }),\n"
-            out = out + "    }\n}\n"
-            out = out + "fn " + run + "Unit(input: " + reqType + ") -> Option<Response> {\n"
-            out = out + "    " + call + "(input)\n"
-            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] })\n}\n"
-        } else {
-            out = out + "        Valid(input) => Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "(input)), vary: \"\", headers: [:] }),\n"
-            out = out + "        Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues }), vary: \"\", headers: [:] }),\n"
-            out = out + "    }\n}\n"
-        }
-    } else {
-        if f.ret == "" {
-            out = out + "    " + call + "()\n"
-            out = out + "    return Some(Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\", headers: [:] })\n}\n"
-        } else {
-            out = out + "    return Some(Response { status: 200, contentType: \"application/json\", body: toJson(" + call + "()), vary: \"\", headers: [:] })\n}\n"
+        let req = f.params[0].ty
+        return match f.ret {
+            Some(_) => vyrn"""
+                fn \{run}(req: Request, ps: Map<String, String>) -> Option<Response> {
+                    return match fromJson<\{req}>(httpInput(ps, req.body, \{httpNumericLit(fields)})) {
+                        Valid(input) => Some(Response { status: 200, contentType: "application/json", body: toJson(\{call}(input)), vary: "", headers: [:] }),
+                        Invalid(issues) => \{unprocessable},
+                    }
+                }
+
+                """,
+            None => vyrn"""
+                fn \{run}(req: Request, ps: Map<String, String>) -> Option<Response> {
+                    return match fromJson<\{req}>(httpInput(ps, req.body, \{httpNumericLit(fields)})) {
+                        Valid(input) => \{unit}(input),
+                        Invalid(issues) => \{unprocessable},
+                    }
+                }
+                fn \{unit}(input: \{req}) -> Option<Response> {
+                    \{call}(input)
+                    return Some(Response { status: 204, contentType: "application/json", body: "", vary: "", headers: [:] })
+                }
+
+                """,
         }
     }
-    out = out + "/// `" + f.name + "` at `" + base + "` + `path`.\n"
-    out = out + "export fn " + f.name + "(path: " + pathType + ") -> Route {\n"
-    out = out + "    return httpRoute(\"" + base + "\" + path, " + run + ", \"" + f.name + "\")\n}\n"
-    return out
+    return match f.ret {
+        Some(_) => vyrn"""
+            fn \{run}(req: Request, ps: Map<String, String>) -> Option<Response> {
+                return Some(Response { status: 200, contentType: "application/json", body: toJson(\{call}()), vary: "", headers: [:] })
+            }
+
+            """,
+        None => vyrn"""
+            fn \{run}(req: Request, ps: Map<String, String>) -> Option<Response> {
+                \{call}()
+                return Some(Response { status: 204, contentType: "application/json", body: "", vary: "", headers: [:] })
+            }
+
+            """,
+    }
 }
 
-fn httpBraced(fields: Array<String>) -> Array<String> {
-    let mut out: Array<String> = []
-    for f in fields {
-        out.push("{" + f + "}")
+/// One procedure's projection: the path type that checks its placeholders, the
+/// decode-call-encode adapter, and the constructor the projection file calls.
+gen fn httpProcedure(f: FnCode, iface: ModuleInterface, base: String) -> Code {
+    let cap = httpCapFirst(f.info.name)
+    let run = name("httpRun" + cap)
+    let pathType = name("Path" + cap)
+    let proc = name(f.info.name)
+    let mut fields: Array<HttpField> = []
+    if f.params.length == 1 {
+        fields = httpFields(f.params[0].info.spelling, iface)
     }
-    return out
+    let mut braced: Array<Code> = []
+    for n in httpNamesOf(fields) {
+        braced.push(vyrn"{\{name(n)}}")
+    }
+    let doc = if fields.length > 0 {
+        vyrn"""
+            /// Path patterns `\{proc}` accepts: \{join(braced, vyrn", ")} (the fields of `\{f.params[0].ty}`).
+            """
+    } else {
+        vyrn"""
+            /// Path patterns `\{proc}` accepts — no placeholders (it takes no input).
+            """
+    }
+    let adapter = httpAdapter(f, fields, cap)
+    return doc + vyrn"""
+
+        export type \{pathType} = String where value =~ \{httpPathRegex(httpNamesOf(fields))}
+
+        """ + adapter + vyrn"""
+        /// `\{proc}` at `\{base} + path`.
+        export fn \{proc}(path: \{pathType}) -> Route {
+            return httpRoute(\{base} + path, \{run}, \{f.info.name})
+        }
+
+        """
 }
 
 /// The REST projection of one procedure module: a placeholder-checked
 /// constructor per procedure, under the base path its stem derives.
-export gen fn http(module: String) -> String {
-    let iface = moduleInterface(module)
-    let err = match validateContract(iface) {
-        Some(d) => render(d),
-        None => "",
+export gen fn http(module: String) -> Code {
+    let m = moduleCode(module)
+    return match validateContract(m.iface) {
+        Some(err) => err,
+        None => httpModule(m, module),
     }
-    if err != "" {
-        return err
-    }
+}
+
+gen fn httpModule(m: ModuleCode, module: String) -> Code {
     let base = httpBasePath(module)
-    let mut out = "/// Generated by std/http `http` — do not edit.\n"
-    out = out + "import { Route, httpRoute, httpInput } from \"std/http\"\n"
-    out = out + render(importBlock(iface, module, procImports(iface, true))) + "\n"
-    out = out + "type HttpIssues = { issues: Array<Issue> }\n"
+    let mut out = vyrn"""
+        /// Generated by std/http `http` — do not edit.
+        import { Route, httpRoute, httpInput } from "std/http"
+
+        """
+    out = out + importBlock(m.iface, module, procImports(m.iface, true)) + vyrn"""
+
+        type HttpIssues = { issues: Array<Issue> }
+
+        """
     let mut syms: Array<Symbol> = []
-    for f in iface.functions {
-        out = out + httpProcedure(f, iface, base)
-        syms.push(symbol(f.name, f.origin, []))
-        syms.push(symbol("Path" + httpCapFirst(f.name), f.origin, []))
+    for f in m.functions {
+        out = out + httpProcedure(f, m.iface, base)
+        syms.push(symbol(f.info.name, f.info.origin, []))
+        syms.push(symbol("Path" + httpCapFirst(f.info.name), f.info.origin, []))
     }
-    out = out + symbolMapFn("http(" + module + ")", syms)
-    return out
+    return out + symbolMapFn("http(" + module + ")", syms)
 }
 
 test "httpInput lets a placeholder win over a body field of the same name" {

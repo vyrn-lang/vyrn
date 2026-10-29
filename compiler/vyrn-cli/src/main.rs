@@ -1300,44 +1300,39 @@ fn contract_verdict(
 /// `vyrn routes [file]`: the resolved wire table, with where each path came
 /// from.
 ///
-/// Rows come from three channels, and none of them computes a path, so the
-/// table and the mounted router cannot disagree: the `//@route` directives a
-/// mounting generator emits (pages included), the symbol maps
-/// (`--json` only, for each route's declaration), and the arguments of the
-/// program's `mount(..)` call for hand-written lists ([`mounted_routes_wasm`]).
-/// The channels are unioned.
+/// Rows come from two channels, and neither computes a path, so the table and
+/// the mounted router cannot disagree: the symbol maps a mounting generator
+/// bakes in (rpc procedures and pages), and the arguments of the program's
+/// `mount(..)` call for hand-written lists ([`mounted_routes_wasm`]). A
+/// hand-written row joins only on a method and path no map holds. The table
+/// and `--json` print the same rows.
 fn routes_cmd(call: &Call) -> Outcome {
     let (p, path) = call.root()?;
     let root_key = dos_to_slash(&path);
     let source = read_source(&root_key)?;
     let graph = p.graph(&root_key, &source)?;
-    let mods = generated(&graph);
-    // `(method, path, procedure, source)`, de-duplicated: a page or api
-    // directory reached through two roots generates the same table twice.
-    let mut rows: Vec<(String, String, String, String)> = Vec::new();
-    for (_, src) in &mods {
-        // A `//@route` counts only where the lexer says a comment begins: a
-        // generator copies string literals through verbatim.
-        let comments = vyrn_frontend::origin::comment_lines(src);
-        for (i, line) in src.lines().enumerate() {
-            if comments.as_ref().is_some_and(|c| !c.contains(&(i + 1))) {
-                continue;
-            }
-            let Some(rest) = line.strip_prefix("//@route ") else {
+    // De-duplicated: a page or api directory reached through two roots, or
+    // mapped by both `rpc` and `client`, states the same row twice. The first
+    // located map entry gives the row its declaration.
+    let mut rows: Vec<RouteRow> = Vec::new();
+    for (_, src) in generated(&graph) {
+        for m in vyrn_frontend::symbolmap::read(src) {
+            let (Some(method), Some(path), Some(key), Some(source)) = (
+                m.derived("method"),
+                m.derived("path"),
+                m.derived("key"),
+                m.derived("source"),
+            ) else {
                 continue;
             };
-            let f: Vec<&str> = rest.split_whitespace().collect();
-            if f.len() < 4 {
-                continue;
-            }
-            let row = (
-                f[0].to_string(),
-                f[1].to_string(),
-                f[2].to_string(),
-                f[3].to_string(),
-            );
-            if !rows.contains(&row) {
-                rows.push(row);
+            let row = [method, path, key, source].map(str::to_string);
+            if !rows.iter().any(|r| r.fields == row) {
+                // An unknown position is `line == 0 && col == 0`.
+                let located = m.line != 0 || m.col != 0;
+                rows.push(RouteRow {
+                    fields: row,
+                    origin: located.then_some(m),
+                });
             }
         }
     }
@@ -1354,9 +1349,14 @@ fn routes_cmd(call: &Call) -> Outcome {
     {
         Ok(mounted) => {
             for (method, path, procedure) in mounted {
-                let row = (method, path, procedure, "explicit".to_string());
-                if !rows.iter().any(|x| x.0 == row.0 && x.1 == row.1) {
-                    rows.push(row);
+                if !rows
+                    .iter()
+                    .any(|x| x.fields[0] == method && x.fields[1] == path)
+                {
+                    rows.push(RouteRow {
+                        fields: [method, path, procedure, "explicit".to_string()],
+                        origin: None,
+                    });
                 }
             }
         }
@@ -1364,41 +1364,42 @@ fn routes_cmd(call: &Call) -> Outcome {
             "note: only derived routes are listed — the mounted router could not be read: {e}"
         ),
     }
+    // A projection puts two methods on one path.
+    rows.sort_by(|a, b| (&a.fields[1], &a.fields[0]).cmp(&(&b.fields[1], &b.fields[0])));
     if call.has("--json") {
-        return Ok(routes_json(&mods, rows));
+        return Ok(routes_json(&rows));
     }
     if rows.is_empty() {
         println!("(no derived routes in {root_key})");
         return Ok(ExitCode::SUCCESS);
     }
-    // A projection puts two methods on one path.
-    rows.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
-    let w0 = rows
-        .iter()
-        .map(|r| r.0.len())
-        .max()
-        .unwrap_or(6)
-        .max("method".len());
-    let w1 = rows
-        .iter()
-        .map(|r| r.1.len())
-        .max()
-        .unwrap_or(4)
-        .max("path".len());
-    let w2 = rows
-        .iter()
-        .map(|r| r.2.len())
-        .max()
-        .unwrap_or(9)
-        .max("procedure".len());
+    let width = |i: usize, head: &str| {
+        rows.iter()
+            .map(|r| r.fields[i].len())
+            .max()
+            .unwrap_or(0)
+            .max(head.len())
+    };
+    let (w0, w1, w2) = (width(0, "method"), width(1, "path"), width(2, "procedure"));
     println!(
         "{:w0$}  {:w1$}  {:w2$}  source",
         "method", "path", "procedure"
     );
-    for (method, path, proc, src) in &rows {
+    for RouteRow {
+        fields: [method, path, proc, src],
+        ..
+    } in &rows
+    {
         println!("{method:w0$}  {path:w1$}  {proc:w2$}  {src}");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// One row of `vyrn routes`: method, path, procedure and source, and the
+/// declaration its symbol map names, if the map locates one.
+struct RouteRow {
+    fields: [String; 4],
+    origin: Option<vyrn_frontend::symbolmap::MappedSymbol>,
 }
 
 /// `vyrn routes`'s hand-written channel: the arguments of every `mount(..)` the
@@ -1407,8 +1408,8 @@ fn routes_cmd(call: &Call) -> Outcome {
 /// A copy of the program swaps its `main` for one that prints `std/http`'s
 /// `mountedRows` of each call's three route lists, and runs in the embedded
 /// engine with stdout captured. Each row is the method, the path, and for a
-/// `Route` the procedure. A `*` row (a `surface(..)`) is dropped: the directive
-/// channel lists its members.
+/// `Route` the procedure. A `*` row (a `surface(..)`) is dropped: the symbol
+/// maps list its members.
 ///
 /// An argument that names a local of its enclosing function cannot be lifted
 /// into the new `main`, so the compile fails. A `mount` other than
@@ -1492,50 +1493,12 @@ fn mounted_routes_wasm(
     Ok(rows)
 }
 
-/// `vyrn routes --json`: the wire table, each route with the declaration its
-/// symbol map names. `origin` is `null` for a route no map covers.
-fn routes_json(
-    mods: &[(&str, &str)],
-    directives: Vec<(String, String, String, String)>,
-) -> ExitCode {
-    /// `(method, path, procedure, source, origin)`.
-    type Row = (
-        String,
-        String,
-        String,
-        String,
-        Option<vyrn_frontend::symbolmap::MappedSymbol>,
-    );
-    let mut rows: Vec<Row> = directives
-        .into_iter()
-        .map(|(method, path, proc, src)| (method, path, proc, src, None))
-        .collect();
-    for (_, src) in mods {
-        for m in vyrn_frontend::symbolmap::read(src) {
-            let Some(path) = m.derived("path") else {
-                continue;
-            };
-            let method = m.derived("method").unwrap_or("POST").to_string();
-            let source = m.derived("source").unwrap_or("convention").to_string();
-            match rows.iter_mut().find(|r| r.0 == method && r.1 == path) {
-                // Every generator that maps a procedure names the same
-                // declaration, so the first one settles it.
-                Some(row) => {
-                    if row.4.is_none() {
-                        row.4 = Some(m);
-                    }
-                }
-                None => {
-                    let path = path.to_string();
-                    let proc = m.decl.clone();
-                    rows.push((method, path, proc, source, Some(m)));
-                }
-            }
-        }
-    }
-    rows.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
+/// `vyrn routes --json`: the rows `routes_cmd` collected, each with its
+/// declaration, or `null` when no map locates one.
+fn routes_json(rows: &[RouteRow]) -> ExitCode {
     println!("[");
-    for (i, (method, path, proc, source, origin)) in rows.iter().enumerate() {
+    for (i, RouteRow { fields, origin }) in rows.iter().enumerate() {
+        let [method, path, proc, source] = fields;
         let comma = if i + 1 == rows.len() { "" } else { "," };
         let origin = match origin {
             Some(m) => format!(

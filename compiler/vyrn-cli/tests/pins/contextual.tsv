@@ -6,7 +6,7 @@ gen	0	3	0	0	3
 test	0	3	1	0	4
 bench	0	3	1	0	4
 panic	0	1	1	0	2
-from	0	2	0	0	2
+from	0	3	0	0	3
 as	0	2	0	0	2
 extern	0	3	0	0	3
 lazy	0	1	0	0	1
@@ -14,4 +14,4 @@ logging	0	2	0	0	2
 contract	0	1	0	0	1
 to	0	1	0	0	1
 await	0	1	0	0	1
-all	0	25	6	0	31
+all	0	26	6	0	32

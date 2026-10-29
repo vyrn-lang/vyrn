@@ -53,12 +53,12 @@ in emission order.
 ## symbolMapFn
 
 ```vyrn
-fn symbolMapFn(module: String, symbols: Array<Symbol>) -> String
+fn symbolMapFn(module: String, symbols: Array<Symbol>) -> Code
 ```
 
 The map declaration to append to a generated module.
 
-The JSON goes through a code quote: `\{json}` sits in expression position,
-so the compiler's own escaping makes it a string literal, with no second
-escaper to disagree with the lexer. The reader finds the declaration by the
-`symbolMap` prefix, since `mapSlug` names it.
+The JSON is a `String` hole, so the compiler's own escaping makes it a
+string literal, with no second escaper to disagree with the lexer. The
+reader finds the declaration by the `symbolMap` prefix, since `mapSlug`
+names it.

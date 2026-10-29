@@ -13,7 +13,6 @@ std/html childPath	identity+fresh(end)		identity+fresh(end)	agrees
 std/html listInsert	identity+fresh(inside)		identity+fresh(inside)	agrees
 std/html listMove	unknown	it returns an array the body did not build	gather	differs
 std/http httpNamesOf	fresh		fresh	agrees
-std/http httpBraced	identity pointwise		identity pointwise	agrees
 std/json copyJsonArray	identity pointwise		identity	differs
 std/json copyJsonFields	identity field-update(value)		identity	differs
 std/json sortKeysArray	identity pointwise		identity pointwise	agrees
