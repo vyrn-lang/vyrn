@@ -751,20 +751,6 @@ fn author_of(m: &Module, line: usize, col: usize) -> Judged<'_> {
     }
 }
 
-/// A note naming who wrote the import at `line:col` of generated module `m`,
-/// for a refusal there; `None` for a module without a span table. A module is
-/// spelled as an import in the generator's importer would spell it.
-fn written_by(m: &Module, line: usize, col: usize, opts: &LoadOptions) -> Option<String> {
-    Some(match author_at(m, line, col)? {
-        (Author::File { key, .. }, at) => {
-            let dir = dir_of(generated_importer(&m.key).unwrap_or(&m.key));
-            let shown = import_specifier(dir, key, opts.std_root.as_deref());
-            format!("written by `{shown}` at line {at}")
-        }
-        (Author::CallSite, _) => "written as data by the generator call".to_string(),
-    })
-}
-
 /// Whether the call site wrote `name` on generated line `line` of module `m`:
 /// a span of the call site's whose text is `name`. False for a hand-written
 /// module.
@@ -4425,13 +4411,21 @@ fn link(
         );
         (!admitted).then_some(to)
     };
-    // A refusal of an import a generator wrote names the import's author.
+    // A refusal of an import a generator wrote shows at the line its author
+    // wrote the `import` keyword on, as an error in copied input shows in the
+    // input; the note names the generated module and its generator call.
     let refused_import = |m: &Module, imp: &ImportDecl, line: usize, rule: Rule| {
         let d = load_error(&m.key, root_key, line, rule);
-        match written_by(m, imp.line, imp.col, opts) {
-            Some(note) => d.with_note(note),
-            None => d,
-        }
+        let Some((Author::File { key, .. }, at)) = author_at(m, imp.line, imp.col) else {
+            return d;
+        };
+        let note = format!(
+            "in generated code {}:{line} (see `vyrn emit-gen`)",
+            readable(&m.key)
+        );
+        let mut d = in_module(Diagnostic { line: at, ..d }, key, root_key).with_note(note);
+        d.from_generated = true;
+        d
     };
     for m in &modules {
         let mut visible: HashSet<String> = HashSet::new(); // foreign names imported here

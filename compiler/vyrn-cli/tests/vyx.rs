@@ -1331,7 +1331,7 @@ fn a_script_import_is_judged_as_its_vyx() {
         "{err}"
     );
     assert!(
-        err.contains("written by `./comp/Widget.vyx` at line 2"),
+        err.contains("Widget.vyx:2:0: `runQuery` is exported"),
         "{err}"
     );
 }

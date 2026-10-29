@@ -609,7 +609,8 @@ The link judges each import of a generated module by the span under its
 `import` keyword (`loader::author_of`, the parser records the keyword's column
 in `ImportDecl::col`): a `File` span as that module, a `CallSite` span as the
 file that wrote the generator call. `admits` stays the one visibility rule. A
-refusal there carries a note naming the author and its line (`written_by`). A
+refusal there shows at the author's file and the line it wrote the `import`
+keyword on, with a note naming the generated module and its generator call. A
 name the call site wrote, a `CallSite` span, resolves in the importer without
 an import (`call_site_wrote`); a name a quote spells resolves in the quote's
 module.
