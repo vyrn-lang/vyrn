@@ -2724,7 +2724,7 @@ std/icons.vyrn	noLicense	yes	no, the result is String, not an integer, Bool or a
 std/icons.vyrn	licenseLine	yes	no, its effect set is alloc
 std/icons.vyrn	iconsEmit	no, it calls `camel`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/icons.vyrn	reservedNames	yes	no, its effect set is alloc
-std/icons.vyrn	iconHelper	yes	no, its effect set is alloc
+std/icons.vyrn	iconHelper	yes	no, its effect set is gen-only
 std/icons.vyrn	glyphSource	no, it calls `resolveGlyph`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/icons.vyrn	qualified	yes	no, its effect set is alloc
 std/icons.vyrn	aliasDepth	yes	yes, emulated Int64
@@ -2739,7 +2739,6 @@ std/icons.vyrn	iconRequest	no, it calls `parseJson`, which is not trap-free	no, 
 std/icons.vyrn	iconCollectionOf	yes	no, its effect set is alloc
 std/icons.vyrn	iconNowhere	yes	no, its effect set is alloc
 std/icons.vyrn	iconProviderModule	no, it calls `camel`, which is not trap-free	no, its effect set is alloc, gen-only
-std/icons.vyrn	lit	yes	no, its effect set is alloc, gen-only
 std/icons.vyrn	iconAttrs	yes	no, its effect set is alloc
 std/icons.vyrn	iconAttrList	yes	no, its effect set is alloc
 std/icons.vyrn	iconAttrOne	yes	no, its effect set is alloc
@@ -2750,6 +2749,8 @@ std/icons.vyrn	camel	no, it keeps an index check	no, its effect set is alloc
 std/icons.vyrn	beforeColon	yes	no, its effect set is alloc
 std/icons.vyrn	afterColon	yes	no, its effect set is alloc
 std/icons.vyrn	jsonKind	yes	no, `j` is Json, not an integer, Bool or a read array of one
+std/icons.vyrn	moduleText	no, it calls `iconsModule`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/icons.vyrn	providerText	no, it calls `iconProvider`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/icons.vyrn	toyCollection	yes	no, the result is String, not an integer, Bool or a read array of one
 std/imports.vyrn	procImports	yes	no, its effect set is alloc, gen-only
 std/imports.vyrn	importBlock	yes	no, its effect set is alloc, gen-only

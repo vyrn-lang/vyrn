@@ -271,7 +271,7 @@ fn two_collections_in_one_program_and_a_misspelled_glyph() {
     let emitted = run_ok(&dir, &["emit-gen", "main.vyrn"]);
     assert_eq!(
         emitted
-            .matches("/// License: MIT — https://example.test/L")
+            .matches("/// \"License: MIT — https://example.test/L\"")
             .count(),
         2,
         "each collection's terms belong in its own module: {emitted}"

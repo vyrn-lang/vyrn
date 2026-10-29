@@ -55,7 +55,7 @@
 ///
 /// A provider is an ordinary module that exports a `gen fn` of this shape:
 ///
-///   export gen fn <TagName>(attrs: String, file: String, line: Int64, col: Int64) -> String
+///   export gen fn <TagName>(attrs: String, file: String, line: Int64, col: Int64) -> Code
 ///
 ///   attrs  the tag's static attributes as a JSON object of strings, in source
 ///          order, written by `std/json` so `std/jsonread` reads it back exactly;

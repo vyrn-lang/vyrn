@@ -1,6 +1,6 @@
 /// `<Icon name="..."/>` in a template resolves to `Icon` here; with no `label` the glyph is `aria-hidden`.
 import { iconProvider } from "std/icons"
 
-export gen fn Icon(attrs: String, file: String, line: Int64, col: Int64) -> String {
+export gen fn Icon(attrs: String, file: String, line: Int64, col: Int64) -> Code {
     return iconProvider(attrs, file, line, col, "bytesize codex")
 }
