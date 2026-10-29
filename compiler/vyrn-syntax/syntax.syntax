@@ -1,0 +1,47 @@
+// The grammar of a .syntax file, written in itself. A definition starts in
+// column 0; an indented line continues it.
+syntax Syntax
+
+expect ^SyntaxExpected(token=token)
+
+file = (blank / note / def)* (eof / ^SyntaxStray)
+blank = [ \t\r]* '\n'
+note = '//' (!'\n' .)* ('\n' / eof)
+def = !ws (directive / rule) [ \t\r]* note? ('\n' / eof)
+
+directive = 'syntax' gap name
+          / ('keyword' / 'token') gap name gap lit
+          / 'opener' (gap lit)+
+          / 'nest' gap digit+ gap throw
+          / 'expect' gap throw
+          / 'row' gap name
+rule = ('nest' gap)? name sp '=' sp alt (sp 'fail' sp throw)?
+
+// Inside a definition, a newline is a space when the next line is indented.
+gap = [ \t]+
+sp = ([ \t] / '\r'? '\n' &[ \t] / '//' (!'\n' .)* &('\r'? '\n' [ \t]))*
+alt = seq (sp '/' sp seq)*
+seq = prefix (@(sp !('/' / stop) prefix))* / &(sp ('/' / ')'))
+stop = ('until' / 'sep' / 'recover' / 'fail') ![A-Za-z0-9_]
+prefix = ('&' / '!' / '@')* (name ':')? suffix
+suffix = primary ('*' / '+' / '?')*
+primary = '(' sp alt? sp ')'
+        / lit
+        / class
+        / '.'
+        / throw
+        / '~' throw
+        / ('+' / '-') name '(' sp alt sp ')'
+        / '?' name
+        / 'split' gap lit
+        / 'many' gap prefix sp 'until' sp prefix (sp 'recover' sp ('stmt' / 'decl' sp prefix))?
+        / 'list' gap prefix sp 'sep' sp prefix sp 'until' sp prefix
+        / 'climb' gap prefix sp '{' (sp level)* sp '}'
+        / 'embed' '(' sp alt sp ',' sp name (sp ',' sp ('wrap' / 'trailing') sp '=' sp throw)* sp ')'
+        / !stop name
+level = ('left' / 'right') (gap lit)+ ';'?
+throw = '^' name ('(' hole (',' sp hole)* ')')? ('@' (name / '(' name ',' sp name ')'))?
+hole = name '=' (lit / '.:?' / '.' / name)
+name = [A-Za-z_] [A-Za-z0-9_.]*
+lit = '\'' ('\\' . / !'\'' .)* '\''
+class = '[' ('\\' . / !']' .)* ']'

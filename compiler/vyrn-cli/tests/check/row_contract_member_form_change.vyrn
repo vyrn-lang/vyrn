@@ -1,0 +1,6 @@
+contract C {
+    let a: Int64
+    fn a() -> Int64
+}
+
+fn main() -> Int64 { return 0 }

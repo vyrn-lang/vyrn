@@ -1,0 +1,5 @@
+contract C {
+    fn *(..) -> Int64 = 1
+}
+
+fn main() -> Int64 { return 0 }

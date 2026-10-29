@@ -54,6 +54,11 @@ rustls-ffi = { version = "=0.15.7", default-features = false, features = ["ring"
 [build-dependencies]
 webpki-root-certs = "1"
 
+# The grammar engine, for `tests/syntaxgate.rs` alone: the `vyrn` binary does
+# not link it.
+[dev-dependencies]
+vyrn-syntax = { path = "../vyrn-syntax" }
+
 # `allocs` wraps the allocator in a per-phase counter (`VYRN_BUILD_PROFILE=allocs`).
 # Off by default: the counter's load in every allocation cost 2.5% to 3.7% of a
 # build. `tests/compiler_scaling.rs` and `scripts/check-allocs.sh` need it.

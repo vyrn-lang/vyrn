@@ -1,0 +1,5 @@
+protocol P {
+    type A = Int64
+}
+
+fn main() -> Int64 { return 0 }

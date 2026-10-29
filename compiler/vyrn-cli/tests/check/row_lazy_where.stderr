@@ -1,0 +1,1 @@
+row_lazy_where.vyrn:1:26: a `lazy` field may not carry an inline `where`: name the validated type and defer that (`field: lazy Body`)

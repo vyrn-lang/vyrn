@@ -1,0 +1,3 @@
+logging { sink: file(1) }
+
+fn main() -> Int64 { return 0 }

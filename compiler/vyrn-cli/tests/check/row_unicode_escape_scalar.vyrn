@@ -1,0 +1,4 @@
+fn main() -> Int64 {
+    let s = "\u{D800}"
+    return 0
+}

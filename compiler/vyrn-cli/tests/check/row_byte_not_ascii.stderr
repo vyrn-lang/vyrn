@@ -1,0 +1,1 @@
+row_byte_not_ascii.vyrn:2:13: byte literal must be a single ASCII byte; write the UTF-8 bytes explicitly

@@ -1,0 +1,6 @@
+type Box<T> = { v: T }
+impl<A> P for Box<A> {
+    type A = Int64
+}
+
+fn main() -> Int64 { return 0 }

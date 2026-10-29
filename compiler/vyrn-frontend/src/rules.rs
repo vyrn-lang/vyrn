@@ -22,6 +22,28 @@ macro_rules! rules {
         }
 
         impl Rule {
+            /// Every row's name, in file order.
+            pub const ROWS: &'static [&'static str] = &[$(stringify!($rule)),*];
+
+            /// Returns the row's name.
+            pub fn name(&self) -> &'static str {
+                match self {
+                    $(Rule::$rule { .. } => stringify!($rule),)*
+                }
+            }
+
+            /// Builds the row named `row` with each hole's text from `text`, or
+            /// `None` for an unknown row or a hole `text` cannot fill. The
+            /// `syntaxgate` test renders a grammar's refusals with it.
+            pub fn from_text(row: &str, text: impl Fn(&str) -> Option<String>) -> Option<Rule> {
+                match row {
+                    $(stringify!($rule) => Some(Rule::$rule {
+                        $($hole: Hole::Text(text(stringify!($hole))?)),*
+                    }),)*
+                    _ => None,
+                }
+            }
+
             /// Renders the sentence by linked names, then one fix line per way
             /// out.
             pub fn render(&self) -> String {

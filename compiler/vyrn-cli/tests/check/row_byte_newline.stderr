@@ -1,0 +1,1 @@
+row_byte_newline.vyrn:2:13: raw newline in byte literal; write '\n'

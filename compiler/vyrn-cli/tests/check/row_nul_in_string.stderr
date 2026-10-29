@@ -1,0 +1,1 @@
+row_nul_in_string.vyrn:2:13: string literal contains a NUL byte; a Vyrn String is NUL-terminated and cannot hold one

@@ -1,0 +1,1 @@
+row_unknown_logging_field.vyrn:1:11: unknown `logging` field `color` (expected `level` or `sink`)

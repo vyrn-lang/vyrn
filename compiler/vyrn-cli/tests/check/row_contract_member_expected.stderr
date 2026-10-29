@@ -1,0 +1,1 @@
+row_contract_member_expected.vyrn:2:5: expected `let` or `fn` in contract `C`, found Type (a contract member is `let name: Type [= default]`, `fn name(..) -> T [= default]`, or the open rule `fn *(..) -> T`)

@@ -1,0 +1,305 @@
+// The Vyrn grammar: shape only. Lower-case rules are lexical, upper-case
+// rules syntactic. A refusal names its row in rules.rs; the sentence lives
+// there.
+syntax Vyrn
+
+// The reserved words, in the lexer's table order: the keyword list.
+keyword Fn 'fn'
+keyword Let 'let'
+keyword Mut 'mut'
+keyword If 'if'
+keyword Else 'else'
+keyword While 'while'
+keyword For 'for'
+keyword In 'in'
+keyword Drop 'drop'
+keyword Protocol 'protocol'
+keyword Import 'import'
+keyword Export 'export'
+keyword Impl 'impl'
+keyword Vself 'self'
+keyword Return 'return'
+keyword True 'true'
+keyword False 'false'
+keyword Type 'type'
+keyword Enum 'enum'
+keyword Where 'where'
+keyword Match 'match'
+keyword Region 'region'
+keyword Break 'break'
+keyword Continue 'continue'
+
+// Punctuation, two characters first. A literal yields to a longer spelling.
+token Arrow '->'
+token FatArrow '=>'
+token TildeMatch '=~'
+token EqEq '=='
+token NotEq '!='
+token LtEq '<='
+token GtEq '>='
+token AndAnd '&&'
+token OrOr '||'
+token QuestionQuestion '??'
+token Shl '<<'
+token Shr '>>'
+token LParen '('
+token RParen ')'
+token LBrace '{'
+token RBrace '}'
+token LBracket '['
+token RBracket ']'
+token Comma ','
+token Semi ';'
+token Colon ':'
+token Dot '.'
+token Plus '+'
+token Minus '-'
+token Star '*'
+token Slash '/'
+token Percent '%'
+token Eq '='
+token Lt '<'
+token Gt '>'
+token Bang '!'
+token Question '?'
+token Pipe '|'
+token Amp '&'
+token Caret '^'
+token Tilde '~'
+
+opener '//'
+
+nest 1024 ^NestingTooDeep(max='1024')
+
+// A literal that fails after its rule committed.
+expect ^Expected(pty=token, aty=found)
+
+// The rows the tree builder raises as each declaration closes: a token's value,
+// or a check that compares names or counts, which a grammar does not state.
+row IntOutOfRange
+row UnicodeEscapeDigits
+row UnicodeEscapeScalar
+row DuplicateLogging
+row ContractOpenRuleTwice
+row ContractMemberFormChange
+row ContractMemberTwice
+row ImplAssocTypeClash
+row ProjectionReceiver
+row InlineWhereBase
+row AwaitNotCall
+row LetPatternScrutinee
+row LetEmptyVariant
+row IndexAssignTarget
+row FieldAssignTarget
+row PushNoPlace
+row SkeletonDetail
+row SkeletonUnparsable
+
+// ---------------------------------------------------------------- tokens
+
+trivia = (ws / comment)*
+comment = '//' !('/' !'/') (!'\n' .)*
+doc = '//' '/' !'/' (!'\n' .)*
+scan = (trivia token)* trivia (eof / ^UnexpectedChar(c=.:?))
+token = string / byte / number / word / doc / punct
+
+word = (alpha / '_') (alnum / '_')*
+ident = !reserved word
+int = digit+ !('.' digit)
+number = digit+ ('.' digit+)?
+
+string = q:'"""' (!'"""' strItem)* ('"""' / ^UnterminatedString@q)
+       / q:'"' (!'"' strItem)* ('"' / ^UnterminatedString@q)
+strItem = '\0' ^NulInString@q / '\\' esc / .
+esc = eof ^UnterminatedEscape@q / '{' hole / 'u' uni / [ntr\\"] / ^UnknownEscape(other=.)@q
+uni = ('{' / ^UnicodeEscapeBrace@q) (!'}' .)* ('}' / ^UnterminatedUnicodeEscape@q)
+hole = ws* &'}' ^EmptyInterp@q
+     / embed(holeText, Expr, wrap=^InInterpolation(detail=inner)@q, trailing=^InterpolationTrailing(src=extent)@q) ('}' / ^UnterminatedInterp@q)
+holeText = (!'}' holeItem)*
+holeItem = '"' (!'"' ('\\' . / .))* ('"' / ^UnterminatedInterpString@q)
+         / '\'' (![\'\n] ('\\' . / .))* ('\'' / ^UnterminatedInterpChar@q)
+         / '//' (!'\n' .)*
+         / '{' holeText '}'?
+         / .
+// A string with no hole: an import path, a test name, an `export to` path.
+plainStr = &('"""' (!'"""' !('\\' '{') ('\\' . / .))* '"""' / '"' (!'"' !('\\' '{') ('\\' . / .))* '"') string
+
+byte = q:'\'' byteBody ('\'' / eof ^UnterminatedByte@q / ^SingleQuotedString@q)
+byteBody = eof ^UnterminatedByte@q
+         / '\'' ^EmptyByte@q
+         / '\\' (eof ^UnterminatedByteEscape@q / [ntr0\\'] / 'x' (hex hex / ^ByteHexDigits@q) / ^UnknownByteEscape(other=.)@q)
+         / '\n' ^ByteNewline@q
+         / [ -~]
+         / ^ByteNotAscii@q
+
+// ------------------------------------------------------------ declarations
+
+Ident = ident fail ^ExpectedIdent(found=found)@after
+Close = split '>'
+
+Module = many Item until eof recover decl ItemStart
+ItemStart = 'fn' / 'type' / 'protocol' / 'impl' / 'import' / 'export' / 'let' / 'logging'
+          / 'mut' 'fn' / 'extern' 'fn' / 'gen' 'fn' / 'test' plainStr / 'bench' plainStr / ContractHead
+ContractHead = 'contract' ident '{'
+Item = doc* (&eof / Export / Decl)
+
+Export = 'export' ( &(ExportTo 'extern' 'fn') ExportTo ^ExportToExtern / ExportTo? +exported(ExportTarget) )
+ExportTo = &('to' plainStr) 'to' plainStr (&(',' plainStr) ',' plainStr)*
+ExportTarget = &('fn' / 'type' / 'protocol' / 'extern' 'fn' / 'gen' 'fn' / ContractHead / 'mut' 'fn') Decl
+             / &'let' ^ModuleStateExport
+             / ^ExportNeedsDecl
+
+Decl = Import / TypeDecl / FnDecl / GenFn / MutFn / Protocol / Contract / Impl / Global
+     / Extern / Test / Bench / Logging / ~^TopLevelExpected(found=found)
+
+Import = i:'import' ( '*' ('as' / ^ImportStarAs(found=found)@(i,after)) ns:Ident ('from' / ^ImportStarFrom(ns=ns, found=found)@(i,after)) Source
+                    / 'type'? '{' ('}' ^ImportEmpty@(i,here) / list ImportName sep ',' until '}' '}')
+                      ('from' / ^ImportFrom(found=found)@(i,after)) Source ) ';'?
+ImportName = Ident ('as' Ident)?
+Source = plainStr / &(ident '(') ident Args / ^ImportPathExpected(found=found)@(i,here)
+
+TypeDecl = 'type' Ident ('<' list Ident sep ',' until '>' Close)? '=' +collect(EnumType / Type) ('where' Expr)? ';'?
+EnumType = 'enum' '{' list Variant sep ',' until '}' '}'
+Variant = Ident ('(' list Type sep ',' until ')' ')')?
+
+Global = 'let' 'mut'? n:Ident (':' Type)? ('=' / ^GlobalNeedsInit(name=n)) Expr ';'?
+
+FnDecl = 'fn' name:Ident TypeBinder? Params Ret? ('where' +nostruct(Expr))? Block
+GenFn = &('gen' 'fn') 'gen' FnDecl
+MutFn = &('mut' 'fn') 'mut' FnDecl
+TypeBinder = '<' list TParam sep ',' until '>' Close
+TParam = Ident (':' Ident ('+' Ident)*)?
+Params = '(' list Param sep ',' until ')' ')'
+Param = Ident ':' Cap? Type ('where' Expr)?
+CapWord = 'read' / 'modify' / 'consume'
+Cap = &(CapWord (ident / 'fn')) CapWord
+Ret = '->' ( &('consume' (ident / '(' / 'fn')) ^ConsumeResult
+           / &(('read' / 'modify') (ident / '(' / 'fn')) ^FreeFnCapability(name=name)
+           / Type )
+
+Extern = &('extern' 'fn') 'extern' 'fn' Ident Params ('->' Type)?
+         ( ?exported (&'{' Block / ^ExportedExternBody) / &'{' ^ExternBody / ';'? )
+Test = &('test' plainStr) 'test' plainStr Block
+Bench = &('bench' plainStr) 'bench' plainStr Block
+
+Logging = 'logging' '{' list LogField sep ',' until '}' '}'
+LogField = k:'level' ':' LogLevel / k:'sink' ':' Sink / k:Ident ':' ^UnknownLoggingField(other=k)@k
+LogLevel = 'trace' / 'debug' / 'info' / 'warn' / 'error' / n:Ident ^UnknownLogLevel(name=n)@k
+Sink = 'stderr' / 'stdout' / s:'file' '(' (plainStr / ^FileSinkPath(found=found)@s) ')' / n:Ident ^UnknownSink(other=n)@n
+
+Protocol = 'protocol' pname:Ident '{' many PAssoc until (doc* !'type') many PItem until '}' '}'
+PAssoc = doc* t:'type' n:Ident (&'=' ^AssocTypeRhs(aname=n)@t / ';'?)
+PItem = doc* ( &'}'
+             / t:'type' n:Ident (&'=' ^AssocTypeRhs(aname=n)@t / ^AssocTypeAfterMethods(aname=n, name=pname)@t)
+             / PMethod )
+PMethod = 'fn' Ident '(' SelfCap? 'self' (',' Ident ':' Cap? Type)* ')' ('->' RCap? Type)? ';'?
+SelfCap = &(CapWord 'self') CapWord
+RCap = &('consume' (ident / '(' / 'fn')) ^ConsumeResult / &(('read' / 'modify') (ident / '(' / 'fn')) ('read' / 'modify')
+
+Contract = &ContractHead 'contract' cname:Ident '{' many CItem until ('}' / eof) '}'
+CItem = doc* (&'}' / CLet / CFn / ^ContractMemberExpected(name=cname, found=found))
+CLet = 'let' m:Ident (':' / ^ContractMemberNeedsType(name=m)) Type ('=' Expr)? ';'?
+CFn = 'fn' ( '*' '(' ('.' '.' / list CParam sep ',' until ')') ')' ('->' Type)? (&'=' ^ContractOpenRuleDefault)? ';'?
+           / m:Ident '(' (&('.' '.') ^ContractMemberParams(name=m) / list CParam sep ',' until ')') ')' ('->' Type)? ('=' Expr)? ';'? )
+CParam = Ident ':' Type
+
+Impl = 'impl' TypeBinder? proto:Ident 'for' ty:Type '{' many IAssoc until (doc* !'type') many IItem until '}' '}'
+IAssoc = doc* 'type' Ident '=' Type ';'?
+IItem = doc* ( &'}' / t:'type' n:Ident ^ImplAssocTypeOrder(aname=n, protocol=proto, ty=ty)@t / IMethod )
+IMethod = 'fn' Ident '(' SelfCap? 'self' (',' Ident ':' Cap? Type)* ')' ('->' RCap? Type)? Block
+
+// ------------------------------------------------------------------ types
+
+Type = Inter ('|' Inter)*
+Inter = TypeAtom ('&' TypeAtom)*
+nest TypeAtom = RecordType / FnType / int / DottedType / NamedType
+FnType = 'fn' '(' list Type sep ',' until ')' ')' ('->' Type)?
+DottedType = &(ident '.') ident ('.' Ident)+ ('<' list Type sep ',' until '>' Close)?
+NamedType = 'Stream' '<' Type Close
+          / 'Array' '<' Type (',' (int / ^ArraySize))? Close
+          / 'SmallArray' '<' Type (',' / ^SmallArrayNeedsCapacity) (int / ^SmallArrayCapacityType) Close
+          / 'Map' '<' Type ',' Type Close
+          / 'Option' '<' Type Close
+          / 'Result' '<' Type ',' Type Close
+          / n:('Omit' / 'Pick') '<' Type ((',' Ident)+ Close / Close ^NeedsField(name=n))
+          / 'Merge' '<' Type ',' Type Close
+          / 'Partial' '<' Type Close
+          / 'Readonly' '<' Type Close
+          / Ident ('<' list Type sep ',' until '>' Close)?
+// Only the outermost record of a `type` declaration may refine a field.
+RecordType = ?collect -collect(+named(RecordBody)) / -named(RecordBody)
+RecordBody = '{' list Field sep ',' until '}' '}'
+Field = Ident ':' ( l:'lazy' (?named / ^LazyAnonymous@l) Type (w:'where' Expr (?named / ^WhereAnonymous@w) ^LazyWhere@w)?
+                  / Type (w:'where' Expr (?named / ^WhereAnonymous@w))? )
+
+// ------------------------------------------------------------- statements
+
+nest Block = '{' many BItem until ('}' / eof) recover stmt '}'
+BItem = doc / ';' / Stmt
+Stmt = Let / Return / Break / Continue / If / While / For / Region / Drop / Assign / ExprStmt
+Let = l:'let' ( &('mut' ident '(') 'mut' v:ident ^LetMutPattern(variant=v)@(l,v)
+              / &(ident '(') RefLet
+              / 'mut'? Ident (':' Type ('where' Expr)?)? '=' Expr ';'? )
+RefLet = ident '(' list Ident sep ',' until ')' ')' '=' Expr ';'?
+Return = 'return' (&(';' / '}' / eof) / Expr) ';'?
+Break = 'break' ';'?
+Continue = 'continue' ';'?
+If = 'if' ('let' Pattern '=' +nostruct(Expr) Block Else? / +nostruct(Expr) Block Else?)
+Else = 'else' ('if' ('let' Pattern '=' +nostruct(Expr) Block Else? / +nostruct(Expr) Block Else?) / Block)
+While = 'while' ('let' Pattern '=' +nostruct(Expr) Block / +nostruct(Expr) Block)
+For = 'for' Ident 'in' (&('consume' ident) 'consume')? +nostruct(Expr) Block
+Region = 'region' Block
+Drop = 'drop' Ident ';'?
+Assign = &((ident / 'self') '=') (Ident / 'self') '=' Expr ';'?
+ExprStmt = Expr ('=' Expr)? ';'?
+
+// ------------------------------------------------------------ expressions
+
+Expr = climb Unary {
+    left '||'
+    left '&&'
+    left '==' '!=' '=~'
+    left '<' '<=' '>' '>='
+    right '??'
+    left '|'
+    left '^'
+    left '&'
+    left '<<' '>>'
+    left '+' '-'
+    left '*' '/' '%'
+    }
+nest Unary = '-' Unary / '!' Unary / '~' Unary
+           / &('consume' (ident / 'self')) 'consume' Postfix
+           / &('await' (ident / 'self')) 'await' Postfix
+           / Postfix
+Postfix = Primary Link*
+Link = '?' / '.' Ident Args? / '[' -nostruct(Expr) ']'
+Args = '(' -nostruct(list Expr sep ',' until ')') ')'
+
+Primary = &LambdaHead Lambda
+        / &'||' ^LambdaNotHere(form='||', fix='`() -> ...`')
+        / &'|' ^LambdaNotHere(form='|x|', fix='`x -> ...`, or `(x, y) -> ...` for more than one')
+        / number / byte / string / 'self' / 'true' / 'false'
+        / '(' -nostruct(Expr) ')'
+        / ArrayLit / Match / IfExpr
+        / &('vyrn' nonl string) 'vyrn' string
+        / &(ident nonl plainStr) t:ident ^TemplateNoHole(name=t)@t
+        / &(ident nonl string) ident string
+        / &(ident '.' ident '{') !?nostruct ident '.' ident StructBody
+        / IdentExpr
+        fail ^UnexpectedToken(found=found)
+IdentExpr = ident (&('.' ident '?' '(') '.' ident)* (&('?' '(') '?')? (@(TypeArgs &'('))? (Args / !?nostruct StructBody / )
+TypeArgs = '<' Type (',' Type)* '>'
+StructBody = '{' -nostruct(list SField sep ',' until '}') '}'
+SField = Ident ':' Expr
+LambdaHead = ident '->' / '(' ')' '->' / '(' ident (',' ident)* ')' '->'
+Lambda = (ident / '(' list Ident sep ',' until ')' ')') '->' (Block / -nostruct(Expr))
+ArrayLit = '[' -nostruct( ':' ']' / ']'
+                        / Expr ( ':' Expr (',' (&']' / Expr ':' Expr))* ']' / (',' (&']' / Expr))* ']' ) )
+Match = 'match' +nostruct(Expr) '{' many Arm until ('}' / eof) '}'
+Arm = Pattern '=>' (Block ','? / Expr (',' / &'}'))
+Pattern = Ident ('.' Ident)* ('(' list Ident sep ',' until ')' ')')?
+IfExpr = i:'if' IfTail
+IfTail = &'let' ^IfLetExpr@(i,here) / +nostruct(Expr) IfBranch ('else' (i:'if' IfTail / IfBranch))?
+IfBranch = b:'{' ( &('let' / 'return' / 'while' / 'for' / 'region' / 'drop' / 'break' / 'continue') ^IfExprStatements
+                 / -nostruct(Expr) (&'}' / ^IfExprStatements@(b,here)) ) '}'

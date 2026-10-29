@@ -1,0 +1,4 @@
+type U = { a: Int64 }
+type T = Omit<U>
+
+fn main() -> Int64 { return 0 }

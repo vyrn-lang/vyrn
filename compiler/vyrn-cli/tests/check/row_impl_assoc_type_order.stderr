@@ -1,0 +1,1 @@
+row_impl_assoc_type_order.vyrn:7:5: `type A = ..` must be declared before the methods of `impl P for Int64` — an associated type is resolved where it is named, so a method above it cannot see it

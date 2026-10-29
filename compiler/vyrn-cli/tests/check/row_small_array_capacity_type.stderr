@@ -1,0 +1,1 @@
+row_small_array_capacity_type.vyrn:1:27: `SmallArray<T, N>` needs a non-negative integer capacity

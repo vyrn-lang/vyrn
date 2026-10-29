@@ -1,0 +1,1 @@
+row_lazy_anonymous.vyrn:1:14: a `lazy` field needs a named record type (`type T = { field: lazy U }`); an anonymous record has no declaration to defer against

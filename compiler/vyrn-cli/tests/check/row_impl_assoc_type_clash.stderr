@@ -1,0 +1,1 @@
+row_impl_assoc_type_clash.vyrn:3:5: `type A` collides with the `A` this impl's head binds — an associated type and a type variable are different things and cannot share a name

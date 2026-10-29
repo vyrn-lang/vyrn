@@ -1,0 +1,6 @@
+protocol P {
+    fn f(self) -> Int64
+    type A
+}
+
+fn main() -> Int64 { return 0 }

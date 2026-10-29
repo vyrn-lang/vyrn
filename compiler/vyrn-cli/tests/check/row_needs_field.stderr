@@ -1,0 +1,1 @@
+row_needs_field.vyrn:4:1: `Omit` needs at least one field, e.g. `Omit<T, field>`

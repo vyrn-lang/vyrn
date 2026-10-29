@@ -1,0 +1,1 @@
+row_assoc_type_rhs.vyrn:2:5: `type A` in a protocol declares an associated type and takes no right-hand side — the implementing type supplies it, so `type A = ..` belongs in the `impl`

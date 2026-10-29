@@ -1,0 +1,1 @@
+row_unicode_escape_brace.vyrn:2:13: `\u` must be followed by `{HEX}`

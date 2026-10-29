@@ -1,0 +1,1 @@
+row_exported_extern_body.vyrn:3:1: an exported extern needs a body — a body-less `extern fn` is an import

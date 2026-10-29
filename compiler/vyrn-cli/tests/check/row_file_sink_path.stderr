@@ -1,0 +1,1 @@
+row_file_sink_path.vyrn:1:17: `file(..)` sink needs a string path, found Int(1)

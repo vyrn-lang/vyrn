@@ -1,0 +1,1 @@
+row_unterminated_unicode_escape.vyrn:2:13: unterminated `\u{` escape

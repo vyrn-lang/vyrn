@@ -1,0 +1,1 @@
+row_contract_member_form_change.vyrn:3:1: contract `C` declares `a` as both a value and a function (line 2) — alternative signatures are alternatives, not a change of member form
