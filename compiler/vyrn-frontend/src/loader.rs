@@ -2991,12 +2991,22 @@ fn read_span_table<'a>(
     if head == "-" {
         return Some(None);
     }
-    // `line:col:rest`, the rest keeping any colon.
-    let placed = |field: &str| -> Option<(Pos, String)> {
+    // `line:col:rest`, the rest keeping any colon. Rows repeat one key and one
+    // path, so a rest equal to `last` shares it.
+    let placed = |field: &str,
+                  last: &mut Option<std::sync::Arc<str>>|
+     -> Option<(Pos, std::sync::Arc<str>)> {
         let mut f = field.splitn(3, ':');
         let (line, col) = (f.next()?.parse().ok()?, f.next()?.parse().ok()?);
-        Some((Pos { line, col }, f.next()?.to_string()))
+        let rest = f.next()?;
+        let shared = match last.take() {
+            Some(l) if *l == *rest => l,
+            _ => std::sync::Arc::from(rest),
+        };
+        *last = Some(shared.clone());
+        Some((Pos { line, col }, shared))
     };
+    let (mut last_key, mut last_path) = (None, None);
     // No `with_capacity`: the count comes from the file.
     let mut rows = Vec::new();
     for _ in 0..head.parse::<usize>().ok()? {
@@ -3012,14 +3022,14 @@ fn read_span_table<'a>(
         let author = match author {
             "-" => Author::CallSite,
             a => {
-                let (at, key) = placed(a)?;
+                let (at, key) = placed(a, &mut last_key)?;
                 Author::File { key, at }
             }
         };
         let shown = match shown {
             "-" => None,
             s => {
-                let (at, path) = placed(s)?;
+                let (at, path) = placed(s, &mut last_path)?;
                 Some(Shown { path, at })
             }
         };
@@ -5904,7 +5914,7 @@ mod tests {
                 SpanRow {
                     offset: 0,
                     author: Author::File {
-                        key: "C:/p/g.vyrn".to_string(),
+                        key: "C:/p/g.vyrn".into(),
                         at: pos(3, 9),
                     },
                     shown: None,
@@ -5914,7 +5924,7 @@ mod tests {
                     offset: 24,
                     author: Author::CallSite,
                     shown: Some(Shown {
-                        path: "C:/p/in.txt".to_string(),
+                        path: "C:/p/in.txt".into(),
                         at: pos(1, 1),
                     }),
                     kind: Kind::Copied,

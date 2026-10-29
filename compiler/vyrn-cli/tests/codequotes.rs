@@ -796,3 +796,28 @@ fn at_shows_an_error_in_the_input() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("in.txt:3:2"), "{err}");
 }
+
+/// `at` stays the builtin in a generator that imports a type with an `at`
+/// projection (`std/json`'s `Json`).
+#[test]
+fn at_is_the_builtin_beside_a_projection_named_at() {
+    let dir = scratch("at-json");
+    write(&dir.join("in.txt"), "one\ntwo\nthree\n");
+    let gen = r#"import { Json } from "std/json"
+export gen fn mk(path: String) -> Code {
+    return at(vyrn"export fn f() -> String { return 1 }", path, 3, 2)
+}
+"#;
+    write(&dir.join("gen.vyrn"), gen);
+    write(&dir.join("app.vyrn"), "import { mk } from \"./gen\"\nimport { f } from mk(\"./in.txt\")\nfn main() -> Int64 { return 0 }\n");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("in.txt:3:2") && !err.contains("internal error"),
+        "{err}"
+    );
+}

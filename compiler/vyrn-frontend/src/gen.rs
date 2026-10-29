@@ -22,7 +22,7 @@ pub struct Pos {
 /// generator cannot name an author.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Author {
-    File { key: String, at: Pos },
+    File { key: Arc<str>, at: Pos },
     CallSite,
 }
 
@@ -31,7 +31,7 @@ pub enum Author {
 /// changes the author.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shown {
-    pub path: String,
+    pub path: Arc<str>,
     pub at: Pos,
 }
 
@@ -301,11 +301,11 @@ pub fn copied_span(
         true => Ok(Span {
             text: text.to_string(),
             author: Author::File {
-                key: key.to_string(),
+                key: Arc::from(key),
                 at,
             },
             shown: Some(Shown {
-                path: path.to_string(),
+                path: Arc::from(path),
                 at,
             }),
             kind: Kind::Copied,
@@ -320,7 +320,7 @@ pub fn copied_span(
 /// an error shows, never the author.
 pub fn shown_at(rope: &Rope, path: &str, (line, col): (usize, usize)) -> Rope {
     let shown = Shown {
-        path: path.to_string(),
+        path: Arc::from(path),
         at: Pos { line, col },
     };
     Rope::Leaf(

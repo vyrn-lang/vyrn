@@ -157,7 +157,8 @@ impl OriginMaps {
     /// Reads the regions of the synthesized module `banner`, a `Code` result,
     /// from its span table: a span with a `shown` position governs from the line
     /// it starts on, and the next span without one ends the region after the
-    /// last line the region touches.
+    /// last line the region touches. A run of spans with one `shown` position
+    /// is one region, as `at` writes it.
     ///
     /// `rows` is sorted by offset (`gen::Written`), so one walk counts each
     /// newline once: linear in the source, not rows times source.
@@ -169,12 +170,13 @@ impl OriginMaps {
         ctx: &Context<'_>,
     ) {
         let mut dirs: Vec<Directive> = Vec::new();
-        let mut open = false;
+        let mut open: Option<&crate::gen::Shown> = None;
         let (mut gen_line, mut counted) = (1, 0);
         for r in rows {
             gen_line += source[counted..r.offset].matches('\n').count();
             counted = r.offset;
             match &r.shown {
+                Some(s) if open == Some(s) => {}
                 Some(s) => {
                     let (origin, malformed) =
                         match anchor(&format!("{}:{}:{}", s.path, s.at.line, s.at.col), ctx) {
@@ -186,16 +188,16 @@ impl OriginMaps {
                         origin,
                         malformed,
                     });
-                    open = true;
+                    open = Some(s);
                 }
-                None if open => {
+                None if open.is_some() => {
                     let mid_line = !source[..r.offset].ends_with('\n');
                     dirs.push(Directive {
                         gen_line: gen_line + mid_line as usize,
                         origin: None,
                         malformed: None,
                     });
-                    open = false;
+                    open = None;
                 }
                 None => {}
             }
