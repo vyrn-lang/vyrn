@@ -317,13 +317,11 @@ export gen fn vyrnCompleteVyx(root: String, path: String, line: Int64, col: Int6
         let cb = bytes(comp)
         let sec = vyxSection(cb, "script", true)
         if sec.found {
-            let sc = vyxParseScriptAt(cb, sec.start, sec.end, dir, cur.tag)
-            let mut k = 0
-            while k < sc.propNames.length {
-                let detail = "prop: " + sc.propTypes[k]
-                items.push(vyxItem(sc.propNames[k], "field", detail, cur.from))
-                items.push(vyxItem(":" + sc.propNames[k], "field", detail, cur.from))
-                k = k + 1
+            let sc = vyxParseScriptAt(cb, sec.start, sec.end, "props", "", cur.tag)
+            for p in sc.props {
+                let detail = "prop: " + p.ty.text
+                items.push(vyxItem(p.name.text, "field", detail, cur.from))
+                items.push(vyxItem(":" + p.name.text, "field", detail, cur.from))
             }
         }
     } else if cur.kind == "attr" {
@@ -395,11 +393,9 @@ gen fn vyxComponentView(src: String, stem: String) -> String {
     let sec = vyxSection(ba, "script", true)
     let mut params: Array<String> = []
     if sec.found {
-        let sc = vyxParseScriptAt(ba, sec.start, sec.end, ".", stem)
-        let mut k = 0
-        while k < sc.propNames.length {
-            params.push(sc.propNames[k] + ": " + sc.propTypes[k])
-            k = k + 1
+        let sc = vyxParseScriptAt(ba, sec.start, sec.end, "props", "", stem)
+        for p in sc.props {
+            params.push(p.name.text + ": " + p.ty.text)
         }
     }
     return view + "\nexport fn " + vyxLowerFirst(stem) + "(" + joinWith(params, ", ") + ") -> Html {}\n"

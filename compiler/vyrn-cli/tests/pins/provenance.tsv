@@ -28,8 +28,6 @@ std/von copyVonArray	identity pointwise		identity	differs
 std/vyx vyxAppend	identity+fresh(end)		identity+fresh(end)	agrees
 std/vyx vyxStripDirectives	subsequence		subsequence	agrees
 std/vyx vyxElementRoots	subsequence		subsequence	agrees
-std/vyx vyxShiftAttrs	identity field-update(line)		identity field-update(line)	agrees
-std/vyx vyxShiftNodes	identity pointwise		identity pointwise	agrees
 std/vyx vyxCompNames	fresh		fresh	agrees
 std/vyx vyxImportedNames	fresh		fresh	agrees
 std/stream merge	no core body		shuffle	differs

@@ -95,10 +95,18 @@ text, trimmed, and `""` for a bare attribute (`disabled`). `dyn` marks
 `@event="handler"`. `line` and `col` are 1-based in the `.vyx` file: the
 value's position, or the name's for a bare attribute.
 
+## VyxSpan
+
+```vyrn
+type VyxSpan = { text: String, line: Int64, col: Int64 }
+```
+
+Text of a `.vyx` file and the 1-based line and column it starts at there.
+
 ## VyxNode
 
 ```vyrn
-type VyxNode = enum { VNText(String), VNInterp(String, Int64, Int64), VNRaw(String, Int64, Int64), VNChildren, VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64), VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool), VNFor(String, String, String, Array<VyxNode>, Int64, Int64, Int64, Int64) }
+type VyxNode = enum { VNText(String), VNInterp(String, Int64, Int64), VNRaw(String, Int64, Int64), VNChildren, VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64), VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool), VNFor(String, VyxSpan, String, Array<VyxNode>, Int64, Int64, Int64, Int64) }
 ```
 
 A node of a parsed template. Lines and columns are 1-based in the `.vyx`
@@ -116,7 +124,8 @@ The compiler's grouping pass consumes the directives and makes the other
 three: `VNRaw(expr, line, col)` for `v-html`; `VNIf(conds, condLines,
 condCols, bodies, elseBody, hasElse)` for a `v-if` chain, one body per
 condition; and `VNFor(var, iter, key, body, line, col, keyLine, keyCol)` for
-`v-for` with its `:key`. A `match` has no wildcard arm, so a walker names
+`v-for` with its `:key`, where `iter` is the iterable and its position and
+`line` and `col` are the header's. A `match` has no wildcard arm, so a walker names
 them too.
 
 ## VyxBody

@@ -769,7 +769,7 @@ displaced. A builtin's effect on positions is its row's `ShapeMap`. A loop
 whose head test is its only exit, whose counter steps by one, and which
 pushes one element of a parameter at the counter every turn covers the
 parameter from the counter's start to the bound. `tests/provenance.rs` pins
-the classes of the 48 functions the analytic report classified by hand.
+the classes of the 46 functions the analytic report classified by hand.
 
 ## Relation identity
 
