@@ -2684,8 +2684,8 @@ export gen fn componentsThemed(dir: String, theme: String) -> String {
 
 /// What `std/ui` needs to route a `.vyx` page: its `params` fields (parallel
 /// arrays), its loader, the loader's return-type spelling,
-/// and whether it opts out of the layout with `layout="none"`. `err` names a
-/// params fault.
+/// and whether it opts out of the layout with `layout="none"`. `err` is the
+/// message of a params or loader fault at the generator call, `""` for none.
 type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasLoad: Bool, loadHasParams: Bool, loadLazy: Bool, loadRet: String, layoutNone: Bool, err: String }
 
 // `head` and `data` are members of the `std/ui:Page` contract. A `.vyx` page
@@ -2916,10 +2916,7 @@ gen fn vyxDataShapeOf(script: String) -> VyxDataShape {
     if form < 0 {
         // Any other return type is named here, not emitted as a `load()` that
         // calls a runner that does not exist.
-        err = render(reportHere(
-            Error,
-            "this page's `data` returns `\{declared}` — a page's `data` returns `Query<T>`, `ParamQuery<T>`, `Lazy<T>` or `ParamLazy<T>`",
-        ))
+        err = "this page's `data` returns `\{declared}` — a page's `data` returns `Query<T>`, `ParamQuery<T>`, `Lazy<T>` or `ParamLazy<T>`"
     }
     return VyxDataShape {
         hasData: true,
@@ -3036,11 +3033,11 @@ export to "./ui", "./ui.editor" gen fn vyxPageShape(source: String) -> VyxPageSh
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     if vyxSectionUnclosed(scriptSec) {
-        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: render(reportHere(Error, "the `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`, so the page's params and loader are unknown")) }
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: "the `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`, so the page's params and loader are unknown" }
     }
     let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "params")
     if bad > 0 {
-        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: render(reportHere(Error, "an `import` sits after the `params` block — every import goes at the top of `<script>`")) }
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: "an `import` sits after the `params` block — every import goes at the top of `<script>`" }
     }
     let script = vyxSlice(ba, scriptSec.start, scriptSec.end)
     let sb = bytes(script)
@@ -3051,7 +3048,7 @@ export to "./ui", "./ui.editor" gen fn vyxPageShape(source: String) -> VyxPageSh
     let mut types: Array<String> = []
     if pb.found {
         if pb.malformed {
-            return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: render(reportHere(Error, "the `params` block is not closed — write `params { name: Type, … }`")) }
+            return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: "the `params` block is not closed — write `params { name: Type, … }`" }
         }
         let end = vyxMatchCurly(sb, pb.braceAt)
         for part in vyxSplitFields(vyxSlice(sb, pb.braceAt + 1, end - 1)) {
@@ -3067,7 +3064,7 @@ export to "./ui", "./ui.editor" gen fn vyxPageShape(source: String) -> VyxPageSh
                     k = k + 1
                 }
                 if colon < 0 {
-                    return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: render(reportHere(Error, "a `params` entry reads `name: Type`, and this one has no `:`")) }
+                    return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: "a `params` entry reads `name: Type`, and this one has no `:`" }
                 }
                 names.push(trim(vyxSlice(pbf, 0, colon)))
                 types.push(trim(vyxSlice(pbf, colon + 1, pbf.length)))
@@ -3794,7 +3791,7 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     let hasHeadFn = vyxScriptHasDecl(script, "head")
     let ds = vyxDataShapeOf(script)
     if ds.err != "" {
-        return consume ds.err
+        return render(reportHere(Error, ds.err))
     }
     let hasLoad = ds.hasData
     let dataType = vyxLoaderDataType(ds.ret)

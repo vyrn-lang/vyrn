@@ -209,7 +209,7 @@ The default `data` for a page that declares none.
 ## pages
 
 ```vyrn
-fn pages(dir: String) -> String
+fn pages(dir: String) -> Code
 ```
 
 Scans `dir` for `.vyrn` and `.vyx` pages and returns the router module.
@@ -217,7 +217,7 @@ Scans `dir` for `.vyrn` and `.vyx` pages and returns the router module.
 ## pagesThemed
 
 ```vyrn
-fn pagesThemed(dir: String, theme: String) -> String
+fn pagesThemed(dir: String, theme: String) -> Code
 ```
 
 [`pages`](#pages), with every `.vyx` page's classes checked against `theme`.
@@ -226,7 +226,7 @@ fn pagesThemed(dir: String, theme: String) -> String
 ## pagesClient
 
 ```vyrn
-fn pagesClient(dir: String) -> String
+fn pagesClient(dir: String) -> Code
 ```
 
 The client page bundle for `dir`.
@@ -234,7 +234,7 @@ The client page bundle for `dir`.
 ## pagesClientThemed
 
 ```vyrn
-fn pagesClientThemed(dir: String, theme: String) -> String
+fn pagesClientThemed(dir: String, theme: String) -> Code
 ```
 
 [`pagesClient`](#pagesclient) with a theme; the server side is [`pagesThemed`](#pagesthemed).

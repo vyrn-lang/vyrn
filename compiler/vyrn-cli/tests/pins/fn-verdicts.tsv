@@ -3381,7 +3381,7 @@ std/ui.vyrn	headHtml	yes	no, its effect set is alloc
 std/ui.vyrn	headTitleOf	yes	no, its effect set is alloc
 std/ui.vyrn	noQuery	yes	no, its effect set is alloc
 std/ui.vyrn	uiNoData	yes	no, the result is Unit, not an integer, Bool or a read array of one
-std/ui.vyrn	uiNoView	yes	no, the value of line 237 is Html, not an integer, Bool or a read array of one
+std/ui.vyrn	uiNoView	yes	no, the value of line 238 is Html, not an integer, Bool or a read array of one
 std/ui.vyrn	uiNoRespond	yes	no, its effect set is alloc
 std/ui.vyrn	uiAcceptNames	yes	no, its effect set is alloc
 std/ui.vyrn	uiWantsData	yes	no, its effect set is alloc
@@ -3393,8 +3393,6 @@ std/ui.vyrn	uiErrorResponseOf	no, it calls `derive$json$jsonEncoders$t565771f7ce
 std/ui.vyrn	uiSliceStr	no, it keeps an index check	no, its effect set is alloc
 std/ui.vyrn	uiUpperFirst	yes	no, its effect set is alloc
 std/ui.vyrn	uiAppendStr	yes	no, its effect set is alloc
-std/ui.vyrn	uiHole	yes	no, its effect set is alloc
-std/ui.vyrn	uiStrLit	yes	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiRegexEscapeLit	yes	no, its effect set is alloc
 std/ui.vyrn	uiStem	no, it calls `uiSliceStr`, which is not trap-free	no, its effect set is alloc
 std/ui.vyrn	uiIsDynSeg	yes	no, `s` is String, not an integer, Bool or a read array of one
@@ -3411,7 +3409,8 @@ std/ui.vyrn	uiIdentLead	yes	no, its effect set is alloc
 std/ui.vyrn	uiStaticHelperName	yes	no, its effect set is alloc
 std/ui.vyrn	uiDynHelperName	yes	no, its effect set is alloc
 std/ui.vyrn	uiHelperNameOf	yes	no, its effect set is alloc
-std/ui.vyrn	uiDynHelperBody	no, it keeps an index check	no, its effect set is alloc
+std/ui.vyrn	uiDynHelperBody	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiParamType	yes	no, its effect set is gen-only
 std/ui.vyrn	uiRecordBody	no, it calls `uiSliceStr`, which is not trap-free	no, its effect set is alloc
 std/ui.vyrn	uiSplitFields	no, it calls `uiSliceStr`, which is not trap-free	no, its effect set is alloc
 std/ui.vyrn	uiParseFields	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap
@@ -3424,8 +3423,10 @@ std/ui.vyrn	uiFnRet	yes	no, its effect set is alloc
 std/ui.vyrn	uiHasType	yes	no, `iface` is ModuleInterface, not an integer, Bool or a read array of one
 std/ui.vyrn	uiTypeSource	yes	no, its effect set is alloc
 std/ui.vyrn	uiTypeModule	yes	no, its effect set is alloc
-std/ui.vyrn	uiPageErrAt	no, it calls `report`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/ui.vyrn	uiPageErrAt	yes	no, its effect set is alloc
+std/ui.vyrn	uiErrHere	yes	no, its effect set is alloc
 std/ui.vyrn	uiContractErrs	no, it calls `checkContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/ui.vyrn	uiReports	no, it calls `report`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/ui.vyrn	uiInspectPage	no, it calls `matchedMember`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/ui.vyrn	uiReadVyx	yes	no, its effect set is alloc, fs-read
 std/ui.vyrn	uiReadDirOf	yes	no, its effect set is alloc, fs-list
@@ -3435,56 +3436,63 @@ std/ui.vyrn	uiScanAll	no, it calls `panic`	no, its effect set is alloc, fs-read,
 std/ui.vyrn	uiIsPrefixOf	yes	no, `a` is Array<String>, not an integer, Bool or a read array of one
 std/ui.vyrn	uiLayoutChain	yes	no, its effect set is alloc
 std/ui.vyrn	uiErrorIndex	yes	no, `p` is UiPageInfo, not an integer, Bool or a read array of one
-std/ui.vyrn	uiCollisionErrors	no, it calls `uiUrlPatternOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/ui.vyrn	uiHelperCollisions	no, it calls `uiUrlPatternOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/ui.vyrn	uiFixedRuntime	yes	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiHeadRuntime	yes	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiErrorRuntime	yes	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiCollisionErrors	no, it calls `uiUrlPatternOf`, which is not trap-free	no, its effect set is alloc
+std/ui.vyrn	uiHelperCollisions	no, it calls `uiUrlPatternOf`, which is not trap-free	no, its effect set is alloc
+std/ui.vyrn	uiFixedRuntime	yes	no, its effect set is gen-only
+std/ui.vyrn	uiHeadRuntime	yes	no, its effect set is gen-only
+std/ui.vyrn	uiErrorRuntime	yes	no, its effect set is gen-only
+std/ui.vyrn	uiNs	yes	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiEmitRoute	no, it calls `uiEmitTryFn`, which is not trap-free	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiEmitDataRoute	no, it calls `uiEmitTryFn`, which is not trap-free	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiEmitTryFn	no, it calls `uiEmitDynMatch`, which is not trap-free	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiSegNeedsDecode	yes	no, its effect set is alloc
 std/ui.vyrn	uiAnyEncodedStatic	yes	no, its effect set is alloc
-std/ui.vyrn	uiEmitDynMatch	no, it keeps an index check	no, its effect set is alloc
-std/ui.vyrn	uiDynArgs	yes	no, its effect set is alloc
+std/ui.vyrn	uiEmitDynMatch	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiDynArgs	yes	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiDynSegIndex	yes	no, `segs` is Array<String>, not an integer, Bool or a read array of one
-std/ui.vyrn	uiPageCallArgs	yes	no, `p` is UiPageInfo, not an integer, Bool or a read array of one
-std/ui.vyrn	uiBodyCall	yes	no, its effect set is alloc
+std/ui.vyrn	uiPageCallArgs	yes	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiBodyCall	yes	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiNeedsThreading	yes	no, `p` is UiPageInfo, not an integer, Bool or a read array of one
-std/ui.vyrn	uiWrapLayout	yes	no, its effect set is alloc
-std/ui.vyrn	uiHeadExpr	yes	no, its effect set is alloc
+std/ui.vyrn	uiWrapLayout	yes	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiHeadExpr	yes	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiTitleExpr	yes	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiDocResponse	yes	no, its effect set is gen-only
 std/ui.vyrn	uiSuccessResponse	yes	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiUsesErrDoc	yes	no, `p` is UiPageInfo, not an integer, Bool or a read array of one
 std/ui.vyrn	uiEmitErrDoc	yes	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiLoadCall	yes	no, its effect set is alloc
-std/ui.vyrn	uiEmitLoadDispatch	yes	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiEmitRender	no, it calls `uiParamFieldInits`, which is not trap-free	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiLoadCall	yes	no, its effect set is gen-only
+std/ui.vyrn	uiMatchLoad	yes	no, its effect set is gen-only
+std/ui.vyrn	uiRenderFn	no, it calls `uiParamFieldInits`, which is not trap-free	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiEmitRender	no, it calls `uiRenderFn`, which is not trap-free	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiDataSuccessBody	yes	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiEmitDataLoadDispatch	yes	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiEmitDataRender	no, it calls `uiParamFieldInits`, which is not trap-free	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiParamFieldInits	no, it calls `uiDynName`, which is not trap-free	no, its effect set is alloc
+std/ui.vyrn	uiEmitDataRender	no, it calls `uiRenderFn`, which is not trap-free	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiParamFieldInits	no, it calls `uiDynName`, which is not trap-free	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiGenImport	yes	no, its effect set is gen-only
+std/ui.vyrn	uiThemed	yes	no, `theme` is Option<String>, not an integer, Bool or a read array of one
 std/ui.vyrn	uiEmitImport	yes	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiEmitTypedUrl	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiAnyStrSeg	yes	no, `pages` is Array<UiPageInfo>, not an integer, Bool or a read array of one
 std/ui.vyrn	uiAnyVyx	yes	no, `pages` is Array<UiPageInfo>, not an integer, Bool or a read array of one
-std/ui.vyrn	uiVyxGenImports	yes	no, its effect set is alloc
-std/ui.vyrn	uiEmitChromeImport	yes	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiVyxGenImports	yes	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiBuildModule	no, it calls `uiRoutePathBranch`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/ui.vyrn	uiEmitRouteFn	yes	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiEmitMountable	no, it calls `uiWirePatternOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/ui.vyrn	uiDispatchOrder	yes	no, its effect set is alloc
-std/ui.vyrn	pages	no, it calls `uiScanAll`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
-std/ui.vyrn	pagesThemed	no, it calls `uiScanAll`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/ui.vyrn	uiFindings	no, it calls `uiCollisionErrors`, which is not trap-free	no, its effect set is alloc
+std/ui.vyrn	uiRouter	no, it calls `uiScanAll`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/ui.vyrn	pages	no, it calls `uiRouter`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/ui.vyrn	pagesThemed	no, it calls `uiRouter`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/ui.vyrn	uiPageId	yes	no, its effect set is alloc
 std/ui.vyrn	uiClientRenderable	yes	no, `p` is UiPageInfo, not an integer, Bool or a read array of one
-std/ui.vyrn	uiClientPageImport	yes	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiClientRuntime	yes	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiClientRuntime	yes	no, its effect set is gen-only
 std/ui.vyrn	uiClientMatchFn	yes	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiResolveTitleExpr	yes	no, its effect set is alloc
+std/ui.vyrn	uiResolveTitleExpr	yes	no, its effect set is gen-only
 std/ui.vyrn	uiEmitResolvePage	yes	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiBuildClientModule	yes	no, its effect set is alloc, gen-only
-std/ui.vyrn	pagesClient	no, it calls `uiScanAll`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
-std/ui.vyrn	pagesClientThemed	no, it calls `uiScanAll`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/ui.vyrn	pagesClient	no, it calls `uiRouter`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/ui.vyrn	pagesClientThemed	no, it calls `uiRouter`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/ui.vyrn	uiHelperBodyText	no, it calls `uiDynHelperBody`, which is not trap-free	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiTryFnText	no, it calls `uiEmitTryFn`, which is not trap-free	no, its effect set is alloc, gen-only
 std/ui.vyrn	query	yes	no, its effect set is alloc
 std/von.vyrn	copyVonArray	yes	no, its effect set is alloc
 std/von.vyrn	copyVonFields	yes	no, its effect set is alloc
@@ -3757,7 +3765,7 @@ std/vyx.vyrn	vyxQueryDataType	no, it calls `vyxFind`, which is not trap-free	no,
 std/vyx.vyrn	vyxLoaderDataType	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxScriptLayoutNone	no, it calls `lines`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxIsLayoutLine	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxDataShapeOf	no, it calls `vyxDeclRet`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxDataShapeOf	no, it calls `vyxDeclRet`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxDeclParamTypes	no, it keeps an index check	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxAfterColon	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxPageInterface	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap
