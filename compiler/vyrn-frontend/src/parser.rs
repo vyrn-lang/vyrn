@@ -1703,6 +1703,7 @@ impl Parser {
                     ))
                 }
             }
+            let source_at = (self.line(), self.col());
             let source = self.import_source(line)?;
             self.eat_semi();
             return Ok(ImportDecl {
@@ -1711,6 +1712,7 @@ impl Parser {
                 source,
                 line,
                 col,
+                source_at,
             });
         }
         if *self.peek() == Tok::Type {
@@ -1750,6 +1752,7 @@ impl Parser {
                 ))
             }
         }
+        let source_at = (self.line(), self.col());
         let source = self.import_source(line)?;
         self.eat_semi();
         Ok(ImportDecl {
@@ -1758,6 +1761,7 @@ impl Parser {
             source,
             line,
             col,
+            source_at,
         })
     }
 
