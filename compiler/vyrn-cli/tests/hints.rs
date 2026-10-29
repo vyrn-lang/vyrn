@@ -265,7 +265,7 @@ fn a_waiver_in_the_component_drops_one_report_and_only_that_one() {
 /// A third-party hint library for a format `std` does not know. It imports
 /// `std/diag` and `std/hints` and nothing else `std/vyx-hints` imports.
 const SQL_HINTS: &str = r#"import { reportHere, Severity } from "std/diag"
-import { hint, noPolicy, policyOf, HintPolicy } from "std/hints"
+import { Finding, noPolicy, policyOf, reports, HintPolicy } from "std/hints"
 import { contains, slice } from "std/strpred"
 import { toLower } from "std/strings"
 
@@ -273,7 +273,7 @@ import { toLower } from "std/strings"
 type SqlPolicy = { policy: HintPolicy, err: String }
 
 /// `sqlHints(path, config)` — two rules over a `.sql` file, one per line.
-export gen fn sqlHints(path: String, config: String) -> String {
+export gen fn sqlHints(path: String, config: String) -> Code {
     let src = match readFile(path) {
         Ok(t) => t,
         Err(e) => "",
@@ -287,10 +287,9 @@ export gen fn sqlHints(path: String, config: String) -> String {
         Err(e) => SqlPolicy { policy: noPolicy(), err: e.copy() },
     }
     if cfg.err != "" {
-        return render(reportHere(Error, "sql-hints: `\{config}` is not a usable config — \{cfg.err}"))
+        return reportHere(Error, "sql-hints: `\{config}` is not a usable config — \{cfg.err}")
     }
-    let pol = cfg.policy
-    let mut out = ""
+    let mut found: Array<Finding> = []
     let mut line = 1
     let mut start = 0
     let mut i = 0
@@ -301,21 +300,20 @@ export gen fn sqlHints(path: String, config: String) -> String {
         if (i == n && i > start) || (i < n && src[i] == '\n') {
             let text = toLower(sqlSlice(src, start, i))
             if contains(text, "select *") {
-                out = out
-                + hint(pol, "sql/select-star", Warning, src, path, line, 1,
-                    "`SELECT *` ships every column, including the ones added later")
+                found.push(Finding { code: "sql/select-star", dflt: Warning, line: line, col: 1,
+                    message: "`SELECT *` ships every column, including the ones added later" })
             }
             if contains(text, "delete from") && contains(text, "where") == false {
-                out = out
-                + hint(pol, "sql/unbounded-delete", Error, src, path, line, 1,
-                    "`DELETE` with no `WHERE` empties the table")
+                found.push(Finding { code: "sql/unbounded-delete", dflt: Error, line: line, col: 1,
+                    message: "`DELETE` with no `WHERE` empties the table" })
             }
             line = line + 1
             start = i + 1
         }
         i = i + 1
     }
-    return out + "export fn sqlChecked() -> Int64 { return \{(line - 1).toString()} }\n"
+    let checked = line - 1
+    return reports(cfg.policy, src, path, found) + vyrn"export fn sqlChecked() -> Int64 { return \{checked} }"
 }
 
 fn sqlSlice(s: String, from: Int64, to: Int64) -> String {

@@ -175,10 +175,29 @@ pub enum Spliced {
 /// re-indented to `indent`, the leading whitespace of the hole's line; a span
 /// `codeAt` copied never is.
 ///
+/// `indent` ends in a comment prefix when the hole stands in a line or doc
+/// comment (the parser's `continuation`). There every value is plain text of
+/// the call site's: a `String` as written, a `Code` as its text, a number or
+/// `Bool` as it prints, and each newline continues the comment with `indent`,
+/// so the text never leaves it.
+///
 /// The wasm generation engine applies it host-side, so the escaping and float
 /// formatting have one implementation.
 pub fn gen_code_splice(val: &Spliced, indent: &str) -> Result<Arc<Rope>, String> {
     let text = |s: String| Ok(Arc::new(Rope::Leaf(vec![Span::data(s)])));
+    if !indent.trim().is_empty() {
+        let plain = match val {
+            Spliced::Str(s) => s.clone(),
+            Spliced::Code(rope) => rope.spans().iter().map(|s| s.text.as_str()).collect(),
+            scalar => gen_code_splice(scalar, "")?
+                .spans()
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect(),
+        };
+        let plain = plain.replace("\r\n", "\n").replace('\r', "\n");
+        return text(plain.replace('\n', &format!("\n{indent}")));
+    }
     match val {
         Spliced::Code(rope) if indent.is_empty() => Ok(rope.clone()),
         Spliced::Code(rope) => Ok(Arc::new(Rope::Leaf(reindented(rope, indent)))),

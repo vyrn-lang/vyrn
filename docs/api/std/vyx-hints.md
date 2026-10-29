@@ -34,16 +34,16 @@ preset severity. The rest are warnings.
 ## vyxHints
 
 ```vyrn
-fn vyxHints(dir: String) -> String
+fn vyxHints(dir: String) -> Code
 ```
 
-Checks every `<Name>.vyx` under `dir` at default severities. Emits
-`//@diag` reports and one declaration for the import to bind.
+Checks every `<Name>.vyx` under `dir` at default severities. Emits the
+reports and one declaration for the import to bind.
 
 ## vyxHintsConfigured
 
 ```vyrn
-fn vyxHintsConfigured(dir: String, config: String) -> String
+fn vyxHintsConfigured(dir: String, config: String) -> Code
 ```
 
 [`vyxHints`](#vyxhints) under the `"hints"` object of the JSON document at `config`.

@@ -364,6 +364,44 @@ fn alone_on_line(before: &str, after: &str, first: bool) -> bool {
     (first || before.contains('\n')) && head.trim().is_empty() && tail.trim().is_empty()
 }
 
+/// The text a splice writes after each newline, for a hole that ends `line`:
+/// the line's leading whitespace and, when the hole stands in a `//`, `///` or
+/// `//!` comment, that prefix and one space ([`crate::gen::gen_code_splice`]).
+fn continuation(line: &str) -> String {
+    let ws = &line[..line.len() - line.trim_start().len()];
+    match comment_start(line) {
+        Some(at) => {
+            let c = &line[at..];
+            let prefix = if c.starts_with("///") || c.starts_with("//!") {
+                &c[..3]
+            } else {
+                &c[..2]
+            };
+            format!("{ws}{prefix} ")
+        }
+        None => ws.to_string(),
+    }
+}
+
+/// The byte offset of the first `//` in `line` outside a string or character
+/// literal.
+fn comment_start(line: &str) -> Option<usize> {
+    let b = line.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < b.len() {
+        match (quote, b[i]) {
+            (Some(_), b'\\') => i += 1,
+            (Some(q), c) if c == q => quote = None,
+            (None, c @ (b'"' | b'\'')) => quote = Some(c),
+            (None, b'/') if b.get(i + 1) == Some(&b'/') => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Whether the hole after part `before` is an import's specifier: it follows
 /// the word `from`.
 fn is_specifier(before: &str) -> bool {
@@ -3937,14 +3975,14 @@ impl Parser {
         let int = |n: usize| Expr::int(n as i64);
         let mut args = vec![int(parts.len())];
         let mut at = (line, col + 5);
-        // The leading whitespace of the line the next hole sits on.
-        let mut indent = String::new();
+        // The text of the line the next hole sits on, up to the hole; an
+        // earlier hole on the line stands as `x`.
+        let mut so_far = String::new();
         for (i, part) in parts.iter().enumerate() {
             args.extend([Expr::str(part), int(at.0), int(at.1)]);
-            if let Some(nl) = part.rfind('\n') {
-                indent.clear();
-                let rest = &part[nl + 1..];
-                indent.push_str(&rest[..rest.len() - rest.trim_start().len()]);
+            match part.rfind('\n') {
+                Some(nl) => so_far = part[nl + 1..].to_string(),
+                None => so_far.push_str(part),
             }
             if let Some(hole) = exprs.get(i) {
                 let before = part.chars().next_back().is_some_and(word);
@@ -3955,7 +3993,7 @@ impl Parser {
                 args.extend([
                     value,
                     int((before || after) as usize),
-                    Expr::str(indent.clone()),
+                    Expr::str(continuation(&so_far)),
                     int(hole.line),
                     int(hole.col.saturating_sub(2)),
                     int(hole.col + len),
@@ -3968,6 +4006,7 @@ impl Parser {
                         _ => (l, c + 1),
                     });
                 at.1 += 1;
+                so_far.push('x');
             }
         }
         Ok(Expr::call(crate::ast::QUOTE, args, line))
