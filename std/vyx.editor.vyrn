@@ -3,7 +3,7 @@
 /// No program links this module, so a program that uses `std/vyx` pays
 /// nothing for it. A tool finds it beside `std/vyx` by its name.
 
-import { vyxSection, vyxSectionAvoid, vyxIsWs, vyxIsIdent, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt, vyxLowerFirst } from "std/vyx"
+import { vyxSection, vyxSectionAvoid, vyxIsWs, vyxIsIdent, vyxCharStart, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt, vyxLowerFirst } from "std/vyx"
 import { joinWith, lines, trim, fromBytesOr } from "std/strings"
 import { Json, JsonField, emit } from "std/json"
 import { endsWith, startsWith } from "std/strpred"
@@ -16,11 +16,6 @@ type VyxCursor = { kind: String, tag: String, prefix: String, from: Int64 }
 
 gen fn vyxNoCursor() -> VyxCursor {
     return VyxCursor { kind: "", tag: "", prefix: "", from: 0 }
-}
-
-/// True for the first byte of a UTF-8 character.
-gen fn vyxCharStart(b: UInt8) -> Bool {
-    return b < '\x80' || b >= '\xc0'
 }
 
 /// The byte offset of 1-based `line` and `col` in `ba`, `col` counting

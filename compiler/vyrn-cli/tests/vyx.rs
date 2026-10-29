@@ -82,10 +82,10 @@ fn emit_gen_shows_the_synthesized_component_module() {
         "panel signature:\n{src}"
     );
 
-    // A relative script import is rebased so it resolves from the synthesized module.
+    // A script import is copied as written and resolves beside its `.vyx`.
     assert!(
-        src.contains("from \"./vyxcomp/./models\""),
-        "rebased import:\n{src}"
+        src.contains("import { Item } from \"./models\""),
+        "copied import:\n{src}"
     );
 
     assert!(src.contains("for it in items {"), "for loop:\n{src}");
@@ -94,8 +94,8 @@ fn emit_gen_shows_the_synthesized_component_module() {
         "keyed push:\n{src}"
     );
     assert!(
-        src.contains("push(row(\n//@origin end\n//@origin ./vyxcomp/Listing.vyx:8:50\nit,\n"),
-        "internal component call, its argument under the attribute's origin:\n{src}"
+        src.contains("kr_0_f.push(row(\n            it,\n        ))"),
+        "internal component call:\n{src}"
     );
 
     assert!(
@@ -596,10 +596,6 @@ fn themed_emit_gen_routes_class_through_vyx_theme() {
     assert!(
         src.contains("vyxTheme.cls(\"card\")"),
         "class routed through vyxTheme.cls:\n{src}"
-    );
-    assert!(
-        src.contains("//@origin"),
-        "carries origin directives:\n{src}"
     );
 }
 
@@ -1215,11 +1211,11 @@ fn an_unchanged_rebuild_regenerates_no_provider() {
 /// name as such a literal, so it would have to declare itself here; components are
 /// libraries.
 ///
-/// `Html`, `Data` and `Params` are type spellings in generated code. The `Ui*` names
-/// are the stems `std/ui` gives the component it compiles a route file into.
+/// `Params`, `PageError` and `UiClientData` are type spellings in generated code.
+/// The other `Ui*` names are the stems `std/ui` gives the component it compiles a
+/// route file into.
 const ALLOWED_CAPITALIZED_LITERALS: &[&str] = &[
-    "Data",
-    "Html",
+    "PageError",
     "Params",
     "UiClientData",
     "UiErrorBody",
@@ -1372,5 +1368,28 @@ fn the_vyx_parse_template_doc_example_runs() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "ul:2\nli:3 :class\n\n"
+    );
+}
+
+/// A `<script>` import is copied with its `import` keyword, so it is judged as
+/// the `.vyx` that wrote it: `runQuery`, exported to `std/ui` and `std/vyx`
+/// only, is refused there, naming the file and line.
+#[test]
+fn a_script_import_is_judged_as_its_vyx() {
+    let dir = scratch("judged");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<script>\nimport { runQuery, Query } from \"std/ui\"\nprops { label: String }\n\nfn peek(q: Query<String>) -> String {\n    return runQuery(q)\n}\n</script>\n<template>\n<p>{{ label }}</p>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(!ok, "the copied import must be refused:\n{err}");
+    assert!(
+        err.contains("`runQuery` is exported from `std/ui` only to `std/ui`, `std/vyx`"),
+        "{err}"
+    );
+    assert!(
+        err.contains("written by `./comp/Widget.vyx` at line 2"),
+        "{err}"
     );
 }

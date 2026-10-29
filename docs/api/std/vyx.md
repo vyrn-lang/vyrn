@@ -13,9 +13,10 @@ layouts and error pages through `vyxPage`, `vyxLayout` and `vyxError`.
 
 A `.vyx` file has two sections:
   <script>   -- optional: a `props { name: Type, ... }` block (the view fn's
-               parameters), `import` lines (relative paths rebased to the
-               synthesized module, deduplicated across components), and
-               plain `fn`/`let`/`type` helpers (module-private).
+               parameters), `import` lines (copied as written, so a
+               relative path resolves beside the `.vyx`; a name a sibling
+               already imports from the same path is dropped), and plain
+               `fn`/`let`/`type` helpers (module-private).
   <template> -- exactly one root element, compiled to the view fn body.
 
 Template grammar (Vue-flavored):
@@ -195,10 +196,10 @@ gen fn walk(nodes: Array<VyxNode>) -> String {
 
 /// Writes `outlineOf() -> String`: the outline of `source`, or why it does
 /// not parse.
-export gen fn outline(source: String) -> String {
+export gen fn outline(source: String) -> Code {
     let t = vyxParseTemplate(source)
     let text = if t.err != "" { t.err.copy() } else { walk(t.nodes) }
-    return render(vyrn"export fn outlineOf() -> String { return \{text} }")
+    return vyrn"export fn outlineOf() -> String { return \{text} }"
 }
 ```
 
@@ -217,7 +218,7 @@ fn main() -> Int64 {
 ## components
 
 ```vyrn
-fn components(dir: String) -> String
+fn components(dir: String) -> Code
 ```
 
 Compiles every `<Name>.vyx` under `dir` into one module exporting one view
@@ -226,7 +227,7 @@ per component. `class` is unchecked; `componentsThemed` checks it.
 ## componentsThemed
 
 ```vyrn
-fn componentsThemed(dir: String, theme: String) -> String
+fn componentsThemed(dir: String, theme: String) -> Code
 ```
 
 [`components`](#components) with a theme: the module imports `tw(<theme>)` as
