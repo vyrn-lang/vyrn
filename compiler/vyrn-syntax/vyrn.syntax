@@ -134,7 +134,7 @@ byteBody = eof ^UnterminatedByte@q
 
 // ------------------------------------------------------------ declarations
 
-Ident = ident fail ^ExpectedIdent(found=found)@after
+Ident = ident fail ^ExpectedIdent(found=found)
 Close = split '>'
 
 Module = many Item until eof recover decl ItemStart
@@ -152,9 +152,9 @@ ExportTarget = &('fn' / 'type' / 'protocol' / 'extern' 'fn' / 'gen' 'fn' / Contr
 Decl = Import / TypeDecl / FnDecl / GenFn / MutFn / Protocol / Contract / Impl / Global
      / Extern / Test / Bench / Logging / ~^TopLevelExpected(found=found)
 
-Import = i:'import' ( '*' ('as' / ^ImportStarAs(found=found)@(i,after)) ns:Ident ('from' / ^ImportStarFrom(ns=ns, found=found)@(i,after)) Source
+Import = i:'import' ( '*' ('as' / ^ImportStarAs(found=found)@(i,here)) ns:Ident ('from' / ^ImportStarFrom(ns=ns, found=found)@(i,here)) Source
                     / 'type'? '{' ('}' ^ImportEmpty@(i,here) / list ImportName sep ',' until '}' '}')
-                      ('from' / ^ImportFrom(found=found)@(i,after)) Source ) ';'?
+                      ('from' / ^ImportFrom(found=found)@(i,here)) Source ) ';'?
 ImportName = Ident ('as' Ident)?
 Source = plainStr / &(ident '(') ident Args / ^ImportPathExpected(found=found)@(i,here)
 

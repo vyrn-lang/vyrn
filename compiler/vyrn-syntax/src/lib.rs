@@ -145,8 +145,6 @@ enum HoleSrc {
 enum At {
     /// The token here, after trivia.
     Here,
-    /// The token after the one here.
-    After,
     /// Where the label of this index in [`Throw::labels`] matched.
     Label(usize),
 }

@@ -404,12 +404,6 @@ impl<'g, 'h> Run<'g, 'h> {
     fn anchor(&mut self, a: At, t: &Throw) -> usize {
         match a {
             At::Here => self.pos,
-            At::After => {
-                let p = self.pos;
-                self.skip_token();
-                self.skip_trivia();
-                std::mem::replace(&mut self.pos, p)
-            }
             At::Label(i) => self.capture(&t.labels[i]).map_or(self.pos, |c| c.0),
         }
     }

@@ -871,7 +871,6 @@ impl<'a> Meta<'a> {
         let n = self.name().ok_or("an anchor")?;
         Ok(match n.as_str() {
             "here" => At::Here,
-            "after" => At::After,
             _ => At::Label(self.label_index(&n)),
         })
     }

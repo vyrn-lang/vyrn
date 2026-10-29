@@ -1,1 +1,1 @@
-row_import_from.vyrn:1:1: expected `from` after the import list, found Str("std/math")
+row_import_from.vyrn:1:14: expected `from` after the import list, found Str("std/math")

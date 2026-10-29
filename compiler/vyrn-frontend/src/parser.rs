@@ -695,12 +695,13 @@ impl Parser {
     }
 
     fn expect_ident(&mut self) -> Result<String, Diagnostic> {
+        let (line, col) = (self.line(), self.col());
         match self.advance() {
             Tok::Ident(name) => Ok(name),
             other => Err(refuse!(
                 "parse",
-                self.line(),
-                self.col(),
+                line,
+                col,
                 ExpectedIdent,
                 found = format!("{:?}", other)
             )),
@@ -1679,26 +1680,28 @@ impl Parser {
         // the target's exports to the flat namespace.
         if *self.peek() == Tok::Star {
             self.advance();
+            let at = self.col();
             match self.advance() {
                 Tok::Ident(kw) if kw == "as" => {}
                 other => {
                     return Err(refuse!(
                         "parse",
                         line,
-                        self.col(),
+                        at,
                         ImportStarAs,
                         found = format!("{other:?}")
                     ))
                 }
             }
             let ns = self.expect_ident()?;
+            let at = self.col();
             match self.advance() {
                 Tok::Ident(kw) if kw == "from" => {}
                 other => {
                     return Err(refuse!(
                         "parse",
                         line,
-                        self.col(),
+                        at,
                         ImportStarFrom,
                         ns,
                         found = format!("{other:?}")
@@ -1742,13 +1745,14 @@ impl Parser {
         if names.is_empty() {
             return Err(refuse!("parse", line, self.col(), ImportEmpty));
         }
+        let at = self.col();
         match self.advance() {
             Tok::Ident(kw) if kw == "from" => {}
             other => {
                 return Err(refuse!(
                     "parse",
                     line,
-                    self.col(),
+                    at,
                     ImportFrom,
                     found = format!("{other:?}")
                 ))
