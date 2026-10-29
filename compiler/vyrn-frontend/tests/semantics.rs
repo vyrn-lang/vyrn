@@ -19,6 +19,7 @@ const STD: &[(&str, &str)] = &[
     ("std/arrays.vyrn", include_str!("../../../std/arrays.vyrn")),
     ("std/bench.vyrn", include_str!("../../../std/bench.vyrn")),
     ("std/cli.vyrn", include_str!("../../../std/cli.vyrn")),
+    ("std/code.vyrn", include_str!("../../../std/code.vyrn")),
     ("std/codecs.vyrn", include_str!("../../../std/codecs.vyrn")),
     (
         "std/connect.vyrn",

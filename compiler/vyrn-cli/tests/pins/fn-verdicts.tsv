@@ -2313,6 +2313,9 @@ std/cli.vyrn	cliCommand	no, it calls `cliPlansOf`, which is not trap-free	no, it
 std/cli.vyrn	cli	no, it calls `panic`	no, its effect set is alloc, trap, gen-only
 std/cli.vyrn	twoOpts	yes	no, its effect set is alloc
 std/code.vyrn	join	yes	no, its effect set is gen-only
+std/code.vyrn	arm	yes	no, its effect set is gen-only
+std/code.vyrn	ifChain	yes	no, its effect set is gen-only
+std/code.vyrn	ifChainOr	yes	no, its effect set is gen-only
 std/codecs.vyrn	hexDigit	yes	yes, packed UInt8
 std/codecs.vyrn	hexDigitUpper	yes	yes, packed UInt8
 std/codecs.vyrn	hexVal	yes	yes, emulated Int64
@@ -2329,7 +2332,8 @@ std/codecs.vyrn	urlUnreserved	yes	yes, packed UInt8
 std/codecs.vyrn	urlEncode	yes	no, its effect set is alloc
 std/codecs.vyrn	urlDecode	yes	no, its effect set is alloc
 std/columns.vyrn	columns	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
-std/columns.vyrn	columnsOf	no, it keeps an index check	no, its effect set is alloc, trap
+std/columns.vyrn	columnsOf	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
+std/columns.vyrn	columnsType	yes	no, its effect set is gen-only
 std/connect.vyrn	connectCapFirst	yes	no, its effect set is alloc
 std/connect.vyrn	connectIsNamedType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/connect.vyrn	connectServiceName	yes	no, its effect set is alloc
@@ -2660,7 +2664,6 @@ std/i18n.vyrn	keyTypeBase	no, it calls `split`, which is not trap-free	no, its e
 std/i18n.vyrn	keyFnName	no, it calls `keyTypeBase`, which is not trap-free	no, its effect set is alloc, trap
 std/i18n.vyrn	keyPlainName	no, it calls `keyTypeBase`, which is not trap-free	no, its effect set is alloc, trap
 std/i18n.vyrn	lowerFirst	yes	no, its effect set is alloc
-std/i18n.vyrn	strLit	yes	no, its effect set is alloc, gen-only
 std/i18n.vyrn	regexEscapeKey	yes	no, its effect set is alloc
 std/i18n.vyrn	dataError	yes	no, its effect set is alloc
 std/i18n.vyrn	i18nUnsupported	yes	no, the result is String, not an integer, Bool or a read array of one
@@ -2689,26 +2692,27 @@ std/i18n.vyrn	dedupeArgs	no, it keeps an index check	no, its effect set is alloc
 std/i18n.vyrn	argSignature	yes	no, its effect set is alloc
 std/i18n.vyrn	pluralCategories	yes	no, its effect set is alloc
 std/i18n.vyrn	pluralSupported	yes	no, its effect set is alloc
-std/i18n.vyrn	pluralAbs	yes	no, its effect set is alloc
-std/i18n.vyrn	pluralCondition	yes	no, its effect set is alloc
+std/i18n.vyrn	pluralAbs	yes	no, its effect set is gen-only
+std/i18n.vyrn	pluralCondition	yes	no, its effect set is gen-only
 std/i18n.vyrn	compileBody	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
-std/i18n.vyrn	compilePlural	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	compilePlural	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	compileSelect	no, it calls `compileBody`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/i18n.vyrn	emitChain	no, it keeps an index check	no, its effect set is alloc
 std/i18n.vyrn	localeErr	no, it calls `report`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	icuBadBrace	no, it keeps an index check	no, its effect set is alloc
-std/i18n.vyrn	keyCollisionErrors	no, it calls `keyFnName`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/i18n.vyrn	keyReservedErrors	no, it calls `keyPlainName`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	keyCollisionErrors	no, it calls `keyFnName`, which is not trap-free	no, its effect set is alloc, trap
 std/i18n.vyrn	i18n	no, it keeps an index check	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/i18n.vyrn	buildModule	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	buildTransKey	yes	no, its effect set is alloc, gen-only
 std/i18n.vyrn	splitCsv	no, it calls `sliceStr`, which is not trap-free	no, its effect set is alloc
-std/i18n.vyrn	paramList	no, it calls `argType`, which is not trap-free	no, its effect set is alloc, trap
-std/i18n.vyrn	argList	yes	no, its effect set is alloc
-std/i18n.vyrn	argType	no, it calls `keyTypeBase`, which is not trap-free	no, its effect set is alloc, trap
+std/i18n.vyrn	selectType	no, it calls `keyTypeBase`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	paramList	no, it calls `argType`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	argList	yes	no, its effect set is alloc, gen-only
+std/i18n.vyrn	argType	no, it calls `selectType`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	buildKeyFns	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	docComment	yes	no, its effect set is alloc
 std/i18n.vyrn	buildT	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	bodyText	no, it calls `compileBody`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	conditionText	yes	no, its effect set is alloc, gen-only
 std/icons.vyrn	icons	no, it calls `iconsModule`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/icons.vyrn	iconsAt	no, it calls `iconsModule`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/icons.vyrn	cannotRead	yes	no, its effect set is alloc
@@ -2723,7 +2727,7 @@ std/icons.vyrn	noLicense	yes	no, the result is String, not an integer, Bool or a
 std/icons.vyrn	licenseLine	yes	no, its effect set is alloc
 std/icons.vyrn	iconsEmit	no, it calls `camel`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/icons.vyrn	reservedNames	yes	no, its effect set is alloc
-std/icons.vyrn	iconHelper	yes	no, its effect set is alloc
+std/icons.vyrn	iconHelper	yes	no, its effect set is gen-only
 std/icons.vyrn	glyphSource	no, it calls `resolveGlyph`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/icons.vyrn	qualified	yes	no, its effect set is alloc
 std/icons.vyrn	aliasDepth	yes	yes, emulated Int64
@@ -2738,7 +2742,6 @@ std/icons.vyrn	iconRequest	no, it calls `parseJson`, which is not trap-free	no, 
 std/icons.vyrn	iconCollectionOf	yes	no, its effect set is alloc
 std/icons.vyrn	iconNowhere	yes	no, its effect set is alloc
 std/icons.vyrn	iconProviderModule	no, it calls `camel`, which is not trap-free	no, its effect set is alloc, gen-only
-std/icons.vyrn	lit	yes	no, its effect set is alloc, gen-only
 std/icons.vyrn	iconAttrs	yes	no, its effect set is alloc
 std/icons.vyrn	iconAttrList	yes	no, its effect set is alloc
 std/icons.vyrn	iconAttrOne	yes	no, its effect set is alloc
@@ -2749,6 +2752,8 @@ std/icons.vyrn	camel	no, it keeps an index check	no, its effect set is alloc
 std/icons.vyrn	beforeColon	yes	no, its effect set is alloc
 std/icons.vyrn	afterColon	yes	no, its effect set is alloc
 std/icons.vyrn	jsonKind	yes	no, `j` is Json, not an integer, Bool or a read array of one
+std/icons.vyrn	moduleText	no, it calls `iconsModule`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/icons.vyrn	providerText	no, it calls `iconProvider`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/icons.vyrn	toyCollection	yes	no, the result is String, not an integer, Bool or a read array of one
 std/imports.vyrn	procImports	yes	no, its effect set is alloc, gen-only
 std/imports.vyrn	importBlock	yes	no, its effect set is alloc, gen-only
@@ -2813,7 +2818,7 @@ std/jsondec.vyrn	jsondec$pathAt	yes	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$openDoc	yes	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$closeDoc	yes	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$kindAt	yes	no, `p` is JsonReader, not an integer, Bool or a read array of one
-std/jsondec.vyrn	jsondec$kindName	yes	no, the value of line 177 is String, not an integer, Bool or a read array of one
+std/jsondec.vyrn	jsondec$kindName	yes	no, the value of line 178 is String, not an integer, Bool or a read array of one
 std/jsondec.vyrn	jsondec$expect	no, it calls `skipJsonValue`, which is not trap-free	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$readNull	yes	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$readString	yes	no, its effect set is alloc
@@ -2843,9 +2848,6 @@ std/jsondec.vyrn	jsondec$jsonDecoders	no, it keeps an index check	no, its effect
 std/jsondec.vyrn	jsondec$jsonDecoder	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/jsondec.vyrn	jsondec$isName	yes	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$expectLine	yes	no, its effect set is gen-only
-std/jsondec.vyrn	jsondec$arm	yes	no, its effect set is gen-only
-std/jsondec.vyrn	jsondec$ifChain	yes	no, its effect set is gen-only
-std/jsondec.vyrn	jsondec$ifChainOr	yes	no, its effect set is gen-only
 std/jsondec.vyrn	jsondec$jsonDecoderBody	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/jsondec.vyrn	jsondec$jsonRecordBody	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/jsondec.vyrn	jsondec$jsonVariantsBody	no, it keeps an index check	no, its effect set is alloc, gen-only
@@ -3333,7 +3335,7 @@ std/tw.vyrn	twDashDots	yes	no, its effect set is alloc
 std/tw.vyrn	twAxisOf	no, it calls `twDropHead`, which is not trap-free	no, its effect set is alloc, trap
 std/tw.vyrn	twKnownFamilies	yes	no, its effect set is alloc
 std/tw.vyrn	twKnownTopLevel	yes	no, its effect set is alloc
-std/tw.vyrn	twUnknownKeyErrors	no, it calls `twHeadOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/tw.vyrn	twUnknownKeyErrors	no, it calls `twHeadOf`, which is not trap-free	no, its effect set is alloc, trap
 std/tw.vyrn	twHeadOf	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
 std/tw.vyrn	twColorClasses	yes	no, its effect set is alloc
 std/tw.vyrn	twBoxDecl	yes	no, its effect set is alloc
@@ -3345,10 +3347,10 @@ std/tw.vyrn	twSizeClasses	yes	no, its effect set is alloc
 std/tw.vyrn	twStaticClasses	yes	no, its effect set is alloc
 std/tw.vyrn	twBuildVocab	no, it calls `twAxisOf`, which is not trap-free	no, its effect set is alloc, trap
 std/tw.vyrn	twSafelist	no, it calls `twAxisOf`, which is not trap-free	no, its effect set is alloc, trap
-std/tw.vyrn	twUnsafeSafelistErrors	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/tw.vyrn	twUnsafeNameErrors	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/tw.vyrn	twUnsafeBreakpointErrors	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/tw.vyrn	twUnsafeValueErrors	no, it calls `twHeadOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/tw.vyrn	twUnsafeSafelistErrors	yes	no, its effect set is alloc
+std/tw.vyrn	twUnsafeNameErrors	yes	no, its effect set is alloc
+std/tw.vyrn	twUnsafeBreakpointErrors	yes	no, its effect set is alloc
+std/tw.vyrn	twUnsafeValueErrors	no, it calls `twHeadOf`, which is not trap-free	no, its effect set is alloc, trap
 std/tw.vyrn	twCssEscape	yes	no, its effect set is alloc
 std/tw.vyrn	twStateLayer	yes	no, its effect set is alloc
 std/tw.vyrn	twRuleFlat	no, it keeps a division check	no, its effect set is alloc
@@ -3356,11 +3358,12 @@ std/tw.vyrn	twBlockLit	no, it calls `twRuleFlat`, which is not trap-free	no, its
 std/tw.vyrn	twCssBody	no, it calls `twBlockLit`, which is not trap-free	no, its effect set is alloc
 std/tw.vyrn	twBuildCss	no, it calls `twCssBody`, which is not trap-free	no, its effect set is alloc
 std/tw.vyrn	twTokenRegex	yes	no, its effect set is alloc
-std/tw.vyrn	twSheetSafetyErrors	no, it calls `twUnsafeValueErrors`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/tw.vyrn	twSheetSafetyErrors	no, it calls `twUnsafeValueErrors`, which is not trap-free	no, its effect set is alloc, trap
+std/tw.vyrn	twReports	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/tw.vyrn	twBuildModule	no, it calls `twCssBody`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/tw.vyrn	twEmitCss	yes	no, its effect set is alloc, gen-only
 std/tw.vyrn	tw	no, it calls `twLoaded`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/tw.vyrn	twLoaded	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/tw.vyrn	loadedText	no, it calls `twLoaded`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/tw.vyrn	cannotReadTheme	yes	no, its effect set is alloc
 std/ui.editor.vyrn	uiChrome	yes	no, its effect set is alloc
 std/ui.editor.vyrn	vyrnChromeUi	yes	no, its effect set is alloc

@@ -26,6 +26,7 @@ const RT_FILES: &[(&str, &str)] = &[
         include_str!("../../../std/jsondec.vyrn"),
     ),
     ("std/num.vyrn", include_str!("../../../std/num.vyrn")),
+    ("std/code.vyrn", include_str!("../../../std/code.vyrn")),
     ("std/codecs.vyrn", include_str!("../../../std/codecs.vyrn")),
     ("std/text.vyrn", include_str!("../../../std/text.vyrn")),
     (

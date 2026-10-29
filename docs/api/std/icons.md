@@ -27,7 +27,7 @@ A template's `<Icon name="ui:github"/>` needs a project provider module:
 // `vyrn.json` binds `ui` and `codex`; those names are the prefixes.
 import { iconProvider } from "std/icons"
 
-export gen fn Icon(attrs: String, file: String, line: Int64, col: Int64) -> String {
+export gen fn Icon(attrs: String, file: String, line: Int64, col: Int64) -> Code {
     return iconProvider(attrs, file, line, col, "ui codex")
 }
 ```
@@ -38,7 +38,7 @@ accessible name) and `class`; any other attribute is refused.
 ## icons
 
 ```vyrn
-fn icons(collection: String, names: String) -> String
+fn icons(collection: String, names: String) -> Code
 ```
 
 One function per glyph in `names` (space-separated Iconify names), read
@@ -47,7 +47,7 @@ from `collection`: a relative `.json` path or a `vyrn.json` dependency alias.
 ## iconsAt
 
 ```vyrn
-fn iconsAt(collection: String, names: String, anchorFile: String, line: Int64, col: Int64) -> String
+fn iconsAt(collection: String, names: String, anchorFile: String, line: Int64, col: Int64) -> Code
 ```
 
 [`icons`](#icons) with reports anchored at `anchorFile`/`line`/`col`, the template
@@ -57,7 +57,7 @@ is this generation's own constant argument and resolves through `vyrn.json`.
 ## iconsModule
 
 ```vyrn
-fn iconsModule(collectionText: String, collectionPath: String, names: String, anchorFile: String, line: Int64, col: Int64) -> String
+fn iconsModule(collectionText: String, collectionPath: String, names: String, anchorFile: String, line: Int64, col: Int64) -> Code
 ```
 
 [`icons`](#icons) over collection text already read. `collectionPath` is only
@@ -67,7 +67,7 @@ in the collection file.
 ## iconProvider
 
 ```vyrn
-fn iconProvider(attrs: String, file: String, line: Int64, col: Int64, collections: String) -> String
+fn iconProvider(attrs: String, file: String, line: Int64, col: Int64, collections: String) -> Code
 ```
 
 A project's `<Icon>` provider. `collections` is a space-separated list of

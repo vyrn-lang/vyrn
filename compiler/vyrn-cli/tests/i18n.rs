@@ -53,12 +53,8 @@ fn emit_gen_shows_the_synthesized_translation_module() {
 
     // Module state is the generator sandbox's carve-out.
     assert!(
-        src.contains("export type Locale = enum {"),
+        src.contains("export type Locale = enum { En, Uk }"),
         "Locale enum:\n{src}"
-    );
-    assert!(
-        src.contains("    En,") && src.contains("    Uk }"),
-        "locale variants:\n{src}"
     );
     assert!(
         src.contains("let mut currentLocale: Locale = En"),
@@ -94,9 +90,9 @@ fn emit_gen_shows_the_synthesized_translation_module() {
         "select fn:\n{src}"
     );
 
-    assert!(src.contains("/// Welcome"), "arg-less doc:\n{src}");
+    assert!(src.contains("/// \"Welcome\""), "arg-less doc:\n{src}");
     assert!(
-        src.contains("/// {count, plural, one {# item} other {# items}}"),
+        src.contains("/// \"{count, plural, one {# item} other {# items}}\""),
         "plural doc:\n{src}"
     );
 

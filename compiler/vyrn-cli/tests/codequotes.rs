@@ -573,6 +573,38 @@ fn main() -> Int64 {
     );
 }
 
+/// `moduleCode` pairs each shape node with its `Code`, so a generator splices a
+/// generic field type whole.
+#[test]
+fn a_module_code_shape_node_splices_a_generic_field() {
+    let gen = r#"export gen fn col(module: String) -> Code {
+    let mut out = vyrn"import { Id } from \{module}\n"
+    for t in moduleCode(module).types {
+        if t.info.name == "Row" {
+            let n = t.nodes[t.info.shape[0].members[0].args[0]]
+            out = out + vyrn"export fn count(v: Array<\{n.code}>) -> Int64 { return v.length }"
+        }
+    }
+    return out
+}
+"#;
+    let app = "import { col } from \"./gen\"\nimport { count } from col(\"./rows\")\nfn main() -> Int64 {\n    let xs: Array<Array<Option<Int64>>> = [[Some(1), None], []]\n    return count(xs)\n}\n";
+    let path = gen_app("shape_node", gen, app);
+    write(
+        &path.with_file_name("rows.vyrn"),
+        "export type Id = Int64\nexport type Row = { tags: Array<Option<Id>> }\n",
+    );
+    let out = vyrn().arg("emit-gen").arg(&path).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("export fn count(v: Array<Array<Option<Id>>>) -> Int64"),
+        "{text}"
+    );
+    let out = vyrn().arg("run").arg(&path).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+}
+
 /// A derive generator's own program may call `derive`: its `toJson` runs
 /// `std/json`'s generator in a load one deeper.
 #[test]

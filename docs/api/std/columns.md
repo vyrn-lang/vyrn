@@ -25,7 +25,7 @@ of records reads the whole row.
 ## columns
 
 ```vyrn
-fn columns(module: String) -> String
+fn columns(module: String) -> Code
 ```
 
 Emits a module exporting the column layout of every record type `module`
