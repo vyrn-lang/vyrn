@@ -3,7 +3,8 @@ import { startsWith, endsWith, contains } from "std/strpred"
 import { includes } from "std/arrays"
 import { escapeHtml } from "./code"
 import { highlightSrc, lineStarts } from "./hl"
-import { quoted, quotedList, branch, lookup, vyrnStems, fenced } from "./gensrc"
+import { quotedList, branch, lookup, vyrnStems, fenced } from "./gensrc"
+import { join } from "std/code"
 
 type Entry = { name: String, kind: String, sig: String, doc: String, line: Int64 }
 
@@ -368,12 +369,12 @@ fn summaryOf(doc: String) -> String {
     return linked(inlineHtml(substring(flat, 0, cut)), [])
 }
 
-/// The source of a `Markup` holding `html`, which this file rendered.
-fn trusted(html: String) -> String {
-    return "TrustedMarkup(" + quoted(html) + ")"
+/// A `Markup` holding `html`, which this file rendered.
+gen fn trusted(html: String) -> Code {
+    return vyrn"TrustedMarkup(\{html})"
 }
 
-export gen fn apiDocs(stdDir: String) -> String {
+export gen fn apiDocs(stdDir: String) -> Code {
     let mut mods: Array<Mod> = []
     for name in vyrnStems(stdDir) {
         if !fenced(name) {
@@ -392,45 +393,56 @@ export gen fn apiDocs(stdDir: String) -> String {
     }
 
     let mut names: Array<String> = []
-    let mut summaries: Array<String> = []
-    let mut intros: Array<String> = []
-    let mut entryLists: Array<String> = []
-    let mut testLists: Array<String> = []
-    let mut counts: Array<String> = []
+    let mut summaries: Array<Code> = []
+    let mut intros: Array<Code> = []
+    let mut entryLists: Array<Code> = []
+    let mut testLists: Array<Code> = []
+    let mut counts: Array<Code> = []
     for m in mods {
         let mut exported: Array<String> = []
         for e in m.entries {
             exported.push(e.name.copy())
         }
         names.push(m.name.copy())
-        summaries.push(branch("m", m.name, quoted(summaryOf(m.doc))))
+        let summary = summaryOf(m.doc)
+        summaries.push(branch("m", m.name, vyrn"\{summary}"))
         intros.push(branch("m", m.name, trusted(linked(proseHtml(m.doc), exported))))
-        let mut es: Array<String> = []
+        let mut es: Array<Code> = []
         for e in m.entries {
             let sig = trusted(highlightSrc(e.sig, lex(e.sig)))
-            es.push("DocEntry { name: " + quoted(e.name) + ", kind: " + quoted(e.kind) + ", sig: " + sig + ", prose: " + trusted(linked(proseHtml(e.doc), exported)) + ", line: " + e.line.toString() + " }")
+            let prose = trusted(linked(proseHtml(e.doc), exported))
+            es.push(vyrn"DocEntry { name: \{e.name}, kind: \{e.kind}, sig: \{sig}, prose: \{prose}, line: \{e.line} }")
         }
-        entryLists.push(branch("m", m.name, "[" + joinWith(es, ", ") + "]"))
+        let entries = join(es, vyrn", ")
+        entryLists.push(branch("m", m.name, vyrn"[\{entries}]"))
         testLists.push(branch("m", m.name, quotedList(m.tests)))
-        counts.push(branch("m", m.name, m.entries.length.toString()))
+        let count = m.entries.length
+        counts.push(branch("m", m.name, vyrn"\{count}"))
     }
 
-    let mut out = "/// The standard library reference, read off `std/` by `site/app/apidoc.vyrn`\n/// while the site compiled. Do not edit.\n"
-    out = out + "import { Markup } from \"std/html\"\n"
-    out = out + "/// Every documented module, sorted.\n"
-    out = out + "export fn docModules() -> Array<String> { return " + quotedList(names) + " }\n"
-    out = out + "/// The first sentence of a module's header block.\n"
-    out = out + lookup("docSummary", "m", "String", summaries, "\"\"")
-    out = out + "/// A module's header block, as HTML.\n"
-    out = out + lookup("docIntro", "m", "Markup", intros, trusted(""))
-    out = out + "export type DocEntry = { name: String, kind: String, sig: Markup, prose: Markup, line: Int64 }\n"
-    out = out + "/// A module's exports in declaration order, each signature coloured by the compiler's lexer and its prose as HTML.\n"
-    out = out + lookup("docEntries", "m", "Array<DocEntry>", entryLists, "[]")
-    out = out + "/// The name of every `test` block the module keeps, in source order.\n"
-    out = out + lookup("docTests", "m", "Array<String>", testLists, "[]")
-    out = out + "/// How many exports a module has.\n"
-    out = out + lookup("docCount", "m", "Int64", counts, "0")
-    return out
+    let modules = quotedList(names)
+    let summaryFn = lookup("docSummary", "m", vyrn"String", summaries, vyrn"\"\"")
+    let introFn = lookup("docIntro", "m", vyrn"Markup", intros, trusted(""))
+    let entriesFn = lookup("docEntries", "m", vyrn"Array<DocEntry>", entryLists, vyrn"[]")
+    let testsFn = lookup("docTests", "m", vyrn"Array<String>", testLists, vyrn"[]")
+    let countFn = lookup("docCount", "m", vyrn"Int64", counts, vyrn"0")
+    return vyrn"""
+        import { Markup } from "std/html"
+        /// Every documented module, sorted.
+        export fn docModules() -> Array<String> { return \{modules} }
+        /// The first sentence of a module's header block.
+        \{summaryFn}
+        /// A module's header block, as HTML.
+        \{introFn}
+        export type DocEntry = { name: String, kind: String, sig: Markup, prose: Markup, line: Int64 }
+        /// A module's exports in declaration order, each signature coloured by the compiler's lexer and its prose as HTML.
+        \{entriesFn}
+        /// The name of every `test` block the module keeps, in source order.
+        \{testsFn}
+        /// How many exports a module has.
+        \{countFn}
+
+        """
 }
 
 test "a doc link to an export links its entry, and any other reads as code" {

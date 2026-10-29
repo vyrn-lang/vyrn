@@ -18,7 +18,7 @@
 import { report, reportHere, Severity } from "std/diag"
 import { joinWith, substring, trim } from "std/strings"
 
-export gen fn table(path: String) -> String {
+export gen fn table(path: String) -> Code {
     let text = match readFile(path) {
         Ok(t) => t,
         Err(e) => "",
@@ -28,7 +28,7 @@ export gen fn table(path: String) -> String {
     }
 
     let mut names: Array<String> = []
-    let mut reports = ""
+    let mut reports = vyrn""
     let mut lineNo = 0
     // Split by hand: the byte offsets are what make a column number, and a
     // column number is what makes a diagnostic worth reading.
@@ -68,42 +68,46 @@ export gen fn table(path: String) -> String {
             let typeCol = typeStart - start + 1
             if contains(names, name) {
                 reports = reports
-                + render(report(
+                + report(
                     Error,
                     path,
                     lineNo,
                     nameCol,
                     "column `\{name}` is declared twice; a table has one column per name",
-                ))
+                )
             } else {
                 names.push(name.copy())
             }
             if ty == "String" {
                 reports = reports
-                + render(report(
+                + report(
                     Warning,
                     path,
                     lineNo,
                     typeCol,
                     "column `\{name}` has no length limit; write `String(120)`",
-                ))
+                )
             }
         }
         i = i + 1
     }
 
-    let quoted = "\"" + joinWith(names, ",") + "\""
-    return reports
-    + "/// Generated from \{path} by the `table` generator.\n"
-    + "export fn columnCount() -> Int64 { return \{names.length.toString()} }\n"
-    + "export fn columnNames() -> String { return \{quoted} }\n"
+    let count = names.length
+    let joined = joinWith(names, ",")
+    return reports + vyrn"""
+        export fn columnCount() -> Int64 { return \{count} }
+        export fn columnNames() -> String { return \{joined} }
+
+        """
 }
 
 /// The input as a whole is missing, so there is no line to point at.
-gen fn reportHereFailed(path: String) -> String {
-    return render(reportHere(Error, "cannot read the table definition `\{path}`"))
-    + "export fn columnCount() -> Int64 { return 0 }\n"
-    + "export fn columnNames() -> String { return \"\" }\n"
+gen fn reportHereFailed(path: String) -> Code {
+    return reportHere(Error, "cannot read the table definition `\{path}`") + vyrn"""
+        export fn columnCount() -> Int64 { return 0 }
+        export fn columnNames() -> String { return "" }
+
+        """
 }
 
 fn contains(names: Array<String>, name: String) -> Bool {

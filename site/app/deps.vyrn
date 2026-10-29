@@ -51,7 +51,7 @@ gen fn depthOf(m: String, all: Array<String>, edges: Array<Uses>, walking: Array
     return deepest + 1
 }
 
-export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
+export gen fn moduleDeps(stdDir: String, examplesDir: String) -> Code {
     // The graph draws what the reference lists, and `std/task` imports the fenced runtime.
     let mut all: Array<String> = []
     for m in vyrnStems(stdDir) {
@@ -65,10 +65,10 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
     }
     let samples = walk(examplesDir, "", 2)
 
-    let mut uses: Array<String> = []
-    let mut usedBy: Array<String> = []
-    let mut depth: Array<String> = []
-    let mut examples: Array<String> = []
+    let mut uses: Array<Code> = []
+    let mut usedBy: Array<Code> = []
+    let mut depth: Array<Code> = []
+    let mut examples: Array<Code> = []
     for m in all {
         let mut mine: Array<String> = []
         for e in edges {
@@ -98,17 +98,25 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
         }
         examples.push(branch("m", m, quotedList(users)))
 
-        depth.push(branch("m", m, depthOf(m, all, edges, []).toString()))
+        let d = depthOf(m, all, edges, [])
+        depth.push(branch("m", m, vyrn"\{d}"))
     }
 
-    let mut out = "/// The module graph, read off `std/` and `examples/` by `site/app/deps.vyrn`\n/// while the site compiled. Do not edit.\n"
-    out = out + "/// The `std/` modules a module imports.\n"
-    out = out + lookup("depUses", "m", "Array<String>", uses, "[]")
-    out = out + "/// The `std/` modules that import a module.\n"
-    out = out + lookup("depUsedBy", "m", "Array<String>", usedBy, "[]")
-    out = out + "/// How far a module sits from the bottom of the graph.\n"
-    out = out + lookup("depDepth", "m", "Int64", depth, "0")
-    out = out + "/// The example programs that import a module, by path under `examples/`.\n"
-    out = out + lookup("depExamples", "m", "Array<String>", examples, "[]")
-    return out
+    let strings = vyrn"Array<String>"
+    let none = vyrn"[]"
+    let usesFn = lookup("depUses", "m", strings, uses, none)
+    let usedByFn = lookup("depUsedBy", "m", strings, usedBy, none)
+    let depthFn = lookup("depDepth", "m", vyrn"Int64", depth, vyrn"0")
+    let examplesFn = lookup("depExamples", "m", strings, examples, none)
+    return vyrn"""
+        /// The `std/` modules a module imports.
+        \{usesFn}
+        /// The `std/` modules that import a module.
+        \{usedByFn}
+        /// How far a module sits from the bottom of the graph.
+        \{depthFn}
+        /// The example programs that import a module, by path under `examples/`.
+        \{examplesFn}
+
+        """
 }

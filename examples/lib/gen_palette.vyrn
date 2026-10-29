@@ -10,7 +10,7 @@
 
 import { chars } from "std/text"
 
-export gen fn palette(dir: String) -> String {
+export gen fn palette(dir: String) -> Code {
     // Count colors in the CSV by counting commas (immune to trailing newlines
     // and CRLF, so the emitted source is reproducible across checkouts).
     let csv = match readFile(dir + "/palette.csv") {
@@ -36,11 +36,12 @@ export gen fn palette(dir: String) -> String {
         theme0 = themes[0]
     }
 
-    // Emit the module source. Constants derive their names from the inputs.
-    let mut out = "/// Generated from ./data by the `palette` generator.\n"
-    out = out + "export type Count = Int64 where value >= 1\n"
-    out = out + "export fn colorCount() -> Count { return " + numColors.toString() + " }\n"
-    out = out + "export fn themeCount() -> Count { return " + numThemes.toString() + " }\n"
-    out = out + "export fn firstTheme() -> String { return \"" + theme0 + "\" }\n"
-    return out
+    // Emit the module. Constants derive their values from the inputs.
+    return vyrn"""
+        export type Count = Int64 where value >= 1
+        export fn colorCount() -> Count { return \{numColors} }
+        export fn themeCount() -> Count { return \{numThemes} }
+        export fn firstTheme() -> String { return \{theme0} }
+
+        """
 }

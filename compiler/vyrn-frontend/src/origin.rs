@@ -158,6 +158,9 @@ impl OriginMaps {
     /// from its span table: a span with a `shown` position governs from the line
     /// it starts on, and the next span without one ends the region after the
     /// last line the region touches.
+    ///
+    /// `rows` is sorted by offset (`gen::Written`), so one walk counts each
+    /// newline once: linear in the source, not rows times source.
     pub fn add_spans(
         &mut self,
         banner: &str,
@@ -165,11 +168,12 @@ impl OriginMaps {
         rows: &[crate::gen::SpanRow],
         ctx: &Context<'_>,
     ) {
-        let line_of = |offset: usize| 1 + source[..offset].matches('\n').count();
         let mut dirs: Vec<Directive> = Vec::new();
         let mut open = false;
+        let (mut gen_line, mut counted) = (1, 0);
         for r in rows {
-            let gen_line = line_of(r.offset);
+            gen_line += source[counted..r.offset].matches('\n').count();
+            counted = r.offset;
             match &r.shown {
                 Some(s) => {
                     let (origin, malformed) =

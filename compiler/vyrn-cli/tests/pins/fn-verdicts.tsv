@@ -806,7 +806,7 @@ examples/leak/server/main.vyrn	main	yes	no, its effect set is alloc, write-outpu
 examples/leak/shared/format.vyrn	title	yes	no, its effect set is alloc
 examples/leak/shared/format.vyrn	titleOf	yes	no, its effect set is alloc, fs-read
 examples/lib/area_spelling.vyrn	Area__Pt__area	yes	no, `p` is Pt, not an integer, Bool or a read array of one
-examples/lib/gen_palette.vyrn	palette	yes	no, its effect set is alloc, fs-read, fs-list
+examples/lib/gen_palette.vyrn	palette	yes	no, its effect set is alloc, fs-read, fs-list, gen-only
 examples/lib/gen_projection_site.vyrn	d1	yes	no, its effect set is write-output
 examples/lib/gen_projection_site.vyrn	probe	yes	no, `q` is Q, not an integer, Bool or a read array of one
 examples/lib/gen_projection_site.vyrn	mk	yes	no, `a` is String, not an integer, Bool or a read array of one
@@ -1815,7 +1815,7 @@ site/app/apidoc.vyrn	proseHtml	no, it keeps an index check	no, its effect set is
 site/app/apidoc.vyrn	isBanner	yes	no, its effect set is alloc
 site/app/apidoc.vyrn	linked	no, it keeps an index check	no, its effect set is alloc, trap
 site/app/apidoc.vyrn	summaryOf	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
-site/app/apidoc.vyrn	trusted	no, it calls `quoted`, which is not trap-free	no, its effect set is alloc, trap
+site/app/apidoc.vyrn	trusted	yes	no, its effect set is gen-only
 site/app/apidoc.vyrn	apiDocs	no, it calls `proseHtml`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 site/app/bench.vyrn	run1File	yes	no, the result is String, not an integer, Bool or a read array of one
 site/app/bench.vyrn	run1Href	yes	no, its effect set is alloc
@@ -1945,8 +1945,7 @@ site/app/editors.vyrn	implHref	yes	no, its effect set is alloc
 site/app/facts.vyrn	contentLines	no, it calls `lines`, which is not trap-free	no, its effect set is alloc, fs-read, trap
 site/app/facts.vyrn	releaseTagOf	no, it calls `releaseField`, which is not trap-free	no, its effect set is alloc, fs-read, trap
 site/app/facts.vyrn	releaseField	no, it calls `contentLines`, which is not trap-free	no, its effect set is alloc, fs-read, trap
-site/app/facts.vyrn	safeTag	yes	no, its effect set is alloc
-site/app/facts.vyrn	repoFacts	no, it calls `vyrnStems`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap
+site/app/facts.vyrn	repoFacts	no, it calls `vyrnStems`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 site/app/feed.vyrn	feedName	yes	no, the result is String, not an integer, Bool or a read array of one
 site/app/feed.vyrn	feedUrl	yes	no, its effect set is alloc
 site/app/feed.vyrn	feedItemCount	no, it calls `releaseRows`, which is not trap-free	no, its effect set is alloc, fs-read, module-state
@@ -1960,13 +1959,14 @@ site/app/feed.vyrn	monthName	yes	no, its effect set is alloc
 site/app/feed.vyrn	feedFault	no, it calls `feedOf`, which is not trap-free	no, its effect set is alloc, trap
 site/app/feed.vyrn	linkFault	no, it calls `timesIn`, which is not trap-free	no, its effect set is alloc, trap
 site/app/feed.vyrn	timesIn	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
-site/app/gensrc.vyrn	quoted	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
-site/app/gensrc.vyrn	quotedList	no, it calls `quoted`, which is not trap-free	no, its effect set is alloc, trap
-site/app/gensrc.vyrn	branch	no, it calls `quoted`, which is not trap-free	no, its effect set is alloc, trap
-site/app/gensrc.vyrn	lookup	yes	no, its effect set is alloc
+site/app/gensrc.vyrn	quotedList	yes	no, its effect set is alloc, gen-only
+site/app/gensrc.vyrn	branch	yes	no, its effect set is gen-only
+site/app/gensrc.vyrn	lookup	yes	no, its effect set is gen-only
 site/app/gensrc.vyrn	entriesOf	yes	no, its effect set is alloc, fs-list
 site/app/gensrc.vyrn	fenced	yes	no, `name` is String, not an integer, Bool or a read array of one
 site/app/gensrc.vyrn	vyrnStems	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, fs-list, trap
+site/app/gensrc.vyrn	sampleLookup	yes	no, its effect set is alloc, gen-only
+site/app/gensrc.vyrn	sampleList	yes	no, its effect set is alloc, gen-only
 site/app/github.vyrn	repoName	yes	no, the result is String, not an integer, Bool or a read array of one
 site/app/github.vyrn	ghBlob	yes	no, its effect set is alloc
 site/app/github.vyrn	ghSpec	yes	no, its effect set is alloc
@@ -2220,7 +2220,7 @@ site/guide/fallible.vyrn	Fallible$Http$isSuccess	yes	no, `self` is Http, not an 
 site/guide/fallible.vyrn	Fallible$Http$success	no, it calls `panic`	no, its effect set is alloc, trap
 site/guide/firstfn.vyrn	area	yes	yes, emulated Int64
 site/guide/firstfn.vyrn	demo	yes	no, its effect set is alloc
-site/guide/gentiny.vyrn	squares	yes	no, its effect set is alloc
+site/guide/gentiny.vyrn	squares	yes	no, its effect set is alloc, gen-only
 site/guide/genuse.vyrn	demo	yes	no, its effect set is alloc
 site/guide/hello.vyrn	demo	yes	no, the result is String, not an integer, Bool or a read array of one
 site/guide/html.vyrn	row	yes	no, its effect set is alloc
