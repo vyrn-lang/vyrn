@@ -1,4 +1,4 @@
-//! The provenance analysis (`vyrn_lower::provenance`) over the 48 functions
+//! The provenance analysis (`vyrn_lower::provenance`) over the 46 functions
 //! the analytic report of 2026-10-21 classified by hand, pinned in
 //! `tests/pins/provenance.tsv`: each function's class, its hand label, and
 //! the reason the analysis gives where it cannot say. A row whose class
@@ -46,12 +46,6 @@ const CENSUS: &[(&str, &str, &str)] = &[
     ("std/vyx.vyrn", "vyxAppend", "identity+fresh(end)"),
     ("std/vyx.vyrn", "vyxStripDirectives", "subsequence"),
     ("std/vyx.vyrn", "vyxElementRoots", "subsequence"),
-    (
-        "std/vyx.vyrn",
-        "vyxShiftAttrs",
-        "identity field-update(line)",
-    ),
-    ("std/vyx.vyrn", "vyxShiftNodes", "identity pointwise"),
     ("std/vyx.vyrn", "vyxCompNames", "fresh"),
     ("std/vyx.vyrn", "vyxImportedNames", "fresh"),
     ("std/stream.vyrn", "merge", "shuffle"),

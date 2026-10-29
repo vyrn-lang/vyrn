@@ -3366,7 +3366,7 @@ std/tw.vyrn	loadedText	no, it calls `twLoaded`, which is not trap-free	no, its e
 std/tw.vyrn	cannotReadTheme	yes	no, its effect set is alloc
 std/ui.editor.vyrn	uiChrome	yes	no, its effect set is alloc
 std/ui.editor.vyrn	vyrnChromeUi	yes	no, its effect set is alloc
-std/ui.editor.vyrn	uiPageView	no, it calls `vyxPageShape`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/ui.editor.vyrn	uiPageView	no, it calls `vyxScriptView`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/ui.editor.vyrn	vyrnSourceUi	no, it calls `vyxStemOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/ui.vyrn	pageError	yes	no, its effect set is alloc
 std/ui.vyrn	notFound	yes	no, its effect set is alloc
@@ -3628,7 +3628,6 @@ std/vyx-hints.vyrn	checkText	no, it calls `vhCheck`, which is not trap-free	no, 
 std/vyx-hints.vyrn	checkOf	no, it calls `checkText`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx-hints.vyrn	fires	no, it calls `checkOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.editor.vyrn	vyxNoCursor	yes	no, its effect set is alloc
-std/vyx.editor.vyrn	vyxCharStart	yes	yes, packed UInt8
 std/vyx.editor.vyrn	vyxOffsetAt	yes	yes, emulated Int64
 std/vyx.editor.vyrn	vyxCharColAt	no, it keeps an index check	no, it is not trap-free
 std/vyx.editor.vyrn	vyxInScript	no, it calls `vyxSection`, which is not trap-free	no, its effect set is alloc
@@ -3644,11 +3643,12 @@ std/vyx.editor.vyrn	vyxEvents	yes	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxItem	yes	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxCapitalized	yes	no, its effect set is alloc
 std/vyx.editor.vyrn	vyrnCompleteVyx	no, it keeps an index check	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
-std/vyx.editor.vyrn	vyxScriptView	no, it calls `vyxSection`, which is not trap-free	no, its effect set is alloc
+std/vyx.editor.vyrn	vyxScriptView	no, it calls `vyxBlankLines`, which is not trap-free	no, its effect set is alloc, gen-only
+std/vyx.editor.vyrn	vyxBlankLines	no, it keeps an index check	no, its effect set is gen-only
 std/vyx.editor.vyrn	vyxHasTemplate	no, it calls `vyxSectionAvoid`, which is not trap-free	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxStemOf	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc
-std/vyx.editor.vyrn	vyxComponentView	no, it calls `vyxParseScriptAt`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.editor.vyrn	vyrnSourceVyx	no, it calls `vyxStemOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.editor.vyrn	vyxComponentView	no, it calls `vyxScriptView`, which is not trap-free	no, its effect set is alloc, gen-only
+std/vyx.editor.vyrn	vyrnSourceVyx	no, it calls `vyxStemOf`, which is not trap-free	no, its effect set is alloc, fs-read, gen-only
 std/vyx.editor.vyrn	vyrnDefinitionVyx	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, fs-read
 std/vyx.vyrn	vyxSlice	no, it keeps an index check	no, its effect set is alloc
 std/vyx.vyrn	vyxIsWs	yes	yes, packed UInt8
@@ -3656,10 +3656,11 @@ std/vyx.vyrn	vyxIsIdent	yes	yes, packed UInt8
 std/vyx.vyrn	vyxLowerFirst	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxAppend	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxLineAt	yes	yes, emulated Int64
-std/vyx.vyrn	vyxColAt	yes	yes, emulated Int64
+std/vyx.vyrn	vyxColAt	no, it keeps an index check	no, it is not trap-free
+std/vyx.vyrn	vyxCharStart	yes	yes, packed UInt8
 std/vyx.vyrn	vyxSkipWs	no, it keeps an index check	no, it is not trap-free
-std/vyx.vyrn	vyxEscSecond	yes	yes, packed UInt8
-std/vyx.vyrn	vyxStrLit	yes	no, its effect set is alloc
+std/vyx.vyrn	vyxSpanIn	no, it keeps an index check	no, its effect set is alloc
+std/vyx.vyrn	vyxSpanAt	no, it keeps an index check	no, its effect set is alloc
 std/vyx.vyrn	vyxFind	no, it keeps an index check	no, it is not trap-free
 std/vyx.vyrn	vyxFindLast	no, it calls `vyxFind`, which is not trap-free	no, it is not trap-free
 std/vyx.vyrn	vyxCollapseWs	yes	no, its effect set is alloc
@@ -3684,7 +3685,7 @@ std/vyx.vyrn	vyxParseForHead	no, it calls `vyxSlice`, which is not trap-free	no,
 std/vyx.vyrn	vyxIsWsText	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxElemHasDir	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxProcessElem	no, it calls `vyxProcessElemInner`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxProcessElemInner	no, it calls `vyxParseForHead`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx.vyrn	vyxProcessElemInner	no, it calls `vyxSpanIn`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxGroupNodes	no, it calls `vyxIsWsText`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxAttrsOf	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxElemLine	yes	no, `n` is VyxNode, not an integer, Bool or a read array of one
@@ -3692,61 +3693,69 @@ std/vyx.vyrn	vyxSectionUnclosed	yes	no, `sec` is VyxSection, not an integer, Boo
 std/vyx.vyrn	vyxSection	no, it calls `vyxSectionAvoid`, which is not trap-free	no, its effect set is alloc
 std/vyx.vyrn	vyxSectionAvoid	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc
 std/vyx.vyrn	vyxSplitFields	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc
-std/vyx.vyrn	vyxRebaseImport	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc
 std/vyx.vyrn	vyxLineStartOffset	yes	yes, emulated Int64
-std/vyx.vyrn	vyxLexKwBlock	no, it keeps an index check	no, its effect set is alloc, gen-only
-std/vyx.vyrn	vyxFindPropsBlock	no, it calls `vyxFindKwBlock`, which is not trap-free	no, its effect set is alloc, gen-only
-std/vyx.vyrn	vyxFindKwBlock	no, it calls `vyxLexKwBlock`, which is not trap-free	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxFindKwBlock	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/vyx.vyrn	vyxMatchCurly	no, it keeps an index check	no, it is not trap-free
 std/vyx.vyrn	vyxImportsFirstViolation	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxFirstNonWs	yes	no, the loop is no counter loop
-std/vyx.vyrn	vyxParseScript	no, it calls `vyxParseScriptAt`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxParseScriptAt	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxFindPropsBlockFrom	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxParseScript	no, it calls `vyxParseScriptAt`, which is not trap-free	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxParseProps	no, it keeps an index check	no, its effect set is alloc
+std/vyx.vyrn	vyxParseScriptAt	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxFindKwBlockFrom	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/vyx.vyrn	vyxScriptErr	yes	no, its effect set is alloc
+std/vyx.vyrn	vyxHelperText	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxUsesChildren	yes	no, it is recursive
 std/vyx.vyrn	vyxNodeUsesChildren	yes	no, it is recursive
 std/vyx.vyrn	vyxIfUsesChildren	yes	no, it is recursive
 std/vyx.vyrn	vyxParseTemplate	no, it calls `vyxParseNodes`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxCompileComponent	no, it calls `vyxImportsFirstViolation`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxCompileComponent	no, it calls `vyxCompileAt`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxCompileAt	no, it calls `vyxImportsFirstViolation`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxElementRoots	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxRootLine	no, it keeps an index check	no, it is not trap-free
 std/vyx.vyrn	vyxCompErr	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxRegion	yes	no, its effect set is alloc, gen-only
-std/vyx.vyrn	vyxShiftAttrs	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxShiftNodes	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxShiftNode	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxShiftIf	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxCountNewlines	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxNormHelper	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxRelocateComp	no, it calls `vyxParseScriptAt`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxCopy	yes	no, its effect set is gen-only
+std/vyx.vyrn	vyxCopyPart	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, gen-only
 std/vyx.vyrn	vyxLookup	yes	no, `reg` is VyxRegistry, not an integer, Bool or a read array of one
 std/vyx.vyrn	vyxEmitChildren	no, it calls `vyxEmitPush`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxEmitPush	no, it calls `vyxEmitIf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxSlotPush	yes	no, its effect set is gen-only
 std/vyx.vyrn	vyxEmitElem	no, it calls `vyxEmitComp`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxEmitComp	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxCompCall	yes	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxHasProp	yes	no, `props` is Array<VyxProp>, not an integer, Bool or a read array of one
 std/vyx.vyrn	vyxEmitProvider	no, it calls `vyxProvAttrs`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxProvNs	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxIdentBytes	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxProvAttrs	no, it calls `emit`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxChildText	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxEmitIf	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxBranch	yes	no, its effect set is gen-only
 std/vyx.vyrn	vyxEmitFor	no, it calls `vyxEmitChildren`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxEmitAttrs	no, it calls `vyxEmitEvent`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxEmitEvent	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx.vyrn	vyxEmitEvent	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxIsIdentifier	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxHasTopComma	no, it keeps an index check	no, it is not trap-free
-std/vyx.vyrn	vyxParseImport	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxMergeImports	no, it calls `vyxParseImport`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxImportLine	yes	no, its effect set is alloc, gen-only
-std/vyx.vyrn	vyxEmitSignature	yes	no, its effect set is alloc
+std/vyx.vyrn	vyxParseImport	no, it keeps an index check	no, its effect set is alloc, trap
+std/vyx.vyrn	vyxImportKey	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc
+std/vyx.vyrn	vyxImportConflicts	no, it calls `vyxParseImport`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx.vyrn	vyxIndexOf	yes	no, `xs` is Array<String>, not an integer, Bool or a read array of one
+std/vyx.vyrn	vyxCopyImports	no, it calls `vyxParseImport`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxCopyImport	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxCopyTail	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/vyx.vyrn	vyxEmitComponent	no, it calls `vyxEmitRoot`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxEmitRoot	no, it calls `vyxEmitRootElem`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxRootSlot	yes	no, its effect set is gen-only
 std/vyx.vyrn	vyxEmitRootElem	no, it calls `vyxEmitComp`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxEmitRootWrap	no, it calls `vyxEmitPush`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxBuildModule	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxBuildModule	no, it calls `vyxHelperBlock`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxImportedNames	no, it calls `vyxParseImport`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxHelperBlock	yes	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxHelperBlock	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxLineStarts	yes	no, its effect set is alloc
+std/vyx.vyrn	vyxCopyRange	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxDeclLast	no, it keeps an index check	no, its effect set is alloc
+std/vyx.vyrn	vyxAccessorCopy	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxMatchParen	no, it keeps an index check	no, it is not trap-free
+std/vyx.vyrn	vyxExportType	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc, gen-only
 std/vyx.vyrn	vyxCompNames	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxNoSchema	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxNoOrigin	yes	no, its effect set is alloc
@@ -3755,8 +3764,9 @@ std/vyx.vyrn	vyxFinish	no, it calls `vyxBuildModule`, which is not trap-free	no,
 std/vyx.vyrn	vyxCannotRead	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxReadDir	yes	no, its effect set is alloc, fs-list
 std/vyx.vyrn	vyxReadFileOf	yes	no, its effect set is alloc, fs-read
-std/vyx.vyrn	components	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
-std/vyx.vyrn	componentsThemed	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/vyx.vyrn	components	no, it calls `vyxComponentsIn`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/vyx.vyrn	componentsThemed	no, it calls `vyxComponentsIn`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/vyx.vyrn	vyxComponentsIn	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/vyx.vyrn	vyxIsDeclOf	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxDeclLine	no, it calls `lines`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxScriptHasDecl	no, it calls `vyxDeclLine`, which is not trap-free	no, its effect set is alloc, trap
@@ -3777,55 +3787,55 @@ std/vyx.vyrn	vyxRetOfDecl	no, it calls `vyxFind`, which is not trap-free	no, its
 std/vyx.vyrn	vyxPageShape	no, it calls `vyxImportsFirstViolation`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxAccessorName	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxUpperFirst	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxRenameAccessor	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxAccessorDecl	no, it calls `vyxIsDeclOf`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxAutoExportPageDecls	no, it calls `lines`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxPageArgs	yes	no, its effect set is alloc
+std/vyx.vyrn	vyxPageArgs	yes	no, its effect set is alloc, gen-only
 std/vyx.vyrn	vyxNoHead	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxHeadEntry	no, it calls `vyxSkipWs`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxParseHead	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxStripHead	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxHeadItemExpr	yes	no, its effect set is alloc
+std/vyx.vyrn	vyxHeadOf	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxHeadItemExpr	yes	no, its effect set is gen-only
 std/vyx.vyrn	vyxEmitHeadFns	yes	no, its effect set is alloc, gen-only
-std/vyx.vyrn	vyxHeadCallArgs	yes	no, `ptypes` is Array<String>, not an integer, Bool or a read array of one
+std/vyx.vyrn	vyxHeadCallArgs	yes	no, its effect set is alloc, gen-only
 std/vyx.vyrn	vyxHeadArgsOk	yes	no, `ptypes` is Array<String>, not an integer, Bool or a read array of one
-std/vyx.vyrn	vyxEmitAccessorHeadFns	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxEmitAccessorHeadTitle	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxEmitHeadTitleFn	yes	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxEmitAccessorHeadFns	yes	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxEmitAccessorHeadTitle	yes	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxEmitHeadTitleFn	yes	no, its effect set is gen-only
 std/vyx.vyrn	vyxWordUsed	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxIsDataDecl	no, it calls `vyxIsDeclOf`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxStripLoadFn	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx.vyrn	vyxSpansText	yes	no, its effect set is alloc
+std/vyx.vyrn	vyxCutDecl	no, it keeps an index check	no, its effect set is alloc, trap
+std/vyx.vyrn	vyxStripLoadLines	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxCalledInCorpus	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxImportIsRelative	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc
 std/vyx.vyrn	vyxMentionsIdent	no, it keeps an index check	no, its effect set is alloc
-std/vyx.vyrn	vyxStripDeadHelpers	no, it calls `vyxStripDeadHelpersOnce`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxStripDeadHelpersOnce	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx.vyrn	vyxStripDeadLines	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxDeclNameOf	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxClientHelperViolation	no, it calls `lines`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxImportBoundName	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxLastIdent	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc
 std/vyx.vyrn	vyxImportNameDead	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxPruneOneImport	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxStripLineComment	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc
 std/vyx.vyrn	vyxNonImportBody	no, it calls `lines`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxJoinExcept	no, it calls `vyxStripLineComment`, which is not trap-free	no, its effect set is alloc
-std/vyx.vyrn	vyxPruneClientImports	no, it calls `lines`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx.vyrn	vyxEmitClientRender	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxEmitPageLoading	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxEmitClientRenderLoading	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxBuildPageClientModuleAt	no, it calls `vyxBuildPageModuleImpl`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxBuildPageModuleAt	no, it calls `vyxBuildPageModuleImpl`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxDataCap	yes	no, the result is String, not an integer, Bool or a read array of one
-std/vyx.vyrn	vyxBuildPageModuleImpl	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxPage	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
-std/vyx.vyrn	vyxPageThemed	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
-std/vyx.vyrn	vyxPageClient	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
-std/vyx.vyrn	vyxPageClientThemed	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxDeadImportNames	no, it calls `vyxParseImport`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx.vyrn	vyxEmitClientRender	yes	no, its effect set is gen-only
+std/vyx.vyrn	vyxEmitPageLoading	yes	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxEmitClientRenderLoading	yes	no, its effect set is gen-only
+std/vyx.vyrn	vyxDeclSpan	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx.vyrn	vyxCopyIn	no, it calls `vyxFind`, which is not trap-free	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxPageFn	yes	no, its effect set is gen-only
+std/vyx.vyrn	vyxLoadFn	yes	no, its effect set is alloc, gen-only
+std/vyx.vyrn	vyxBuildPageModule	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxPageOf	no, it calls `vyxBuildPageModule`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxPage	no, it calls `vyxPageOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxPageThemed	no, it calls `vyxPageOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxPageClient	no, it calls `vyxPageOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxPageClientThemed	no, it calls `vyxPageOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/vyx.vyrn	vyxDirOf	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc
-std/vyx.vyrn	vyxBuildLayoutModuleAt	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxLayout	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
-std/vyx.vyrn	vyxLayoutThemed	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
-std/vyx.vyrn	vyxBuildErrorModuleAt	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx.vyrn	vyxError	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
-std/vyx.vyrn	vyxErrorThemed	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxBuildLayoutModule	no, it calls `vyxSectionAvoid`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxLayoutOf	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxLayout	no, it calls `vyxLayoutOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxLayoutThemed	no, it calls `vyxLayoutOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxBuildErrorModule	no, it calls `vyxSectionAvoid`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxErrorOf	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxError	no, it calls `vyxErrorOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/vyx.vyrn	vyxErrorThemed	no, it calls `vyxErrorOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/vyx.vyrn	Owned$VyxNode$release	yes	no, it is recursive

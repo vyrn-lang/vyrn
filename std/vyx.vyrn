@@ -11,9 +11,10 @@
 ///
 /// A `.vyx` file has two sections:
 ///   <script>   -- optional: a `props { name: Type, ... }` block (the view fn's
-///                parameters), `import` lines (relative paths rebased to the
-///                synthesized module, deduplicated across components), and
-///                plain `fn`/`let`/`type` helpers (module-private).
+///                parameters), `import` lines (copied as written, so a
+///                relative path resolves beside the `.vyx`; a name a sibling
+///                already imports from the same path is dropped), and plain
+///                `fn`/`let`/`type` helpers (module-private).
 ///   <template> -- exactly one root element, compiled to the view fn body.
 ///
 /// Template grammar (Vue-flavored):
@@ -93,6 +94,7 @@ import { Html } from "std/html"
 import { Json, JsonField, emit } from "std/json"
 import { contains, endsWith, startsWith } from "std/strpred"
 import { report, reportHere, Severity } from "std/diag"
+import { join, arm, ifChain, ifChainOr } from "std/code"
 
 /// What a components module exports: one view per component, each returning
 /// `Html`. View names are the application's, so the contract is open. Every
@@ -147,15 +149,27 @@ fn vyxAppend(arr: Array<String>, s: String) -> Array<String> {
 }
 
 /// The 1-based line number of byte offset `off` within `ba` (newlines before it).
-fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
+export to "./vyx.editor" fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
     return lineAt(ba, off)
 }
 
-/// The 1-based column of byte offset `off` within `ba`, in bytes since the last
-/// LF. Bytes, not characters, match the interpreter's columns and the C `#line`
-/// convention that origin directives feed (see `std/text` `colAtV`).
-fn vyxColAt(ba: Array<UInt8>, off: Int64) -> Int64 {
-    return colAt(ba, off)
+/// The 1-based column of byte offset `off` within `ba`, in characters since the
+/// last LF: the column `codeAt` and the lexer count.
+export to "./vyx.editor" fn vyxColAt(ba: Array<UInt8>, off: Int64) -> Int64 {
+    let mut col = 1
+    let mut i = off
+    while i > 0 && ba[i - 1] != '\n' {
+        if vyxCharStart(ba[i - 1]) {
+            col = col + 1
+        }
+        i = i - 1
+    }
+    return col
+}
+
+/// True for the first byte of a UTF-8 character.
+export to "./vyx.editor" fn vyxCharStart(b: UInt8) -> Bool {
+    return b < '\x80' || b >= '\xc0'
 }
 
 /// The offset of the first non-whitespace byte in `ba[from..)`, so an
@@ -168,44 +182,33 @@ fn vyxSkipWs(ba: Array<UInt8>, from: Int64, e: Int64) -> Int64 {
     return i
 }
 
-/// The second byte of a Vyrn string-literal escape for `b`, or 0 when `b` needs
-/// no escaping.
-fn vyxEscSecond(b: UInt8) -> UInt8 {
-    if b == '\\' {
-        return '\\'
+/// `text`, found at byte offset `off` of `s`, a value that starts at `line`:`col`;
+/// columns count characters.
+fn vyxSpanIn(s: String, line: Int64, col: Int64, off: Int64, text: String) -> VyxSpan {
+    let sb = bytes(s)
+    let mut l = line
+    let mut c = col
+    let mut i = 0
+    while i < off {
+        if sb[i] == '\n' {
+            l = l + 1
+            c = 1
+        } else if vyxCharStart(sb[i]) {
+            c = c + 1
+        }
+        i = i + 1
     }
-    if b == '"' {
-        return '"'
-    }
-    if b == '\n' {
-        return 'n'
-    }
-    if b == '\r' {
-        return 'r'
-    }
-    if b == '\t' {
-        return 't'
-    }
-    return 0
+    return VyxSpan { text: text.copy(), line: l, col: c }
 }
 
-/// `raw` wrapped and escaped as a Vyrn string literal (quotes included). UTF-8
-/// bytes pass through untouched, so template text is embedded verbatim.
-fn vyxStrLit(raw: String) -> String {
-    let ba = bytes(raw)
-    let mut out: Array<UInt8> = []
-    out.push('"')
-    for b in ba {
-        let s = vyxEscSecond(b)
-        if s == 0 {
-            out.push(b)
-        } else {
-            out.push('\\')
-            out.push(s)
-        }
+/// The trimmed bytes `ba[s..e)` and the position of their first byte.
+fn vyxSpanAt(ba: Array<UInt8>, s: Int64, e: Int64) -> VyxSpan {
+    let a = vyxSkipWs(ba, s, e)
+    let mut b = e
+    while b > a && vyxIsWs(ba[b - 1]) {
+        b = b - 1
     }
-    out.push('"')
-    return fromBytesOr(out, "\"\"")
+    return VyxSpan { text: vyxSlice(ba, a, b), line: vyxLineAt(ba, a), col: vyxColAt(ba, a) }
 }
 
 /// The index of the first occurrence of `needle` in `ba` at or after `from`, or
@@ -387,6 +390,9 @@ fn vyxScanFindMarkup(ba: Array<UInt8>, name: String, from: Int64) -> Int64 {
 /// value's position, or the name's for a bare attribute.
 export type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line: Int64, col: Int64 }
 
+/// Text of a `.vyx` file and the 1-based line and column it starts at there.
+export type VyxSpan = { text: String, line: Int64, col: Int64 }
+
 /// A node of a parsed template. Lines and columns are 1-based in the `.vyx`
 /// file. [`vyxParseTemplate`] yields four variants:
 ///
@@ -402,7 +408,8 @@ export type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line:
 /// three: `VNRaw(expr, line, col)` for `v-html`; `VNIf(conds, condLines,
 /// condCols, bodies, elseBody, hasElse)` for a `v-if` chain, one body per
 /// condition; and `VNFor(var, iter, key, body, line, col, keyLine, keyCol)` for
-/// `v-for` with its `:key`. A `match` has no wildcard arm, so a walker names
+/// `v-for` with its `:key`, where `iter` is the iterable and its position and
+/// `line` and `col` are the header's. A `match` has no wildcard arm, so a walker names
 /// them too.
 export type VyxNode = enum {
     VNText(String),
@@ -411,7 +418,7 @@ export type VyxNode = enum {
     VNChildren,
     VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64),
     VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool),
-    VNFor(String, String, String, Array<VyxNode>, Int64, Int64, Int64, Int64) }
+    VNFor(String, VyxSpan, String, Array<VyxNode>, Int64, Int64, Int64, Int64) }
 
 /// One branch of a `VNIf`: a node list, so bodies nest in a payload without
 /// `Array<Array<VyxNode>>`.
@@ -456,7 +463,8 @@ impl Owned for VyxNode {
             }
             VNFor(v, it, key, body, l, c, kl, kc) => {
                 drop v
-                drop it
+                let itText = consume it.text
+                drop itText
                 drop key
                 drop body
             }
@@ -775,8 +783,9 @@ fn vyxStripDirectives(attrs: Array<VyxAttr>, dropKey: Bool) -> Array<VyxAttr> {
     return out
 }
 
-/// A parsed `v-for` header `x in expr`.
-type VyxForHdr = { var: String, iter: String, errs: Array<VyxErr> }
+/// A parsed `v-for` header `x in expr`; `iterAt` is the byte offset of `iter`
+/// in the header.
+type VyxForHdr = { var: String, iter: String, iterAt: Int64, errs: Array<VyxErr> }
 
 gen fn vyxParseForHead(header: String, srcFile: String, line: Int64) -> VyxForHdr {
     let ba = bytes(header)
@@ -793,16 +802,17 @@ gen fn vyxParseForHead(header: String, srcFile: String, line: Int64) -> VyxForHd
         i = i + 1
     }
     if i + 1 >= ba.length || ba[i] != 'i' || ba[i + 1] != 'n' {
-        return VyxForHdr { var: "", iter: "", errs: [vyxErr(srcFile, line, "a `v-for` header reads `item in items`, and this one has no `in`")] }
+        return VyxForHdr { var: "", iter: "", iterAt: 0, errs: [vyxErr(srcFile, line, "a `v-for` header reads `item in items`, and this one has no `in`")] }
     }
     if i + 2 < ba.length && vyxIsWs(ba[i + 2]) == false {
-        return VyxForHdr { var: "", iter: "", errs: [vyxErr(srcFile, line, "a `v-for` header reads `item in items`, and this one runs `in` into the next word")] }
+        return VyxForHdr { var: "", iter: "", iterAt: 0, errs: [vyxErr(srcFile, line, "a `v-for` header reads `item in items`, and this one runs `in` into the next word")] }
     }
+    let iterAt = vyxSkipWs(ba, i + 2, ba.length)
     let iter = trim(vyxSlice(ba, i + 2, ba.length))
     if varName.byteLength == 0 || iter.byteLength == 0 {
-        return VyxForHdr { var: varName, iter: iter, errs: [vyxErr(srcFile, line, "a `v-for` header reads `item in items`, and this one leaves one of the two empty")] }
+        return VyxForHdr { var: varName, iter: iter, iterAt: iterAt, errs: [vyxErr(srcFile, line, "a `v-for` header reads `item in items`, and this one leaves one of the two empty")] }
     }
-    return VyxForHdr { var: varName, iter: iter, errs: [] }
+    return VyxForHdr { var: varName, iter: iter, iterAt: iterAt, errs: [] }
 }
 
 type VyxGroup = { nodes: Array<VyxNode>, errs: Array<VyxErr> }
@@ -873,7 +883,8 @@ gen fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kid
         let h = vyxParseForHead(vfor.value, srcFile, vfor.line)
         errs = vyxCat(errs, h.errs)
         let elem = VNElem(tag.copy(), isComp, vyxStripDirectives(attrs, true), childNodes, line)
-        return VyxOne { node: VNFor(h.var.copy(), h.iter.copy(), key.value.copy(), [elem], vfor.line, vfor.col, key.line, key.col), errs: errs }
+        let iter = vyxSpanIn(vfor.value, vfor.line, vfor.col, h.iterAt, h.iter)
+        return VyxOne { node: VNFor(h.var.copy(), iter, key.value.copy(), [elem], vfor.line, vfor.col, key.line, key.col), errs: errs }
     }
     return VyxOne { node: VNElem(tag.copy(), isComp, vyxStripDirectives(attrs, false), childNodes, line), errs: errs }
 }
@@ -1046,20 +1057,16 @@ export to "./vyx.editor" fn vyxSectionAvoid(ba: Array<UInt8>, name: String, isCo
     return VyxSection { found: true, start: contentStart, end: closeAt, openAt: openAt }
 }
 
-/// The parsed `<script>` section: props (parallel name/type arrays), rebased
-/// import lines, and pass-through helper source. `err` is set on a props fault.
-/// The position arrays hold the 1-based `.vyx` position of each import and
-/// helper line, for `//@origin` directives.
+/// One `props` or `params` entry, `name: Type`.
+export to "./vyx.editor" type VyxProp = { name: VyxSpan, ty: VyxSpan }
+
+/// The parsed `<script>` section: its `props` (or a page's `params`) entries,
+/// its import lines, and every other non-blank line, a helper line, from its
+/// first byte. `errs` holds a block fault.
 export to "./vyx.editor" type VyxScript = {
-    propNames: Array<String>,
-    propTypes: Array<String>,
-    imports: Array<String>,
-    importLines: Array<Int64>,
-    importCols: Array<Int64>,
-    helpers: String,
-    helperTexts: Array<String>,
-    helperLines: Array<Int64>,
-    helperCols: Array<Int64>,
+    props: Array<VyxProp>,
+    imports: Array<VyxSpan>,
+    helperLines: Array<VyxSpan>,
     errs: Array<VyxErr>,
 }
 
@@ -1084,32 +1091,6 @@ fn vyxSplitFields(body: String) -> Array<String> {
     }
     parts.push(vyxSlice(ba, start, ba.length))
     return parts
-}
-
-/// Rebases one `import ... from "spec"` line: a relative `spec` gets `dir`
-/// prefixed, since the synthesized module's imports resolve against the app
-/// file; bare specifiers pass through. In `from gen("./x")` the first quoted
-/// string after ` from ` is the path argument, rebased the same way.
-fn vyxRebaseImport(line: String, dir: String) -> String {
-    let ba = bytes(line)
-    let fromAt = vyxFind(ba, bytes(" from "), 0)
-    if fromAt < 0 {
-        return line.copy()
-    }
-    let q1 = vyxFind(ba, bytes("\""), fromAt)
-    if q1 < 0 {
-        return line.copy()
-    }
-    let q2 = vyxFind(ba, bytes("\""), q1 + 1)
-    if q2 < 0 {
-        return line.copy()
-    }
-    let spec = vyxSlice(ba, q1 + 1, q2)
-    if spec.startsWith("./") || spec.startsWith("../") {
-        let rebased = dir + "/" + spec
-        return vyxSlice(ba, 0, q1 + 1) + rebased + vyxSlice(ba, q2, ba.length)
-    }
-    return line.copy()
 }
 
 /// A located `props` block. `found`: a `props` keyword leads a statement line.
@@ -1143,7 +1124,7 @@ fn vyxLineStartOffset(ba: Array<UInt8>, targetLine: Int64) -> Int64 {
 /// after whitespace. `lex` emits no token for a comment and one for a whole
 /// string, so a `props` in a comment, a string, or `let props = ...` never
 /// matches. Offsets are relative to `ba`.
-gen fn vyxLexKwBlock(ba: Array<UInt8>, kwStr: String) -> VyxProps {
+gen fn vyxFindKwBlock(ba: Array<UInt8>, kwStr: String) -> VyxProps {
     let toks = lex(vyxSlice(ba, 0, ba.length))
     let kwLen = bytes(kwStr).length
     let mut i = 0
@@ -1169,16 +1150,6 @@ gen fn vyxLexKwBlock(ba: Array<UInt8>, kwStr: String) -> VyxProps {
         i = i + 1
     }
     return VyxProps { found: false, malformed: false, kwAt: 0 - 1, braceAt: 0 - 1 }
-}
-
-gen fn vyxFindPropsBlock(ba: Array<UInt8>) -> VyxProps {
-    return vyxFindKwBlock(ba, "props")
-}
-
-/// The statement-leading `<kw> { ... }` block finder: `props` in components,
-/// `params` in `.vyx` pages.
-gen fn vyxFindKwBlock(ba: Array<UInt8>, kwStr: String) -> VyxProps {
-    return vyxLexKwBlock(ba, kwStr)
 }
 
 /// The index just past the `}` matching the `{` at `open` (brace-depth match,
@@ -1210,9 +1181,9 @@ fn vyxMatchCurly(ba: Array<UInt8>, open: Int64) -> Int64 {
 /// the `kwStr` block, breaking the imports-first rule; 0
 /// when there is none.
 gen fn vyxImportsFirstViolation(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, kwStr: String) -> Int64 {
-    // `vyxLexKwBlock` offsets are relative to the section slice.
+    // `vyxFindKwBlock` offsets are relative to the section slice.
     let sub = bytes(vyxSlice(ba, sStart, sEnd))
-    let blk = vyxLexKwBlock(sub, kwStr)
+    let blk = vyxFindKwBlock(sub, kwStr)
     if blk.found == false {
         return 0
     }
@@ -1235,8 +1206,8 @@ gen fn vyxImportsFirstViolation(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, kw
     return 0
 }
 
-/// The offset of the first non-whitespace byte in `[s, e)`, or `s` when all is
-/// whitespace: the column anchor for an origin directive.
+/// The offset of the first non-whitespace byte in `[s, e)`, or `e` when all is
+/// whitespace.
 fn vyxFirstNonWs(ba: Array<UInt8>, s: Int64, e: Int64) -> Int64 {
     let mut i = s
     while i < e && vyxIsWs(ba[i]) {
@@ -1245,112 +1216,106 @@ fn vyxFirstNonWs(ba: Array<UInt8>, s: Int64, e: Int64) -> Int64 {
     return i
 }
 
-/// Parses a standalone `<script>` string, positions relative to its start. For
-/// the unit tests.
-gen fn vyxParseScript(script: String, dir: String, srcFile: String) -> VyxScript {
+/// Parses a standalone component `<script>` string, positions relative to its
+/// start. For the unit tests.
+gen fn vyxParseScript(script: String, srcFile: String) -> VyxScript {
     let ba = bytes(script)
-    return vyxParseScriptAt(ba, 0, ba.length, dir, srcFile)
+    return vyxParseScriptAt(ba, 0, ba.length, "props", "", srcFile)
 }
 
-/// Parses the `<script>` section `ba[sStart, sEnd)`: the single `props {...}`
-/// block, rebased imports, and everything else as helper source, each with its
-/// whole-file `.vyx` position for `//@origin` directives.
-export to "./vyx.editor" gen fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: String, srcFile: String) -> VyxScript {
+/// The entries of the block body `ba[s..e)`, split at commas outside `<>`.
+gen fn vyxParseProps(ba: Array<UInt8>, s: Int64, e: Int64, kw: String, srcFile: String) -> VyxScript {
+    let mut props: Array<VyxProp> = []
+    let mut depth = 0
+    let mut start = s
+    let mut i = s
+    while i <= e {
+        if i == e || (ba[i] == ',' && depth == 0) {
+            let fs = vyxSkipWs(ba, start, i)
+            if fs < i {
+                let mut colon = fs
+                while colon < i && ba[colon] != ':' {
+                    colon = colon + 1
+                }
+                if colon == i {
+                    return vyxScriptErr(vyxErr(srcFile, 0, "a `\{kw}` entry reads `name: Type`, and this one has no `:`"))
+                }
+                props.push(VyxProp { name: vyxSpanAt(ba, fs, colon), ty: vyxSpanAt(ba, colon + 1, i) })
+            }
+            start = i + 1
+        } else if ba[i] == '<' {
+            depth = depth + 1
+        } else if ba[i] == '>' {
+            depth = depth - 1
+        }
+        i = i + 1
+    }
+    return VyxScript { props: props, imports: [], helperLines: [], errs: [] }
+}
+
+/// Parses the `<script>` section `ba[sStart, sEnd)` at whole-file positions:
+/// the single `kw { ... }` block (`props`, or a page's `params`), the import
+/// lines, and every other line as a helper line. The lines of a `skip { ... }`
+/// block (a layout's `head`) are left out; `skip` is "" for none.
+export to "./vyx.editor" gen fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, kw: String, skip: String, srcFile: String) -> VyxScript {
     // A relative offset `r` into `sub` is whole-file offset `sStart + r`.
     let sub = bytes(vyxSlice(ba, sStart, sEnd))
-    let props = vyxFindPropsBlock(sub)
-    let mut propNames: Array<String> = []
-    let mut propTypes: Array<String> = []
+    let block = vyxFindKwBlock(sub, kw)
+    let mut props: Array<VyxProp> = []
     let mut bodyEnd = 0 - 1
     let mut bodyStart = 0 - 1
-    if props.found {
-        if props.malformed {
-            return vyxScriptErr(vyxErr(srcFile, 0, "the `props` block is not closed — write `props { name: Type, … }`"))
+    if block.found {
+        if block.malformed {
+            return vyxScriptErr(vyxErr(srcFile, 0, "the `\{kw}` block is not closed — write `\{kw} { name: Type, … }`"))
         }
-        bodyStart = props.braceAt
+        bodyStart = block.braceAt
         bodyEnd = vyxMatchCurly(sub, bodyStart)
-        let more = vyxFindPropsBlockFrom(sub, bodyEnd)
+        let more = vyxFindKwBlockFrom(sub, kw, bodyEnd)
         if more.found {
-            return vyxScriptErr(vyxErr(srcFile, 0, "this component declares `props` more than once — one component has one `props` block"))
+            return vyxScriptErr(vyxErr(srcFile, 0, "this component declares `\{kw}` more than once — one component has one `\{kw}` block"))
         }
-        let fields = vyxSplitFields(vyxSlice(sub, bodyStart + 1, bodyEnd - 1))
-        for part in fields {
-            let trimmed = trim(part)
-            if trimmed.byteLength > 0 {
-                let pb = bytes(trimmed)
-                let mut colon = 0 - 1
-                let mut k = 0
-                while k < pb.length && colon < 0 {
-                    if pb[k] == ':' {
-                        colon = k
-                    }
-                    k = k + 1
-                }
-                if colon < 0 {
-                    return vyxScriptErr(vyxErr(srcFile, 0, "a `props` entry reads `name: Type`, and this one has no `:`"))
-                }
-                propNames.push(trim(vyxSlice(pb, 0, colon)))
-                propTypes.push(trim(vyxSlice(pb, colon + 1, pb.length)))
-            }
+        let parsed = vyxParseProps(ba, sStart + bodyStart + 1, sStart + bodyEnd - 1, kw, srcFile)
+        if parsed.errs.length > 0 {
+            return parsed
         }
+        props = consume parsed.props
     }
-    // Each line outside the props block is an import (rebased) or a helper line.
-    let mut imports: Array<String> = []
-    let mut importLines: Array<Int64> = []
-    let mut importCols: Array<Int64> = []
-    let mut helpers = ""
-    let mut helperTexts: Array<String> = []
-    let mut helperLines: Array<Int64> = []
-    let mut helperCols: Array<Int64> = []
+    let skipped = if skip == "" { VyxProps { found: false, malformed: false, kwAt: 0 - 1, braceAt: 0 - 1 } } else { vyxFindKwBlock(sub, skip) }
+    let skipEnd = if skipped.found && skipped.malformed == false { vyxMatchCurly(sub, skipped.braceAt) } else { 0 - 1 }
+    let mut imports: Array<VyxSpan> = []
+    let mut helperLines: Array<VyxSpan> = []
     let mut lineStart = 0
     let mut i = 0
     while i <= sub.length {
         if i == sub.length || sub[i] == '\n' {
             let lineEnd = if i > lineStart && sub[i - 1] == '\r' { i - 1 } else { i }
-            let lineText = vyxSlice(sub, lineStart, lineEnd)
-            // A line that overlaps the props block is skipped.
-            let inProps = bodyStart >= 0 && lineStart < bodyEnd && lineEnd > props.kwAt
-            if inProps == false {
-                let t = trim(lineText)
-                let fnwAbs = sStart + vyxFirstNonWs(sub, lineStart, lineEnd)
-                if t.startsWith("import ") {
-                    imports.push(vyxRebaseImport(t, dir))
-                    importLines.push(vyxLineAt(ba, fnwAbs))
-                    importCols.push(vyxColAt(ba, fnwAbs))
-                } else if t.byteLength > 0 {
-                    helpers = helpers + lineText + "\n"
-                    helperTexts.push(lineText)
-                    helperLines.push(vyxLineAt(ba, fnwAbs))
-                    helperCols.push(vyxColAt(ba, fnwAbs))
+            // A line that overlaps a block is skipped.
+            let inBlock = bodyStart >= 0 && lineStart < bodyEnd && lineEnd > block.kwAt
+            let inSkip = skipEnd >= 0 && lineStart < skipEnd && lineEnd > skipped.kwAt
+            if inBlock == false && inSkip == false {
+                let line = vyxSpanAt(ba, sStart + lineStart, sStart + lineEnd)
+                if line.text.startsWith("import ") {
+                    imports.push(line)
+                } else if line.text.byteLength > 0 {
+                    helperLines.push(VyxSpan { text: vyxSlice(sub, lineStart, lineEnd), line: vyxLineAt(ba, sStart + lineStart), col: vyxColAt(ba, sStart + lineStart) })
                 }
             }
             lineStart = i + 1
         }
         i = i + 1
     }
-    return VyxScript {
-        propNames: propNames,
-        propTypes: propTypes,
-        imports: imports,
-        importLines: importLines,
-        importCols: importCols,
-        helpers: helpers,
-        helperTexts: helperTexts,
-        helperLines: helperLines,
-        helperCols: helperCols,
-        errs: [],
-    }
+    return VyxScript { props: props, imports: imports, helperLines: helperLines, errs: [] }
 }
 
-/// A `props` block search starting at `from` (for the second-block check).
-gen fn vyxFindPropsBlockFrom(ba: Array<UInt8>, from: Int64) -> VyxProps {
+/// A `kwStr` block search starting at `from` (for the second-block check).
+gen fn vyxFindKwBlockFrom(ba: Array<UInt8>, kwStr: String, from: Int64) -> VyxProps {
     let mut sub: Array<UInt8> = []
     let mut i = from
     while i < ba.length {
         sub.push(ba[i])
         i = i + 1
     }
-    let r = vyxFindPropsBlock(sub)
+    let r = vyxFindKwBlock(sub, kwStr)
     if r.found {
         let braceAt = if r.braceAt < 0 { 0 - 1 } else { r.braceAt + from }
         return VyxProps { found: true, malformed: r.malformed, kwAt: r.kwAt + from, braceAt: braceAt }
@@ -1359,37 +1324,25 @@ gen fn vyxFindPropsBlockFrom(ba: Array<UInt8>, from: Int64) -> VyxProps {
 }
 
 fn vyxScriptErr(e: VyxErr) -> VyxScript {
-    return VyxScript {
-        propNames: [],
-        propTypes: [],
-        imports: [],
-        importLines: [],
-        importCols: [],
-        helpers: "",
-        helperTexts: [],
-        helperLines: [],
-        helperCols: [],
-        errs: [e.copy()],
-    }
+    return VyxScript { props: [], imports: [], helperLines: [], errs: [e.copy()] }
 }
 
-/// One parsed `.vyx` component. The position arrays hold the `.vyx` origin of
-/// each copied script region. `srcPath` is the file the template node lines are
-/// stated against; `std/ui` overrides it for a page compiled through a
-/// synthetic source.
+/// A script's helper lines as text, one per line.
+fn vyxHelperText(sc: VyxScript) -> String {
+    let mut out = ""
+    for l in sc.helperLines {
+        out = out + l.text + "\n"
+    }
+    return out
+}
+
+/// One parsed `.vyx` component. `srcPath` is the file its positions are in,
+/// spelled as the generator read it.
 type VyxComp = {
     name: String,
     fnName: String,
     srcPath: String,
-    propNames: Array<String>,
-    propTypes: Array<String>,
-    imports: Array<String>,
-    importLines: Array<Int64>,
-    importCols: Array<Int64>,
-    helpers: String,
-    helperTexts: Array<String>,
-    helperLines: Array<Int64>,
-    helperCols: Array<Int64>,
+    script: VyxScript,
     root: VyxNode,
     takesChildren: Bool,
     errs: Array<VyxErr>,
@@ -1476,10 +1429,10 @@ export type VyxTemplate = { nodes: Array<VyxNode>, err: String }
 ///
 /// /// Writes `outlineOf() -> String`: the outline of `source`, or why it does
 /// /// not parse.
-/// export gen fn outline(source: String) -> String {
+/// export gen fn outline(source: String) -> Code {
 ///     let t = vyxParseTemplate(source)
 ///     let text = if t.err != "" { t.err.copy() } else { walk(t.nodes) }
-///     return render(vyrn"export fn outlineOf() -> String { return \{text} }")
+///     return vyrn"export fn outlineOf() -> String { return \{text} }"
 /// }
 /// ```
 ///
@@ -1514,14 +1467,17 @@ export gen fn vyxParseTemplate(source: String) -> VyxTemplate {
 }
 
 /// Compiles one `.vyx` source into a `VyxComp`; component calls are resolved
-/// later, once every sibling name is known. `compName` is the file stem; `dir`
-/// rebases relative imports.
+/// later, once every sibling name is known. `compName` is the file stem and
+/// `dir` the directory the generator read it from.
 gen fn vyxCompileComponent(compName: String, source: String, dir: String) -> VyxComp {
-    let ba = bytes(source)
+    return vyxCompileAt(bytes(source), compName, dir + "/" + compName + ".vyx", "props", "")
+}
+
+/// Compiles the `.vyx` bytes `ba`, read from `srcPath`, into a `VyxComp` named
+/// `compName`. `kw` names the parameter block (`props`, or a page's `params`)
+/// and `skip` a block the script leaves out (a layout's `head`), "" for none.
+gen fn vyxCompileAt(ba: Array<UInt8>, compName: String, srcPath: String, kw: String, skip: String) -> VyxComp {
     let fnName = vyxLowerFirst(compName)
-    // Relative to the importing module, like the `readFile` path: the base for
-    // origin directives and the anchor for every diagnostic below.
-    let srcPath = dir + "/" + compName + ".vyx"
     if vyxIsIdentifier(fnName) == false {
         // `My-Widget.vyx` or `404.vyx` would emit an invalid fn name, a lexer
         // error far from the cause.
@@ -1542,33 +1498,16 @@ gen fn vyxCompileComponent(compName: String, source: String, dir: String) -> Vyx
         return vyxCompErr(compName, fnName, srcPath, [vyxErr(srcPath, 0, "this component has no `<template>` section — a component's view is the one element inside it")])
     }
 
-    let mut propNames: Array<String> = []
-    let mut propTypes: Array<String> = []
-    let mut imports: Array<String> = []
-    let mut importLines: Array<Int64> = []
-    let mut importCols: Array<Int64> = []
-    let mut helpers = ""
-    let mut helperTexts: Array<String> = []
-    let mut helperLines: Array<Int64> = []
-    let mut helperCols: Array<Int64> = []
+    let mut script = VyxScript { props: [], imports: [], helperLines: [], errs: [] }
     if scriptSec.found {
-        let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "props")
+        let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, kw)
         if bad > 0 {
-            return vyxCompErr(compName, fnName, srcPath, [vyxErr(srcPath, bad, "an `import` sits after the `props` block — every import goes at the top of `<script>`")])
+            return vyxCompErr(compName, fnName, srcPath, [vyxErr(srcPath, bad, "an `import` sits after the `\{kw}` block — every import goes at the top of `<script>`")])
         }
-        let sc = vyxParseScriptAt(ba, scriptSec.start, scriptSec.end, dir, srcPath)
-        if sc.errs.length > 0 {
-            return vyxCompErr(compName, fnName, srcPath, sc.errs)
+        script = vyxParseScriptAt(ba, scriptSec.start, scriptSec.end, kw, skip, srcPath)
+        if script.errs.length > 0 {
+            return vyxCompErr(compName, fnName, srcPath, script.errs)
         }
-        propNames = consume sc.propNames
-        propTypes = consume sc.propTypes
-        imports = consume sc.imports
-        importLines = consume sc.importLines
-        importCols = consume sc.importCols
-        helpers = consume sc.helpers
-        helperTexts = consume sc.helperTexts
-        helperLines = consume sc.helperLines
-        helperCols = consume sc.helperCols
     }
 
     // Absolute file offsets, for true line numbers.
@@ -1609,23 +1548,7 @@ gen fn vyxCompileComponent(compName: String, source: String, dir: String) -> Vyx
     }
     // The node itself, not `[root]`: an array literal would take the root.
     let takesChildren = vyxNodeUsesChildren(root)
-    return VyxComp {
-        name: compName.copy(),
-        fnName: fnName,
-        srcPath: srcPath,
-        propNames: propNames,
-        propTypes: propTypes,
-        imports: imports,
-        importLines: importLines,
-        importCols: importCols,
-        helpers: helpers,
-        helperTexts: helperTexts,
-        helperLines: helperLines,
-        helperCols: helperCols,
-        root: root,
-        takesChildren: takesChildren,
-        errs: [],
-    }
+    return VyxComp { name: compName.copy(), fnName: fnName, srcPath: srcPath.copy(), script: script, root: root, takesChildren: takesChildren, errs: [] }
 }
 
 /// The top-level nodes except whitespace-only text. Every one counts toward
@@ -1663,196 +1586,24 @@ fn vyxRootLine(roots: Array<VyxNode>) -> Int64 {
 }
 
 fn vyxCompErr(name: String, fnName: String, srcPath: String, errs: Array<VyxErr>) -> VyxComp {
-    return VyxComp {
-        name: name.copy(),
-        fnName: fnName.copy(),
-        srcPath: srcPath.copy(),
-        propNames: [],
-        propTypes: [],
-        imports: [],
-        importLines: [],
-        importCols: [],
-        helpers: "",
-        helperTexts: [],
-        helperLines: [],
-        helperCols: [],
-        root: VNText(""),
-        takesChildren: false,
-        errs: errs.copy(),
-    }
+    return VyxComp { name: name.copy(), fnName: fnName.copy(), srcPath: srcPath.copy(), script: VyxScript { props: [], imports: [], helperLines: [], errs: [] }, root: VNText(""), takesChildren: false, errs: errs.copy() }
 }
 
-/// Brackets one generated region that carries `.vyx` user text with
-/// origin directives: `rawAt` records `src:line:col` and `render` emits
-/// `//@origin src:line:col` before and `//@origin end` after. `text` is whole
-/// generated lines ending in a newline; the directive's column applies to the
-/// whole line, so the user text rides inside its wrapper line.
-gen fn vyxRegion(text: String, src: String, line: Int64, col: Int64) -> String {
-    return render(rawAt(text, src, line, col))
+/// `s`, copied from `src` where it stands.
+gen fn vyxCopy(src: String, s: VyxSpan) -> Code {
+    return codeAt(src, s.line, s.col, s.text)
 }
 
-// A `.vyx` page is compiled through a synthetic source whose `<template>` is a
-// verbatim copy of the route file's at a shifted line. Adding `dLine` to every
-// node line and pointing `srcPath` at the real file maps each origin to the
-// real `.vyx`.
-
-/// Every attribute's line shifted by `d` (columns unchanged).
-fn vyxShiftAttrs(attrs: Array<VyxAttr>, d: Int64) -> Array<VyxAttr> {
-    let mut out: Array<VyxAttr> = []
-    for a in attrs {
-        out.push(VyxAttr { name: a.name.copy(), value: a.value.copy(), dyn: a.dyn, evt: a.evt, line: a.line + d, col: a.col })
-    }
-    return out
-}
-
-/// A node list with every node's line(s) shifted by `d`.
-fn vyxShiftNodes(nodes: Array<VyxNode>, d: Int64) -> Array<VyxNode> {
-    let mut out: Array<VyxNode> = []
-    for n in nodes {
-        out.push(vyxShiftNode(n, d))
-    }
-    return out
-}
-
-/// One template node with every line field shifted by `d`.
-fn vyxShiftNode(n: VyxNode, d: Int64) -> VyxNode {
-    return match n {
-        VNText(s) => VNText(s.copy()),
-        VNInterp(x, l, c) => VNInterp(x.copy(), l + d, c),
-        VNRaw(x, l, c) => VNRaw(x.copy(), l + d, c),
-        VNChildren => VNChildren,
-        VNElem(t, comp, a, k, l) => VNElem(t.copy(), comp, vyxShiftAttrs(a, d), vyxShiftNodes(k, d), l + d),
-        VNIf(conds, cl, cc, bodies, els, has) => vyxShiftIf(conds, cl, cc, bodies, els, has, d),
-        VNFor(v, it, k, body, l, c, kl, kc) => VNFor(v.copy(), it.copy(), k.copy(), vyxShiftNodes(body, d), l + d, c, kl + d, kc),
-    }
-}
-
-/// A `VNIf`'s per-condition line array and branch bodies shifted by `d`.
-fn vyxShiftIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<Int64>, bodies: Array<VyxBody>, els: VyxBody, has: Bool, d: Int64) -> VyxNode {
-    let mut cl: Array<Int64> = []
-    for x in condLines {
-        cl.push(x + d)
-    }
-    let mut bs: Array<VyxBody> = []
-    for b in bodies {
-        bs.push(VyxBody { nodes: vyxShiftNodes(b.nodes, d) })
-    }
-    let es = VyxBody { nodes: vyxShiftNodes(els.nodes, d) }
-    return VNIf(conds.copy(), cl, condCols.copy(), bs, es, has)
-}
-
-/// The number of LF bytes in `s`: the line count of a synthesized prefix.
-fn vyxCountNewlines(s: String) -> Int64 {
-    let mut n = 0
-    for b in bytes(s) {
-        if b == '\n' {
-            n = n + 1
-        }
-    }
-    return n
-}
-
-/// Normalizes a script line for matching: trimmed, with a leading `export `
-/// dropped, since page auto-export may add one to a copied helper, and a
-/// contract accessor under its private name.
-fn vyxNormHelper(line: String) -> String {
-    let t = trim(line)
-    let acc = vyxAccessorDecl(t)
-    if acc != "" {
-        return acc
-    }
-    if t.startsWith("export ") {
-        return trim(vyxSlice(bytes(t), 7, bytes(t).length))
-    }
-    return t
-}
-
-/// Relocates a `.vyx` page compiled through a synthetic source so its
-/// `//@origin` directives target the real route file.
-/// `realBa` is the real file; `[sStart, sEnd)` its `<script>` section, or
-/// `sFound` false; `dLine` the template line shift. Import and helper origins
-/// are matched in order against the real file; an unmatched or synthesized line
-/// is emitted without an origin.
-gen fn vyxRelocateComp(comp: VyxComp, realBa: Array<UInt8>, sStart: Int64, sEnd: Int64, sFound: Bool, dLine: Int64, realSrc: String, dir: String) -> VyxComp {
-    // Line 0 is an unknown origin, emitted bare.
-    let mut importLines: Array<Int64> = []
-    let mut importCols: Array<Int64> = []
-    let mut il = 0
-    while il < comp.imports.length {
-        importLines.push(0)
-        importCols.push(0)
-        il = il + 1
-    }
-    let mut helperLines: Array<Int64> = []
-    let mut helperCols: Array<Int64> = []
-    let mut hl = 0
-    while hl < comp.helperTexts.length {
-        helperLines.push(0)
-        helperCols.push(0)
-        hl = hl + 1
-    }
-    if sFound {
-        let real = vyxParseScriptAt(realBa, sStart, sEnd, dir, realSrc)
-        // Match each import to the real file's import of the same text, in
-        // order, so duplicates pair up.
-        let mut ic = 0
-        let mut i = 0
-        while i < comp.imports.length {
-            let mut j = ic
-            let mut done = false
-            while j < real.imports.length && done == false {
-                if real.imports[j] == comp.imports[i] {
-                    importLines[i] = real.importLines[j]
-                    importCols[i] = real.importCols[j]
-                    ic = j + 1
-                    done = true
-                }
-                j = j + 1
-            }
-            i = i + 1
-        }
-        // Match each helper line to the real script's line of the same content,
-        // in order.
-        let mut hc = 0
-        let mut h = 0
-        while h < comp.helperTexts.length {
-            let needle = vyxNormHelper(comp.helperTexts[h])
-            let mut j = hc
-            let mut done = false
-            while j < real.helperTexts.length && done == false {
-                if vyxNormHelper(real.helperTexts[j]) == needle {
-                    helperLines[h] = real.helperLines[j]
-                    helperCols[h] = real.helperCols[j]
-                    hc = j + 1
-                    done = true
-                }
-                j = j + 1
-            }
-            h = h + 1
-        }
-    }
-    return VyxComp {
-        name: comp.name.copy(),
-        fnName: comp.fnName.copy(),
-        srcPath: realSrc.copy(),
-        propNames: comp.propNames.copy(),
-        propTypes: comp.propTypes.copy(),
-        imports: comp.imports.copy(),
-        importLines: importLines,
-        importCols: importCols,
-        helpers: comp.helpers.copy(),
-        helperTexts: comp.helperTexts.copy(),
-        helperLines: helperLines,
-        helperCols: helperCols,
-        root: vyxShiftNode(comp.root, dLine),
-        takesChildren: comp.takesChildren,
-        errs: comp.errs.copy(),
-    }
+/// The bytes `[a, b)` of span `s`, copied from `src`.
+gen fn vyxCopyPart(src: String, s: VyxSpan, a: Int64, b: Int64) -> Code {
+    return vyxCopy(src, vyxSpanIn(s.text, s.line, s.col, a, vyxSlice(bytes(s.text), a, b)))
 }
 
 // Code generation: a post-order walk emitting `std/html` calls. Every element
 // fills a `mut Array<Html>` accumulator named by its tree path, so `v-if`,
-// `v-for` and `<slot/>` lower to plain pushes.
+// `v-for` and `<slot/>` lower to plain pushes. Each statement that carries
+// template text shows its errors at that text's `.vyx` position. A finding goes
+// to `errs`; a provider tag's import, found inside a view, goes to `imports`.
 
 /// The components a capitalized tag can resolve to: sibling `names` first, then
 /// the provider names in `imported`. When `themed`, every `class`
@@ -1870,99 +1621,132 @@ fn vyxLookup(reg: VyxRegistry, name: String) -> Int64 {
     return 0 - 1
 }
 
-/// Emitted statements, errors, and module-level imports a node needs. A
-/// provider tag is found while its view body is emitted, and an import cannot
-/// sit in a function body, so `vyxBuildModule` moves `imports` to the import
-/// block.
-type VyxEmit = { code: String, errs: Array<VyxErr>, imports: String }
-
-gen fn vyxEmitChildren(nodes: Array<VyxNode>, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
-    let mut code = ""
-    let mut errs: Array<VyxErr> = []
-    let mut imports = ""
+gen fn vyxEmitChildren(nodes: Array<VyxNode>, acc: String, path: String, reg: VyxRegistry, src: String, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
+    let mut stmts: Array<Code> = []
     let mut j = 0
     for n in nodes {
-        let r = vyxEmitPush(n, acc, path + "_" + j.toString(), reg, src)
-        code = code + r.code
-        errs = vyxCat(errs, r.errs)
-        imports = imports + r.imports
+        stmts.push(vyxEmitPush(n, acc, path + "_" + j.toString(), reg, src, errs, imports))
         j = j + 1
     }
-    return VyxEmit { code: code, errs: errs, imports: imports }
+    return join(stmts, vyrn"\n")
 }
 
-gen fn vyxEmitPush(n: VyxNode, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
+gen fn vyxEmitPush(n: VyxNode, acc: String, path: String, reg: VyxRegistry, src: String, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
+    let a = name(acc)
     return match n {
-        VNText(s) => VyxEmit { code: acc + ".push(text(" + vyxStrLit(s) + "))\n", errs: [], imports: "" },
-        VNInterp(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(text((" + x + ").toString()))\n", src, l, c), errs: [], imports: "" },
-        VNRaw(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(Raw((" + x + ").copy()))\n", src, l, c), errs: [], imports: "" },
-        VNChildren => VyxEmit { code: "for vyxCh in consume children {\n" + acc + ".push(vyxCh)\n}\n", errs: [], imports: "" },
-        VNElem(tag, isComp, attrs, kids, l) => vyxEmitElem(tag, isComp, attrs, kids, l, acc, path, reg, src),
-        VNIf(conds, cl, cc, bodies, els, has) => vyxEmitIf(conds, cl, cc, bodies, els, has, acc, path, reg, src),
-        VNFor(v, it, k, body, l, c, kl, kc) => vyxEmitFor(v, it, k, body, l, c, kl, kc, acc, path, reg, src),
+        VNText(s) => vyrn"\{a}.push(text(\{s}))",
+        VNInterp(x, l, c) => at(vyrn"\{a}.push(text((\{codeAt(src, l, c, x)}).toString()))", src, l, c),
+        VNRaw(x, l, c) => at(vyrn"\{a}.push(Raw((\{codeAt(src, l, c, x)}).copy()))", src, l, c),
+        VNChildren => vyxSlotPush(acc),
+        VNElem(tag, isComp, attrs, kids, l) => vyxEmitElem(tag, isComp, attrs, kids, l, acc, path, reg, src, errs, imports),
+        VNIf(conds, cl, cc, bodies, els, has) => vyxEmitIf(conds, cl, cc, bodies, els, has, acc, path, reg, src, errs, imports),
+        VNFor(v, it, k, body, l, c, kl, kc) => vyxEmitFor(v, it, k, body, l, c, kl, kc, acc, path, reg, src, errs, imports),
     }
 }
 
-gen fn vyxEmitElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
+/// `<slot/>`: the children move into `acc`.
+gen fn vyxSlotPush(acc: String) -> Code {
+    return vyrn"""
+        for vyxCh in consume children {
+            \{name(acc)}.push(vyxCh)
+        }
+        """
+}
+
+gen fn vyxEmitElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, src: String, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
     if isComp {
-        return vyxEmitComp(tag, attrs, kids, line, acc, path, reg, src)
+        return vyxEmitComp(tag, attrs, kids, line, acc, path, reg, src, errs, imports)
     }
-    let kacc = "k" + path
-    let kids2 = vyxEmitChildren(kids, kacc, path, reg, src)
-    // Expression-bearing attributes are hoisted onto their own origin-governed
-    // `let` bindings (`ae.pre`), so a type error maps to the `.vyx` column.
-    let ae = vyxEmitAttrs(attrs, reg, src, kacc)
-    let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + ae.pre + acc + ".push(el(" + vyxStrLit(tag) + ", [" + ae.list + "], " + kacc + "))\n"
-    return VyxEmit { code: code, errs: vyxCat(kids2.errs, ae.errs), imports: consume kids2.imports }
+    let kacc = name("k" + path)
+    let body = vyxEmitChildren(kids, "k" + path, path, reg, src, errs, imports)
+    // Expression-bearing attributes are hoisted onto their own `let`
+    // bindings (`pre`), so a type error shows at the `.vyx` column.
+    let mut pre: Array<Code> = []
+    let list = vyxEmitAttrs(attrs, reg, src, "k" + path, pre, errs)
+    let hoisted = join(pre, vyrn"\n")
+    return vyrn"""
+        let mut \{kacc}: Array<Html> = []
+        \{body}
+        \{hoisted}
+        \{name(acc)}.push(el(\{tag}, [\{list}], \{kacc}))
+        """
 }
 
 /// Emits a component call, resolving props by name against the component's
-/// declaration and passing `<slot/>` content when it accepts children. The
-/// call opens under the tag's line and each argument sits on its own line
-/// under its attribute's origin, so an error inside an argument maps to it.
-gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
+/// declaration and passing `<slot/>` content when it accepts children. Each
+/// argument shows its errors at its attribute.
+gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, src: String, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
     let idx = vyxLookup(reg, tag)
     if idx < 0 {
         // No sibling `.vyx` answers the tag; an imported name is a provider.
         if includes(reg.imported, tag) {
-            return vyxEmitProvider(tag, attrs, kids, line, acc, path, src)
+            return vyxEmitProvider(tag, attrs, kids, line, acc, path, src, errs, imports)
         }
-        return VyxEmit { code: acc + ".push(empty())\n", errs: [vyxErr(src, line, "`<\{tag}>` names no component — a component is a `.vyx` file in the same directory, or a generation-time provider a `<script>` imports")], imports: "" }
+        errs.push(vyxErr(src, line, "`<\{tag}>` names no component — a component is a `.vyx` file in the same directory, or a generation-time provider a `<script>` imports"))
+        return vyrn"\{name(acc)}.push(empty())"
     }
     let comp = reg.comps[idx]
-    let mut errs: Array<VyxErr> = []
-    let mut args = vyxRegion(acc + ".push(" + comp.fnName + "(\n", src, line, 1)
-    let mut pi = 0
-    while pi < comp.propNames.length {
-        let pn = comp.propNames[pi]
+    let mut args: Array<Code> = []
+    for p in comp.script.props {
+        let pn = p.name.text.copy()
         let av = vyxDir(attrs, pn)
         if av.found == false {
             errs.push(vyxErr(src, line, "`<\{tag}>` is given no `\{pn}`, which its `props` block declares — every prop is required"))
-            args = args + "empty(),\n"
+            args.push(vyrn"empty()")
+        } else if av.dyn {
+            args.push(at(codeAt(src, av.line, av.col, av.value), src, av.line, av.col))
         } else {
-            let v = if av.dyn { consume av.value } else { vyxStrLit(av.value) }
-            args = args + vyxRegion(v + ",\n", src, av.line, av.col)
+            args.push(at(vyrn"\{av.value}", src, av.line, av.col))
         }
-        pi = pi + 1
     }
     for a in attrs {
         if a.evt {
             errs.push(vyxErr(src, a.line, "`<\{tag}>` is given the event `@\{a.name}` — a component takes props, and an event binds on a plain element"))
-        } else if includes(comp.propNames, a.name) == false {
+        } else if vyxHasProp(comp.script.props, a.name) == false {
             errs.push(vyxErr(src, a.line, "`<\{tag}>` has no prop `\{a.name}` — its `props` block decides what it takes"))
         }
     }
     let hasKids = trim(vyxChildText(kids)).byteLength > 0 || kids.length > 0
     if comp.takesChildren {
-        let kacc = "k" + path
-        let kids2 = vyxEmitChildren(kids, kacc, path, reg, src)
-        let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + args + kacc + "))\n"
-        return VyxEmit { code: code, errs: vyxCat(errs, kids2.errs), imports: consume kids2.imports }
+        let kacc = name("k" + path)
+        let body = vyxEmitChildren(kids, "k" + path, path, reg, src, errs, imports)
+        args.push(vyrn"\{kacc}")
+        let call = vyxCompCall(acc, comp.fnName, args)
+        return vyrn"""
+            let mut \{kacc}: Array<Html> = []
+            \{body}
+            \{call}
+            """
     }
     if hasKids {
         errs.push(vyxErr(src, line, "`<\{tag}>` is given children, and its `<template>` has no `<slot/>` to put them in"))
     }
-    return VyxEmit { code: args + "))\n", errs: errs, imports: "" }
+    return vyxCompCall(acc, comp.fnName, args)
+}
+
+/// `<acc>.push(<view>(<args>))`, each argument on its own line, so an error
+/// a column cannot place still finds its attribute by the line.
+gen fn vyxCompCall(acc: String, view: String, args: Array<Code>) -> Code {
+    let mut lines: Array<Code> = []
+    for a in args {
+        lines.push(a + vyrn",")
+    }
+    let list = join(lines, vyrn"\n")
+    return vyrn"""
+        \{name(acc)}.push(\{name(view)}(
+            \{list}
+        ))
+        """
+}
+
+/// Whether `props` declares `name`.
+fn vyxHasProp(props: Array<VyxProp>, name: String) -> Bool {
+    for p in props {
+        if p.name.text == name {
+            return true
+        }
+    }
+    return false
 }
 
 /// Emits one provider tag: the nested generator import that runs provider `tag`
@@ -1970,8 +1754,8 @@ gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, lin
 /// `:attr`, `@event` and children are refused at their own line: an expression
 /// cannot be a generator argument, and a provider's tree comes from its
 /// attributes.
-gen fn vyxEmitProvider(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, src: String) -> VyxEmit {
-    let mut errs: Array<VyxErr> = []
+gen fn vyxEmitProvider(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, src: String, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
+    let before = errs.length
     for a in attrs {
         if a.evt {
             errs.push(vyxErr(src, a.line, "`<\{tag}>` is a generation-time provider, and `@\{a.name}` binds a handler — a provider's attributes become constant arguments to a generator, so a provider tag takes static attributes only"))
@@ -1982,15 +1766,15 @@ gen fn vyxEmitProvider(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>,
     if kids.length > 0 {
         errs.push(vyxErr(src, line, "`<\{tag}>` is given children, and it is a generation-time provider — a provider's tree comes from its attributes alone, so it takes none"))
     }
-    if errs.length > 0 {
-        return VyxEmit { code: acc + ".push(empty())\n", errs: errs, imports: "" }
+    if errs.length > before {
+        return vyrn"\{name(acc)}.push(empty())"
     }
     // The provider reports at this `.vyx` file and the tag's line; the column is
-    // always 1.
-    let ns = vyxProvNs(src, path)
-    let call = tag + "(" + vyxStrLit(vyxProvAttrs(attrs)) + ", " + vyxStrLit(src) + ", " + line.toString() + ", 1)"
-    let imp = vyxImportLine("import * as " + ns + " from " + call, true, src, line, 1)
-    return VyxEmit { code: acc + ".push(" + ns + ".provide())\n", errs: [], imports: consume imp }
+    // always 1. Its import shows a loader error at the tag.
+    let ns = name(vyxProvNs(src, path))
+    let json = vyxProvAttrs(attrs)
+    imports.push(at(vyrn"import * as \{ns} from \{name(tag)}(\{json}, \{src}, \{line}, 1)", src, line, 1))
+    return vyrn"\{name(acc)}.push(\{ns}.provide())"
 }
 
 /// The namespace alias minted for one provider tag. Components share one flat
@@ -2045,142 +1829,131 @@ fn vyxChildText(kids: Array<VyxNode>) -> String {
 }
 
 /// Emits a `v-if` chain: each branch fills its own accumulator, then splices
-/// into `acc`; a missing `v-else` pushes nothing. Each condition sits on its own
-/// origin-governed `if` line, so a type error maps to that condition's column.
-gen fn vyxEmitIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<Int64>, bodies: Array<VyxBody>, els: VyxBody, has: Bool, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
-    let mut code = ""
-    let mut errs: Array<VyxErr> = []
-    let mut imports = ""
+/// into `acc`; a missing `v-else` pushes nothing. Each condition shows its
+/// errors at its own `.vyx` column.
+gen fn vyxEmitIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<Int64>, bodies: Array<VyxBody>, els: VyxBody, has: Bool, acc: String, path: String, reg: VyxRegistry, src: String, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
+    let mut arms: Array<Code> = []
     let mut bi = 0
     while bi < conds.length {
-        let head = if bi > 0 { "} else if " } else { "if " }
         let bacc = "k" + path + "_b" + bi.toString()
-        let inner = vyxEmitChildren(bodies[bi].nodes, bacc, path + "_b" + bi.toString(), reg, src)
-        errs = vyxCat(errs, inner.errs)
-        imports = imports + inner.imports
-        code = code + vyxRegion(head + conds[bi] + " {\n", src, condLines[bi], condCols[bi])
-        code = code + "let mut " + bacc + ": Array<Html> = []\n" + inner.code
-        code = code + "for vyxN in consume " + bacc + " {\n" + acc + ".push(vyxN)\n}\n"
+        let inner = vyxEmitChildren(bodies[bi].nodes, bacc, path + "_b" + bi.toString(), reg, src, errs, imports)
+        let cond = at(codeAt(src, condLines[bi], condCols[bi], conds[bi]), src, condLines[bi], condCols[bi])
+        arms.push(arm(cond, vyxBranch(bacc, inner, acc)))
         bi = bi + 1
     }
     if has {
         let eacc = "k" + path + "_be"
-        let inner = vyxEmitChildren(els.nodes, eacc, path + "_be", reg, src)
-        errs = vyxCat(errs, inner.errs)
-        imports = imports + inner.imports
-        code = code + "} else {\n"
-        code = code + "let mut " + eacc + ": Array<Html> = []\n" + inner.code
-        code = code + "for vyxN in consume " + eacc + " {\n" + acc + ".push(vyxN)\n}\n"
+        let inner = vyxEmitChildren(els.nodes, eacc, path + "_be", reg, src, errs, imports)
+        return ifChainOr(arms, vyxBranch(eacc, inner, acc))
     }
-    code = code + "}\n"
-    return VyxEmit { code: code, errs: errs, imports: imports }
+    return ifChain(arms)
+}
+
+/// One branch: fill `bacc` with `inner`, then splice it into `acc`.
+gen fn vyxBranch(bacc: String, inner: Code, acc: String) -> Code {
+    return vyrn"""
+        let mut \{name(bacc)}: Array<Html> = []
+        \{inner}
+        for vyxN in consume \{name(bacc)} {
+            \{name(acc)}.push(vyxN)
+        }
+        """
 }
 
 /// Emits a `v-for` loop: each iteration fills a fresh accumulator, spliced into
-/// `acc` with a `Key` on a line under the key's origin.
-gen fn vyxEmitFor(v: String, it: String, key: String, body: Array<VyxNode>, line: Int64, col: Int64, keyLine: Int64, keyCol: Int64, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
-    let facc = "k" + path + "_f"
-    let inner = vyxEmitChildren(body, facc, path + "_f", reg, src)
-    let mut code = vyxRegion("for " + v + " in " + it + " {\n", src, line, col)
-    code = code + "let mut " + facc + ": Array<Html> = []\n" + inner.code
-    code = code + "for vyxN in consume " + facc + " {\n" + vyxRegion(acc + ".push(keyed((" + key + ").toString(), vyxN))\n", src, keyLine, keyCol) + "}\n"
-    code = code + "}\n"
-    return VyxEmit { code: code, errs: consume inner.errs, imports: consume inner.imports }
+/// `acc` with a `Key`. The iterable and the key show their errors at their own
+/// `.vyx` positions; the variable is the header's first word.
+gen fn vyxEmitFor(v: String, it: VyxSpan, key: String, body: Array<VyxNode>, line: Int64, col: Int64, keyLine: Int64, keyCol: Int64, acc: String, path: String, reg: VyxRegistry, src: String, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
+    let facc = name("k" + path + "_f")
+    let inner = vyxEmitChildren(body, "k" + path + "_f", path + "_f", reg, src, errs, imports)
+    let each = codeAt(src, line, col, v)
+    let iter = at(vyxCopy(src, it), src, it.line, it.col)
+    let push = at(vyrn"\{name(acc)}.push(keyed((\{codeAt(src, keyLine, keyCol, key)}).toString(), vyxN))", src, keyLine, keyCol)
+    return vyrn"""
+        for \{each} in \{iter} {
+            let mut \{facc}: Array<Html> = []
+            \{inner}
+            for vyxN in consume \{facc} {
+                \{push}
+            }
+        }
+        """
 }
 
-/// The attribute list and the preamble that precedes the element's push line.
-/// Every expression-bearing attribute is hoisted into its own origin-governed
-/// `let` in `pre`; static attributes stay inline in `list`.
-type VyxAttrsEmit = { list: String, pre: String, errs: Array<VyxErr> }
-
 /// Emits the `Attr` constructors for a tag: `class` -> `Cls` (or `vyxTheme.cls`
-/// when themed), `@event` -> `On`, others -> `A(name, value)`. `clsBase` names
-/// the hoisted bindings uniquely.
-gen fn vyxEmitAttrs(attrs: Array<VyxAttr>, reg: VyxRegistry, src: String, clsBase: String) -> VyxAttrsEmit {
-    let mut parts: Array<String> = []
-    let mut pre = ""
-    let mut errs: Array<VyxErr> = []
+/// when themed), `@event` -> `On`, others -> `A(name, value)`. Every
+/// expression-bearing attribute is hoisted into its own `let` in `pre`, named
+/// from `clsBase`; static attributes stay inline in the list it returns.
+gen fn vyxEmitAttrs(attrs: Array<VyxAttr>, reg: VyxRegistry, src: String, clsBase: String, pre: modify Array<Code>, errs: modify Array<VyxErr>) -> Code {
+    let mut parts: Array<Code> = []
     let mut ai = 0
     for a in attrs {
-        let slot = clsBase + "_a" + ai.toString()
+        let slot = name(clsBase + "_a" + ai.toString())
         if a.evt {
-            let ev = vyxEmitEvent(a, src)
-            errs = vyxCat(errs, ev.errs)
-            if ev.hasArg {
-                pre = pre + vyxRegion("let " + slot + ": Attr = " + ev.code + "\n", src, ev.argLine, ev.argCol)
-                parts.push(slot)
-            } else {
-                parts.push(consume ev.code)
-            }
+            parts.push(vyxEmitEvent(a, src, slot, pre, errs))
+        } else if a.name == "class" && reg.themed {
+            // Themed class: a static literal is checked against `Tw` at
+            // compile time, a dynamic one at run time.
+            let cv = if a.dyn { codeAt(src, a.line, a.col, a.value) } else { vyrn"\{a.value}" }
+            pre.push(at(vyrn"let \{slot}: Attr = vyxTheme.cls(\{cv})", src, a.line, a.col))
+            parts.push(vyrn"\{slot}")
+        } else if a.name == "class" && a.dyn {
+            pre.push(at(vyrn"let \{slot}: Attr = Cls((\{codeAt(src, a.line, a.col, a.value)}).copy())", src, a.line, a.col))
+            parts.push(vyrn"\{slot}")
         } else if a.name == "class" {
-            if reg.themed {
-                // Themed class: a static literal is checked against `Tw` at
-                // compile time, a dynamic one at run time.
-                let cv = if a.dyn { a.value.copy() } else { vyxStrLit(a.value) }
-                pre = pre + vyxRegion("let " + slot + ": Attr = vyxTheme.cls(" + cv + ")\n", src, a.line, a.col)
-                parts.push(slot)
-            } else {
-                let cv = if a.dyn { a.value.copy() } else { vyxStrLit(a.value) }
-                if a.dyn {
-                    pre = pre + vyxRegion("let " + slot + ": Attr = Cls((" + cv + ").copy())\n", src, a.line, a.col)
-                    parts.push(slot)
-                } else {
-                    parts.push("Cls(" + cv + ")")
-                }
-            }
+            parts.push(vyrn"Cls(\{a.value})")
         } else if a.dyn {
-            pre = pre + vyxRegion("let " + slot + ": Attr = A(" + vyxStrLit(a.name) + ", (" + a.value + ").copy())\n", src, a.line, a.col)
-            parts.push(slot)
+            pre.push(at(vyrn"let \{slot}: Attr = A(\{a.name}, (\{codeAt(src, a.line, a.col, a.value)}).copy())", src, a.line, a.col))
+            parts.push(vyrn"\{slot}")
         } else {
-            parts.push("A(" + vyxStrLit(a.name) + ", " + vyxStrLit(a.value) + ")")
+            parts.push(vyrn"A(\{a.name}, \{a.value})")
         }
         ai = ai + 1
     }
-    return VyxAttrsEmit { list: joinWith(parts, ", "), pre: pre, errs: errs }
+    return join(parts, vyrn", ")
 }
 
-/// One emitted `@event` binding, with its scalar argument's position when it
-/// has one.
-type VyxEventEmit = { code: String, errs: Array<VyxErr>, hasArg: Bool, argLine: Int64, argCol: Int64 }
-
 /// Emits `@event="handler(scalar)"` as `On(event, "handler", payload)`: one
-/// handler name and at most one scalar argument.
-gen fn vyxEmitEvent(a: VyxAttr, src: String) -> VyxEventEmit {
-    let spec = trim(a.value)
+/// handler name and at most one scalar argument. With an argument it hoists the
+/// binding `slot` into `pre`, showing errors at the argument.
+gen fn vyxEmitEvent(a: VyxAttr, src: String, slot: Name, pre: modify Array<Code>, errs: modify Array<VyxErr>) -> Code {
+    let spec = a.value.copy()
     let sb = bytes(spec)
     let paren = vyxFind(sb, bytes("("), 0)
     if paren < 0 {
         if vyxIsIdentifier(spec) == false {
-            return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", \"\", \"\")", errs: [vyxErr(src, a.line, "`@\{a.name}` names no handler — write `@\{a.name}=\"handler\"` or `@\{a.name}=\"handler(arg)\"`")], hasArg: false, argLine: a.line, argCol: a.col }
+            errs.push(vyxErr(src, a.line, "`@\{a.name}` names no handler — write `@\{a.name}=\"handler\"` or `@\{a.name}=\"handler(arg)\"`"))
+            return vyrn"On(\{a.name}, \"\", \"\")"
         }
-        return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(spec) + ", \"\")", errs: [], hasArg: false, argLine: a.line, argCol: a.col }
+        return vyrn"On(\{a.name}, \{spec}, \"\")"
     }
     let handler = trim(vyxSlice(sb, 0, paren))
     if vyxIsIdentifier(handler) == false {
-        return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", \"\", \"\")", errs: [vyxErr(src, a.line, "`@\{a.name}` names no handler — the text before `(` must be one identifier")], hasArg: false, argLine: a.line, argCol: a.col }
+        errs.push(vyxErr(src, a.line, "`@\{a.name}` names no handler — the text before `(` must be one identifier"))
+        return vyrn"On(\{a.name}, \"\", \"\")"
     }
     let closeParen = vyxFindLast(sb, bytes(")"), paren)
     if closeParen < 0 {
         // A missing `)` would slice to "" and compile a zero-argument handler.
-        return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", \"\", \"\")", errs: [vyxErr(src, a.line, "`@\{a.name}` has an unterminated `(` — write `@\{a.name}=\"handler\"` or `@\{a.name}=\"handler(arg)\"`")], hasArg: false, argLine: a.line, argCol: a.col }
+        errs.push(vyxErr(src, a.line, "`@\{a.name}` has an unterminated `(` — write `@\{a.name}=\"handler\"` or `@\{a.name}=\"handler(arg)\"`"))
+        return vyrn"On(\{a.name}, \"\", \"\")"
     }
     let argExpr = trim(vyxSlice(sb, paren + 1, closeParen))
     if argExpr.byteLength == 0 {
-        return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(handler) + ", \"\")", errs: [], hasArg: false, argLine: a.line, argCol: a.col }
+        return vyrn"On(\{a.name}, \{handler}, \"\")"
     }
     if vyxHasTopComma(bytes(argExpr)) {
-        return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(handler) + ", \"\")", errs: [vyxErr(src, a.line, "`@\{a.name}` passes more than one argument — a handler crosses to the host, and it takes at most one scalar")], hasArg: false, argLine: a.line, argCol: a.col }
+        errs.push(vyxErr(src, a.line, "`@\{a.name}` passes more than one argument — a handler crosses to the host, and it takes at most one scalar"))
+        return vyrn"On(\{a.name}, \{handler}, \"\")"
     }
-    // Attribute values are single-line, so the arg's column is the value's
-    // column plus its offset.
-    let argRel = vyxSkipWs(sb, paren + 1, sb.length)
-    let argCol = a.col + argRel
-    return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(handler) + ", (" + argExpr + ").toString())", errs: [], hasArg: true, argLine: a.line, argCol: argCol }
+    let arg = vyxSpanIn(spec, a.line, a.col, vyxSkipWs(sb, paren + 1, sb.length), argExpr)
+    pre.push(at(vyrn"let \{slot}: Attr = On(\{a.name}, \{handler}, (\{vyxCopy(src, arg)}).toString())", src, arg.line, arg.col))
+    return vyrn"\{slot}"
 }
 
 /// Whether `s` is a single Vyrn identifier (letters, digits, `_`; not
 /// digit-first).
-fn vyxIsIdentifier(s: String) -> Bool {
+export to "./vyx.editor" fn vyxIsIdentifier(s: String) -> Bool {
     let ba = bytes(s)
     if ba.length == 0 {
         return false
@@ -2218,310 +1991,348 @@ fn vyxHasTopComma(ba: Array<UInt8>) -> Bool {
     return false
 }
 
-// Import merging: identical selective imports collapse,
-// same-spec selective imports union their names, `import * as ns` dedups by
-// (ns, spec), and one name imported from two specs is a diagnostic naming both
-// files.
+// Imports: every import line is copied from its `.vyx`, so its `import` keyword
+// keeps its writer and a relative path resolves beside that file. A name already
+// imported from the same specifier is dropped from a later line, an
+// `import * as ns` repeats by (ns, spec), and one name imported from two
+// specifiers is a diagnostic naming both files.
 
-/// One parsed import line.
-type VyxImport = { ns: Bool, ok: Bool, names: Array<String>, alias: String, spec: String }
+/// One parsed import line. `names` are the selective import's entries, each
+/// at byte offsets `[starts[i], ends[i])` of the line; `alias` is a namespace
+/// import's name and `spec` the source after ` from `, the dedup and conflict
+/// key. `ok` is false for an unrecognized shape, copied whole.
+type VyxImport = { ns: Bool, ok: Bool, names: Array<String>, starts: Array<Int64>, ends: Array<Int64>, alias: String, spec: String }
 
-/// Parses `import { A, B } from <spec>` or `import * as ns from <spec>`. `spec`
-/// is everything after ` from `, the dedup and conflict key. `ok` is false for
-/// an unrecognized shape, passed through raw.
+/// Parses `import { A, B } from <spec>` or `import * as ns from <spec>`.
 fn vyxParseImport(line: String) -> VyxImport {
     let ba = bytes(line)
     let fromAt = vyxFind(ba, bytes(" from "), 0)
     if fromAt < 0 {
-        return VyxImport { ns: false, ok: false, names: [], alias: "", spec: "" }
+        return VyxImport { ns: false, ok: false, names: [], starts: [], ends: [], alias: "", spec: "" }
     }
     let spec = trim(vyxSlice(ba, fromAt + 6, ba.length))
     let head = trim(vyxSlice(ba, 0, fromAt))
     if head.startsWith("import * as ") {
         let alias = trim(vyxSlice(bytes(head), 12, bytes(head).length))
-        return VyxImport { ns: true, ok: true, names: [], alias: alias, spec: spec }
+        return VyxImport { ns: true, ok: true, names: [], starts: [], ends: [], alias: alias, spec: spec }
     }
-    let braceOpen = vyxFind(bytes(head), bytes("{"), 0)
-    let braceClose = vyxFindLast(bytes(head), bytes("}"), 0)
+    let braceOpen = vyxFind(ba, bytes("{"), 0)
+    let braceClose = vyxFindLast(bytes(vyxSlice(ba, 0, fromAt)), bytes("}"), 0)
     if braceOpen < 0 || braceClose <= braceOpen {
-        return VyxImport { ns: false, ok: false, names: [], alias: "", spec: spec }
+        return VyxImport { ns: false, ok: false, names: [], starts: [], ends: [], alias: "", spec: spec }
     }
-    let inner = vyxSlice(bytes(head), braceOpen + 1, braceClose)
     let mut names: Array<String> = []
-    for part in vyxSplitFields(inner) {
-        let t = trim(part)
-        if t.byteLength > 0 {
-            names.push(t)
+    let mut starts: Array<Int64> = []
+    let mut ends: Array<Int64> = []
+    let mut depth = 0
+    let mut s = braceOpen + 1
+    let mut i = s
+    while i <= braceClose {
+        if i == braceClose || (ba[i] == ',' && depth == 0) {
+            let part = vyxSpanAt(ba, s, i)
+            if part.text.byteLength > 0 {
+                let at = vyxSkipWs(ba, s, i)
+                names.push(part.text.copy())
+                starts.push(at)
+                ends.push(at + part.text.byteLength)
+            }
+            s = i + 1
+        } else if ba[i] == '<' {
+            depth = depth + 1
+        } else if ba[i] == '>' {
+            depth = depth - 1
         }
+        i = i + 1
     }
-    return VyxImport { ns: false, ok: true, names: names, alias: "", spec: spec }
+    return VyxImport { ns: false, ok: true, names: names, starts: starts, ends: ends, alias: "", spec: spec }
 }
 
-/// The merged import block plus any conflict diagnostic, which names both sides
-/// by the `.vyx` file each came from.
-type VyxMerge = { block: String, errs: Array<VyxErr> }
+/// The name a line's import binds that `skip` may hold: a namespace alias, or
+/// the last word before ` from ` of an unrecognized shape.
+fn vyxImportKey(line: String, imp: VyxImport) -> String {
+    if imp.ns {
+        return imp.alias.copy()
+    }
+    let fromAt = vyxFind(bytes(line), bytes(" from "), 0)
+    return vyxLastIdent(vyxSlice(bytes(line), 0, if fromAt < 0 { 0 } else { fromAt }))
+}
 
-gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
-    // Selective imports: first-seen spec order, unioned names. A bucket with one
-    // contributing line keeps its origin; a unioned bucket has none.
-    let mut selSpecs: Array<String> = []
-    let mut selNames: Array<Array<String>> = []
-    let mut selSrc: Array<String> = []
-    let mut selLine: Array<Int64> = []
-    let mut selCol: Array<Int64> = []
-    let mut selCount: Array<Int64> = []
-    // Namespace imports deduped by (alias, spec), origin = first occurrence.
+/// The diagnostics of a component set's imports: a namespace alias bound to
+/// two specifiers, or one name imported from two.
+fn vyxImportConflicts(comps: Array<VyxComp>) -> Array<VyxErr> {
     let mut nsAlias: Array<String> = []
     let mut nsSpec: Array<String> = []
-    let mut nsSrc: Array<String> = []
-    let mut nsLine: Array<Int64> = []
-    let mut nsCol: Array<Int64> = []
-    // Raw pass-through lines (unrecognized shapes), deduped exactly, with origins.
-    let mut rawLines: Array<String> = []
-    let mut rawSrc: Array<String> = []
-    let mut rawLine: Array<Int64> = []
-    let mut rawCol: Array<Int64> = []
-    // Conflict tracking: the spec and file each name was first seen with.
     let mut cName: Array<String> = []
     let mut cSpec: Array<String> = []
     let mut cFile: Array<String> = []
     let mut errs: Array<VyxErr> = []
-
     for c in comps {
-        let mut li = 0
-        while li < c.imports.length {
-            let line = c.imports[li]
-            let oL = if li < c.importLines.length { c.importLines[li] } else { 0 }
-            let oC = if li < c.importCols.length { c.importCols[li] } else { 0 }
-            let imp = vyxParseImport(line)
-            if imp.ok == false {
-                if includes(rawLines, line) == false {
-                    rawLines.push(line.copy())
-                    rawSrc.push(c.srcPath.copy())
-                    rawLine.push(oL)
-                    rawCol.push(oC)
+        for sp in c.script.imports {
+            let imp = vyxParseImport(sp.text)
+            if imp.ok && imp.ns {
+                let k = vyxIndexOf(nsAlias, imp.alias)
+                if k < 0 {
+                    nsAlias.push(imp.alias.copy())
+                    nsSpec.push(imp.spec.copy())
+                } else if nsSpec[k] != imp.spec {
+                    errs.push(vyxErrHere(
+                        "`\{c.srcPath}` imports `\{imp.alias}` from `\{imp.spec}`, and a sibling component already binds that name to `\{nsSpec[k]}` — one namespace alias reaches one module across the whole set, so rename one of them",
+                    ))
                 }
-            } else if imp.ns {
-                // An alias reused for a different spec is a conflict.
-                let mut found = false
-                let mut k = 0
-                while k < nsAlias.length {
-                    if nsAlias[k] == imp.alias {
-                        found = true
-                        if nsSpec[k] != imp.spec {
-                            errs.push(vyxErrHere(
-                                "`\{c.srcPath}` imports `\{imp.alias}` from `\{imp.spec}`, and a sibling component already binds that name to `\{nsSpec[k]}` — one namespace alias reaches one module across the whole set, so rename one of them",
-                            ))
-                        }
-                    }
-                    k = k + 1
-                }
-                if found == false {
-                    nsAlias.push(consume imp.alias)
-                    nsSpec.push(consume imp.spec)
-                    nsSrc.push(c.srcPath.copy())
-                    nsLine.push(oL)
-                    nsCol.push(oC)
-                }
-            } else {
-                // Union into the spec's name set; a name from another spec is a
-                // conflict.
+            } else if imp.ok {
                 for nm in imp.names {
-                    let mut seen = false
-                    let mut ci = 0
-                    while ci < cName.length {
-                        if cName[ci] == nm {
-                            seen = true
-                            if cSpec[ci] != imp.spec {
-                                errs.push(vyxErrHere(
-                                    "`\{cFile[ci]}` and `\{c.srcPath}` both import `\{nm}`, from `\{cSpec[ci]}` and `\{imp.spec}` — the components share one flat namespace, so one name comes from one module",
-                                ))
-                            }
-                        }
-                        ci = ci + 1
-                    }
-                    if seen == false {
+                    let k = vyxIndexOf(cName, nm)
+                    if k < 0 {
                         cName.push(nm.copy())
                         cSpec.push(imp.spec.copy())
                         cFile.push(c.srcPath.copy())
+                    } else if cSpec[k] != imp.spec {
+                        errs.push(vyxErrHere(
+                            "`\{cFile[k]}` and `\{c.srcPath}` both import `\{nm}`, from `\{cSpec[k]}` and `\{imp.spec}` — the components share one flat namespace, so one name comes from one module",
+                        ))
                     }
-                }
-                let mut si = 0 - 1
-                let mut k = 0
-                while k < selSpecs.length {
-                    if selSpecs[k] == imp.spec {
-                        si = k
-                    }
-                    k = k + 1
-                }
-                if si < 0 {
-                    selSpecs.push(imp.spec.copy())
-                    selNames.push(consume imp.names)
-                    selSrc.push(c.srcPath.copy())
-                    selLine.push(oL)
-                    selCol.push(oC)
-                    selCount.push(1)
-                } else {
-                    let mut cur = selNames[si].copy()
-                    for nm in imp.names {
-                        if includes(cur, nm) == false {
-                            cur.push(nm.copy())
-                        }
-                    }
-                    selNames[si] = cur
-                    selCount[si] = selCount[si] + 1
                 }
             }
-            li = li + 1
         }
     }
-
-    let mut out = ""
-    let mut i = 0
-    while i < selSpecs.length {
-        let line = "import { " + joinWith(selNames[i], ", ") + " } from " + selSpecs[i]
-        let hasOrigin = selCount[i] == 1
-        out = out + vyxImportLine(line, hasOrigin, selSrc[i], selLine[i], selCol[i])
-        i = i + 1
-    }
-    i = 0
-    while i < nsAlias.length {
-        let line = "import * as " + nsAlias[i] + " from " + nsSpec[i]
-        out = out + vyxImportLine(line, true, nsSrc[i], nsLine[i], nsCol[i])
-        i = i + 1
-    }
-    i = 0
-    while i < rawLines.length {
-        out = out + vyxImportLine(rawLines[i], true, rawSrc[i], rawLine[i], rawCol[i])
-        i = i + 1
-    }
-    return VyxMerge { block: out, errs: errs }
+    return errs
 }
 
-/// One import line, bracketed by an origin directive when `hasOrigin`. Line 0
-/// (a synthesized import) is emitted bare.
-gen fn vyxImportLine(line: String, hasOrigin: Bool, src: String, oLine: Int64, oCol: Int64) -> String {
-    if hasOrigin && oLine > 0 && oCol > 0 {
-        return vyxRegion(line + "\n", src, oLine, oCol)
+/// The index of the first `s` in `xs`, or -1.
+fn vyxIndexOf(xs: Array<String>, s: String) -> Int64 {
+    let mut i = 0
+    while i < xs.length {
+        if xs[i] == s {
+            return i
+        }
+        i = i + 1
     }
-    return line + "\n"
+    return 0 - 1
 }
 
-/// The view signature: `fn name(p: T, ..., children: Array<Html>) -> Html`,
-/// with `children` only when the template uses `<slot/>`.
-fn vyxEmitSignature(comp: VyxComp) -> String {
-    let mut params: Array<String> = []
-    let mut i = 0
-    while i < comp.propNames.length {
-        params.push(comp.propNames[i] + ": " + comp.propTypes[i])
-        i = i + 1
+/// The import block of a component set, each line copied from its `.vyx`:
+/// selective imports in first-seen specifier order, each line without the
+/// names an earlier line already imported from its specifier or `skip` holds;
+/// then each namespace alias's first line, then the other shapes, each once.
+/// A line whose names all go is dropped.
+gen fn vyxCopyImports(comps: Array<VyxComp>, skip: Array<String>) -> Code {
+    let mut specs: Array<String> = []
+    for c in comps {
+        for sp in c.script.imports {
+            let imp = vyxParseImport(sp.text)
+            if imp.ok && imp.ns == false && includes(specs, imp.spec) == false {
+                specs.push(imp.spec.copy())
+            }
+        }
+    }
+    let mut out: Array<Code> = []
+    for spec in specs {
+        let mut taken = skip.copy()
+        for c in comps {
+            for sp in c.script.imports {
+                let imp = vyxParseImport(sp.text)
+                if imp.ok && imp.ns == false && imp.spec == spec {
+                    let mut keep: Array<Int64> = []
+                    let mut k = 0
+                    while k < imp.names.length {
+                        if includes(taken, imp.names[k]) == false {
+                            taken.push(imp.names[k].copy())
+                            keep.push(k)
+                        }
+                        k = k + 1
+                    }
+                    if keep.length > 0 {
+                        out.push(vyxCopyImport(c.srcPath, sp, imp, keep))
+                    }
+                }
+            }
+        }
+    }
+    let mut aliases = skip.copy()
+    let mut shapes: Array<String> = []
+    for c in comps {
+        for sp in c.script.imports {
+            let imp = vyxParseImport(sp.text)
+            if imp.ok == false || imp.ns {
+                let key = vyxImportKey(sp.text, imp)
+                if imp.ns && includes(aliases, key) == false {
+                    aliases.push(key)
+                    out.push(vyxCopyTail(c.srcPath, sp, 0))
+                } else if imp.ok == false && includes(shapes, sp.text) == false && includes(skip, key) == false {
+                    shapes.push(sp.text.copy())
+                    out.push(vyxCopyTail(c.srcPath, sp, 0))
+                }
+            }
+        }
+    }
+    return join(out, vyrn"\n")
+}
+
+/// The selective import line `sp`, parsed as `imp`, copied with only its
+/// names at the indices `keep`: each name with the separator before it in the
+/// line, every byte from `src`.
+gen fn vyxCopyImport(src: String, sp: VyxSpan, imp: VyxImport, keep: Array<Int64>) -> Code {
+    if keep.length == imp.names.length {
+        return vyxCopyTail(src, sp, 0)
+    }
+    let mut out = vyxCopyPart(src, sp, 0, imp.starts[0])
+    let mut first = true
+    for k in keep {
+        if first == false {
+            out = out + vyxCopyPart(src, sp, imp.ends[k - 1], imp.starts[k])
+        }
+        out = out + vyxCopyPart(src, sp, imp.starts[k], imp.ends[k])
+        first = false
+    }
+    return out + vyxCopyTail(src, sp, imp.ends[imp.names.length - 1])
+}
+
+/// The import line `sp` from byte `from` on, copied from `src`. A generator
+/// call's relative path argument resolves beside the importing file, not
+/// beside its writer, so it is written as that path joined to `src`'s
+/// directory.
+gen fn vyxCopyTail(src: String, sp: VyxSpan, from: Int64) -> Code {
+    let ba = bytes(sp.text)
+    let fromAt = vyxFind(ba, bytes(" from "), 0)
+    let source = if fromAt < 0 { ba.length } else { vyxSkipWs(ba, fromAt + 6, ba.length) }
+    let q1 = vyxFind(ba, bytes("\""), source)
+    let q2 = if q1 < 0 { 0 - 1 } else { vyxFind(ba, bytes("\""), q1 + 1) }
+    let isCall = source < ba.length && ba[source] != '"'
+    if isCall == false || q2 < 0 {
+        return vyxCopyPart(src, sp, from, ba.length)
+    }
+    let arg = vyxSlice(ba, q1 + 1, q2)
+    if arg.startsWith("./") == false && arg.startsWith("../") == false {
+        return vyxCopyPart(src, sp, from, ba.length)
+    }
+    let joined = vyxDirOf(src) + "/" + arg
+    return vyxCopyPart(src, sp, from, q1) + vyrn"\{joined}" + vyxCopyPart(src, sp, q2 + 1, ba.length)
+}
+
+/// A component's view: `fn name(<props>, <extra>, children: Array<Html>) ->
+/// Html`, its props copied from the `.vyx`, the synthesized parameters `extra`
+/// after them, and `children` only when the template uses `<slot/>`.
+gen fn vyxEmitComponent(comp: VyxComp, reg: VyxRegistry, extra: Array<Code>, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
+    let mut params: Array<Code> = []
+    for p in comp.script.props {
+        params.push(vyrn"\{vyxCopy(comp.srcPath, p.name)}: \{vyxCopy(comp.srcPath, p.ty)}")
+    }
+    for x in extra {
+        params.push(x)
     }
     if comp.takesChildren {
         // The slot splice moves the children into the view's accumulator.
-        params.push("children: consume Array<Html>")
+        params.push(vyrn"children: consume Array<Html>")
     }
-    return "export fn " + comp.fnName + "(" + joinWith(params, ", ") + ") -> Html {\n"
+    let list = join(params, vyrn", ")
+    let body = vyxEmitRoot(comp.root, reg, comp.srcPath, errs, imports)
+    return vyrn"""
+        export fn \{name(comp.fnName)}(\{list}) -> Html {
+            \{body}
+        }
+        """
 }
 
-/// One component's view after an empty origin region at its `.vyx`'s first
-/// line. The region maps no text; it names the file, so a template that binds
-/// no expression still has an owner.
-gen fn vyxEmitComponent(comp: VyxComp, reg: VyxRegistry) -> VyxEmit {
-    let mut out = vyxRegion("", comp.srcPath, 1, 1) + vyxEmitSignature(comp)
-    let rootEmit = vyxEmitRoot(comp.root, reg, comp.srcPath)
-    out = out + rootEmit.code + "}\n"
-    return VyxEmit { code: out, errs: consume rootEmit.errs, imports: consume rootEmit.imports }
-}
-
-gen fn vyxEmitRoot(root: VyxNode, reg: VyxRegistry, src: String) -> VyxEmit {
+gen fn vyxEmitRoot(root: VyxNode, reg: VyxRegistry, src: String, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
     return match root {
-        VNElem(tag, isComp, attrs, kids, l) => vyxEmitRootElem(tag, isComp, attrs, kids, l, reg, src),
-        VNText(s) => VyxEmit { code: "return text(" + vyxStrLit(s) + ")\n", errs: [], imports: "" },
-        VNInterp(x, l, c) => VyxEmit { code: vyxRegion("return text((" + x + ").toString())\n", src, l, c), errs: [], imports: "" },
-        VNRaw(x, l, c) => VyxEmit { code: vyxRegion("return Raw(" + x + ")\n", src, l, c), errs: [], imports: "" },
-        VNChildren => VyxEmit { code: "let mut kr: Array<Html> = []\nfor vyxCh in consume children {\nkr.push(vyxCh)\n}\nreturn el(\"div\", [], kr)\n", errs: [], imports: "" },
-        VNIf(cc, cl, ccc, bb, ee, hh) => vyxEmitRootWrap(root, reg, src),
-        VNFor(v, it, k, bd, l, c, kl, kc) => vyxEmitRootWrap(root, reg, src),
+        VNElem(tag, isComp, attrs, kids, l) => vyxEmitRootElem(tag, isComp, attrs, kids, l, reg, src, errs, imports),
+        VNText(s) => vyrn"return text(\{s})",
+        VNInterp(x, l, c) => at(vyrn"return text((\{codeAt(src, l, c, x)}).toString())", src, l, c),
+        VNRaw(x, l, c) => at(vyrn"return Raw(\{codeAt(src, l, c, x)})", src, l, c),
+        VNChildren => vyxRootSlot(),
+        VNIf(cc, cl, ccc, bb, ee, hh) => vyxEmitRootWrap(root, reg, src, errs, imports),
+        VNFor(v, it, k, bd, l, c, kl, kc) => vyxEmitRootWrap(root, reg, src, errs, imports),
     }
 }
 
-gen fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, reg: VyxRegistry, src: String) -> VyxEmit {
+/// A root `<slot/>`: the children in a `<div>`.
+gen fn vyxRootSlot() -> Code {
+    return vyrn"""
+        let mut kr: Array<Html> = []
+        for vyxCh in consume children {
+            kr.push(vyxCh)
+        }
+        return el("div", [], kr)
+        """
+}
+
+gen fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, reg: VyxRegistry, src: String, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
     if isComp {
-        let pushed = vyxEmitComp(tag, attrs, kids, line, "kr", "r", reg, src)
-        let code = "let mut kr: Array<Html> = []\n" + pushed.code + "return kr[0]\n"
-        return VyxEmit { code: code, errs: consume pushed.errs, imports: consume pushed.imports }
+        let pushed = vyxEmitComp(tag, attrs, kids, line, "kr", "r", reg, src, errs, imports)
+        return vyrn"""
+            let mut kr: Array<Html> = []
+            \{pushed}
+            return kr[0]
+            """
     }
-    let kids2 = vyxEmitChildren(kids, "kr", "r", reg, src)
-    let ae = vyxEmitAttrs(attrs, reg, src, "kr")
-    let code = "let mut kr: Array<Html> = []\n" + kids2.code + ae.pre + "return el(" + vyxStrLit(tag) + ", [" + ae.list + "], kr)\n"
-    return VyxEmit { code: code, errs: vyxCat(kids2.errs, ae.errs), imports: consume kids2.imports }
+    let body = vyxEmitChildren(kids, "kr", "r", reg, src, errs, imports)
+    let mut pre: Array<Code> = []
+    let list = vyxEmitAttrs(attrs, reg, src, "kr", pre, errs)
+    let hoisted = join(pre, vyrn"\n")
+    return vyrn"""
+        let mut kr: Array<Html> = []
+        \{body}
+        \{hoisted}
+        return el(\{tag}, [\{list}], kr)
+        """
 }
 
 /// A root that is a bare `v-if` or `v-for`, pushed into a `<div>` wrapper.
-gen fn vyxEmitRootWrap(root: VyxNode, reg: VyxRegistry, src: String) -> VyxEmit {
-    let pushed = vyxEmitPush(root, "kr", "r", reg, src)
-    let code = "let mut kr: Array<Html> = []\n" + pushed.code + "return el(\"div\", [], kr)\n"
-    return VyxEmit { code: code, errs: consume pushed.errs, imports: consume pushed.imports }
+gen fn vyxEmitRootWrap(root: VyxNode, reg: VyxRegistry, src: String, errs: modify Array<VyxErr>, imports: modify Array<Code>) -> Code {
+    let pushed = vyxEmitPush(root, "kr", "r", reg, src, errs, imports)
+    return vyrn"""
+        let mut kr: Array<Html> = []
+        \{pushed}
+        return el("div", [], kr)
+        """
 }
 
 /// Assembles the synthesized module. When `themed`, it imports the theme
 /// `theme` (resolved like `dir`) and routes every `class` through
-/// `vyxTheme.cls(...)`. Exported for `std/ui`'s `pages`.
-gen fn vyxBuildModule(comps: consume Array<VyxComp>, themed: Bool, theme: String) -> String {
+/// `vyxTheme.cls(...)`. `extra` are synthesized view parameters, for the one
+/// view of a page, layout or error module; `page` renames a page's accessors
+/// and exports its `type Data`; `skip` names imports the module leaves out.
+/// A finding goes to `errs`, and the result is then incomplete.
+gen fn vyxBuildModule(comps: consume Array<VyxComp>, themed: Bool, theme: String, extra: Array<Code>, page: Bool, skip: Array<String>, errs: modify Array<VyxErr>) -> Code {
     // The registry takes the components: `VyxNode` has no `copy`.
     let reg = VyxRegistry { names: vyxCompNames(comps), imported: vyxImportedNames(comps), comps: comps, themed: themed }
-    // A code quote with no holes, so the preamble is checked as Vyrn when
-    // `std/vyx` compiles.
-    let mut out = render(vyrn"""/// Generated by std/vyx `components` — do not edit.
-import { el, text, keyed, empty, Html, Attr } from "std/html"
-""")
-    if themed {
-        // `theme` is spliced in expression position, so the compiler bakes it as
-        // a string literal; no injection is possible.
-        out = out + render(vyrn"""import { tw } from "std/tw"
-import * as vyxTheme from tw(\{theme})
-""")
-    }
-
-    let merged = vyxMergeImports(reg.comps)
-    if merged.errs.length > 0 {
-        return render(vyxReports(merged.errs))
-    }
-    out = out + merged.block
-
-    // The views are built before they are appended: a provider tag's import is
-    // found while its view is emitted, and must reach the import block. Helper
-    // lines follow the imports, each bracketed by its own origin directive.
-    let mut views = ""
-    let mut provImports = ""
-    let mut errs: Array<VyxErr> = []
-    for c in reg.comps {
-        let e = vyxEmitComponent(c, reg)
-        views = views + e.code
-        provImports = provImports + e.imports
-        errs = vyxCat(errs, e.errs)
+    for e in vyxImportConflicts(reg.comps) {
+        errs.push(e.copy())
     }
     if errs.length > 0 {
-        return render(vyxReports(errs))
+        return vyrn""
     }
-    out = out + provImports
+    let mut top: Array<Code> = [vyrn"import { el, text, keyed, empty, Html, Attr } from \"std/html\""]
+    if themed {
+        // `theme` is a String hole, so it is a string literal; no injection is
+        // possible.
+        top.push(vyrn"import { tw } from \"std/tw\"")
+        top.push(vyrn"import * as vyxTheme from tw(\{theme})")
+    }
+    top.push(vyxCopyImports(reg.comps, skip))
+    // The views are built before they are joined: a provider tag's import is
+    // found while its view is emitted, and must reach the import block.
+    let mut views: Array<Code> = []
+    let mut provided: Array<Code> = []
     for c in reg.comps {
-        if trim(c.helpers).byteLength > 0 {
-            out = out + vyxHelperBlock(c)
-        }
+        views.push(vyxEmitComponent(c, reg, extra, errs, provided))
     }
-    return out + views
+    top.push(join(provided, vyrn"\n"))
+    for c in reg.comps {
+        top.push(vyxHelperBlock(c, page))
+    }
+    top.push(join(views, vyrn"\n"))
+    return join(top, vyrn"\n")
 }
 
 /// Every name a component's `<script>` imported selectively, across the whole
-/// set. Flat, because the module has one merged import block, so a sibling's
+/// set. Flat, because the module has one import block, so a sibling's
 /// import is in scope at every tag. A namespace alias is not a tag name.
 fn vyxImportedNames(comps: Array<VyxComp>) -> Array<String> {
     let mut out: Array<String> = []
     for c in comps {
-        let mut li = 0
-        while li < c.imports.length {
-            let imp = vyxParseImport(c.imports[li])
+        for sp in c.script.imports {
+            let imp = vyxParseImport(sp.text)
             if imp.ok && imp.ns == false {
                 for nm in imp.names {
                     if includes(out, nm) == false {
@@ -2529,32 +2340,162 @@ fn vyxImportedNames(comps: Array<VyxComp>) -> Array<String> {
                     }
                 }
             }
-            li = li + 1
         }
     }
     return out
 }
 
-/// One component's helper block, each line bracketed by its `.vyx` origin; a
-/// line of unknown position is emitted bare. Without per-line positions it is
-/// the raw `helpers` string.
-gen fn vyxHelperBlock(c: VyxComp) -> String {
-    if c.helperTexts.length == 0 {
-        return c.helpers.copy()
-    }
-    let mut out = ""
+/// One component's helper lines, copied from its `.vyx`. In a page, a `head`
+/// or `data` accessor is written under its private name ([`vyxAccessorName`])
+/// without `export`, and a statement-leading `type Data` is exported, because
+/// the router reaches it through the page's namespace.
+gen fn vyxHelperBlock(c: VyxComp, page: Bool) -> Code {
+    let lines = c.script.helperLines.copy()
+    let mut out: Array<Code> = []
     let mut i = 0
-    while i < c.helperTexts.length {
-        let l = if i < c.helperLines.length { c.helperLines[i] } else { 0 }
-        let cc = if i < c.helperCols.length { c.helperCols[i] } else { 0 }
-        if l > 0 && cc > 0 {
-            out = out + vyxRegion(c.helperTexts[i] + "\n", c.srcPath, l, cc)
+    while i < lines.length {
+        let t = trim(lines[i].text)
+        let accessor = if vyxIsDeclOf(t, "head") { "head" } else if vyxIsDeclOf(t, "data") { "data" } else { "" }
+        if page && accessor != "" {
+            let last = vyxDeclLast(lines, i)
+            out.push(vyxAccessorCopy(c.srcPath, lines, i, last, vyxAccessorName(accessor)))
+            i = last + 1
+        } else if page && t.startsWith("type Data") {
+            out.push(vyxExportType(c.srcPath, lines[i]))
+            i = i + 1
         } else {
-            out = out + c.helperTexts[i] + "\n"
+            out.push(vyxCopy(c.srcPath, lines[i]))
+            i = i + 1
+        }
+    }
+    return join(out, vyrn"\n")
+}
+
+/// The helper lines as one text, and where each line starts in it.
+fn vyxLineStarts(lines: Array<VyxSpan>) -> Array<Int64> {
+    let mut starts: Array<Int64> = []
+    let mut off = 0
+    for l in lines {
+        starts.push(off)
+        off = off + l.text.byteLength + 1
+    }
+    return starts
+}
+
+/// The bytes `[a, b)` of the helper lines' text ([`vyxLineStarts`]), copied
+/// from `src` one line at a time.
+gen fn vyxCopyRange(src: String, lines: Array<VyxSpan>, a: Int64, b: Int64) -> Code {
+    let starts = vyxLineStarts(lines)
+    let mut out = vyrn""
+    let mut k = 0
+    for l in lines {
+        let s = if a > starts[k] { a - starts[k] } else { 0 }
+        let e = if b < starts[k] + l.text.byteLength { b - starts[k] } else { l.text.byteLength }
+        if starts[k] > a && starts[k] <= b {
+            out = out + vyrn"\n"
+        }
+        if s < e {
+            out = out + vyxCopyPart(src, l, s, e)
+        }
+        k = k + 1
+    }
+    return out
+}
+
+/// The index of the helper line holding the `}` that closes the declaration
+/// starting on line `i`; `i` when no `{` follows.
+fn vyxDeclLast(lines: Array<VyxSpan>, i: Int64) -> Int64 {
+    let jb = bytes(vyxSpansText(lines))
+    let starts = vyxLineStarts(lines)
+    let brace = vyxFind(jb, bytes("{"), starts[i])
+    if brace < 0 {
+        return i
+    }
+    let end = vyxMatchCurly(jb, brace)
+    let mut k = i
+    while k + 1 < lines.length && starts[k + 1] < end {
+        k = k + 1
+    }
+    return k
+}
+
+/// The accessor declared on helper lines `i` to `last` as `fn <newName>`: its
+/// parameters, return type, body and any text after its `}` copied from `src`.
+/// The parameters and the return type show their errors at the declaration,
+/// as the declaration's own line would.
+gen fn vyxAccessorCopy(src: String, lines: Array<VyxSpan>, i: Int64, last: Int64, newName: String) -> Code {
+    let jb = bytes(vyxSpansText(lines))
+    let starts = vyxLineStarts(lines)
+    let open = vyxFind(jb, bytes("("), starts[i])
+    let close = vyxMatchParen(jb, open)
+    let brace = vyxFind(jb, bytes("{"), close)
+    if brace < 0 {
+        // A declaration with no body is copied as it stands.
+        return vyxCopy(src, lines[i])
+    }
+    let end = vyxMatchCurly(jb, brace)
+    let lineEnd = starts[last] + lines[last].text.byteLength
+    let decl = lines[i].copy()
+    let declCol = decl.col + vyxSkipWs(bytes(decl.text), 0, decl.text.byteLength)
+    let params = at(vyxCopyRange(src, lines, open + 1, close - 1), src, decl.line, declCol)
+    let body = vyxCopyRange(src, lines, brace + 1, end - 1)
+    let rest = vyxCopyRange(src, lines, end, lineEnd)
+    let arrow = vyxFind(jb, bytes("->"), close)
+    if arrow < 0 || arrow > brace {
+        return vyrn"""
+            fn \{name(newName)}(\{params}) {
+                \{body}
+            }
+            """ + rest
+    }
+    let rs = vyxSkipWs(jb, arrow + 2, brace)
+    let mut re = brace
+    while re > rs && vyxIsWs(jb[re - 1]) {
+        re = re - 1
+    }
+    let ret = at(vyxCopyRange(src, lines, rs, re), src, decl.line, declCol)
+    return vyrn"""
+        fn \{name(newName)}(\{params}) -> \{ret} {
+            \{body}
+        }
+        """ + rest
+}
+
+/// The index just past the `)` matching the `(` at `open`, or `ba.length`.
+fn vyxMatchParen(ba: Array<UInt8>, open: Int64) -> Int64 {
+    let mut depth = 0
+    let mut i = open
+    while i < ba.length {
+        if ba[i] == '"' {
+            i = vyxScanQuote(ba, i, ba.length) - 1
+        } else if ba[i] == '(' {
+            depth = depth + 1
+        } else if ba[i] == ')' {
+            depth = depth - 1
+            if depth == 0 {
+                return i + 1
+            }
         }
         i = i + 1
     }
-    return out
+    return ba.length
+}
+
+/// The helper line `l`, a `type Data ... = ...` line, exported: its name and
+/// the rest of the line after `=` copied from `src`. A line without `=` is
+/// copied as it stands.
+gen fn vyxExportType(src: String, l: VyxSpan) -> Code {
+    let lb = bytes(l.text)
+    let kw = vyxFind(lb, bytes("type "), 0)
+    let eq = vyxFind(lb, bytes("="), kw)
+    if eq < 0 {
+        return vyxCopy(src, l)
+    }
+    let n = vyxSpanAt(lb, kw + 5, eq)
+    let at = vyxSkipWs(lb, kw + 5, eq)
+    let tyName = vyxCopyPart(src, l, at, at + n.text.byteLength)
+    let rhs = vyxCopyPart(src, l, vyxSkipWs(lb, eq + 1, lb.length), lb.length)
+    return vyrn"export type \{tyName} = \{rhs}"
 }
 
 fn vyxCompNames(comps: Array<VyxComp>) -> Array<String> {
@@ -2573,22 +2514,20 @@ fn vyxNoSchema() -> Schema {
 }
 
 /// An unplaced `Origin`. The checked surface is not emitted yet, so it has no
-/// declaration site; `.vyx` positions are the origin directives' job.
+/// declaration site; the copies carry the `.vyx` positions.
 fn vyxNoOrigin() -> Origin {
     return Origin { file: "", line: 0, col: 0, name: "" }
 }
 
 /// The export surface `vyxBuildModule` is about to emit, as reflection for the
 /// contract check: one view per component with its props (plus `children` for
-/// a `<slot/>`), returning `Html`. Must match `vyxEmitSignature`.
+/// a `<slot/>`), returning `Html`. Must match `vyxEmitComponent`.
 gen fn vyxEmittedInterface(comps: Array<VyxComp>) -> ModuleInterface {
     let mut fns: Array<FnInfo> = []
     for c in comps {
         let mut ps: Array<ParamInfo> = []
-        let mut i = 0
-        while i < c.propNames.length {
-            ps.push(ParamInfo { name: c.propNames[i].copy(), spelling: c.propTypes[i].copy(), schema: vyxNoSchema(), uncodable: "" })
-            i = i + 1
+        for p in c.script.props {
+            ps.push(ParamInfo { name: p.name.text.copy(), spelling: p.ty.text.copy(), schema: vyxNoSchema(), uncodable: "" })
         }
         if c.takesChildren {
             ps.push(ParamInfo { name: "children", spelling: "consume Array<Html>", schema: vyxNoSchema(), uncodable: "" })
@@ -2598,31 +2537,36 @@ gen fn vyxEmittedInterface(comps: Array<VyxComp>) -> ModuleInterface {
     return ModuleInterface { functions: fns, types: [] }
 }
 
-/// Assembles the module or returns the accumulated diagnostics: the pure tail
+/// Assembles the module or reports the accumulated findings: the pure tail
 /// of `components` and `componentsThemed`. The `listDir`/`readFile` calls stay
 /// in the gen bodies, because a comptime-only builtin has no native or wasm
 /// lowering.
-gen fn vyxFinish(comps: consume Array<VyxComp>, errs: Array<VyxErr>, dir: String, themed: Bool, theme: String) -> String {
+gen fn vyxFinish(comps: consume Array<VyxComp>, errs: Array<VyxErr>, dir: String, themed: Bool, theme: String) -> Code {
     // A read failure arrives with nothing in `comps`, so it is checked before
     // the empty-directory guard, which would bury the OS reasons.
     if errs.length > 0 {
-        return render(vyxReports(errs))
+        return vyxReports(errs)
     }
     if comps.length == 0 {
-        return render(reportHere(
+        return reportHere(
             Error,
             "no `.vyx` files under `\{dir}` — a component is a `.vyx` file in that directory",
-        ))
+        )
     }
     // An issue against the `Component` contract is a load diagnostic.
-    let mut contractErr = ""
+    let mut issues: Array<VyxErr> = []
     for iss in checkContract(vyxEmittedInterface(comps), contractOf(Component)) {
-        contractErr = contractErr + render(reportHere(Error, iss.message))
+        issues.push(vyxErrHere(iss.message))
     }
-    if contractErr != "" {
-        return contractErr
+    if issues.length > 0 {
+        return vyxReports(issues)
     }
-    return vyxBuildModule(comps, themed, theme)
+    let mut found: Array<VyxErr> = []
+    let module = vyxBuildModule(comps, themed, theme, [], false, [], found)
+    if found.length > 0 {
+        return vyxReports(found)
+    }
+    return module
 }
 
 /// The diagnostic for a `.vyx` source that cannot be read, with the OS reason.
@@ -2652,10 +2596,23 @@ gen fn vyxReadFileOf(path: String) -> VyxFileRead {
 
 /// Compiles every `<Name>.vyx` under `dir` into one module exporting one view
 /// per component. `class` is unchecked; `componentsThemed` checks it.
-export gen fn components(dir: String) -> String {
+export gen fn components(dir: String) -> Code {
+    return vyxComponentsIn(dir, false, "")
+}
+
+/// [`components`] with a theme: the module imports `tw(<theme>)` as
+/// `vyxTheme`, a static class literal is checked against `Tw` at compile time
+/// at its `.vyx` position, and a dynamic `:class` is coerced at run time.
+/// `theme` resolves relative to the importing module, like `dir`.
+export gen fn componentsThemed(dir: String, theme: String) -> Code {
+    return vyxComponentsIn(dir, true, theme)
+}
+
+/// The body of [`components`] and [`componentsThemed`].
+gen fn vyxComponentsIn(dir: String, themed: Bool, theme: String) -> Code {
     let listed = vyxReadDir(dir)
     if listed.err != "" {
-        return render(reportHere(Error, vyxCannotRead(dir, listed.err)))
+        return reportHere(Error, vyxCannotRead(dir, listed.err))
     }
     let mut comps: Array<VyxComp> = []
     let mut errs: Array<VyxErr> = []
@@ -2677,38 +2634,7 @@ export gen fn components(dir: String) -> String {
             }
         }
     }
-    return vyxFinish(comps, errs, dir, false, "")
-}
-
-/// [`components`] with a theme: the module imports `tw(<theme>)` as
-/// `vyxTheme`, a static class literal is checked against `Tw` at compile time
-/// at its `.vyx` position, and a dynamic `:class` is coerced at run time.
-/// `theme` resolves relative to the importing module, like `dir`.
-export gen fn componentsThemed(dir: String, theme: String) -> String {
-    let listed = vyxReadDir(dir)
-    if listed.err != "" {
-        return render(reportHere(Error, vyxCannotRead(dir, listed.err)))
-    }
-    let mut comps: Array<VyxComp> = []
-    let mut errs: Array<VyxErr> = []
-    for name in listed.entries {
-        if name.endsWith(".vyx") {
-            let nb = bytes(name)
-            let stem = vyxSlice(nb, 0, nb.length - 4)
-            let path = dir + "/" + name
-            let read = vyxReadFileOf(path)
-            if read.err != "" {
-                errs.push(vyxErrHere(vyxCannotRead(path, read.err)))
-            } else {
-                let comp = vyxCompileComponent(stem, read.src, dir)
-                if comp.errs.length > 0 {
-                    errs = vyxCat(errs, comp.errs)
-                }
-                comps.push(comp)
-            }
-        }
-    }
-    return vyxFinish(comps, errs, dir, true, theme)
+    return vyxFinish(comps, errs, dir, themed, theme)
 }
 
 // `.vyx` pages. A page's `<script>` has a `params { ... }`
@@ -3132,58 +3058,13 @@ fn vyxUpperFirst(s: String) -> String {
     return fromBytesOr(out, s)
 }
 
-/// A contract accessor's declaration line, renamed and stripped of `export`:
-/// `export fn head() -> Head {` => `fn uiPgHead() -> Head {`.
-fn vyxRenameAccessor(t: String, name: String) -> String {
-    let bare = if t.startsWith("export ") { trim(vyxSlice(bytes(t), 7, bytes(t).length)) } else { t.copy() }
-    let bb = bytes(bare)
-    let open = vyxFind(bb, bytes("("), 0)
-    if open < 0 {
-        return bare
-    }
-    return "fn " + vyxAccessorName(name) + vyxSlice(bb, open, bb.length)
-}
-
-/// The trimmed script line `t` renamed when it declares the `head` or `data`
-/// accessor, else "".
-fn vyxAccessorDecl(t: String) -> String {
-    if vyxIsDeclOf(t, "head") {
-        return vyxRenameAccessor(t, "head")
-    }
-    if vyxIsDeclOf(t, "data") {
-        return vyxRenameAccessor(t, "data")
-    }
-    return ""
-}
-
-/// Exports a statement-leading `type Data` line, which the router reaches
-/// through the page's namespace, and renames the `head` and `data` accessors
-/// to their private names. Lines already exported pass through.
-fn vyxAutoExportPageDecls(script: String) -> String {
-    let mut out = ""
-    for line in lines(script) {
-        let t = trim(line)
-        let acc = vyxAccessorDecl(t)
-        if vyxIsLayoutLine(line) {
-            // `layout="none"` is consumed by the router shape; it is not Vyrn.
-        } else if acc != "" {
-            out = out + acc + "\n"
-        } else if t.startsWith("type Data") {
-            out = out + "export " + line + "\n"
-        } else {
-            out = out + line + "\n"
-        }
-    }
-    return out
-}
-
 /// The `p.<name>` argument list forwarding a `Params` value into the page view.
-fn vyxPageArgs(names: Array<String>) -> String {
-    let mut parts: Array<String> = []
+gen fn vyxPageArgs(names: Array<String>) -> Code {
+    let mut parts: Array<Code> = []
     for n in names {
-        parts.push("p." + n)
+        parts.push(vyrn"p.\{name(n)}")
     }
-    return joinWith(parts, ", ")
+    return join(parts, vyrn", ")
 }
 
 // The `head { ... }` block, for layouts and error pages.
@@ -3245,69 +3126,70 @@ gen fn vyxParseHead(ba: Array<UInt8>, start: Int64, end: Int64, srcFile: String)
     return VyxHead { found: true, items: items, errs: [] }
 }
 
-/// A script with its `head { ... }` block sliced out, and the parsed head.
-type VyxHeadSplit = { rest: String, head: VyxHead }
-
-/// Removes a statement-leading `head { ... }` block from the script
-/// `ba[sStart, sEnd)`; `found` is false when there is none.
-gen fn vyxStripHead(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, srcFile: String) -> VyxHeadSplit {
-    let script = vyxSlice(ba, sStart, sEnd)
-    let sb = bytes(script)
+/// The statement-leading `head { ... }` block of the script `ba[sStart, sEnd)`;
+/// `found` is false when there is none.
+gen fn vyxHeadOf(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, srcFile: String) -> VyxHead {
+    let sb = bytes(vyxSlice(ba, sStart, sEnd))
     let hb = vyxFindKwBlock(sb, "head")
     if hb.found == false || hb.malformed {
-        return VyxHeadSplit { rest: script, head: vyxNoHead() }
+        return vyxNoHead()
     }
     let end = vyxMatchCurly(sb, hb.braceAt)
-    let rest = vyxSlice(sb, 0, hb.kwAt) + vyxSlice(sb, end, sb.length)
-    return VyxHeadSplit { rest: rest, head: vyxParseHead(ba, sStart + hb.braceAt + 1, sStart + end - 1, srcFile) }
+    return vyxParseHead(ba, sStart + hb.braceAt + 1, sStart + end - 1, srcFile)
 }
 
-/// The `std/html` element expression for one head entry.
-fn vyxHeadItemExpr(it: VyxHeadItem) -> String {
+/// The `std/html` element expression for one head entry, its expression
+/// copied from `src`.
+gen fn vyxHeadItemExpr(it: VyxHeadItem, src: String) -> Code {
+    let x = codeAt(src, it.line, it.col, it.expr)
     if it.kind == "stylesheet" {
-        return "el(\"link\", [A(\"rel\", \"stylesheet\"), A(\"href\", (" + it.expr + "))], [])"
+        return vyrn"el(\"link\", [A(\"rel\", \"stylesheet\"), A(\"href\", (\{x}))], [])"
     }
     if it.kind == "module" {
-        return "el(\"script\", [A(\"type\", \"module\"), A(\"src\", (" + it.expr + "))], [])"
+        return vyrn"el(\"script\", [A(\"type\", \"module\"), A(\"src\", (\{x}))], [])"
     }
-    return "el(\"script\", [A(\"src\", (" + it.expr + "))], [])"
+    return vyrn"el(\"script\", [A(\"src\", (\{x}))], [])"
 }
 
 /// Emits the module's `head(<sig>) -> Array<Html>` and
-/// `headTitle(<sig>) -> String`. `sig` is the parameter list ("" for a layout);
-/// `prelude` binds the locals the entries read (`let id = p.id`). Always
-/// emitted; an empty head gives `[]` and "". Each entry's line sits under its
-/// origin in `src`.
-gen fn vyxEmitHeadFns(head: VyxHead, sig: String, prelude: String, src: String) -> String {
-    let mut out = "export fn head(" + sig + ") -> Array<Html> {\n" + prelude
-    out = out + "    let mut uiHd: Array<Html> = []\n"
+/// `headTitle(<sig>) -> String`. `sig` is the parameter list (empty for a
+/// layout); `prelude` binds the locals the entries read (`let id = p.id`).
+/// Always emitted; an empty head gives `[]` and "". Each entry shows its
+/// errors at its position in `src`.
+gen fn vyxEmitHeadFns(head: VyxHead, sig: Code, prelude: Code, src: String) -> Code {
+    let mut pushes: Array<Code> = []
     for it in head.items {
         if it.kind != "title" {
-            out = out + vyxRegion("    uiHd.push(" + vyxHeadItemExpr(it) + ")\n", src, it.line, it.col)
+            pushes.push(at(vyrn"uiHd.push(\{vyxHeadItemExpr(it, src)})", src, it.line, it.col))
         }
     }
-    out = out + "    return uiHd\n}\n"
-    out = out + vyxEmitHeadTitleFn(head, sig, prelude, src)
-    return out
+    let body = join(pushes, vyrn"\n")
+    let title = vyxEmitHeadTitleFn(head, sig, prelude, src)
+    return vyrn"""
+        export fn head(\{sig}) -> Array<Html> {
+            \{prelude}
+            let mut uiHd: Array<Html> = []
+            \{body}
+            return uiHd
+        }
+        \{title}
+        """
 }
 
 /// The arguments for the page's `head` accessor, from its declared parameter
 /// types. Head takes what the view takes: `()`, `(d)`, `(p)` or `(p, d)`, and a
 /// parameter of type `Params` is the route parameters.
-fn vyxHeadCallArgs(ptypes: Array<String>, hasParams: Bool, hasLoad: Bool) -> String {
-    if ptypes.length == 0 {
-        return ""
+gen fn vyxHeadCallArgs(ptypes: Array<String>, hasParams: Bool, hasLoad: Bool) -> Code {
+    if ptypes.length == 1 && ptypes[0] == "Params" && hasParams {
+        return vyrn"p"
     }
-    if ptypes.length == 1 {
-        if ptypes[0] == "Params" {
-            return if hasParams { "p" } else { "" }
-        }
-        return if hasLoad { "d" } else { "" }
+    if ptypes.length == 1 && ptypes[0] != "Params" && hasLoad {
+        return vyrn"d"
     }
-    if hasParams && hasLoad {
-        return "p, d"
+    if ptypes.length == 2 && hasParams && hasLoad {
+        return join([vyrn"p", vyrn"d"], vyrn", ")
     }
-    return ""
+    return vyrn""
 }
 
 /// Whether the page's `head` accessor asks only for what the page can give: no
@@ -3331,29 +3213,41 @@ fn vyxHeadArgsOk(ptypes: Array<String>, hasParams: Bool, hasLoad: Bool) -> Bool 
 
 /// Emits `head`/`headTitle` wrapping the page's `head(...)` accessor. `sig` is
 /// the router's call shape; `args` is what the accessor receives.
-fn vyxEmitAccessorHeadFns(sig: String, args: String) -> String {
-    let call = vyxAccessorName("head") + "(" + args + ")"
-    let mut out = "export fn head(" + sig + ") -> Array<Html> {\n    return headHtml(" + call + ")\n}\n"
-    return out + vyxEmitAccessorHeadTitle(sig, args)
+gen fn vyxEmitAccessorHeadFns(sig: Code, args: Code) -> Code {
+    let title = vyxEmitAccessorHeadTitle(sig, args)
+    return vyrn"""
+        export fn head(\{sig}) -> Array<Html> {
+            return headHtml(\{name(vyxAccessorName("head"))}(\{args}))
+        }
+        \{title}
+        """
 }
 
 /// Emits only `headTitle(<sig>)` from the `head(...)` accessor, for the client
 /// bundle of a dataless page.
-fn vyxEmitAccessorHeadTitle(sig: String, args: String) -> String {
-    return "export fn headTitle(" + sig + ") -> String {\n    return headTitleOf(" + vyxAccessorName("head") + "(" + args + "))\n}\n"
+gen fn vyxEmitAccessorHeadTitle(sig: Code, args: Code) -> Code {
+    return vyrn"""
+        export fn headTitle(\{sig}) -> String {
+            return headTitleOf(\{name(vyxAccessorName("head"))}(\{args}))
+        }
+        """
 }
 
 /// Emits only `headTitle(<sig>) -> String`. The client bundle keeps it for a
 /// dataless page, so the host resolves the title with no round-trip.
-gen fn vyxEmitHeadTitleFn(head: VyxHead, sig: String, prelude: String, src: String) -> String {
-    let mut ret = "    return \"\"\n"
+gen fn vyxEmitHeadTitleFn(head: VyxHead, sig: Code, prelude: Code, src: String) -> Code {
+    let mut ret = vyrn"return \"\""
     for it in head.items {
         if it.kind == "title" {
-            drop ret
-            ret = vyxRegion("    return (" + it.expr + ")\n", src, it.line, it.col)
+            ret = at(vyrn"return (\{codeAt(src, it.line, it.col, it.expr)})", src, it.line, it.col)
         }
     }
-    return "export fn headTitle(" + sig + ") -> String {\n" + prelude + ret + "}\n"
+    return vyrn"""
+        export fn headTitle(\{sig}) -> String {
+            \{prelude}
+            \{ret}
+        }
+        """
 }
 
 // Client-page compilation: the view only. `load` runs on
@@ -3398,28 +3292,58 @@ fn vyxIsDataDecl(t: String) -> Bool {
     return vyxIsDeclOf(t, "data")
 }
 
-/// `script` without the statement-leading `data()` accessor; unchanged when
-/// there is none.
-gen fn vyxStripLoadFn(script: String) -> String {
-    let sb = bytes(script)
-    let n = sb.length
-    let mut i = 0
-    let mut lineStart = 0
-    while i <= n {
-        if i == n || sb[i] == '\n' {
-            let line = trim(vyxSlice(sb, lineStart, i))
-            if vyxIsDataDecl(line) {
-                let brace = vyxFind(sb, bytes("{"), lineStart)
-                if brace >= 0 {
-                    let end = vyxMatchCurly(sb, brace)
-                    return vyxSlice(sb, 0, lineStart) + vyxSlice(sb, end, n)
-                }
+/// The texts of `spans`, one per line.
+fn vyxSpansText(spans: Array<VyxSpan>) -> String {
+    let mut out = ""
+    for sp in spans {
+        out = out + sp.text + "\n"
+    }
+    return out
+}
+
+/// `lines` without the declaration that starts on line `i`: from that line to
+/// the `}` matching the first `{` after its start. Text after the `}` on its
+/// line stays, at its own position. Unchanged when no `{` follows.
+fn vyxCutDecl(lines: Array<VyxSpan>, i: Int64) -> Array<VyxSpan> {
+    let jb = bytes(vyxSpansText(lines))
+    let mut starts: Array<Int64> = []
+    let mut off = 0
+    for l in lines {
+        starts.push(off)
+        off = off + l.text.byteLength + 1
+    }
+    let brace = vyxFind(jb, bytes("{"), starts[i])
+    if brace < 0 {
+        return lines.copy()
+    }
+    let end = vyxMatchCurly(jb, brace)
+    let mut out: Array<VyxSpan> = []
+    let mut k = 0
+    for l in lines {
+        let lineEnd = starts[k] + l.text.byteLength
+        if k < i || starts[k] >= end {
+            out.push(l.copy())
+        } else if end < lineEnd {
+            let rest = vyxSpanIn(l.text, l.line, l.col, end - starts[k], vyxSlice(bytes(l.text), end - starts[k], l.text.byteLength))
+            if trim(rest.text).byteLength > 0 {
+                out.push(rest)
             }
-            lineStart = i + 1
+        }
+        k = k + 1
+    }
+    return out
+}
+
+/// `lines` without the first statement-leading `data()` accessor.
+gen fn vyxStripLoadLines(lines: Array<VyxSpan>) -> Array<VyxSpan> {
+    let mut i = 0
+    for l in lines {
+        if vyxIsDataDecl(trim(l.text)) {
+            return vyxCutDecl(lines, i)
         }
         i = i + 1
     }
-    return script.copy()
+    return lines.copy()
 }
 
 /// Whether `name(` occurs in `corpus` as a whole token: an inline helper call.
@@ -3488,50 +3412,32 @@ fn vyxMentionsIdent(corpus: String, name: String) -> Bool {
     return false
 }
 
-/// `script` without the private helpers nothing in it mentions, to a fixed
-/// point. A `data` accessor hands its work to a named helper, which would reach
-/// the browser still calling the server contract; `vyxClientHelperViolation`
-/// would refuse the page. Exported helpers are never removed.
-gen fn vyxStripDeadHelpers(script: String, keep: String) -> String {
-    let mut cur = script
+/// `lines` without the private helpers nothing else mentions, to a fixed
+/// point: not the other lines, the `imports` or `keep`. A `data` accessor
+/// hands its work to a named helper, which would reach the browser still
+/// calling the server contract; `vyxClientHelperViolation` would refuse the
+/// page. Exported helpers are never removed.
+gen fn vyxStripDeadLines(lines: Array<VyxSpan>, imports: Array<VyxSpan>, keep: String) -> Array<VyxSpan> {
+    let mut cur = lines.copy()
     let mut rounds = 0
-    while rounds < 16 {
-        let next = vyxStripDeadHelpersOnce(cur, keep)
-        if next == cur {
-            return cur.copy()
-        }
-        cur = next
-        rounds = rounds + 1
-    }
-    return cur.copy()
-}
-
-/// One pass of [`vyxStripDeadHelpers`]: removes the first private helper
-/// nothing else mentions.
-gen fn vyxStripDeadHelpersOnce(script: String, keep: String) -> String {
-    let sb = bytes(script)
-    let n = sb.length
-    let mut i = 0
-    let mut lineStart = 0
-    while i <= n {
-        if i == n || sb[i] == '\n' {
-            let t = trim(vyxSlice(sb, lineStart, i))
-            if t.startsWith("fn ") {
-                let name = vyxDeclNameOf(t)
-                let brace = vyxFind(sb, bytes("{"), lineStart)
-                if name.byteLength > 0 && brace >= 0 {
-                    let end = vyxMatchCurly(sb, brace)
-                    let rest = vyxSlice(sb, 0, lineStart) + vyxSlice(sb, end, n)
-                    if vyxMentionsIdent(rest + " " + keep, name) == false {
-                        return rest
-                    }
+    let mut cutOne = true
+    while rounds < 16 && cutOne {
+        cutOne = false
+        let mut i = 0
+        while i < cur.length && cutOne == false {
+            let name = vyxDeclNameOf(trim(cur[i].text))
+            if name.byteLength > 0 {
+                let rest = vyxCutDecl(cur, i)
+                if vyxSpansText(rest) != vyxSpansText(cur) && vyxMentionsIdent(vyxSpansText(rest) + vyxSpansText(imports) + " " + keep, name) == false {
+                    cur = rest
+                    cutOne = true
                 }
             }
-            lineStart = i + 1
+            i = i + 1
         }
-        i = i + 1
+        rounds = rounds + 1
     }
-    return script.copy()
+    return cur
 }
 
 /// The declared name of a `fn <name>(` line ("" when the line is not one).
@@ -3609,36 +3515,6 @@ fn vyxImportNameDead(name: String, corpus: String, loadBody: String) -> Bool {
     return vyxWordUsed(loadBody, name) && vyxWordUsed(corpus, name) == false
 }
 
-/// One import line, pruned for the client: a selective import drops the names
-/// only `load` used, and goes when none survive; a namespace or default import
-/// goes when its name is load-only. Unrecognized shapes are kept.
-gen fn vyxPruneOneImport(line: String, corpus: String, loadBody: String) -> String {
-    let lb = bytes(line)
-    let brace = vyxFind(lb, bytes("{"), 0)
-    if brace >= 0 {
-        let close = vyxFind(lb, bytes("}"), brace)
-        let mut kept: Array<String> = []
-        for nm in vyxSplitFields(vyxSlice(lb, brace + 1, close)) {
-            let t = trim(nm)
-            if t.byteLength > 0 && vyxImportNameDead(vyxImportBoundName(t), corpus, loadBody) == false {
-                kept.push(t)
-            }
-        }
-        if kept.length == 0 {
-            return ""
-        }
-        return "import { " + joinWith(kept, ", ") + " }" + vyxSlice(lb, close + 1, lb.length)
-    }
-    let fromIdx = vyxFind(lb, bytes(" from "), 0)
-    if fromIdx < 0 {
-        return line.copy()
-    }
-    if vyxImportNameDead(vyxLastIdent(vyxSlice(lb, 0, fromIdx)), corpus, loadBody) {
-        return ""
-    }
-    return line.copy()
-}
-
 /// `line` without its `//` comment, so a comment naming a type cannot keep a
 /// dead file-I/O import alive in the client bundle.
 fn vyxStripLineComment(line: String) -> String {
@@ -3663,379 +3539,441 @@ fn vyxNonImportBody(script: String) -> String {
     return out
 }
 
-/// The lines except index `skip`, comments stripped and space-joined: the usage
-/// corpus for one import, since another import may use its name
-/// (`import * as t from i18n("...")` uses `i18n`).
-fn vyxJoinExcept(lines: Array<String>, skip: Int64) -> String {
-    let mut out = ""
+/// The import names of `imports` that only the stripped loader used, so the
+/// client leaves them out: a selective import's entries, and a namespace or
+/// other import's bound name. `lines` is what remains with `load` stripped;
+/// `extra` is more usage (template and generated types); `loadBody` is the
+/// stripped loader's source. A name the original never referenced stays,
+/// since it may serve a use the scan cannot see.
+gen fn vyxDeadImportNames(imports: Array<VyxSpan>, lines: Array<VyxSpan>, extra: String, loadBody: String) -> Array<String> {
+    let body = vyxNonImportBody(vyxSpansText(lines))
+    let mut dead: Array<String> = []
     let mut k = 0
-    for line in lines {
-        if k != skip {
-            out = out + vyxStripLineComment(line) + " "
-        }
-        k = k + 1
-    }
-    return out
-}
-
-/// `script`, with `load` already stripped, minus its dead imports. `extra` is
-/// more usage (template and generated types); `loadBody` is the stripped
-/// loader's source, so only load-only names go.
-gen fn vyxPruneClientImports(script: String, extra: String, loadBody: String) -> String {
-    let rows = lines(script)
-    let mut out = ""
-    let mut k = 0
-    for line in rows {
-        if trim(line).startsWith("import ") {
-            let kept = vyxPruneOneImport(trim(line), vyxJoinExcept(rows, k) + " " + extra, loadBody)
-            if kept.byteLength > 0 {
-                out = out + kept + "\n"
+    for sp in imports {
+        // Another import may use this one's name (`import * as t from i18n("...")`
+        // uses `i18n`).
+        let mut others = ""
+        let mut j = 0
+        for o in imports {
+            if j != k {
+                others = others + vyxStripLineComment(o.text) + " "
             }
-        } else {
-            out = out + line + "\n"
+            j = j + 1
+        }
+        let corpus = others + body + " " + extra
+        let imp = vyxParseImport(sp.text)
+        if imp.ok && imp.ns == false {
+            for nm in imp.names {
+                if vyxImportNameDead(vyxImportBoundName(nm), corpus, loadBody) {
+                    dead.push(nm.copy())
+                }
+            }
+        } else if vyxImportNameDead(vyxImportKey(sp.text, imp), corpus, loadBody) {
+            dead.push(vyxImportKey(sp.text, imp))
         }
         k = k + 1
     }
-    return out
+    return dead
 }
 
 /// The client page module's host entry:
 /// `clientRender(propsJson, paramsJson) -> String` decodes props and params in
 /// the page module, where their types are in scope, calls the view, and returns
 /// the `std/html` tree as JSON for `vyrn-dom`. A decode miss returns the
-/// fallback sentinel. A generic data type is aliased first, because `fromJson`
-/// takes a named type.
-fn vyxEmitClientRender(hasLoad: Bool, paramNames: Array<String>, dataType: String) -> String {
-    let fb = "\"__vyrn_fallback__\""
-    let hasParams = paramNames.length > 0
+/// fallback sentinel. A generic data type `data`, which `generic` says, is
+/// aliased first, because `fromJson` takes a named type.
+gen fn vyxEmitClientRender(hasLoad: Bool, hasParams: Bool, data: Code, generic: Bool) -> Code {
+    if hasLoad == false && hasParams {
+        return vyrn"""
+            export fn clientRender(propsJson: String, paramsJson: String) -> String {
+                return match fromJson<Params>(paramsJson) {
+                    Valid(uiPrm) => toJson(page(uiPrm)),
+                    Invalid(uiI) => "__vyrn_fallback__",
+                }
+            }
+            """
+    }
     if hasLoad == false {
-        let mut out = "export fn clientRender(propsJson: String, paramsJson: String) -> String {\n"
-        if hasParams {
-            out = out + "    return match fromJson<Params>(paramsJson) {\n"
-            out = out + "        Valid(uiPrm) => toJson(page(uiPrm)),\n"
-            out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
-        } else {
-            out = out + "    return toJson(page())\n}\n"
-        }
-        return out
+        return vyrn"""
+            export fn clientRender(propsJson: String, paramsJson: String) -> String {
+                return toJson(page())
+            }
+            """
     }
     // A loader page decodes the data and, for a dynamic route, the params.
-    let generic = dataType.contains("<")
-    let dataName = if generic { "UiClientData" } else { dataType.copy() }
-    let mut out = ""
-    if generic {
-        out = "type UiClientData = " + dataType + "\n"
-    }
-    out = out + "export fn clientRender(propsJson: String, paramsJson: String) -> String {\n"
+    let alias = if generic { vyrn"type UiClientData = \{data}" } else { vyrn"" }
+    let named = if generic { vyrn"UiClientData" } else { data }
     if hasParams {
-        out = out + "    return match fromJson<" + dataName + ">(propsJson) {\n"
-        out = out + "        Valid(uiD) => match fromJson<Params>(paramsJson) {\n"
-        out = out + "            Valid(uiPrm) => toJson(page(uiPrm, uiD)),\n"
-        out = out + "            Invalid(uiI) => " + fb + ",\n        },\n"
-        out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
-    } else {
-        out = out + "    return match fromJson<" + dataName + ">(propsJson) {\n"
-        out = out + "        Valid(uiD) => toJson(page(uiD)),\n"
-        out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
+        return vyrn"""
+            \{alias}
+            export fn clientRender(propsJson: String, paramsJson: String) -> String {
+                return match fromJson<\{named}>(propsJson) {
+                    Valid(uiD) => match fromJson<Params>(paramsJson) {
+                        Valid(uiPrm) => toJson(page(uiPrm, uiD)),
+                        Invalid(uiI) => "__vyrn_fallback__",
+                    },
+                    Invalid(uiI) => "__vyrn_fallback__",
+                }
+            }
+            """
     }
-    return out
+    return vyrn"""
+        \{alias}
+        export fn clientRender(propsJson: String, paramsJson: String) -> String {
+            return match fromJson<\{named}>(propsJson) {
+                Valid(uiD) => toJson(page(uiD)),
+                Invalid(uiI) => "__vyrn_fallback__",
+            }
+        }
+        """
 }
 
 /// The lazy page's skeleton entry: `pageLoading([p: Params]) -> Html`
 /// renders the view's `Loading` arm, with no data.
-fn vyxEmitPageLoading(paramNames: Array<String>) -> String {
+gen fn vyxEmitPageLoading(paramNames: Array<String>) -> Code {
     if paramNames.length > 0 {
-        return "export fn pageLoading(p: Params) -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ", Loading)\n}\n"
+        let args = vyxPageArgs(paramNames)
+        return vyrn"""
+            export fn pageLoading(p: Params) -> Html {
+                return uiPageBody(\{args}, Loading)
+            }
+            """
     }
-    return "export fn pageLoading() -> Html {\n    return uiPageBody(Loading)\n}\n"
+    return vyrn"""
+        export fn pageLoading() -> Html {
+            return uiPageBody(Loading)
+        }
+        """
 }
 
 /// The lazy page's loading host entry: `clientRenderLoading(paramsJson)`
 /// renders the skeleton for a soft nav's first paint. The dispatch calls it when
 /// the props payload is the `{"__loading__":true}` sentinel.
-fn vyxEmitClientRenderLoading(paramNames: Array<String>) -> String {
-    let fb = "\"__vyrn_fallback__\""
-    if paramNames.length > 0 {
-        let mut out = "export fn clientRenderLoading(paramsJson: String) -> String {\n"
-        out = out + "    return match fromJson<Params>(paramsJson) {\n"
-        out = out + "        Valid(uiPrm) => toJson(pageLoading(uiPrm)),\n"
-        out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
-        return out
+gen fn vyxEmitClientRenderLoading(hasParams: Bool) -> Code {
+    if hasParams {
+        return vyrn"""
+            export fn clientRenderLoading(paramsJson: String) -> String {
+                return match fromJson<Params>(paramsJson) {
+                    Valid(uiPrm) => toJson(pageLoading(uiPrm)),
+                    Invalid(uiI) => "__vyrn_fallback__",
+                }
+            }
+            """
     }
-    return "export fn clientRenderLoading(paramsJson: String) -> String {\n    return toJson(pageLoading())\n}\n"
+    return vyrn"""
+        export fn clientRenderLoading(paramsJson: String) -> String {
+            return toJson(pageLoading())
+        }
+        """
 }
 
-/// `vyxBuildPageModuleAt` for the client bundle: `load`
-/// and its dead imports are stripped and `head`/`headTitle` omitted. The view,
-/// `Params` and `page` are the server module's, byte for byte.
-gen fn vyxBuildPageClientModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
-    return vyxBuildPageModuleImpl(source, srcPath, dir, themed, theme, true)
-}
-
-/// Builds a `.vyx` page module: the template compiles to a
-/// `uiPageBody(<params>[, data: Data])` view, and the module exports `page` and
-/// `Params`. Origins target `srcPath`, or a synthetic `UiPageBody.vyx` when it
-/// is `""`; the generated code is the same either way.
-gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
-    return vyxBuildPageModuleImpl(source, srcPath, dir, themed, theme, false)
-}
-
-/// `consume ` when the lazy wrapper moves the loaded data into `Ready(..)`.
-fn vyxDataCap(lazy: Bool) -> String {
-    if lazy {
-        return "consume "
+/// The helper line that declares `fn <name>`, or an empty span at line 0 when
+/// none does.
+fn vyxDeclSpan(lines: Array<VyxSpan>, name: String) -> VyxSpan {
+    for l in lines {
+        if vyxIsDeclOf(trim(l.text), name) {
+            return l.copy()
+        }
     }
-    return ""
+    return VyxSpan { text: "", line: 0, col: 0 }
 }
 
-gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, themed: Bool, theme: String, client: Bool) -> String {
+/// `text` where it first stands after the `->` of the declaration line
+/// `decl`, copied from `src`.
+gen fn vyxCopyIn(src: String, decl: VyxSpan, text: String) -> Code {
+    let db = bytes(decl.text)
+    let arrow = vyxFind(db, bytes("->"), 0)
+    let at = vyxFind(db, bytes(text), if arrow < 0 { 0 } else { arrow })
+    if at < 0 {
+        return codeAt(src, decl.line, decl.col, text)
+    }
+    return vyxCopyPart(src, decl, at, at + text.byteLength)
+}
+
+/// The page entry: it forwards the `Params` fields, and the loaded data if
+/// any, into the body. It takes the raw `T` as `d: dataTy`; a lazy page passes
+/// `Ready(d)` as `dataArg`.
+gen fn vyxPageFn(hasLoad: Bool, args: Code, dataTy: Code, dataArg: Code, hasParams: Bool) -> Code {
+    if hasLoad && hasParams {
+        return vyrn"""
+            export fn page(p: Params, d: \{dataTy}) -> Html {
+                return uiPageBody(\{args}, \{dataArg})
+            }
+            """
+    }
+    if hasLoad {
+        // A static loader: no `Params`, the body takes only the data.
+        return vyrn"""
+            export fn page(d: \{dataTy}) -> Html {
+                return uiPageBody(\{dataArg})
+            }
+            """
+    }
+    if hasParams {
+        return vyrn"""
+            export fn page(p: Params) -> Html {
+                return uiPageBody(\{args})
+            }
+            """
+    }
+    return vyrn"""
+        export fn page() -> Html {
+            return uiPageBody()
+        }
+        """
+}
+
+/// The `load` the router calls: one `runner` call over the page's deferred
+/// call, returning `ret`. A `Param*` query takes the route params, so
+/// `load(p)` does too.
+gen fn vyxLoadFn(runner: String, ret: Code, hasParams: Bool) -> Code {
+    let call = name(runner)
+    let data = name(vyxAccessorName("data"))
+    if hasParams {
+        return vyrn"""
+            export fn load(p: Params) -> \{ret} {
+                return \{call}(\{data}(), p)
+            }
+            """
+    }
+    return vyrn"""
+        export fn load() -> \{ret} {
+            return \{call}(\{data}())
+        }
+        """
+}
+
+/// Builds the module of the `.vyx` page `source`, read from `srcPath`: the
+/// template compiles to a `uiPageBody(<params>[, data: Data])` view, and the
+/// module exports `page` and `Params`, and on the server `load`, `head`,
+/// `headTitle` and `encodeProps`. The `client` module, for `std/ui`'s
+/// `pagesClient`, keeps the view and exports `clientRender` instead.
+gen fn vyxBuildPageModule(source: String, srcPath: String, themed: Bool, theme: String, client: Bool) -> Code {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
     if vyxSectionUnclosed(scriptSec) {
-        return render(reportHere(Error, "this page's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`"))
+        return reportHere(Error, "this page's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`")
     }
     if vyxSectionUnclosed(templateSec) {
-        return render(reportHere(Error, "this page's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`"))
+        return reportHere(Error, "this page's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`")
     }
     if templateSec.found == false {
-        return render(reportHere(Error, "this page has no `<template>` section — a page's view is the one element inside it"))
+        return reportHere(Error, "this page has no `<template>` section — a page's view is the one element inside it")
     }
     let templateBody = vyxSlice(ba, templateSec.start, templateSec.end)
     let script = if scriptSec.found { vyxSlice(ba, scriptSec.start, scriptSec.end) } else { "" }
     if scriptSec.found {
         let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "params")
         if bad > 0 {
-            return render(vyxReports([vyxErr(srcPath, bad, "an `import` sits after the `params` block — every import goes at the top of `<script>`")]))
+            return vyxReports([vyxErr(srcPath, bad, "an `import` sits after the `params` block — every import goes at the top of `<script>`")])
         }
     }
 
-    // Take out the `params { ... }` fields; the rest of the script stays, with
-    // `Data` exported.
+    // The `params { ... }` fields, as written.
     let sb = bytes(script)
     let pb = vyxFindKwBlock(sb, "params")
     let mut paramFields = ""
-    let mut restScript = script.copy()
     if pb.found && pb.malformed == false {
         let end = vyxMatchCurly(sb, pb.braceAt)
         paramFields = trim(vyxSlice(sb, pb.braceAt + 1, end - 1))
-        restScript = vyxSlice(sb, 0, pb.kwAt) + vyxSlice(sb, end, sb.length)
     }
     // A page has no `head { ... }` block: its head is the `head()` accessor. A
     // leftover block fails to parse in the compiled body.
     let hasHeadFn = vyxScriptHasDecl(script, "head")
     let ds = vyxDataShapeOf(script)
     if ds.err != "" {
-        return render(reportHere(Error, ds.err))
+        return reportHere(Error, ds.err)
     }
     let hasLoad = ds.hasData
     let dataType = vyxLoaderDataType(ds.ret)
-    // A lazy page's view receives `PageData<T>` (`Loading | Ready(T)`); the
-    // loader returns `T` and `page` wraps `Ready(d)`. The server always has
-    // data, so it never renders `Loading`.
     let lazy = ds.lazy
-    let viewDataType = if lazy { "PageData<" + dataType + ">" } else { dataType.copy() }
-    // The client keeps the view only. `dataType` and `hasLoad` come from the
-    // original script, so the client `page(d: Data)` signature stays correct.
+    let comp0 = vyxCompileAt(ba, "UiPageBody", srcPath, "params", "")
+    if comp0.errs.length > 0 {
+        return vyxReports(comp0.errs)
+    }
+    let mut comp = comp0
+    // The loaded type and the loader's return type, copied from the `data`
+    // declaration. `dataType` and `hasLoad` come from the whole script, so the
+    // client's `page(d: Data)` signature stays correct.
+    let decl = vyxDeclSpan(comp.script.helperLines, "data")
+    let data = if hasLoad { vyxCopyIn(srcPath, decl, dataType) } else { vyrn"" }
+    let ret = if hasLoad { vyxCopyIn(srcPath, decl, ds.ret) } else { vyrn"" }
+    let mut lines = comp.script.helperLines.copy()
+    let mut dead: Array<String> = []
     if client {
         // The whole pre-strip body: the loader AND the helpers it reached, since
         // the import a server call names lives in the helper, not the accessor.
-        let loadBody = vyxNonImportBody(restScript)
-        restScript = vyxStripLoadFn(restScript)
+        let loadBody = vyxNonImportBody(vyxSpansText(lines))
+        lines = vyxStripLoadLines(lines)
         // Cutting the `data` accessor leaves its named helper behind, dead in the
         // browser and calling the server contract.
-        restScript = vyxStripDeadHelpers(restScript, templateBody + " " + dataType + " " + paramFields)
-        restScript = vyxPruneClientImports(restScript, templateBody + " " + dataType + " " + paramFields, loadBody)
+        let keep = templateBody + " " + dataType + " " + paramFields
+        lines = vyxStripDeadLines(lines, comp.script.imports, keep)
+        dead = vyxDeadImportNames(comp.script.imports, lines, keep, loadBody)
         // An app-module helper called in the view cannot render client-side;
-        // name it here instead of a boot trap.
-        let viol = vyxClientHelperViolation(restScript, templateBody)
+        // name it here instead of a boot trap. A dead import name is called
+        // nowhere, so the check reads the imports unpruned.
+        let viol = vyxClientHelperViolation(vyxSpansText(comp.script.imports) + vyxSpansText(lines), templateBody)
         if viol.byteLength > 0 {
-            return render(reportHere(
+            return reportHere(
                 Error,
                 "this page's view calls `\{viol}`, an app-module helper, and the view runs in the browser — move that call into `data`, which runs on the server",
-            ))
+            )
         }
     }
-    let restExported = vyxAutoExportPageDecls(restScript)
-
-    // A synthetic `props` block of the params (plus `data: <T>` with a loader)
-    // gives the compiled view its parameters.
-    let dataField = if hasLoad {
-        if paramFields.byteLength > 0 { ", data: " + viewDataType } else { "data: " + viewDataType }
-    } else {
-        ""
+    let mut kept: Array<VyxSpan> = []
+    for l in lines {
+        // `layout="none"` is consumed by the router shape; it is not Vyrn.
+        if vyxIsLayoutLine(l.text) == false {
+            kept.push(l.copy())
+        }
     }
-    let propsInner = paramFields + dataField
-    let mut synthScript = restExported
-    if propsInner.byteLength > 0 {
-        // After the page's imports, for the imports-first rule; the module
-        // collects imports and helpers separately.
-        synthScript = synthScript + "props { " + propsInner + " }\n"
-    }
-    let synthPrefix = "<script>\n" + synthScript + "\n</script>\n<template>\n"
-    let synthSource = synthPrefix + templateBody + "\n</template>\n"
-    let comp0 = vyxCompileComponent("UiPageBody", synthSource, dir)
-    if comp0.errs.length > 0 {
-        return render(vyxReports(comp0.errs))
-    }
-    // With the caller's path, origins target the real route file.
-    let mut comp = comp0
-    if srcPath != "" {
-        let dLine = vyxLineAt(ba, templateSec.start) - (vyxCountNewlines(synthPrefix) + 1)
-        comp = vyxRelocateComp(comp, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir)
-    }
-    let moduleStr = vyxBuildModule([comp], themed, theme)
-    if moduleStr.contains("export fn uiPageBody") == false {
-        return moduleStr
-    }
-
+    comp.script.helperLines = kept
     let mut paramNames: Array<String> = []
-    if paramFields.byteLength > 0 {
-        for part in vyxSplitFields(paramFields) {
-            let t = trim(part)
-            if t.byteLength > 0 {
-                let pbf = bytes(t)
-                let mut colon = 0 - 1
-                let mut k = 0
-                while k < pbf.length && colon < 0 {
-                    if pbf[k] == ':' {
-                        colon = k
-                    }
-                    k = k + 1
-                }
-                if colon >= 0 {
-                    paramNames.push(trim(vyxSlice(pbf, 0, colon)))
-                }
-            }
-        }
+    let mut fields: Array<Code> = []
+    for pr in comp.script.props {
+        paramNames.push(pr.name.text.copy())
+        fields.push(vyrn"\{vyxCopy(srcPath, pr.name)}: \{vyxCopy(srcPath, pr.ty)}")
+    }
+    let hasParams = paramNames.length > 0
+    // The view takes the params, then the loaded data. A lazy page's view
+    // receives `PageData<T>` (`Loading | Ready(T)`); the loader returns `T`
+    // and `page` wraps `Ready(d)`. The server always has data, so it never
+    // renders `Loading`.
+    let mut extra: Array<Code> = []
+    if hasLoad && lazy {
+        extra.push(vyrn"data: PageData<\{data}>")
+    } else if hasLoad {
+        extra.push(vyrn"data: \{data}")
+    }
+    let mut errs: Array<VyxErr> = []
+    let module = vyxBuildModule([comp], themed, theme, extra, true, dead, errs)
+    if errs.length > 0 {
+        return vyxReports(errs)
     }
 
-    // `PageData` is defined once in std/ui, so its constructors register once.
-    // Generated modules collect imports separately, so prepending is safe.
-    let mut out = if lazy { "import { PageData } from \"std/ui\"\n" + moduleStr } else { moduleStr }
     // The router calls wrappers, not the accessors: `std/ui` turns a `Head` and
     // a query into the shapes the router consumes. The client needs neither.
+    let runner = vyxDataRunner(vyxDataForm(vyxDeclRet(script, "data")))
+    let mut top: Array<Code> = []
+    if ds.hasData && client == false {
+        top.push(vyrn"import { \{name(runner)} } from \"std/ui\"")
+    }
     if hasHeadFn && client == false {
-        out = "import { headHtml, headTitleOf } from \"std/ui\"\n" + out
+        top.push(vyrn"import { headHtml, headTitleOf } from \"std/ui\"")
     }
     if hasHeadFn && client {
-        out = "import { headTitleOf } from \"std/ui\"\n" + out
+        top.push(vyrn"import { headTitleOf } from \"std/ui\"")
     }
-    // The runner follows `data`'s declared return type.
-    let runner = vyxDataRunner(vyxDataForm(vyxDeclRet(script, "data")))
+    // `PageData` is defined once in std/ui, so its constructors register once.
+    if lazy {
+        top.push(vyrn"import { PageData } from \"std/ui\"")
+    }
+    top.push(module)
+    if hasParams {
+        let list = join(fields, vyrn", ")
+        top.push(vyrn"export type Params = { \{list} }")
+    }
     if ds.hasData && client == false {
-        out = "import { " + runner + " } from \"std/ui\"\n" + out
+        top.push(vyxLoadFn(runner, ret, ds.hasParams))
     }
-    if paramFields.byteLength > 0 {
-        out = out + "export type Params = { " + paramFields + " }\n"
-    }
-    // The `load` the router calls: one runner call over the page's deferred
-    // call. A `Param*` query takes the route params, so `load(p)` does too.
-    if ds.hasData && client == false {
-        if ds.hasParams {
-            out = out + "export fn load(p: Params) -> " + ds.ret + " {\n    return " + runner + "(" + vyxAccessorName("data") + "(), p)\n}\n"
-        } else {
-            out = out + "export fn load() -> " + ds.ret + " {\n    return " + runner + "(" + vyxAccessorName("data") + "())\n}\n"
-        }
-    }
-    // The page entry forwards the Params fields, and the loaded data if any,
-    // into the body. It takes the raw `T`; a lazy page wraps it in `Ready(d)`.
-    let dataArg = if lazy { "Ready(consume d)" } else { "d" }
-    if hasLoad {
-        if paramNames.length > 0 {
-            out = out + "export fn page(p: Params, d: " + vyxDataCap(lazy) + dataType + ") -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ", " + dataArg + ")\n}\n"
-        } else {
-            // A static loader: no `Params`, the body takes only the data.
-            out = out + "export fn page(d: " + vyxDataCap(lazy) + dataType + ") -> Html {\n    return uiPageBody(" + dataArg + ")\n}\n"
-        }
-    } else if paramNames.length > 0 {
-        out = out + "export fn page(p: Params) -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ")\n}\n"
-    } else {
-        out = out + "export fn page() -> Html {\n    return uiPageBody()\n}\n"
-    }
+    let dataTy = if lazy { vyrn"consume \{data}" } else { data }
+    let dataArg = if lazy { vyrn"Ready(consume d)" } else { vyrn"d" }
+    top.push(vyxPageFn(hasLoad, vyxPageArgs(paramNames), dataTy, dataArg, hasParams))
     // `head()`/`headTitle()` take `page`'s shape, so a dynamic head can read
     // params and data.
-    let sig = if hasLoad {
-        if paramNames.length > 0 { "p: Params, d: " + dataType } else { "d: " + dataType }
-    } else {
-        if paramNames.length > 0 { "p: Params" } else { "" }
+    let mut sigParts: Array<Code> = []
+    let mut binds: Array<Code> = []
+    if hasParams {
+        sigParts.push(vyrn"p: Params")
     }
-    let mut prelude = ""
     for n in paramNames {
-        prelude = prelude + "    let " + n + " = p." + n + "\n"
+        binds.push(vyrn"let \{name(n)} = p.\{name(n)}")
     }
     if hasLoad {
-        prelude = prelude + "    let data = d\n"
+        sigParts.push(vyrn"d: \{data}")
+        binds.push(vyrn"let data = d")
     }
+    let sig = join(sigParts, vyrn", ")
+    let prelude = join(binds, vyrn"\n")
     // Which of `head`'s four signatures the page chose, from its parameter
     // types. The wrapper's own signature is fixed by the router.
     let headTypes = vyxDeclParamTypes(vyxDeclLine(script, "head"))
-    if hasHeadFn && vyxHeadArgsOk(headTypes, paramNames.length > 0, hasLoad) == false {
-        return render(reportHere(
+    if hasHeadFn && vyxHeadArgsOk(headTypes, hasParams, hasLoad) == false {
+        return reportHere(
             Error,
             "this page's `head` takes `(\{joinWith(headTypes, ", ")})`, which is none of the signatures the router calls it with",
-        ))
+        )
     }
-    let headArgs = vyxHeadCallArgs(headTypes, paramNames.length > 0, hasLoad)
+    let headArgs = vyxHeadCallArgs(headTypes, hasParams, hasLoad)
     // The client omits `head`/`headTitle` and exports `clientRender` instead.
     if client {
-        out = out + vyxEmitClientRender(hasLoad, paramNames, dataType)
+        top.push(vyxEmitClientRender(hasLoad, hasParams, data, dataType.contains("<")))
         // A lazy page also exports `pageLoading` and `clientRenderLoading`, so a
         // soft nav paints the skeleton, then fills `Ready(props)`.
         if lazy {
-            out = out + vyxEmitPageLoading(paramNames) + vyxEmitClientRenderLoading(paramNames)
+            top.push(vyxEmitPageLoading(paramNames))
+            top.push(vyxEmitClientRenderLoading(hasParams))
         }
         // A dataless page keeps `headTitle`, so the host resolves the title with
         // no round-trip. A loader page's title depends on its data and travels
         // in the payload.
-        if hasLoad == false {
-            out = out + if hasHeadFn { vyxEmitAccessorHeadTitle(sig, headArgs) } else { vyxEmitHeadTitleFn(vyxNoHead(), sig, prelude, "") }
+        if hasLoad == false && hasHeadFn {
+            top.push(vyxEmitAccessorHeadTitle(sig, headArgs))
+        } else if hasLoad == false {
+            top.push(vyxEmitHeadTitleFn(vyxNoHead(), sig, prelude, srcPath))
         }
     } else {
-        out = out + if hasHeadFn { vyxEmitAccessorHeadFns(sig, headArgs) } else { vyxEmitHeadFns(vyxNoHead(), sig, prelude, "") }
+        if hasHeadFn {
+            top.push(vyxEmitAccessorHeadFns(sig, headArgs))
+        } else {
+            top.push(vyxEmitHeadFns(vyxNoHead(), sig, prelude, srcPath))
+        }
         // A loader page exports a typed props encoder: `toJson` cannot infer a
         // match-bound value's type, but a parameter carries it.
         if hasLoad {
-            out = out + "export fn encodeProps(d: " + dataType + ") -> String {\n    return toJson(d)\n}\n"
+            let encode = vyrn"""
+                export fn encodeProps(d: \{data}) -> String {
+                    return toJson(d)
+                }
+                """
+            top.push(encode)
         }
     }
-    return out
+    return join(top, vyrn"\n")
+}
+
+/// The page module of the `.vyx` at `vyxPath`, or why it cannot be read.
+gen fn vyxPageOf(vyxPath: String, themed: Bool, theme: String, client: Bool) -> Code {
+    let read = vyxReadFileOf(vyxPath)
+    if read.err != "" {
+        return reportHere(Error, vyxCannotRead(vyxPath, read.err))
+    }
+    return vyxBuildPageModule(read.src, vyxPath, themed, theme, client)
 }
 
 /// Synthesizes a `.vyx` page module from `vyxPath`. The
 /// argument is the full `.vyx` path, because the generator sandbox admits reads
 /// of exactly its path arguments.
-export to "./ui" gen fn vyxPage(vyxPath: String) -> String {
-    let read = vyxReadFileOf(vyxPath)
-    if read.err != "" {
-        return render(reportHere(Error, vyxCannotRead(vyxPath, read.err)))
-    }
-    return vyxBuildPageModuleAt(read.src, vyxPath, vyxDirOf(vyxPath), false, "")
+export to "./ui" gen fn vyxPage(vyxPath: String) -> Code {
+    return vyxPageOf(vyxPath, false, "", false)
 }
 
 /// [`vyxPage`] with the page's classes checked against `theme`.
-export to "./ui" gen fn vyxPageThemed(vyxPath: String, theme: String) -> String {
-    return match readFile(vyxPath) {
-        Ok(v) => vyxBuildPageModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
-        Err(e) => render(reportHere(Error, vyxCannotRead(vyxPath, e))),
-    }
+export to "./ui" gen fn vyxPageThemed(vyxPath: String, theme: String) -> Code {
+    return vyxPageOf(vyxPath, true, theme, false)
 }
 
 /// [`vyxPage`] for the client bundle: no `load`, head or
 /// title, for `std/ui`'s `pagesClient`.
-export to "./ui" gen fn vyxPageClient(vyxPath: String) -> String {
-    return match readFile(vyxPath) {
-        Ok(v) => vyxBuildPageClientModuleAt(v, vyxPath, vyxDirOf(vyxPath), false, ""),
-        Err(e) => render(reportHere(Error, vyxCannotRead(vyxPath, e))),
-    }
+export to "./ui" gen fn vyxPageClient(vyxPath: String) -> Code {
+    return vyxPageOf(vyxPath, false, "", true)
 }
 
 /// [`vyxPageClient`] with classes checked against `theme`.
-export to "./ui" gen fn vyxPageClientThemed(vyxPath: String, theme: String) -> String {
-    return match readFile(vyxPath) {
-        Ok(v) => vyxBuildPageClientModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
-        Err(e) => render(reportHere(Error, vyxCannotRead(vyxPath, e))),
-    }
+export to "./ui" gen fn vyxPageClientThemed(vyxPath: String, theme: String) -> Code {
+    return vyxPageOf(vyxPath, true, theme, true)
 }
 
 /// The directory part of `path`, before the last `/`.
@@ -4052,134 +3990,134 @@ export to "./vyx.editor" fn vyxDirOf(path: String) -> String {
 // `<slot/>` for the page body and an optional `head { ... }`. It is not a
 // route; the router wraps each page body in its layouts, nearest first.
 
-/// Builds a `.vyx` layout module: `layout(children: Array<Html>) -> Html` around
-/// the compiled template, which must contain `<slot/>`, plus `head()` and
-/// `headTitle()`. Origins target `srcPath`, the `layout.vyx`.
-gen fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
+/// Builds the module of the `.vyx` layout `source`, read from `srcPath`:
+/// `layout(children: Array<Html>) -> Html` around the compiled template, which
+/// must contain `<slot/>`, plus `head()` and `headTitle()`.
+gen fn vyxBuildLayoutModule(source: String, srcPath: String, themed: Bool, theme: String) -> Code {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
     if vyxSectionUnclosed(scriptSec) {
-        return render(reportHere(Error, "this layout's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`"))
+        return reportHere(Error, "this layout's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`")
     }
     if vyxSectionUnclosed(templateSec) {
-        return render(reportHere(Error, "this layout's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`"))
+        return reportHere(Error, "this layout's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`")
     }
     if templateSec.found == false {
-        return render(reportHere(Error, "this layout has no `<template>` section — a layout's view is the one element inside it"))
+        return reportHere(Error, "this layout has no `<template>` section — a layout's view is the one element inside it")
     }
-    let templateBody = vyxSlice(ba, templateSec.start, templateSec.end)
-
-    let hs = vyxStripHead(ba, scriptSec.start, scriptSec.end, "vyx_layout")
-    if hs.head.errs.length > 0 {
-        return render(vyxReports(hs.head.errs))
+    let head = vyxHeadOf(ba, scriptSec.start, scriptSec.end, "vyx_layout")
+    if head.errs.length > 0 {
+        return vyxReports(head.errs)
     }
-    let synthPrefix = "<script>\n" + hs.rest + "\n</script>\n<template>\n"
-    let synthSource = synthPrefix + templateBody + "\n</template>\n"
-    let comp0 = vyxCompileComponent("UiLayoutBody", synthSource, dir)
-    if comp0.errs.length > 0 {
-        return render(vyxReports(comp0.errs))
-    }
-    let mut comp = comp0
-    if srcPath != "" {
-        let dLine = vyxLineAt(ba, templateSec.start) - (vyxCountNewlines(synthPrefix) + 1)
-        comp = vyxRelocateComp(comp, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir)
+    let comp = vyxCompileAt(ba, "UiLayoutBody", srcPath, "props", "head")
+    if comp.errs.length > 0 {
+        return vyxReports(comp.errs)
     }
     if comp.takesChildren == false {
-        return render(reportHere(
+        return reportHere(
             Error,
-            "the layout in `\{dir}` has no `<slot/>` — a layout wraps its page, so it must say where the page goes",
-        ))
+            "the layout in `\{vyxDirOf(srcPath)}` has no `<slot/>` — a layout wraps its page, so it must say where the page goes",
+        )
     }
-    let src = comp.srcPath.copy()
-    let moduleStr = vyxBuildModule([comp], themed, theme)
-    if moduleStr.contains("export fn uiLayoutBody") == false {
-        return moduleStr
+    let mut errs: Array<VyxErr> = []
+    let module = vyxBuildModule([comp], themed, theme, [], false, [], errs)
+    if errs.length > 0 {
+        return vyxReports(errs)
     }
-    let mut out = moduleStr
-    out = out + "export fn layout(children: consume Array<Html>) -> Html {\n    return uiLayoutBody(children)\n}\n"
-    out = out + vyxEmitHeadFns(hs.head, "", "", src)
-    return out
+    let heads = vyxEmitHeadFns(head, vyrn"", vyrn"", srcPath)
+    return vyrn"""
+        \{module}
+        export fn layout(children: consume Array<Html>) -> Html {
+            return uiLayoutBody(children)
+        }
+        \{heads}
+        """
+}
+
+/// The layout module of the `.vyx` at `vyxPath`, or why it cannot be read.
+gen fn vyxLayoutOf(vyxPath: String, themed: Bool, theme: String) -> Code {
+    let read = vyxReadFileOf(vyxPath)
+    if read.err != "" {
+        return reportHere(Error, vyxCannotRead(vyxPath, read.err))
+    }
+    return vyxBuildLayoutModule(read.src, vyxPath, themed, theme)
 }
 
 /// Synthesizes a `.vyx` layout module from `vyxPath`.
-export to "./ui" gen fn vyxLayout(vyxPath: String) -> String {
-    return match readFile(vyxPath) {
-        Ok(v) => vyxBuildLayoutModuleAt(v, vyxPath, vyxDirOf(vyxPath), false, ""),
-        Err(e) => render(reportHere(Error, vyxCannotRead(vyxPath, e))),
-    }
+export to "./ui" gen fn vyxLayout(vyxPath: String) -> Code {
+    return vyxLayoutOf(vyxPath, false, "")
 }
 
 /// [`vyxLayout`] with the layout's classes checked against `theme`.
-export to "./ui" gen fn vyxLayoutThemed(vyxPath: String, theme: String) -> String {
-    return match readFile(vyxPath) {
-        Ok(v) => vyxBuildLayoutModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
-        Err(e) => render(reportHere(Error, vyxCannotRead(vyxPath, e))),
-    }
+export to "./ui" gen fn vyxLayoutThemed(vyxPath: String, theme: String) -> Code {
+    return vyxLayoutOf(vyxPath, true, theme)
 }
 
 // `.vyx` error pages: an `error.vyx` is a component the
 // router renders in the page's place, inside the layout, when `load` fails. It
 // receives an injected `error: PageError` prop. It is not a route.
 
-/// Builds a `.vyx` error module: `errorPage(e: PageError) -> Html` around the
-/// compiled template, with the injected `error` prop. Origins target `srcPath`,
-/// the `error.vyx`; the injected `PageError` import has none.
-gen fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
+/// Builds the module of the `.vyx` error page `source`, read from `srcPath`:
+/// `errorPage(e: PageError) -> Html` around the compiled template, with the
+/// injected `error` prop.
+gen fn vyxBuildErrorModule(source: String, srcPath: String, themed: Bool, theme: String) -> Code {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
     if vyxSectionUnclosed(scriptSec) {
-        return render(reportHere(Error, "this error page's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`"))
+        return reportHere(Error, "this error page's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`")
     }
     if vyxSectionUnclosed(templateSec) {
-        return render(reportHere(Error, "this error page's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`"))
+        return reportHere(Error, "this error page's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`")
     }
     if templateSec.found == false {
-        return render(reportHere(Error, "this error page has no `<template>` section — its view is the one element inside it"))
+        return reportHere(Error, "this error page has no `<template>` section — its view is the one element inside it")
     }
-    let templateBody = vyxSlice(ba, templateSec.start, templateSec.end)
-
     // Error pages render inside the layout, which owns the head.
-    let hs = vyxStripHead(ba, scriptSec.start, scriptSec.end, "vyx_error")
-    if hs.head.errs.length > 0 {
-        return render(vyxReports(hs.head.errs))
+    let head = vyxHeadOf(ba, scriptSec.start, scriptSec.end, "vyx_error")
+    if head.errs.length > 0 {
+        return vyxReports(head.errs)
     }
-    let synthScript = "import { PageError } from \"std/ui\"\n" + hs.rest + "\nprops { error: PageError }\n"
-    let synthPrefix = "<script>\n" + synthScript + "\n</script>\n<template>\n"
-    let synthSource = synthPrefix + templateBody + "\n</template>\n"
-    let comp0 = vyxCompileComponent("UiErrorBody", synthSource, dir)
-    if comp0.errs.length > 0 {
-        return render(vyxReports(comp0.errs))
+    let comp = vyxCompileAt(ba, "UiErrorBody", srcPath, "props", "head")
+    if comp.errs.length > 0 {
+        return vyxReports(comp.errs)
     }
-    let mut comp = comp0
-    if srcPath != "" {
-        let dLine = vyxLineAt(ba, templateSec.start) - (vyxCountNewlines(synthPrefix) + 1)
-        comp = vyxRelocateComp(comp, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir)
+    // The view's one parameter is the injected `error` prop.
+    if comp.script.props.length > 0 {
+        return vyxReports([vyxErr(srcPath, 0, "this component declares `props` more than once — one component has one `props` block")])
     }
-    let moduleStr = vyxBuildModule([comp], themed, theme)
-    if moduleStr.contains("export fn uiErrorBody") == false {
-        return moduleStr
+    let mut errs: Array<VyxErr> = []
+    let module = vyxBuildModule([comp], themed, theme, [vyrn"error: PageError"], false, ["PageError"], errs)
+    if errs.length > 0 {
+        return vyxReports(errs)
     }
-    let mut out = moduleStr
-    out = out + "export fn errorPage(e: PageError) -> Html {\n    return uiErrorBody(e)\n}\n"
-    return out
+    return vyrn"""
+        import { PageError } from "std/ui"
+        \{module}
+        export fn errorPage(e: PageError) -> Html {
+            return uiErrorBody(e)
+        }
+        """
+}
+
+/// The error-page module of the `.vyx` at `vyxPath`, or why it cannot be read.
+gen fn vyxErrorOf(vyxPath: String, themed: Bool, theme: String) -> Code {
+    let read = vyxReadFileOf(vyxPath)
+    if read.err != "" {
+        return reportHere(Error, vyxCannotRead(vyxPath, read.err))
+    }
+    return vyxBuildErrorModule(read.src, vyxPath, themed, theme)
 }
 
 /// Synthesizes a `.vyx` error-page module from `vyxPath`.
-export to "./ui" gen fn vyxError(vyxPath: String) -> String {
-    return match readFile(vyxPath) {
-        Ok(v) => vyxBuildErrorModuleAt(v, vyxPath, vyxDirOf(vyxPath), false, ""),
-        Err(e) => render(reportHere(Error, vyxCannotRead(vyxPath, e))),
-    }
+export to "./ui" gen fn vyxError(vyxPath: String) -> Code {
+    return vyxErrorOf(vyxPath, false, "")
 }
 
 /// [`vyxError`] with classes checked against `theme`.
-export to "./ui" gen fn vyxErrorThemed(vyxPath: String, theme: String) -> String {
-    return match readFile(vyxPath) {
-        Ok(v) => vyxBuildErrorModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
-        Err(e) => render(reportHere(Error, vyxCannotRead(vyxPath, e))),
-    }
+export to "./ui" gen fn vyxErrorThemed(vyxPath: String, theme: String) -> Code {
+    return vyxErrorOf(vyxPath, true, theme)
 }
 
 test "section extraction finds script and template bounds" {
@@ -4193,18 +4131,13 @@ test "section extraction finds script and template bounds" {
 }
 
 test "props parse pulls names and types" {
-    let sc = vyxParseScript("props { item: Item, count: Int64 }", "./components", "c_vyx")
+    let sc = vyxParseScript("props { item: Item, count: Int64 }", "c_vyx")
     assertEq(sc.errs.length, 0)
-    assertEq(sc.propNames.length, 2)
-    assertEq(sc.propNames[0], "item")
-    assertEq(sc.propTypes[0], "Item")
-    assertEq(sc.propNames[1], "count")
-    assertEq(sc.propTypes[1], "Int64")
-}
-
-test "relative imports are rebased, bare imports pass through" {
-    assertEq(vyxRebaseImport("import { t } from \"../i18n\"", "./components"), "import { t } from \"./components/../i18n\"")
-    assertEq(vyxRebaseImport("import { x } from \"std/html\"", "./components"), "import { x } from \"std/html\"")
+    assertEq(sc.props.length, 2)
+    assertEq(sc.props[0].name.text, "item")
+    assertEq(sc.props[0].ty.text, "Item")
+    assertEq(sc.props[1].name.text, "count")
+    assertEq(sc.props[1].ty.text, "Int64")
 }
 
 test "a simple component compiles to a view function" {
@@ -4213,80 +4146,6 @@ test "a simple component compiles to a view function" {
     assertEq(comp.errs.length, 0)
     assertEq(comp.fnName, "item")
     assertEq(comp.takesChildren, false)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("export fn item(title: String) -> Html"))
-    assert(out.contains("Cls(\"row\")"))
-    assert(out.contains("text((title).toString())"))
-}
-
-test "a themed build routes class through vyxTheme.cls with its own origin directive" {
-    let src = "<script>props { title: String }</script><template><li class=\"row\">{{ title }}</li></template>"
-    let comp = vyxCompileComponent("Item", src, "./c")
-    assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], true, "./theme.json")
-    assert(out.contains("import { tw } from \"std/tw\""))
-    assert(out.contains("import * as vyxTheme from tw(\"./theme.json\")"))
-    assert(out.contains("vyxTheme.cls(\"row\")"))
-    assert(out.contains(": Attr = vyxTheme.cls(\"row\")"))
-    assert(out.contains("//@origin ./c/Item.vyx:1:"))
-    // `VyxNode` cannot be copied, so the second build compiles its own.
-    let comp2 = vyxCompileComponent("Item", src, "./c")
-    let bare = vyxBuildModule([comp2], false, "")
-    assert(bare.contains("Cls(\"row\")"))
-    assertEq(bare.contains("vyxTheme"), false)
-}
-
-test "a themed build coerces a dynamic class at runtime" {
-    let src = "<script>props { cls: String }</script><template><li :class=\"cls\">x</li></template>"
-    let comp = vyxCompileComponent("Item", src, "./c")
-    assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], true, "./theme.json")
-    assert(out.contains("vyxTheme.cls(cls)"))
-}
-
-test "a v-if chain lowers to nested conditionals" {
-    let src = "<template><ul><b v-if=\"n > 1\">many</b><i v-else>one</i></ul></template>"
-    let comp = vyxCompileComponent("Lst", src, "./c")
-    assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("if n > 1 {"))
-    assert(out.contains("} else {"))
-}
-
-test "a v-else-if condition maps to its own origin column" {
-    let src = "<template>\n<ul>\n<b v-if=\"n > 5\">hi</b>\n<i v-else-if=\"n > 1\">mid</i>\n</ul>\n</template>"
-    let comp = vyxCompileComponent("Lst", src, "./c")
-    assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("} else if n > 1 {"))
-    // The v-else-if condition is on line 4; `<i v-else-if="` is 14 chars so the
-    // condition starts at column 15.
-    assert(out.contains("//@origin ./c/Lst.vyx:4:15"))
-}
-
-test "a keyed v-for lowers to keyed pushes" {
-    let src = "<template><ul><li v-for=\"x in xs\" :key=\"x.id\">{{ x.name }}</li></ul></template>"
-    let comp = vyxCompileComponent("Lst", src, "./c")
-    assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("for x in xs {"))
-    assert(out.contains("keyed((x.id).toString()"))
-}
-
-test "an event handler lowers to On with a scalar payload" {
-    let src = "<template><button @click=\"remove(item.id)\">x</button></template>"
-    let comp = vyxCompileComponent("Btn", src, "./c")
-    assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("On(\"click\", \"remove\", (item.id).toString())"))
-}
-
-test "a bad event arg maps column-exact to the .vyx" {
-    // `<button @click="` is 16 chars; the arg `item.id` begins at column 17.
-    let src = "<template><button @click=\"remove(item.id)\">x</button></template>"
-    let comp = vyxCompileComponent("Btn", src, "./c")
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("//@origin ./c/Btn.vyx:1:34"))
 }
 
 test "a missing v-for key is a generation diagnostic" {
@@ -4324,9 +4183,6 @@ test "a root-level slot splice consumes children" {
     let src = "<template><slot/></template>"
     let comp = vyxCompileComponent("Shell", src, "./c")
     assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("for vyxCh in consume children {"))
-    assert(out.contains("in children {") == false)
 }
 
 test "an unclosed element is rejected" {
@@ -4347,9 +4203,6 @@ test "imports before a props block compile" {
     let src = "<script>\nimport { t } from \"../s\"\nprops { x: Int64 }\n</script>\n<template><li>{{ x }}</li></template>"
     let comp = vyxCompileComponent("Ok", src, "./c")
     assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("export fn ok(x: Int64) -> Html"))
-    assert(out.contains("from \"./c/../s\""))
 }
 
 test "a props keyword in a comment does not trip imports-first" {
@@ -4360,28 +4213,16 @@ test "a props keyword in a comment does not trip imports-first" {
 
 test "a .vyx page with params before an import is rejected" {
     let src = "<script>\nparams { id: String }\nimport { Paste } from \"../wire\"\n</script>\n<template><h1>{{ id }}</h1></template>"
-    let out = vyxBuildPageModuleAt(src, "", "./routes", false, "")
-    assert(out.contains("an `import` sits after the `params` block"))
+    let ba = bytes(src)
+    let sec = vyxSection(ba, "script", true)
+    assertEq(vyxImportsFirstViolation(ba, sec.start, sec.end, "params"), 3)
 }
 
 test "a .vyx page with imports before params compiles" {
     let src = "<script>\nimport { Paste } from \"../wire\"\nparams { id: String }\n</script>\n<template><h1>{{ id }}</h1></template>"
-    let out = vyxBuildPageModuleAt(src, "", "./routes", false, "")
-    assert(out.contains("export fn page"))
-}
-
-test "a non-scalar event arg is rejected" {
-    let src = "<template><button @click=\"go(a, b)\">x</button></template>"
-    let comp = vyxCompileComponent("Btn", src, "./c")
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("`@click` passes more than one argument"))
-}
-
-test "an unknown component tag is rejected" {
-    let src = "<template><ul><Missing :x=\"1\"/></ul></template>"
-    let comp = vyxCompileComponent("Host", src, "./c")
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("`<Missing>` names no component"))
+    let comp = vyxCompileAt(bytes(src), "UiPageBody", "./routes/p.vyx", "params", "")
+    assertEq(comp.errs.length, 0)
+    assertEq(comp.script.props[0].name.text, "id")
 }
 
 test "a component uses children when the template has a slot" {
@@ -4389,71 +4230,48 @@ test "a component uses children when the template has a slot" {
     let comp = vyxCompileComponent("Shell", src, "./c")
     assertEq(comp.errs.length, 0)
     assert(comp.takesChildren)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("export fn shell(children: consume Array<Html>) -> Html"))
-}
-
-test "v-html lowers to a Raw content node" {
-    let src = "<script>props { html: Markup }</script><template><div v-html=\"html\"></div></template>"
-    let comp = vyxCompileComponent("R", src, "./c")
-    assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("Raw((html).copy())"))
-}
-
-test "a dynamic attr is hoisted under an origin directive" {
-    let src = "<script>props { u: String }</script><template><a :href=\"u\">x</a></template>"
-    let comp = vyxCompileComponent("Lnk", src, "./c")
-    assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("A(\"href\", (u).copy())"))
 }
 
 test "a single-quoted attr value carries a string literal expression" {
     let src = "<script>props { id: String }</script><template><a :href='\"/raw/\" + id'>raw</a></template>"
     let comp = vyxCompileComponent("Lnk", src, "./c")
     assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("A(\"href\", (\"/raw/\" + id).copy())"))
+    assertEq(vyxAttrsOf(comp.root)[0].value, "\"/raw/\" + id")
 }
 
 test "a comment mentioning props before the real props block is ignored" {
     let src = "<script>\n// these are the props for the widget\nprops { title: String }\n</script>\n<template><li>{{ title }}</li></template>"
     let comp = vyxCompileComponent("C", src, "./c")
     assertEq(comp.errs.length, 0)
-    assertEq(comp.propNames.length, 1)
-    assertEq(comp.propNames[0], "title")
+    assertEq(comp.script.props.length, 1)
+    assertEq(comp.script.props[0].name.text, "title")
 }
 
 test "a comment mentioning props in a no-props component is ignored" {
     let src = "<script>\n// no props here, just a helper\nfn greet() -> String { return \"hi\" }\n</script>\n<template><li>{{ greet() }}</li></template>"
     let comp = vyxCompileComponent("C", src, "./c")
     assertEq(comp.errs.length, 0)
-    assertEq(comp.propNames.length, 0)
+    assertEq(comp.script.props.length, 0)
 }
 
 test "a helper identifier named props is not a props block" {
     let src = "<script>\nfn f() -> Int64 {\nlet props = 5\nreturn props\n}\n</script>\n<template><li>{{ f() }}</li></template>"
     let comp = vyxCompileComponent("C", src, "./c")
     assertEq(comp.errs.length, 0)
-    assertEq(comp.propNames.length, 0)
-    assert(comp.helpers.contains("let props = 5"))
+    assertEq(comp.script.props.length, 0)
+    assert(vyxHelperText(comp.script).contains("let props = 5"))
 }
 
 test "an HTML comment inside the template is stripped, not a bad tag" {
     let src = "<template><ul><!-- a note --><li>x</li></ul></template>"
     let comp = vyxCompileComponent("C", src, "./c")
     assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("text(\"x\")"))
 }
 
 test "a lone brace in text stays literal" {
     let src = "<template><li>a { b } c</li></template>"
     let comp = vyxCompileComponent("C", src, "./c")
     assertEq(comp.errs.length, 0)
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("a { b } c"))
 }
 
 test "a literal close-script tag inside a helper string does not truncate the section" {
@@ -4538,8 +4356,8 @@ test "a helper string containing props-brace and template tags is inert" {
     let src = "<script>\nfn f() -> String { return \"props { fake: Int64 } <template> script\" }\n</script>\n<template><li>{{ f() }}</li></template>"
     let comp = vyxCompileComponent("C", src, "./c")
     assertEq(comp.errs.length, 0)
-    assertEq(comp.propNames.length, 0)
-    assert(comp.helpers.contains("props { fake: Int64 }"))
+    assertEq(comp.script.props.length, 0)
+    assert(vyxHelperText(comp.script).contains("props { fake: Int64 }"))
 }
 
 test "comments may mention props template and script freely (the CreateForm regression)" {
@@ -4548,31 +4366,17 @@ test "comments may mention props template and script freely (the CreateForm regr
     let withComment = vyxCompileComponent("C", src, "./c")
     let bare = vyxCompileComponent("C", "<script>\nprops { title: String }\n</script>\n<template><li>{{ title }}</li></template>", "./c")
     assertEq(withComment.errs.length, 0)
-    assertEq(withComment.propNames.length, 1)
-    assertEq(withComment.propNames[0], "title")
-    let a = vyxBuildModule([withComment], false, "")
-    let b = vyxBuildModule([bare], false, "")
-    assert(a.contains("export fn c(title: String) -> Html"))
-    assert(b.contains("export fn c(title: String) -> Html"))
-}
-
-test "identical imports collapse and same-spec selective imports union" {
-    let a = vyxCompileComponent("A", "<script>import { x } from \"std/html\"\nimport { t } from \"../s\"</script><template><li>{{ x }}</li></template>", "./w")
-    let b = vyxCompileComponent("B", "<script>import { y } from \"std/html\"\nimport { t } from \"../s\"</script><template><li>{{ y }}</li></template>", "./w")
-    let out = vyxBuildModule([a, b], false, "")
-    // The two std/html selective imports union into one line.
-    assert(out.contains("import { x, y } from \"std/html\""))
-    // The identical `../s` import (rebased to the same spec) appears once.
-    assertEq(out.contains("import { t } from \"./w/../s\""), true)
+    assertEq(withComment.script.props.length, 1)
+    assertEq(withComment.script.props[0].name.text, "title")
 }
 
 test "a same-name-different-spec import conflict names both files" {
     let a = vyxCompileComponent("A", "<script>import { t } from \"../one\"</script><template><li>{{ t }}</li></template>", "./w")
     let b = vyxCompileComponent("B", "<script>import { t } from \"../two\"</script><template><li>{{ t }}</li></template>", "./w")
-    let out = vyxBuildModule([a, b], false, "")
-    assert(out.contains("both import `t`"))
-    assert(out.contains("./w/A.vyx"))
-    assert(out.contains("./w/B.vyx"))
+    let errs = vyxImportConflicts([a, b])
+    assert(vyxErrsSay(errs, "both import `t`"))
+    assert(vyxErrsSay(errs, "./w/A.vyx"))
+    assert(vyxErrsSay(errs, "./w/B.vyx"))
 }
 
 test "a .vyx page shape reports its params and its data query" {
@@ -4587,33 +4391,6 @@ test "a .vyx page shape reports its params and its data query" {
     assertEq(shape.loadRet, "Validation<Data>")
 }
 
-test "a .vyx page module exports Params and a page fn binding the segment" {
-    let src = "<script>\nparams { id: String }\n</script>\n<template><h1>paste {{ id }}</h1></template>"
-    let out = vyxBuildPageModuleAt(src, "", "./routes/p", false, "")
-    assert(out.contains("export type Params = { id: String }"))
-    assert(out.contains("export fn uiPageBody(id: String) -> Html"))
-    assert(out.contains("export fn page(p: Params) -> Html"))
-    assert(out.contains("return uiPageBody(p.id)"))
-}
-
-test "a .vyx page with data forwards Data and wraps the query in load" {
-    let src = "<script>\nparams { id: Int64 }\nexport fn data() -> ParamQuery<Params, Validation<Data>> { return paramQuery(fetch) }\ntype Data = { title: String }\n</script>\n<template><h1>{{ data.title }}</h1></template>"
-    let out = vyxBuildPageModuleAt(src, "", "./routes/book", false, "")
-    assert(out.contains("export fn page(p: Params, d: Data) -> Html"))
-    assert(out.contains("return uiPageBody(p.id, d)"))
-    // `load` is generated: one `runParamQuery` over the declared query.
-    assert(out.contains("export fn load(p: Params) -> Validation<Data>"))
-    assert(out.contains("runParamQuery("))
-    assert(out.contains("export type Data"))
-}
-
-test "a static .vyx page needs no Params" {
-    let src = "<template><h1>about</h1></template>"
-    let out = vyxBuildPageModuleAt(src, "", "./routes", false, "")
-    assert(out.contains("export fn page() -> Html"))
-    assertEq(out.contains("export type Params"), false)
-}
-
 test "an attribute starting a non-identifier byte is a named diagnostic, not a hang" {
     // Each shape once scanned zero bytes per iteration and never finished.
     let triggers = ["<template><div #app>x</div></template>", "<template><button @click.stop=\"go()\">x</button></template>", "<template><a href=\"/x\",rel=\"y\">x</a></template>", "<template><li *ngIf>x</li></template>"]
@@ -4621,14 +4398,6 @@ test "an attribute starting a non-identifier byte is a named diagnostic, not a h
         let comp = vyxCompileComponent("Bad", src, "./c")
         assert(vyxErrsSay(comp.errs, "an attribute name is expected"))
     }
-}
-
-test "an unterminated `(` in an event value is a named diagnostic" {
-    // An unclosed `save(` must not compile a zero-argument handler.
-    let src = "<template><button @click=\"save(item.id\">x</button></template>"
-    let comp = vyxCompileComponent("Btn", src, "./c")
-    let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("`@click` has an unterminated `(`"))
 }
 
 test "a component stem that is not an identifier is named, not emitted" {

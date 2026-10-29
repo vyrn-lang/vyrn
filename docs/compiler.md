@@ -604,9 +604,9 @@ result has no table: its regions come from `//@origin` lines and its imports
 are judged by its banner. A report is a `Diag` span (`gen::Kind::Diag`): the
 loader lifts a `Code` result's diagnostics from its `Diag` spans alone, and
 `render` prints a `Diag` span as the `//@diag` line a `String` generator
-writes. Both paths stand until the last `String` generator in std moves to
-`Code`; that commit deletes the directive scan, the `//@diag` text and the
-banner rule.
+writes. No module generator in std returns `String`; both paths stand while a
+test or example generator does, and the commit that deletes the last one
+deletes the directive scan, the `//@diag` text and the banner rule.
 
 The link judges each import of a generated module by the span under its
 `import` keyword (`loader::author_of`, the parser records the keyword's column
@@ -769,7 +769,7 @@ displaced. A builtin's effect on positions is its row's `ShapeMap`. A loop
 whose head test is its only exit, whose counter steps by one, and which
 pushes one element of a parameter at the counter every turn covers the
 parameter from the counter's start to the bound. `tests/provenance.rs` pins
-the classes of the 48 functions the analytic report classified by hand.
+the classes of the 46 functions the analytic report classified by hand.
 
 ## Relation identity
 

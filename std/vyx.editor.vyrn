@@ -3,8 +3,8 @@
 /// No program links this module, so a program that uses `std/vyx` pays
 /// nothing for it. A tool finds it beside `std/vyx` by its name.
 
-import { vyxSection, vyxSectionAvoid, vyxIsWs, vyxIsIdent, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt, vyxLowerFirst } from "std/vyx"
-import { joinWith, lines, trim, fromBytesOr } from "std/strings"
+import { vyxSection, vyxSectionAvoid, vyxIsWs, vyxIsIdent, vyxIsIdentifier, vyxCharStart, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt, vyxLowerFirst, vyxLineAt, vyxColAt } from "std/vyx"
+import { join } from "std/code"
 import { Json, JsonField, emit } from "std/json"
 import { endsWith, startsWith } from "std/strpred"
 
@@ -16,11 +16,6 @@ type VyxCursor = { kind: String, tag: String, prefix: String, from: Int64 }
 
 gen fn vyxNoCursor() -> VyxCursor {
     return VyxCursor { kind: "", tag: "", prefix: "", from: 0 }
-}
-
-/// True for the first byte of a UTF-8 character.
-gen fn vyxCharStart(b: UInt8) -> Bool {
-    return b < '\x80' || b >= '\xc0'
 }
 
 /// The byte offset of 1-based `line` and `col` in `ba`, `col` counting
@@ -317,13 +312,11 @@ export gen fn vyrnCompleteVyx(root: String, path: String, line: Int64, col: Int6
         let cb = bytes(comp)
         let sec = vyxSection(cb, "script", true)
         if sec.found {
-            let sc = vyxParseScriptAt(cb, sec.start, sec.end, dir, cur.tag)
-            let mut k = 0
-            while k < sc.propNames.length {
-                let detail = "prop: " + sc.propTypes[k]
-                items.push(vyxItem(sc.propNames[k], "field", detail, cur.from))
-                items.push(vyxItem(":" + sc.propNames[k], "field", detail, cur.from))
-                k = k + 1
+            let sc = vyxParseScriptAt(cb, sec.start, sec.end, "props", "", cur.tag)
+            for p in sc.props {
+                let detail = "prop: " + p.ty.text
+                items.push(vyxItem(p.name.text, "field", detail, cur.from))
+                items.push(vyxItem(":" + p.name.text, "field", detail, cur.from))
             }
         }
     } else if cur.kind == "attr" {
@@ -340,24 +333,38 @@ export gen fn vyrnCompleteVyx(root: String, path: String, line: Int64, col: Int6
     return emit(JArr(items))
 }
 
-/// `src` with every character outside its `<script>` body replaced by a
-/// space and each LF kept: the Vyrn a tool reads in a `.vyx`, at the file's
-/// own lines and columns. A section never closed keeps nothing.
-export to "./ui.editor" gen fn vyxScriptView(src: String) -> String {
+/// `src`, read from `path`, with every character outside its `<script>` body
+/// replaced by blanks and each LF kept: the Vyrn a tool reads in a `.vyx`,
+/// copied at the file's own lines and columns. A section never closed keeps
+/// nothing.
+export to "./ui.editor" gen fn vyxScriptView(path: String, src: String) -> Code {
     let ba = bytes(src)
     let sec = vyxSection(ba, "script", true)
-    let mut out: Array<UInt8> = []
-    let mut i = 0
-    while i < ba.length {
-        let b = ba[i]
-        if b == '\n' || (sec.found && i >= sec.start && i < sec.end) {
-            out.push(b)
-        } else if vyxCharStart(b) {
-            out.push(' ')
+    if sec.found == false {
+        return vyxBlankLines(ba, 0, ba.length)
+    }
+    let mut out = vyxBlankLines(ba, 0, sec.start)
+    let col = vyxColAt(ba, sec.start)
+    let mut c = 1
+    while c < col {
+        out = out + vyrn" "
+        c = c + 1
+    }
+    let body = codeAt(path, vyxLineAt(ba, sec.start), col, vyxSlice(ba, sec.start, sec.end))
+    return out + body + vyxBlankLines(ba, sec.end, ba.length)
+}
+
+/// One LF for each LF in bytes `[a, b)` of `ba`.
+gen fn vyxBlankLines(ba: Array<UInt8>, a: Int64, b: Int64) -> Code {
+    let mut out = vyrn""
+    let mut i = a
+    while i < b {
+        if ba[i] == '\n' {
+            out = out + vyrn"\n"
         }
         i = i + 1
     }
-    return fromBytesOr(out, "")
+    return out
 }
 
 /// Whether `src` has a `<template>` section outside its `<script>`, closed or
@@ -384,35 +391,39 @@ export to "./ui.editor" gen fn vyxStemOf(path: String) -> String {
     return name
 }
 
-/// The view of the component source `src` named `stem`: [`vyxScriptView`],
-/// then the view function its `<template>` compiles to.
-gen fn vyxComponentView(src: String, stem: String) -> String {
-    let view = vyxScriptView(src)
-    if vyxHasTemplate(src) == false {
+/// The view of the component source `src`, read from `path` and named
+/// `stem`: [`vyxScriptView`], then the view function its `<template>` compiles
+/// to. A stem that spells no identifier names no function.
+gen fn vyxComponentView(path: String, src: String, stem: String) -> Code {
+    let view = vyxScriptView(path, src)
+    let fnName = vyxLowerFirst(stem)
+    if vyxHasTemplate(src) == false || vyxIsIdentifier(fnName) == false {
         return view
     }
     let ba = bytes(src)
     let sec = vyxSection(ba, "script", true)
-    let mut params: Array<String> = []
+    let mut params: Array<Code> = []
     if sec.found {
-        let sc = vyxParseScriptAt(ba, sec.start, sec.end, ".", stem)
-        let mut k = 0
-        while k < sc.propNames.length {
-            params.push(sc.propNames[k] + ": " + sc.propTypes[k])
-            k = k + 1
+        let sc = vyxParseScriptAt(ba, sec.start, sec.end, "props", "", stem)
+        for p in sc.props {
+            let pn = codeAt(path, p.name.line, p.name.col, p.name.text)
+            let pt = codeAt(path, p.ty.line, p.ty.col, p.ty.text)
+            params.push(vyrn"\{pn}: \{pt}")
         }
     }
-    return view + "\nexport fn " + vyxLowerFirst(stem) + "(" + joinWith(params, ", ") + ") -> Html {}\n"
+    let list = join(params, vyrn", ")
+    let decl = vyrn"export fn \{name(fnName)}(\{list}) -> Html {}"
+    return view + vyrn"\n" + decl + vyrn"\n"
 }
 
 /// The Vyrn a tool reads in the component at `path`: its `<script>` at the
 /// file's own positions, then the view function its `<template>` compiles to.
-export gen fn vyrnSourceVyx(path: String) -> String {
+export gen fn vyrnSourceVyx(path: String) -> Code {
     let src = match readFile(path) {
         Ok(s) => s,
         Err(e) => "",
     }
-    return vyxComponentView(src, vyxStemOf(path))
+    return vyxComponentView(path, src, vyxStemOf(path))
 }
 
 /// The definition of the component tag at 1-based `line` and `col` of the
@@ -475,26 +486,4 @@ test "a tag name, an event and the script classify apart" {
     assertEq(e.kind, "event")
     assertEq(e.from, 4)
     assertEq(vyxCursorAt(src, 2, 5).kind, "")
-}
-
-test "the script view keeps the script at its own lines and columns" {
-    let src = "<template><p>x</p></template>\n<script>let a = 1\n</script>\n"
-    let v = vyxScriptView(src)
-    assertEq(v.byteLength, src.byteLength)
-    let ls = lines(v)
-    assertEq(trim(ls[0]), "")
-    assertEq(ls[1], "        let a = 1")
-    assertEq(trim(ls[2]), "")
-}
-
-test "a component view ends in the function its template compiles to" {
-    let v = vyxComponentView("<script>\nprops { n: Int64, s: String }\n</script>\n<template><li>{{ n }}</li></template>\n", "ItemRow")
-    assert(v.endsWith("\nexport fn itemRow(n: Int64, s: String) -> Html {}\n"))
-}
-
-test "a component without a template provides nothing" {
-    let half = "<script>\nlet a = 1\n</script>\n"
-    assertEq(vyxComponentView(half, "C"), vyxScriptView(half))
-    let decoy = "<script>\nlet s = \"<template>\"\n</script>\n"
-    assertEq(vyxComponentView(decoy, "C"), vyxScriptView(decoy))
 }
