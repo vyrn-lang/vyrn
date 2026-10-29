@@ -2,8 +2,9 @@
 //!
 //! The printer reads [`crate::lexer::lex_with_trivia`] and decides only the whitespace
 //! between raw token texts, so a literal is reproduced byte for byte. Safety
-//! invariant: `lex(output)` equals `lex(input)` without `Semi` tokens, or [`fmt`]
-//! returns an error and the caller leaves the file untouched.
+//! invariant: the output's tokens are the input's on the same lines, less some
+//! `;`, and the parse is the same without those `;`; or [`fmt`] returns an error
+//! and the caller leaves the file untouched.
 //!
 //! Line structure is the author's: the printer never joins or splits lines. It
 //! sets indentation, intra-line spacing ([`wants_space`]), drops each semicolon
@@ -11,7 +12,8 @@
 //! the file with one newline.
 
 use crate::diagnostics::Diagnostic;
-use crate::lexer::{self, Tok, Triv, TrivKind};
+use crate::lexer::{self, Tok, Token, Triv, TrivKind};
+use crate::parser::{self, Parser};
 use crate::rules::refuse;
 
 /// Formats `source` into its canonical form. The input must lex but need not
@@ -20,22 +22,57 @@ pub fn fmt(source: &str) -> Result<String, Diagnostic> {
     let before = lexer::lex(source)?;
     let items = lexer::lex_with_trivia(source)?;
     let output = print(source, &items);
-
-    // Safety invariant: lex(fmt(src)) == lex(src) without Semi tokens.
     let after = lexer::lex(&output)?;
-    if strip_semi(&before) != strip_semi(&after) {
-        return Err(refuse!("fmt", 0, 0, FormatterInvariant));
+    match kept(&before, &after).is_some_and(|kept| same_parse(before, kept)) {
+        true => Ok(output),
+        false => Err(refuse!("fmt", 0, 0, FormatterInvariant)),
     }
-    Ok(output)
 }
 
-/// The token kinds of a stream without `Semi` and `Eof`: the safety invariant's
-/// equivalence.
-fn strip_semi(toks: &[lexer::Token]) -> Vec<&Tok> {
-    toks.iter()
-        .map(|t| &t.tok)
-        .filter(|t| !matches!(t, Tok::Semi | Tok::Eof))
-        .collect()
+/// The tokens of `before` that `after` keeps, at `before`'s positions, or
+/// `None` when `after` is not `before` less some `;`, token for token, with two
+/// tokens on one line in `after` exactly when they are in `before`. An
+/// interpolation hole's column moves with its string, so it is not compared.
+fn kept(before: &[Token], after: &[Token]) -> Option<Vec<Token>> {
+    let same = |a: &Tok, b: &Tok| match (a, b) {
+        (Tok::TemplateStr { parts: p, exprs: e }, Tok::TemplateStr { parts: q, exprs: f }) => {
+            p == q && e.len() == f.len() && e.iter().zip(f).all(|(x, y)| x.src == y.src)
+        }
+        _ => a == b,
+    };
+    let mut rest = after.iter().peekable();
+    let mut out = Vec::with_capacity(after.len());
+    // The lines of the last kept token in `before` and in `after`.
+    let mut last: Option<(usize, usize)> = None;
+    for b in before {
+        match rest.peek() {
+            Some(a) if same(&b.tok, &a.tok) => {
+                // `Eof` follows the newline the printer ends the file with.
+                let joined = last.is_some_and(|(bl, al)| (bl == b.line) != (al == a.line));
+                if joined && b.tok != Tok::Eof {
+                    return None;
+                }
+                last = Some((b.line, a.line));
+                out.push(b.clone());
+                rest.next();
+            }
+            _ if b.tok == Tok::Semi => {}
+            _ => return None,
+        }
+    }
+    rest.next().is_none().then_some(out)
+}
+
+/// Whether `before` and `kept` parse to the same program and diagnostics.
+fn same_parse(before: Vec<Token>, kept: Vec<Token>) -> bool {
+    let (p, e) = parser::parse_accum(before);
+    let (q, f) = parser::parse_accum(kept);
+    let said = |e: &[Diagnostic]| -> Vec<(usize, usize, String)> {
+        e.iter()
+            .map(|d| (d.line, d.col, d.message.clone()))
+            .collect()
+    };
+    p == q && said(&e) == said(&f)
 }
 
 /// Whether the `;` between the token `prev` and the items `rest` ends a statement
@@ -52,7 +89,7 @@ fn semi_separates(prev: Option<&Triv>, rest: &[Triv]) -> bool {
     };
     let after_return = matches!(prev.map(|p| &p.kind), Some(TrivKind::Tok(Return)));
     // A binary operator, a postfix link, a call, a struct literal or a tagged string.
-    let continues = crate::parser::Parser::binop(next).is_some()
+    let continues = Parser::binop(next).is_some()
         || matches!(
             next,
             QuestionQuestion
@@ -404,6 +441,23 @@ mod tests {
         assert_eq!(f("fn main()->Int64{let x=1+2;return x;}"), {
             "fn main() -> Int64 { let x = 1 + 2 return x }\n"
         });
+    }
+
+    #[test]
+    fn a_hole_that_moves_with_its_string_formats() {
+        assert_eq!(
+            f("fn g(x: Int64) -> String {\nlet a =   \"v \\{x}\"\nreturn a\n}\n"),
+            "fn g(x: Int64) -> String {\n    let a = \"v \\{x}\"\n    return a\n}\n"
+        );
+    }
+
+    #[test]
+    fn the_invariant_refuses_a_dropped_semicolon_that_joins_two_statements() {
+        let lex = |s: &str| lexer::lex(s).expect("lexes");
+        let src = lex("fn m() -> Int64 { let x = 1; -2 return x }");
+        let joined = lex("fn m() -> Int64 { let x = 1 -2 return x }");
+        let kept = kept(&src, &joined).expect("the tokens are the source's less one semicolon");
+        assert!(!same_parse(src, kept));
     }
 
     #[test]

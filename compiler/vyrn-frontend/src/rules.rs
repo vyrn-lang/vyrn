@@ -944,8 +944,7 @@ rules! {
     FloorCannotInclude { artifact, target, module, what }
         "artifact `{artifact}` ({target}) cannot include `{module}`: {what}";
     FormatterInvariant {}
-        "internal formatter error: output would change the token sequence \
-        (source left unchanged)";
+        "internal formatter error: output would change the parse (source left unchanged)";
     DeriveWroteDerive {} "a `derive` generator wrote a `derive` call";
     AudienceCannotImport { importer, from, imported, to }
         "`{importer}` is {from} and cannot import `{imported}`, which is {to}";
