@@ -5,16 +5,19 @@ Policy for checking libraries: per-project rule levels and per-line waivers.
 A rule is a `code`, a string this module never interprets; an input file is
 text with lines. `std/vyx-hints` uses only this public surface.
 
+A library's rules record [`Finding`](#finding)s as data; [`reports`](#reports) applies the
+project's levels and waivers once and returns the reports:
+
 ```vyrn
-import { hint, noPolicy } from "std/hints"
+import { Finding, noPolicy, reports } from "std/hints"
 import { Severity } from "std/diag"
 
-export gen fn myHints(path: String) -> String {
+export gen fn myHints(path: String) -> Code {
     let src = match readFile(path) { Ok(t) => t, Err(e) => "" }
-    let mut out = ""
+    let mut found: Array<Finding> = []
     // ... find something at line 4, column 9 ...
-    out = out + hint(noPolicy(), "my/rule", Warning, src, path, 4, 9, "say what is wrong")
-    return out
+    found.push(Finding { code: "my/rule", dflt: Warning, line: 4, col: 9, message: "say what is wrong" })
+    return reports(noPolicy(), src, path, found)
 }
 ```
 
@@ -39,11 +42,20 @@ that one report. The marker is plain text inside the input's own comment:
 ## HintPolicy
 
 ```vyrn
-type HintPolicy = { codes: Array<String>, levels: Array<String>, strict: Bool }
+type HintPolicy = { codes: Array<String>, levels: Array<String> }
 ```
 
 Per-code severity overrides, as parallel arrays (a code and its level word).
-`strict` ignores waivers; only [`strictly`](#strictly) sets it, for [`unusedWaivers`](#unusedwaivers).
+
+## Finding
+
+```vyrn
+type Finding = { code: String, dflt: Severity, line: Int64, col: Int64, message: String }
+```
+
+One rule's finding in an input file: the rule's `code`, its severity when
+the project sets none, the 1-based `line` and `col` it anchors at, and what
+is wrong.
 
 ## noPolicy
 
@@ -52,15 +64,6 @@ fn noPolicy() -> HintPolicy
 ```
 
 The empty policy: no override, every rule at its default severity.
-
-## strictly
-
-```vyrn
-fn strictly(p: HintPolicy) -> HintPolicy
-```
-
-`p` with waivers ignored: what a rule would report. Builds the `raw`
-input of [`unusedWaivers`](#unusedwaivers).
 
 ## policyOf
 
@@ -83,14 +86,15 @@ fn levelOf(p: HintPolicy, code: String, dflt: Severity) -> String
 The level `code` runs at under `p`: its configured word, or the word for
 `dflt` when the project said nothing about it.
 
-## hint
+## reports
 
 ```vyrn
-fn hint(p: HintPolicy, code: String, dflt: Severity, src: String, file: String, line: Int64, col: Int64, message: String) -> String
+fn reports(p: HintPolicy, src: String, file: String, findings: Array<Finding>) -> Code
 ```
 
-One `//@diag` report line, or `""` when `code` is off or waived at `line`.
-`src` is the text of `file`; the waiver marker is read from it.
+The reports `findings` earn in `file` under `p`, in order: a finding whose
+rule is off, or whose line `src` waives, earns none. `src` is the text of
+`file`; the waiver markers are read from it.
 
 ## waived
 
@@ -104,12 +108,11 @@ on that line or on the one above it.
 ## unusedWaivers
 
 ```vyrn
-fn unusedWaivers(p: HintPolicy, src: String, file: String, raw: String) -> String
+fn unusedWaivers(p: HintPolicy, src: String, findings: Array<Finding>) -> Array<Finding>
 ```
 
-Reports every `vyrn-ignore` marker in `src` that waives nothing. `raw` is
-the same report built under [`strictly`](#strictly); a marker at line L is used when
-`raw` reports its code at L or L + 1.
-
-Reports go through [`hint`](#hint) with `p`, so `hint/unused-waiver` is configured
-and waived like any other rule.
+A `hint/unused-waiver` finding for every `vyrn-ignore` marker in `src` that
+waives nothing: a marker at line L is used when a finding of its code whose
+rule `p` does not turn off sits at L or L + 1. [`reports`](#reports) judges these
+findings like any other, so the rule is configured and waived by the same
+policy.

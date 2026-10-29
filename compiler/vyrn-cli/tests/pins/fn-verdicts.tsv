@@ -2498,21 +2498,20 @@ std/hash.vyrn	sha1Rotl30	yes	yes, native
 std/hash.vyrn	Hashable$Int64$hash	yes	yes, emulated Int64
 std/hash.vyrn	Hashable$String$hash	yes	no, its effect set is alloc
 std/hints.vyrn	noPolicy	yes	no, its effect set is alloc
-std/hints.vyrn	strictly	yes	no, its effect set is alloc
 std/hints.vyrn	policyOf	no, it calls `emit`, which is not trap-free	no, its effect set is alloc, trap
 std/hints.vyrn	levelOf	yes	no, its effect set is alloc
-std/hints.vyrn	hint	no, it calls `waived`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/hints.vyrn	reports	no, it calls `waived`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/hints.vyrn	waived	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
 std/hints.vyrn	waivesLine	no, it keeps an index check	no, its effect set is alloc
-std/hints.vyrn	unusedWaivers	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/hints.vyrn	unusedWaivers	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
+std/hints.vyrn	covers	yes	no, its effect set is alloc
 std/hints.vyrn	waiverCode	no, it keeps an index check	no, its effect set is alloc, trap
-std/hints.vyrn	rawReports	no, it calls `rawLineHas`, which is not trap-free	no, its effect set is alloc, trap
-std/hints.vyrn	rawLineHas	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
 std/hints.vyrn	continuesCode	no, it keeps an index check	no, it is not trap-free
 std/hints.vyrn	lineText	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
 std/hints.vyrn	isObject	yes	no, `j` is Json, not an integer, Bool or a read array of one
 std/hints.vyrn	policyOr	no, it calls `policyOf`, which is not trap-free	no, its effect set is alloc, trap
 std/hints.vyrn	refusal	no, it calls `policyOf`, which is not trap-free	no, its effect set is alloc, trap
+std/hints.vyrn	reportText	no, it calls `reports`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/html.vyrn	copyHtmlArray	yes	no, its effect set is alloc
 std/html.vyrn	el	yes	no, its effect set is alloc
 std/html.vyrn	text	yes	no, its effect set is alloc
@@ -3573,12 +3572,13 @@ std/vyx-hints.vyrn	vyxHints	no, it calls `vhScan`, which is not trap-free	no, it
 std/vyx-hints.vyrn	vyxHintsConfigured	no, it calls `vhScan`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/vyx-hints.vyrn	vhScan	no, it calls `panic`	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/vyx-hints.vyrn	vhPolicy	no, it calls `policyOf`, which is not trap-free	no, its effect set is alloc, trap
-std/vyx-hints.vyrn	vhModule	yes	no, its effect set is alloc
+std/vyx-hints.vyrn	vhModule	yes	no, its effect set is gen-only
 std/vyx-hints.vyrn	vhCheck	no, it calls `vyxParseTemplate`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx-hints.vyrn	vhNodes	no, it calls `vhNode`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx-hints.vyrn	vhNode	no, it calls `vhElem`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx-hints.vyrn	vhBodies	no, it calls `vhNodes`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/vyx-hints.vyrn	vhElem	no, it calls `vhDeprecatedTag`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx-hints.vyrn	vhNodes	no, it calls `vhNode`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx-hints.vyrn	vhNode	no, it calls `vhElem`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx-hints.vyrn	vhBodies	no, it calls `vhNodes`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx-hints.vyrn	vhElem	no, it calls `vhElemRules`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx-hints.vyrn	vhElemRules	no, it calls `vhDeprecatedTag`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx-hints.vyrn	vhNeedsAlt	yes	no, its effect set is alloc
 std/vyx-hints.vyrn	vhNamedByContent	yes	no, `tag` is String, not an integer, Bool or a read array of one
 std/vyx-hints.vyrn	vhIsNameable	yes	no, its effect set is alloc
@@ -3616,7 +3616,8 @@ std/vyx-hints.vyrn	vhHasContent	no, it calls `vhNodeHasContent`, which is not tr
 std/vyx-hints.vyrn	vhNodeHasContent	no, it calls `trim`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx-hints.vyrn	vhAnchorLine	yes	no, `attrs` is Array<VyxAttr>, not an integer, Bool or a read array of one
 std/vyx-hints.vyrn	vhAnchorCol	yes	no, `attrs` is Array<VyxAttr>, not an integer, Bool or a read array of one
-std/vyx-hints.vyrn	checkOf	no, it calls `vhCheck`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx-hints.vyrn	checkText	no, it calls `vhCheck`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx-hints.vyrn	checkOf	no, it calls `checkText`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx-hints.vyrn	fires	no, it calls `checkOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.editor.vyrn	vyxNoCursor	yes	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxCharStart	yes	yes, packed UInt8
