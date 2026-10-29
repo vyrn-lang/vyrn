@@ -703,7 +703,16 @@ pub(crate) fn judged_as<'a>(
 /// that byte's line in the author's file; `None` for a module without a span
 /// table. A position past the text is the last span's.
 fn author_at(m: &Module, line: usize, col: usize) -> Option<(&Author, usize)> {
-    let (rows, text) = (m.spans.as_deref()?, m.gen_source.as_deref()?);
+    author_in(m.spans.as_deref()?, m.gen_source.as_deref()?, line, col)
+}
+
+/// [`author_at`] over a span table `rows` of `text`.
+fn author_in<'a>(
+    rows: &'a [SpanRow],
+    text: &str,
+    line: usize,
+    col: usize,
+) -> Option<(&'a Author, usize)> {
     let start = text
         .split_inclusive('\n')
         .take(line.saturating_sub(1))
@@ -723,6 +732,22 @@ fn author_at(m: &Module, line: usize, col: usize) -> Option<(&Author, usize)> {
         Author::CallSite => 0,
     };
     Some((&row.author, line_in))
+}
+
+/// Returns the module a relative specifier at `line:col` of module `key`
+/// resolves beside: its writer. Text `codeAt` copied resolves beside its input
+/// file, quote text beside the module that holds the quote, and the call site's
+/// data beside the file that wrote the generator call. A module without a span
+/// table resolves as [`resolve_spec`] reads its key.
+fn spec_base<'a>(
+    key: &'a str,
+    table: Option<(&'a [SpanRow], &str)>,
+    (line, col): (usize, usize),
+) -> &'a str {
+    match table.and_then(|(rows, text)| author_in(rows, text, line, col)) {
+        Some((Author::File { key, .. }, _)) => key,
+        Some((Author::CallSite, _)) | None => key,
+    }
 }
 
 /// Returns the module an import at `line:col` of module `m` is judged as: the
@@ -1911,7 +1936,8 @@ fn load_modules(
         let mut import_targets: Vec<Option<String>> = vec![None; program.imports.len()];
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Path(path) = &imp.source {
-                let target = resolve_spec(path, key, opts).map_err(|e| {
+                let base = spec_base(key, spans.zip(Some(text.as_str())), imp.source_at);
+                let target = resolve_spec(path, base, opts).map_err(|e| {
                     vec![in_module(
                         Diagnostic::error(imp.line, 0, "load", e),
                         key,

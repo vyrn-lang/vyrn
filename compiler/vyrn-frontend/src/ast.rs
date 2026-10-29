@@ -513,6 +513,8 @@ pub struct ImportDecl {
     /// The `import` keyword's line and column.
     pub line: usize,
     pub col: usize,
+    /// The source's line and column: the specifier or the generator's name.
+    pub source_at: (usize, usize),
 }
 
 /// The right-hand side of `import { .. } from <source>`.

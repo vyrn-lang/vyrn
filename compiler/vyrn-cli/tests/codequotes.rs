@@ -821,3 +821,68 @@ export gen fn mk(path: String) -> Code {
         "{err}"
     );
 }
+
+/// A relative specifier a quote writes resolves beside the module that holds
+/// the quote, not beside the file that called the generator.
+#[test]
+fn a_quote_specifier_resolves_beside_its_own_module() {
+    let dir = scratch("spec-quote");
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    write(
+        &dir.join("lib/seven.vyrn"),
+        "export fn seven() -> Int64 { return 7 }\n",
+    );
+    let gen = "export gen fn mk() -> Code {\n    return vyrn\"\"\"\n        import { seven } from \"./seven\"\n        export fn made() -> Int64 { return seven() }\n\n        \"\"\"\n}\n";
+    write(&dir.join("lib/g.vyrn"), gen);
+    write(&dir.join("app.vyrn"), "import { mk } from \"./lib/g\"\nimport { made } from mk()\nfn main() -> Int64 { return made() }\n");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A relative specifier `codeAt` copied resolves beside the input file it came
+/// from.
+#[test]
+fn a_copied_specifier_resolves_beside_its_input() {
+    let dir = scratch("spec-copy");
+    std::fs::create_dir_all(dir.join("in")).unwrap();
+    write(
+        &dir.join("in/seven.vyrn"),
+        "export fn seven() -> Int64 { return 7 }\n",
+    );
+    write(
+        &dir.join("in/page.txt"),
+        "import { seven } from \"./seven\"\n",
+    );
+    let gen = r#"export gen fn copy(path: String) -> Code {
+    let line = match readFile(path) {
+        Ok(_) => "import { seven } from \"./seven\"",
+        Err(e) => panic(e),
+    }
+    return codeAt(path, 1, 1, line) + vyrn"""
+
+        export fn made() -> Int64 { return seven() }
+
+        """
+}
+"#;
+    write(&dir.join("gen.vyrn"), gen);
+    write(&dir.join("app.vyrn"), "import { copy } from \"./gen\"\nimport { made } from copy(\"./in/page.txt\")\nfn main() -> Int64 { return made() }\n");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

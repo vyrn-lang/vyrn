@@ -677,6 +677,7 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
             source,
             line: 1,
             col: 1,
+            source_at: (1, 1),
         }
     }
 
@@ -693,6 +694,7 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
             source,
             line: 1,
             col: 1,
+            source_at: (1, 1),
         }
     }
 
