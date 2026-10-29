@@ -7,7 +7,7 @@ Check a module against a module contract.
 
     import { checkContract } from "std/contract"
 
-    gen fn pages(dir: String) -> String {
+    gen fn pages(dir: String) -> Code {
         let iface = moduleInterface(pageFile)
         let issues = checkContract(iface, contractOf(Page))
         ...
