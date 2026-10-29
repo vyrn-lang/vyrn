@@ -149,13 +149,13 @@ fn vyxAppend(arr: Array<String>, s: String) -> Array<String> {
 }
 
 /// The 1-based line number of byte offset `off` within `ba` (newlines before it).
-fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
+export to "./vyx.editor" fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
     return lineAt(ba, off)
 }
 
 /// The 1-based column of byte offset `off` within `ba`, in characters since the
 /// last LF: the column `codeAt` and the lexer count.
-fn vyxColAt(ba: Array<UInt8>, off: Int64) -> Int64 {
+export to "./vyx.editor" fn vyxColAt(ba: Array<UInt8>, off: Int64) -> Int64 {
     let mut col = 1
     let mut i = off
     while i > 0 && ba[i - 1] != '\n' {
@@ -1953,7 +1953,7 @@ gen fn vyxEmitEvent(a: VyxAttr, src: String, slot: Name, pre: modify Array<Code>
 
 /// Whether `s` is a single Vyrn identifier (letters, digits, `_`; not
 /// digit-first).
-fn vyxIsIdentifier(s: String) -> Bool {
+export to "./vyx.editor" fn vyxIsIdentifier(s: String) -> Bool {
     let ba = bytes(s)
     if ba.length == 0 {
         return false

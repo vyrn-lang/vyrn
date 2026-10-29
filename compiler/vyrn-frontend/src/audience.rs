@@ -468,10 +468,9 @@ pub fn companion_answers(
 
 /// The Vyrn a tool reads in a generator input, as the editor companion of the
 /// claiming generator module writes it through `gen fn vyrnSource*(path:
-/// String) -> String`: the input with every character outside Vyrn code
-/// replaced by a space and each LF kept, then declarations the file's form
-/// provides. Positions in `code` are the
-/// input's, so a tool maps none.
+/// String) -> Code`: the input's Vyrn code at its own lines and columns, every
+/// other character blank and each LF kept, then declarations the file's form
+/// provides. Positions in `code` are the input's, so a tool maps none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputView {
     /// The view's first lines, one per line of the input.

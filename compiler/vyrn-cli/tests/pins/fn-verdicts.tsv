@@ -3366,7 +3366,7 @@ std/tw.vyrn	loadedText	no, it calls `twLoaded`, which is not trap-free	no, its e
 std/tw.vyrn	cannotReadTheme	yes	no, its effect set is alloc
 std/ui.editor.vyrn	uiChrome	yes	no, its effect set is alloc
 std/ui.editor.vyrn	vyrnChromeUi	yes	no, its effect set is alloc
-std/ui.editor.vyrn	uiPageView	no, it calls `vyxPageShape`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/ui.editor.vyrn	uiPageView	no, it calls `vyxScriptView`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/ui.editor.vyrn	vyrnSourceUi	no, it calls `vyxStemOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/ui.vyrn	pageError	yes	no, its effect set is alloc
 std/ui.vyrn	notFound	yes	no, its effect set is alloc
@@ -3643,10 +3643,11 @@ std/vyx.editor.vyrn	vyxEvents	yes	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxItem	yes	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxCapitalized	yes	no, its effect set is alloc
 std/vyx.editor.vyrn	vyrnCompleteVyx	no, it keeps an index check	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
-std/vyx.editor.vyrn	vyxScriptView	no, it calls `vyxSection`, which is not trap-free	no, its effect set is alloc
+std/vyx.editor.vyrn	vyxScriptView	no, it calls `vyxBlankLines`, which is not trap-free	no, its effect set is alloc, gen-only
+std/vyx.editor.vyrn	vyxBlankLines	no, it keeps an index check	no, its effect set is gen-only
 std/vyx.editor.vyrn	vyxHasTemplate	no, it calls `vyxSectionAvoid`, which is not trap-free	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxStemOf	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc
-std/vyx.editor.vyrn	vyxComponentView	no, it calls `vyxParseScriptAt`, which is not trap-free	no, its effect set is alloc, gen-only
+std/vyx.editor.vyrn	vyxComponentView	no, it calls `vyxScriptView`, which is not trap-free	no, its effect set is alloc, gen-only
 std/vyx.editor.vyrn	vyrnSourceVyx	no, it calls `vyxStemOf`, which is not trap-free	no, its effect set is alloc, fs-read, gen-only
 std/vyx.editor.vyrn	vyrnDefinitionVyx	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, fs-read
 std/vyx.vyrn	vyxSlice	no, it keeps an index check	no, its effect set is alloc

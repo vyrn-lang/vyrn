@@ -22,7 +22,7 @@ from}`, empty where the editor's forward map answers instead.
 ## vyrnSourceVyx
 
 ```vyrn
-fn vyrnSourceVyx(path: String) -> String
+fn vyrnSourceVyx(path: String) -> Code
 ```
 
 The Vyrn a tool reads in the component at `path`: its `<script>` at the

@@ -17,7 +17,7 @@ line: a tool grades every other file there against `Page`.
 ## vyrnSourceUi
 
 ```vyrn
-fn vyrnSourceUi(path: String) -> String
+fn vyrnSourceUi(path: String) -> Code
 ```
 
 The Vyrn a tool reads in the `.vyx` page at `path`: its `<script>` at the
