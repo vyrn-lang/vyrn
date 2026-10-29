@@ -1298,7 +1298,7 @@ gen fn httpProcedure(f: FnCode, iface: ModuleInterface, base: String) -> Code {
         export type \{pathType} = String where value =~ \{httpPathRegex(httpNamesOf(fields))}
 
         """ + adapter + vyrn"""
-        /// `\{proc}` at `\{base} + path`.
+        /// `\{proc}` at `\{base}` + `path`.
         export fn \{proc}(path: \{pathType}) -> Route {
             return httpRoute(\{base} + path, \{run}, \{f.info.name})
         }

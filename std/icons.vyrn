@@ -371,7 +371,7 @@ gen fn glyphSource(
     let glyphName = qualified(coll, want)
     return vyrn"""
 
-        /// \{glyphName}
+        /// `\{glyphName}`
         export fn \{name(fnName)}() -> Html {
             return glyph(\{found.box}, \{found.body})
         }
@@ -824,12 +824,12 @@ test "a named glyph becomes one function over the shared helper" {
 
 test "the collection's licence is the generated header's own line" {
     let src = moduleText(toyCollection(), "toy", "github", "", 0, 0)
-    assert(contains(src, "/// \"License: MIT — https://example.test/L\""))
+    assert(contains(src, "/// License: MIT — https://example.test/L"))
 }
 
 test "a collection that declares no terms says so rather than saying nothing" {
     let src = moduleText("{\"icons\":{\"a\":{\"body\":\"<a/>\"}}}", "bare", "a", "", 0, 0)
-    assert(contains(src, "/// \"License: not declared in the collection file\""))
+    assert(contains(src, "/// License: not declared in the collection file"))
 }
 
 test "a hyphenated name becomes one lowerCamelCase function" {

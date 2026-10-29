@@ -383,8 +383,9 @@ pub fn is_word_builtin(name: &str) -> bool {
 /// `@codeQuote(n, key, part_0, line_0, col_0, [hole, glued, indent, line, from, to,
 /// part, line, col]...)`, with all `n` parts, empty ones too, and a hole between each
 /// pair. A part is its text and where it starts in its module; a hole is its value,
-/// `1` when it touches a word character, its line's leading whitespace and its
-/// line and columns. The parser writes the call without `key`; the loader inserts
+/// `1` when it touches a word character, the text a splice writes after each
+/// newline (its line's leading whitespace, then the comment prefix when it stands
+/// in a comment) and its line and columns. The parser writes the call without `key`; the loader inserts
 /// the module's key, the parts' author, at index 1 ([`Quote::of`] reads either).
 pub const QUOTE: &str = "@codeQuote";
 

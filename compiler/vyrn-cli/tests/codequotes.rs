@@ -605,6 +605,36 @@ fn a_module_code_shape_node_splices_a_generic_field() {
     assert_eq!(out.status.code(), Some(2), "{err}");
 }
 
+/// A hole in a doc comment writes its `String` as plain text, and a newline
+/// in it continues the comment, so the text cannot become code.
+#[test]
+fn a_comment_hole_writes_plain_text_and_stays_in_the_comment() {
+    let gen = r#"export gen fn mk(doc: String) -> Code {
+    return vyrn"""
+        /// Says \{doc}.
+        export fn four() -> Int64 { return 4 }
+        """
+}
+"#;
+    let app = "import { mk } from \"./gen\"\nimport { four } from mk(\"\\\"hi\\\"\nexport fn evil() -> Int64 { return 0 }\")\nfn main() -> Int64 { return four() }\n";
+    let path = gen_app("comment_hole", gen, app);
+    let out = vyrn().arg("emit-gen").arg(&path).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(
+            "/// Says \"hi\"\n/// export fn evil() -> Int64 { return 0 }.\nexport fn four()"
+        ),
+        "{text}"
+    );
+    let out = vyrn().arg("run").arg(&path).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// A derive generator's own program may call `derive`: its `toJson` runs
 /// `std/json`'s generator in a load one deeper.
 #[test]

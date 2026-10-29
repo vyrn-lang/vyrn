@@ -90,9 +90,9 @@ fn emit_gen_shows_the_synthesized_translation_module() {
         "select fn:\n{src}"
     );
 
-    assert!(src.contains("/// \"Welcome\""), "arg-less doc:\n{src}");
+    assert!(src.contains("/// Welcome"), "arg-less doc:\n{src}");
     assert!(
-        src.contains("/// \"{count, plural, one {# item} other {# items}}\""),
+        src.contains("/// {count, plural, one {# item} other {# items}}"),
         "plural doc:\n{src}"
     );
 
