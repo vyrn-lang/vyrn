@@ -16,8 +16,7 @@
 /// A `Warning` changes no exit code and no output byte, unless the build passes
 /// `--deny-warnings`. An `Error` fails the load at the anchor. The anchor is a
 /// 1-based line and column, resolved against the module that imported the
-/// generator. A generator that returns a `String` writes `render(report(..))`,
-/// a `//@diag` line, until the last `String` generator is gone.
+/// generator.
 
 import { replace } from "std/strings"
 
@@ -49,8 +48,7 @@ fn word(severity: Severity) -> String {
     }
 }
 
-/// A newline in a message would end the directive and hand the rest to the
-/// parser as source, so it becomes a space.
+/// A report is one line, so a newline in a message becomes a space.
 fn oneLine(message: String) -> String {
     return replace(replace(message, "\n", " "), "\r", " ")
 }
@@ -62,36 +60,4 @@ fn atLeastOne(n: Int64) -> Int64 {
         return 1
     }
     return n
-}
-
-/// The line `render` writes for a report, which a test can compare.
-gen fn written(severity: Severity, file: String, line: Int64, col: Int64, message: String) -> String {
-    return render(report(severity, file, line, col, message))
-}
-
-test "a report is one directive line" {
-    assertEq(
-        written(Warning, "./users.tbl", 9, 3, "column `email` has no length limit"),
-        "//@diag warning ./users.tbl:9:3 column `email` has no length limit\n",
-    )
-}
-
-test "an error says error" {
-    assertEq(
-        written(Error, "./users.tbl", 14, 1, "column `id` is declared twice"),
-        "//@diag error ./users.tbl:14:1 column `id` is declared twice\n",
-    )
-}
-
-test "a message never breaks out of its line" {
-    assertEq(writtenHere(Warning, "two\nlines"), "//@diag warning - two lines\n")
-}
-
-/// The line `render` writes for a report with no position.
-gen fn writtenHere(severity: Severity, message: String) -> String {
-    return render(reportHere(severity, message))
-}
-
-test "a zero position is clamped, not lost" {
-    assertEq(written(Warning, "./a.tbl", 0, 0, "x"), "//@diag warning ./a.tbl:1:1 x\n")
 }

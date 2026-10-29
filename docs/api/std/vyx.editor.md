@@ -35,7 +35,7 @@ fn vyrnDefinitionVyx(root: String, path: String, line: Int64, col: Int64) -> Str
 ```
 
 The definition of the component tag at 1-based `line` and `col` of the
-`.vyx` at `path`, as an anchor in `//@origin` notation: the sibling
+`.vyx` at `path`, as a `path:line:col` anchor: the sibling
 `<Name>.vyx` at its first line, for a cursor on `<Name` or `</Name` in the
 template. `root` is the directory the generator was pointed at. Returns ""
 anywhere else, or when no such sibling exists.

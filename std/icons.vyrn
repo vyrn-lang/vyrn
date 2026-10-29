@@ -63,7 +63,7 @@ export gen fn iconsAt(
 ) -> Code {
     return match readFile(collection) {
         Ok(text) => iconsModule(text, collection, names, anchorFile, line, col),
-        Err(why) => anchored(anchorFile, collection, line, col, cannotRead(collection, why)),
+        Err(why) => reported([iconErr(anchorFile, collection, line, col, cannotRead(collection, why))]),
     }
 }
 
@@ -82,21 +82,38 @@ export gen fn iconsModule(
     line: Int64,
     col: Int64,
 ) -> Code {
+    let mut errs: Array<IconErr> = []
+    let code = iconsCode(collectionText, collectionPath, names, anchorFile, line, col, errs)
+    return reported(errs) + code
+}
+
+/// What [`iconsModule`] writes, with each refusal added to `errs`.
+gen fn iconsCode(
+    collectionText: String,
+    collectionPath: String,
+    names: String,
+    anchorFile: String,
+    line: Int64,
+    col: Int64,
+    errs: modify Array<IconErr>,
+) -> Code {
     let wanted = splitWhitespace(names)
     if wanted.length == 0 {
-        return anchored(
+        errs.push(iconErr(
             anchorFile,
             collectionPath,
             line,
             col,
             "icons(\"\{collectionPath}\", \"\") names no glyph — list the glyphs the program uses, separated by spaces",
-        )
+        ))
+        return vyrn""
     }
     let coll = iconCollection(collectionText, collectionPath)
     if coll.error != "" {
-        return anchored(anchorFile, collectionPath, line, col, coll.error)
+        errs.push(iconErr(anchorFile, collectionPath, line, col, coll.error))
+        return vyrn""
     }
-    return iconsEmit(coll, wanted, collectionPath, anchorFile, line, col)
+    return iconsEmit(coll, wanted, collectionPath, anchorFile, line, col, errs)
 }
 
 /// The parts of a collection that generating a glyph needs. `icons` and
@@ -275,6 +292,7 @@ gen fn iconsEmit(
     anchorFile: String,
     line: Int64,
     col: Int64,
+    errs: modify Array<IconErr>,
 ) -> Code {
     let mut body = vyrn""
     // Seed with the generated module's own names, so a glyph that collides
@@ -285,36 +303,33 @@ gen fn iconsEmit(
     }
     for want in wanted {
         if contains(want, ":") {
-            body = body
-            + anchored(
+            errs.push(iconErr(
                 anchorFile,
                 path,
                 line,
                 col,
                 "`\{want}` names a collection as well as a glyph — the collection is the first argument, so write `\{afterColon(want)}`",
-            )
+            ))
         } else {
             let fnName = camel(want)
             if includes(reservedNames(), fnName) {
-                body = body
-                + anchored(
+                errs.push(iconErr(
                     anchorFile,
                     path,
                     line,
                     col,
                     "`\{want}` becomes `\{fnName}()`, which the generated module itself needs (\{joinWith(reservedNames(), "`, `")}) — import the collection twice and take one glyph in each",
-                )
+                ))
             } else if includes(taken, fnName) {
-                body = body
-                + anchored(
+                errs.push(iconErr(
                     anchorFile,
                     path,
                     line,
                     col,
                     "`\{want}` and an earlier glyph in this import both become `\{fnName}()` — import the collection twice and take one glyph in each",
-                )
+                ))
             } else {
-                body = body + glyphSource(coll, want, fnName, path, anchorFile, line, col)
+                body = body + glyphSource(coll, want, fnName, path, anchorFile, line, col, errs)
                 taken.push(fnName.copy())
             }
         }
@@ -363,10 +378,12 @@ gen fn glyphSource(
     anchorFile: String,
     line: Int64,
     col: Int64,
+    errs: modify Array<IconErr>,
 ) -> Code {
     let found = resolveGlyph(coll, want, 0)
     if found.error != "" {
-        return anchored(anchorFile, path, line, col, found.error)
+        errs.push(iconErr(anchorFile, path, line, col, found.error))
+        return vyrn""
     }
     let glyphName = qualified(coll, want)
     return vyrn"""
@@ -547,19 +564,19 @@ export gen fn iconProvider(
         return report(Error, file, line, col, ask.error)
     }
     if ask.name == "" {
-        return report(
-            Error,
-            file,
-            line,
-            col,
-            "`<Icon>` needs a `name` — the glyph to draw, `name=\"\{bound[0]}:github\"`",
-        )
+        return report(Error, file, line, col, iconNoName(bound[0]))
     }
     let at = iconCollectionOf(ask.name, bound)
     if at.error != "" {
         return report(Error, file, line, col, at.error)
     }
     return iconProviderModule(at.collection, at.glyph, ask, file, line, col)
+}
+
+/// Why a tag with no name is refused, in the vocabulary of `collection`, the
+/// first one the provider binds.
+fn iconNoName(collection: String) -> String {
+    return "`<Icon>` needs a `name` — the glyph to draw, `name=\"\{collection}:github\"`"
 }
 
 type IconAsk = { name: String, size: String, label: String, class: String, error: String }
@@ -704,12 +721,24 @@ fn iconAttrNamed(
     out.push(A(n, v))
 }
 
-/// Anchors in the collection file when `anchorFile` is empty.
-gen fn anchored(anchorFile: String, path: String, line: Int64, col: Int64, why: String) -> Code {
+/// One refusal: the file, line and column it is anchored at, and its message.
+type IconErr = { file: String, line: Int64, col: Int64, message: String }
+
+/// A refusal anchored in the collection file when `anchorFile` is empty.
+gen fn iconErr(anchorFile: String, path: String, line: Int64, col: Int64, why: String) -> IconErr {
     if anchorFile == "" {
-        return report(Error, path, 1, 1, why)
+        return IconErr { file: path.copy(), line: 1, col: 1, message: why.copy() }
     }
-    return report(Error, anchorFile, line, col, why)
+    return IconErr { file: anchorFile.copy(), line: line, col: col, message: why.copy() }
+}
+
+/// The reports of `errs`, each an `Error`.
+gen fn reported(errs: Array<IconErr>) -> Code {
+    let mut out = vyrn""
+    for e in errs {
+        out = out + report(Error, e.file, e.line, e.col, e.message)
+    }
+    return out
 }
 
 /// `circle-check` becomes `circleCheck`; `1-circle` becomes `icon1Circle`,
@@ -785,14 +814,25 @@ fn jsonKind(j: Json) -> String {
     }
 }
 
-/// The text `iconsModule` writes, which a test can read.
+/// The refusals and the code `iconsModule` writes, as text a test can read.
 gen fn moduleText(text: String, path: String, names: String, anchor: String, line: Int64, col: Int64) -> String {
-    return render(iconsModule(text, path, names, anchor, line, col))
+    let mut errs: Array<IconErr> = []
+    let code = iconsCode(text, path, names, anchor, line, col, errs)
+    return errsText(errs) + render(code)
 }
 
-/// The text `iconProvider` writes, which a test can read.
+/// The code `iconProvider` writes, which a test can read.
 gen fn providerText(attrs: String, file: String, line: Int64, col: Int64, collections: String) -> String {
     return render(iconProvider(attrs, file, line, col, collections))
+}
+
+/// One `refused <file>:<line>:<col> <message>` line per refusal.
+gen fn errsText(errs: Array<IconErr>) -> String {
+    let mut out = ""
+    for e in errs {
+        out = out + "refused \{e.file}:\{e.line.toString()}:\{e.col.toString()} \{e.message}\n"
+    }
+    return out
 }
 
 /// A test collection: a width override, an alias, and a transforming alias.
@@ -819,7 +859,7 @@ test "a named glyph becomes one function over the shared helper" {
     assert(contains(src, "export fn github() -> Html {"))
     assert(contains(src, "A(\"aria-hidden\", \"true\")"))
     assert(contains(src, "glyph(\"0 0 16 16\", \"<path d=\\\"M8 0 L16 8Z\\\"/>\")"))
-    assert(contains(src, "//@diag") == false)
+    assert(contains(src, "refused ") == false)
 }
 
 test "the collection's licence is the generated header's own line" {
@@ -856,7 +896,7 @@ test "an unknown glyph is a report with the nearest name, and no declaration" {
 
 test "a report lands on the anchor the caller gave" {
     let src = moduleText(toyCollection(), "toy", "githup", "./Badge.vyx", 7, 1)
-    assert(contains(src, "//@diag error ./Badge.vyx:7:1 the collection `toy` has no glyph"))
+    assert(contains(src, "refused ./Badge.vyx:7:1 the collection `toy` has no glyph"))
 }
 
 test "an alias asking for a transform is refused, not rendered unturned" {
@@ -948,25 +988,24 @@ test "one bound collection takes a bare name" {
 }
 
 test "with two bound collections a bare name is refused, naming the vocabulary" {
-    let src = providerText("{\"name\":\"github\"}", "./B.vyx", 7, 1, "toy other")
-    assert(contains(src, "//@diag error ./B.vyx:7:1"))
-    assert(contains(src, "`github` names no collection, and this provider binds `toy`, `other`"))
-    assert(contains(src, "iconsAt") == false)
+    let at = iconCollectionOf("github", ["toy", "other"])
+    assert(contains(at.error, "`github` names no collection, and this provider binds `toy`, `other`"))
+    assertEq(providerText("{\"name\":\"github\"}", "./B.vyx", 7, 1, "toy other"), "")
 }
 
 test "a prefix the provider does not bind is refused at the tag" {
-    let src = providerText("{\"name\":\"brand:github\"}", "./B.vyx", 7, 1, "toy")
-    assert(contains(src, "names the collection `brand`, and this provider binds `toy`"))
+    let at = iconCollectionOf("brand:github", ["toy"])
+    assert(contains(at.error, "names the collection `brand`, and this provider binds `toy`"))
 }
 
 test "an attribute the provider does not know is refused by name" {
-    let src = providerText("{\"name\":\"toy:github\",\"colour\":\"red\"}", "./B.vyx", 7, 1, "toy")
-    assert(contains(src, "`<Icon>` has no `colour` attribute — it takes `name`"))
+    let ask = iconRequest("{\"name\":\"toy:github\",\"colour\":\"red\"}")
+    assert(contains(ask.error, "`<Icon>` has no `colour` attribute — it takes `name`"))
 }
 
 test "a tag with no name says what one looks like in this project's vocabulary" {
-    let src = providerText("{}", "./B.vyx", 7, 1, "toy")
-    assert(contains(src, "`<Icon>` needs a `name` — the glyph to draw, `name=\"toy:github\"`"))
+    assertEq(iconRequest("{}").name, "")
+    assert(contains(iconNoName("toy"), "`<Icon>` needs a `name` — the glyph to draw, `name=\"toy:github\"`"))
 }
 
 test "size, label and class reach the use site" {

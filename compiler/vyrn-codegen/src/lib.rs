@@ -266,7 +266,9 @@ pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
         // A quote's part: its text, the key of the module that wrote it, and
         // the part's line and column there.
         ("text", &[I32, I32, I64, I64], &[I64]),
-        ("raw", &[I32], &[I64]),
+        // A String as the call site's data: a reflected type's spelling, or a
+        // companion's answer.
+        ("data", &[I32], &[I64]),
         // A hole's value: its tag, its word, its String, and the indentation
         // of the hole's line.
         ("splice", &[I32, I64, I32, I32], &[I64]),
@@ -275,7 +277,6 @@ pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
         ("diag", &[I32, I32, I32], &[I64]),
         ("codeAt", &[I32, I64, I64, I32], &[I64]),
         ("at", &[I64, I32, I64, I64], &[I64]),
-        ("rawAt", &[I32, I32, I64, I64], &[I64]),
         ("concat", &[I64, I64], &[I64]),
         ("render", &[I64], &[I64]),
         // `render` answers with a length and the guest allocates, then `fetch`

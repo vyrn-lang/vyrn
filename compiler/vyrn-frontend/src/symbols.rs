@@ -133,7 +133,7 @@ pub struct Analysis {
     pub namespaces: Vec<NamespaceInfo>,
     /// The origin tables of every generated module reachable from this document,
     /// for hover, completion and go-to-definition inside generator
-    /// input files. Empty without a linker or without `//@origin` directives.
+    /// input files. Empty without a linker or without a span with an origin.
     pub origins: crate::origin::OriginMaps,
     /// Diagnostics relocated to a generator input file such as a `.vyx`.
     /// The LSP publishes them against that file's URI; they are not
@@ -2044,13 +2044,9 @@ fn namespace_members(
     let qualified = (program.functions.iter().map(|f| (&f.name, &f.export_to)))
         .chain(program.protocols.iter().map(|p| (&p.name, &p.export_to)))
         .chain(program.type_decls.iter().map(|t| (&t.name, &t.export_to)));
-    // The importer is the open document, which no generator wrote, so no
-    // declarer is asked.
-    let judged = || crate::loader::judged_as(importer, |_| None);
+    let judged = || crate::loader::Judged::document(importer);
     let shut_out: std::collections::HashSet<&str> = qualified
-        .filter(|(_, to)| {
-            !judged().is_some_and(|j| crate::loader::admits(to, target, j, opts, &mut real_paths))
-        })
+        .filter(|(_, to)| !crate::loader::admits(to, target, judged(), opts, &mut real_paths))
         .map(|(name, _)| name.as_str())
         .collect();
     let exported = |of, name: &str, exported| {

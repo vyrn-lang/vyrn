@@ -653,10 +653,10 @@ gen fn twLoaded(theme: String, read: Result<String, String>) -> Code {
     // as a theme fault.
     let got = match read {
         Ok(v) => TwRead { data: v.copy(), err: "" },
-        Err(e) => TwRead { data: "", err: e.copy() },
+        Err(e) => TwRead { data: "", err: cannotReadTheme(theme, e) },
     }
     if got.err != "" {
-        return reportHere(Error, cannotReadTheme(theme, got.err))
+        return reportHere(Error, got.err)
     }
     let parsed = twParseTheme(got.data)
     if parsed.ok == false {
@@ -677,11 +677,8 @@ gen fn twLoaded(theme: String, read: Result<String, String>) -> Code {
     return twBuildModule(parsed, vocab, twAxisOf(parsed, "breakpoints"), twSafelist(parsed))
 }
 
-/// The text `twLoaded` writes, which a test can read.
-gen fn loadedText(theme: String, read: Result<String, String>) -> String {
-    return render(twLoaded(theme, read))
-}
-
+/// Why a theme that cannot be read is refused: before parsing, so the parser
+/// never mislabels a failed read as a theme fault.
 fn cannotReadTheme(theme: String, why: String) -> String {
     return "std/tw cannot read the theme `\{theme}`: \{why} — a theme is a flat theme.json of design tokens"
 }
@@ -719,10 +716,8 @@ test "twAxisOf dashes color shade paths and keeps theme order" {
 }
 
 test "a theme that cannot be read is its own diagnostic, not a parse error" {
-    let out = loadedText("./missing/theme.json", Err("No such file or directory"))
-    assert(
-        contains(out, "//@diag error - std/tw cannot read the theme `./missing/theme.json`: No such file or directory"),
-    )
+    let out = cannotReadTheme("./missing/theme.json", "No such file or directory")
+    assert(contains(out, "std/tw cannot read the theme `./missing/theme.json`: No such file or directory"))
     assert(contains(out, "not a usable theme") == false)
 }
 

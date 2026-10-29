@@ -112,17 +112,42 @@ export fn levelOf(p: HintPolicy, code: String, dflt: Severity) -> String {
     }
 }
 
-/// The reports `findings` earn in `file` under `p`, in order: a finding whose
-/// rule is off, or whose line `src` waives, earns none. `src` is the text of
-/// `file`; the waiver markers are read from it.
-export gen fn reports(p: HintPolicy, src: String, file: String, findings: Array<Finding>) -> Code {
-    let mut out = vyrn""
+/// The `findings` that earn a report under `p`, in order, each at the severity
+/// `p` gives it: a finding whose rule is off, or whose line `src` waives, earns
+/// none. `src` is the text of the file the findings are in; the waiver markers
+/// are read from it.
+export to "./vyx-hints" gen fn earned(p: HintPolicy, src: String, findings: Array<Finding>) -> Array<Finding> {
+    let mut out: Array<Finding> = []
     for f in findings {
         let level = levelOf(p, f.code, f.dflt)
         if level != "off" && waived(src, f.line, f.code) == false {
             let severity = if level == "error" { Error } else { Warning }
-            out = out + report(severity, file, f.line, f.col, "\{f.code}: \{f.message}")
+            out.push(Finding { code: f.code.copy(), dflt: severity, line: f.line, col: f.col, message: f.message.copy() })
         }
+    }
+    return out
+}
+
+/// The reports `findings` earn in `file` under `p` ([`earned`]). `src` is the
+/// text of `file`.
+export gen fn reports(p: HintPolicy, src: String, file: String, findings: Array<Finding>) -> Code {
+    let mut out = vyrn""
+    for f in earned(p, src, findings) {
+        out = out + report(f.dflt, file, f.line, f.col, "\{f.code}: \{f.message}")
+    }
+    return out
+}
+
+/// `findings` in `file` as text, one `<severity> <file>:<line>:<col> <code>:
+/// <message>` line each, which a test can compare.
+export to "./vyx-hints" gen fn findingsText(findings: Array<Finding>, file: String) -> String {
+    let mut out = ""
+    for f in findings {
+        let severity = match f.dflt {
+            Warning => "warning",
+            Error => "error",
+        }
+        out = out + "\{severity} \{file}:\{f.line.toString()}:\{f.col.toString()} \{f.code}: \{f.message}\n"
     }
     return out
 }
@@ -357,7 +382,7 @@ test "a malformed config is refused, never a silent no-op" {
 /// which a test can read.
 gen fn reportText(p: HintPolicy, src: String, code: String, line: Int64, col: Int64) -> String {
     let found: Array<Finding> = [Finding { code: code.copy(), dflt: Warning, line: line, col: col, message: "say why" }]
-    return render(reports(p, src, "f.vyx", found))
+    return findingsText(earned(p, src, found), "f.vyx")
 }
 
 test "an off rule emits nothing" {
@@ -367,10 +392,10 @@ test "an off rule emits nothing" {
 }
 
 test "a report carries its code, its anchor and its severity" {
-    assertEq(reportText(noPolicy(), "x\n", "a/b", 3, 7), "//@diag warning f.vyx:3:7 a/b: say why\n")
+    assertEq(reportText(noPolicy(), "x\n", "a/b", 3, 7), "warning f.vyx:3:7 a/b: say why\n")
     assertEq(
         reportText(policyOr("{\"hints\": {\"a/b\": \"error\"}}"), "x\n", "a/b", 3, 7),
-        "//@diag error f.vyx:3:7 a/b: say why\n",
+        "error f.vyx:3:7 a/b: say why\n",
     )
 }
 

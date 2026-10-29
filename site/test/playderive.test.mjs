@@ -8,15 +8,15 @@ import { runVyrn } from "../../web/wasi-min.js";
 const root = new URL("../../", import.meta.url);
 const bytes = await readFile(fileURLToPath(new URL("out/play.wasm", root)));
 
-const src = `export gen fn fieldsOf(t: TypeArg) -> String {
-    let mut out = ""
+const src = `export gen fn fieldsOf(t: TypeArg) -> Code {
+    let mut out = vyrn""
     for r in t.roots {
-        let n = t.nodes[r].shape
-        let mut names = ""
-        for m in n.members {
-            names = names + " " + m.name
+        let n = t.nodes[r]
+        let mut words = n.shape.kind.copy()
+        for m in n.shape.members {
+            words = words + " " + m.name
         }
-        out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String {\n    return \\"" + n.kind + names + "\\"\n}\n"
+        out = out + vyrn"fn \\{name(n.shape.name)}(v: \\{n.code}) -> String {\\n    return \\{words}\\n}\\n"
     }
     return out
 }
@@ -42,7 +42,7 @@ test("derive runs its generator in the page and the program prints what it wrote
 
 test("a generator that asks the page for more than its TypeArg is refused, not run", async () => {
   const play = await instantiatePlay(bytes);
-  const reads = src.replace('let mut out = ""', 'let mut out = moduleInterface("./x").types.length.toString()');
+  const reads = src.replace("let mut words = n.shape.kind.copy()", 'let mut words = moduleInterface("./x").types.length.toString()');
   const { diagnostics } = play.compile(reads);
   assert.deepEqual(
     diagnostics.map((d) => d.message),

@@ -765,8 +765,8 @@ mod tests {
         // The `.vyx` `cls` shape: a generator-synthesized module has a fn whose
         // PARAM `cls` shadows `std/html`'s exported `cls`, both linked together.
         let html = "export fn cls(s: String) -> String { return s.copy() }";
-        let gen = "export gen fn widgets(dir: String) -> String { \
-                       return \"export fn item(cls: String) -> String { return cls.copy() }\" }";
+        let gen = "export gen fn widgets(dir: String) -> Code { \
+                       return vyrn\"export fn item(cls: String) -> String { return cls.copy() }\" }";
         let root = "import { cls } from \"./html\" \
                     import { widgets } from \"./gen\" \
                     import { item } from widgets(\"./w\") \
@@ -1244,11 +1244,12 @@ mod gen_tests {
     #[test]
     fn distinct_args_make_distinct_modules_same_args_dedup() {
         // Two calls with different args give two modules with different names.
-        let gen = "export gen fn mk(tag: String) -> String { \
-                       return \"export fn tag\" + tag + \"() -> Int64 { return \" + tag + \" }\" }";
+        let gen = "export gen fn mk(tag: Int64) -> Code { \
+                       let f = name(\"tag\" + tag.toString()) \
+                       return vyrn\"export fn \\{f}() -> Int64 { return \\{tag} }\" }";
         let root = "import { mk } from \"./gen\" \
-                    import { tag1 } from mk(\"1\") \
-                    import { tag2 } from mk(\"2\") \
+                    import { tag1 } from mk(1) \
+                    import { tag2 } from mk(2) \
                     fn main() -> Int64 { return tag1() + tag2() }";
         assert_eq!(run(root, &[("gen.vyrn", gen)]).unwrap(), 3);
     }
@@ -1257,8 +1258,8 @@ mod gen_tests {
     fn same_resolved_path_different_spellings_share_one_stateful_module() {
         // Path args spelled differently (`./data`, `./x/../data`) that resolve to one
         // file synthesize ONE module, so both importers mutate the same `n`.
-        let gen = "export gen fn mk(dir: String) -> String { \
-                       return \"let mut n: Int64 = 0\\n\
+        let gen = "export gen fn mk(dir: String) -> Code { \
+                       return vyrn\"let mut n: Int64 = 0\\n\
                                 export fn bump() -> Int64 { n = n + 1\\nreturn n }\\n\" }";
         let a = "import { mk } from \"./gen\" \
                  import { bump } from mk(\"./data\") \
@@ -1280,8 +1281,8 @@ mod gen_tests {
     fn different_resolved_paths_stay_distinct_modules() {
         // Calls resolving to different targets stay two modules: each emits `bump`, so
         // the flat namespace collides.
-        let gen = "export gen fn mk(dir: String) -> String { \
-                       return \"export fn bump() -> Int64 { return 1 }\\n\" }";
+        let gen = "export gen fn mk(dir: String) -> Code { \
+                       return vyrn\"export fn bump() -> Int64 { return 1 }\\n\" }";
         let a = "import { mk } from \"./gen\" \
                  import { bump } from mk(\"./data\") \
                  export fn a() -> Int64 { return bump() }";
@@ -1297,9 +1298,9 @@ mod gen_tests {
 
     #[test]
     fn generator_trap_becomes_a_load_diagnostic() {
-        let gen = "export gen fn bad(x: Int64) -> String { \
+        let gen = "export gen fn bad(x: Int64) -> Code { \
                        let q = 1 / x \
-                       return \"\" }";
+                       return vyrn\"\" }";
         let root = "import { bad } from \"./gen\" \
                     import { z } from bad(0) \
                     fn main() -> Int64 { return 0 }";
@@ -1309,8 +1310,8 @@ mod gen_tests {
 
     #[test]
     fn generated_name_collision_is_a_load_error() {
-        let gen = "export gen fn mk(d: String) -> String { \
-                       return \"export fn dup() -> Int64 { return 1 }\" }";
+        let gen = "export gen fn mk(d: String) -> Code { \
+                       return vyrn\"export fn dup() -> Int64 { return 1 }\" }";
         // The root already defines `dup`, so the generated `dup` collides.
         let root = "import { mk } from \"./gen\" \
                     import { dup } from mk(\"./x\") \
@@ -1322,7 +1323,7 @@ mod gen_tests {
 
     #[test]
     fn non_constant_generator_argument_is_rejected() {
-        let gen = "export gen fn mk(d: String) -> String { return \"\" }";
+        let gen = "export gen fn mk(d: String) -> Code { return vyrn\"\" }";
         let root = "import { mk } from \"./gen\" \
                     import { x } from mk(readLine()) \
                     fn main() -> Int64 { return 0 }";
@@ -1348,11 +1349,11 @@ mod gen_tests {
                     export type Req = { book: Book }";
         let contract = "import { Req } from \"./wire\" \
                         export fn make(r: Req) -> Req { return r }";
-        let gen = "export gen fn cnt(path: String) -> String { \
+        let gen = "export gen fn cnt(path: String) -> Code { \
                        let iface = moduleInterface(path) \
                        let mut n = 0 \
                        for t in iface.types { n = n + 1 } \
-                       return \"export fn n() -> Int64 { return \" + \"\\{n}\" + \" }\\n\" }";
+                       return vyrn\"export fn n() -> Int64 { return \\{n} }\\n\" }";
         let root = "import { cnt } from \"./gen\" \
                     import { n } from cnt(\"./contract\") \
                     fn main() -> Int64 { return n() }";
@@ -1381,11 +1382,12 @@ mod gen_tests {
         let contract = "import { T } from \"./wire\" export fn f(x: T) -> T { return x }";
         // The generator's output embeds the closure's field spelling, so a real
         // edit to `wire.vyrn` produces FRESH output, not just a re-run.
-        let gen = "export gen fn refl(path: String) -> String { \
+        let gen = "export gen fn refl(path: String) -> Code { \
                        let iface = moduleInterface(path) \
                        let mut src = \"\" \
                        for t in iface.types { src = src + t.source } \
-                       return \"export fn shape() -> Int64 { return \" + \"\\{src.byteLength}\" + \" }\\n\" }";
+                       let n = src.byteLength \
+                       return vyrn\"export fn shape() -> Int64 { return \\{n} }\\n\" }";
         let root = "import { refl } from \"./gen\" \
                     import { shape } from refl(\"./contract\") \
                     fn main() -> Int64 { return shape() }";
@@ -1430,7 +1432,7 @@ mod gen_tests {
     fn editing_the_generator_or_its_imports_invalidates_the_cache() {
         let helper = r#"export fn tag() -> String { return "one" }"#;
         let gen = r#"import { tag } from "./helper"
-export gen fn emit(x: String) -> String { return "export fn shape() -> String { return \"" + tag() + "\" }" }"#;
+export gen fn emit(x: String) -> Code { let t = tag() return vyrn"export fn shape() -> String { return \{t} }" }"#;
         let root = r#"import { emit } from "./gen"
 import { shape } from emit("./seed")
 fn main() -> Int64 { return shape().byteLength }"#;
@@ -1522,9 +1524,9 @@ fn main() -> Int64 { return shape().byteLength }"#;
         let contract = "import { A } from \"./wireA\" \
                         import { B } from \"./wireB\" \
                         export fn f(a: A) -> B { return B { t: T { b: 0 } } }";
-        let gen = "export gen fn cnt(path: String) -> String { \
+        let gen = "export gen fn cnt(path: String) -> Code { \
                        let iface = moduleInterface(path) \
-                       return \"export fn z() -> Int64 { return 0 }\\n\" }";
+                       return vyrn\"export fn z() -> Int64 { return 0 }\\n\" }";
         let root = "import { cnt } from \"./gen\" \
                     import { z } from cnt(\"./contract\") \
                     fn main() -> Int64 { return z() }";
@@ -1549,10 +1551,10 @@ fn main() -> Int64 { return shape().byteLength }"#;
         // A synthesized module, keyed by a banner, resolves its relative imports against
         // the real importer's directory.
         let contract = "export fn calc() -> Int64 { return 21 }";
-        let gen = "export gen fn wrap(path: String) -> String { \
+        let gen = "export gen fn wrap(path: String) -> Code { \
                        let iface = moduleInterface(path) \
-                       return \"import { calc } from \\\"\" + path + \"\\\"\\n\" \
-                            + \"export fn go() -> Int64 { return calc() + calc() }\\n\" }";
+                       return vyrn\"import { calc } from \\{path}\\n\" \
+                            + vyrn\"export fn go() -> Int64 { return calc() + calc() }\\n\" }";
         let root = "import { wrap } from \"./gen\" \
                     import { go } from wrap(\"./contract\") \
                     fn main() -> Int64 { return go() }";
@@ -1567,15 +1569,16 @@ fn main() -> Int64 { return shape().byteLength }"#;
         // A generator imported by a generated module resolves its path args against the
         // real importing file's directory, not the banner key. `outer` emits a module
         // importing `inner("./sub/data")`, which must read `sub/data.vyrn`.
-        let gen = "export gen fn inner(path: String) -> String { \
+        let gen = "export gen fn inner(path: String) -> Code { \
                        let iface = moduleInterface(path) \
                        let mut n = 0 \
                        for f in iface.functions { n = n + 1 } \
-                       return \"export fn cnt() -> Int64 { return \" + \"\\{n}\" + \" }\\n\" } \
-                   export gen fn outer(dummy: String) -> String { \
-                       return \"import { inner } from \\\"./gen\\\"\\n\" \
-                            + \"import { cnt } from inner(\\\"./sub/data\\\")\\n\" \
-                            + \"export fn go() -> Int64 { return cnt() }\\n\" }";
+                       return vyrn\"export fn cnt() -> Int64 { return \\{n} }\\n\" } \
+                   export gen fn outer(dummy: String) -> Code { \
+                       let g = \"./gen\"                        let d = \"./sub/data\" \
+                       return vyrn\"import { inner } from \\{g}\\n\" \
+                            + vyrn\"import { cnt } from inner(\\{d})\\n\" \
+                            + vyrn\"export fn go() -> Int64 { return cnt() }\\n\" }";
         let data = "export fn a() -> Int64 { return 1 } export fn b() -> Int64 { return 2 }";
         let root = "import { outer } from \"./gen\" \
                     import { go } from outer(\"x\") \
@@ -1591,10 +1594,10 @@ fn main() -> Int64 { return shape().byteLength }"#;
     fn generated_module_may_declare_module_state() {
         // Module state is legal in a generated module. The generated global
         // initializes before `main` and persists across calls from the root.
-        let gen = "export gen fn mk(tag: String) -> String { \
-                       return \"let mut cur = 10\\n\" \
-                            + \"export fn bump() { cur = cur + 1 }\\n\" \
-                            + \"export fn peek() -> Int64 { return cur }\\n\" }";
+        let gen = "export gen fn mk(tag: String) -> Code { \
+                       return vyrn\"let mut cur = 10\\n\" \
+                            + vyrn\"export fn bump() { cur = cur + 1 }\\n\" \
+                            + vyrn\"export fn peek() -> Int64 { return cur }\\n\" }";
         let root = "import { mk } from \"./gen\" \
                     import { bump, peek } from mk(\"x\") \
                     fn main() -> Int64 { bump() bump() return peek() }";
@@ -1605,24 +1608,35 @@ fn main() -> Int64 { return shape().byteLength }"#;
     #[test]
     fn generated_module_calls_back_into_its_importer() {
         // The RPC dispatcher pattern: a generated module invokes a plain function
-        // defined in the module that imported it (the callback convention). Names
-        // owned by the importer are visible to generated code without an import.
-        let gen = "export gen fn cb(tag: String) -> String { \
-                       return \"export fn dispatch() -> Int64 { return onEvent() + 1 }\\n\" }";
+        // defined in the module that imported it (the callback convention). A
+        // name the call site wrote resolves in the importer without an import.
+        let gen = "export gen fn cb(handler: String) -> Code { \
+                       let h = name(handler) \
+                       return vyrn\"export fn dispatch() -> Int64 { return \\{h}() + 1 }\\n\" }";
         let root = "import { cb } from \"./gen\" \
-                    import { dispatch } from cb(\"x\") \
+                    import { dispatch } from cb(\"onEvent\") \
                     fn onEvent() -> Int64 { return 41 } \
                     fn main() -> Int64 { return dispatch() }";
         assert_eq!(run(root, &[("gen.vyrn", gen)]).unwrap(), 42);
+    }
+
+    #[test]
+    fn a_name_a_generator_quote_spells_is_not_its_importers() {
+        // Quote text is the generator module's own: a name it spells resolves
+        // there, whoever imports the generated module.
+        let gen = "export gen fn cb(tag: String) -> Code {                        return vyrn\"export fn dispatch() -> Int64 { return onEvent() + 1 }\n\" }";
+        let root = "import { cb } from \"./gen\"                     import { dispatch } from cb(\"x\")                     fn onEvent() -> Int64 { return 41 }                     fn main() -> Int64 { return dispatch() }";
+        let e = gen_err(root, &[("gen.vyrn", gen)]);
+        assert!(e.contains("function `onEvent` is defined in"), "{e}");
     }
 
     /// A `derive` generator that writes, for each root, a function returning
     /// `word`'s byte length.
     fn derive_gen(word: &str) -> String {
         format!(
-            "export gen fn tag(t: TypeArg) -> String {{\n    let mut out = \"\"\n    \
-             for r in t.roots {{\n        let n = t.nodes[r].shape\n        \
-             out = out + \"fn \" + n.name + \"(v: \" + n.spelling + \") -> String {{ return \\\"{word}\\\" }}\\n\"\n    \
+            "export gen fn tag(t: TypeArg) -> Code {{\n    let mut out = vyrn\"\"\n    \
+             let w = \"{word}\"\n    for r in t.roots {{\n        let n = t.nodes[r]\n        \
+             out = out + vyrn\"fn \\{{name(n.shape.name)}}(v: \\{{n.code}}) -> String {{ return \\{{w}} }}\\n\"\n    \
              }}\n    return out\n}}\n"
         )
     }
@@ -1653,7 +1667,7 @@ fn main() -> Int64 { return shape().byteLength }"#;
     /// A hit gives the cold load's diagnostics, byte for byte.
     #[test]
     fn a_derive_hit_gives_the_same_diagnostics() {
-        let gen = derive_gen("one").replace("\\\"one\\\"", "7");
+        let gen = derive_gen("one").replace("let w = \"one\"", "let w = 7");
         let r = CachingResolver::new(&[("gen.vyrn", &gen)]);
         let before = gen_run_count();
         let cold = derive_with(DERIVE_ROOT, &r).expect_err("the written code is refused");
@@ -1664,7 +1678,7 @@ fn main() -> Int64 { return shape().byteLength }"#;
     /// A refused generator writes no entry, cold or warm.
     #[test]
     fn a_refused_derive_generator_writes_no_entry() {
-        let gen = derive_gen("one").replace("let mut out = \"\"", "let mut out = 1");
+        let gen = derive_gen("one").replace("let mut out = vyrn\"\"", "let mut out = 1");
         let r = CachingResolver::new(&[("gen.vyrn", &gen)]);
         let cold = derive_with(DERIVE_ROOT, &r).expect_err("the generator is refused");
         assert!(r.cache.borrow().is_empty(), "cold: no entry");
@@ -1708,10 +1722,10 @@ fn main() -> Int64 { return shape().byteLength }"#;
         // One module may export several `gen fn`s; distinct generators over the
         // same arguments must not collide in the content-addressed cache (the
         // cache key includes the generator name).
-        let gen = "export gen fn a(p: String) -> String { \
-                       return \"export fn which() -> Int64 { return 1 }\" } \
-                   export gen fn b(p: String) -> String { \
-                       return \"export fn which() -> Int64 { return 2 }\" }";
+        let gen = "export gen fn a(p: String) -> Code { \
+                       return vyrn\"export fn which() -> Int64 { return 1 }\" } \
+                   export gen fn b(p: String) -> Code { \
+                       return vyrn\"export fn which() -> Int64 { return 2 }\" }";
         let root_a = "import { a } from \"./gen\" \
                       import { which } from a(\"./x\") \
                       fn main() -> Int64 { return which() }";
@@ -1729,10 +1743,10 @@ fn main() -> Int64 { return shape().byteLength }"#;
 
     #[test]
     fn cache_hit_skips_the_second_run_and_input_change_invalidates() {
-        let gen = "export gen fn consts(dir: String) -> String { \
+        let gen = "export gen fn consts(dir: String) -> Code { \
                        return match readFile(\"./data/n.txt\") { \
-                           Ok(s) => \"export fn n() -> String { return \\\"\" + s + \"\\\" }\", \
-                           Err(e) => e } }";
+                           Ok(s) => vyrn\"export fn n() -> String { return \\{s} }\", \
+                           Err(e) => vyrn\"\" } }";
         let root = "import { consts } from \"./gen\" \
                     import { n } from consts(\"./data\") \
                     fn main() -> Int64 { return 0 }";
@@ -1752,11 +1766,10 @@ fn main() -> Int64 { return shape().byteLength }"#;
 
     /// A generator that COUNTS the entries of a listed directory: the site's
     /// `repo.vyrn` in miniature. `-1` when the directory is not there at all.
-    const COUNTER: &str = "export gen fn count(dir: String) -> String { \
+    const COUNTER: &str = "export gen fn count(dir: String) -> Code { \
                                return match listDir(dir) { \
-                                   Ok(names) => \"export fn n() -> Int64 { return \" \
-                                       + names.length.toString() + \" }\", \
-                                   Err(e) => \"export fn n() -> Int64 { return 0 - 1 }\", \
+                                   Ok(names) => vyrn\"export fn n() -> Int64 { return \\{names.length} }\", \
+                                   Err(e) => vyrn\"export fn n() -> Int64 { return 0 - 1 }\", \
                                } }";
     const COUNTER_ROOT: &str = "import { count } from \"./gen\" \
                                 import { n } from count(\"./data\") \
@@ -1820,11 +1833,11 @@ fn main() -> Int64 { return shape().byteLength }"#;
     #[test]
     fn a_kinds_listing_with_a_subdirectory_hits_and_a_changed_kind_misses() {
         // The byte lengths tell `b` from `b/`, so the answer follows the kind.
-        let gen = "export gen fn kinds(dir: String) -> String { \
+        let gen = "export gen fn kinds(dir: String) -> Code { \
                        let mut n = 0 \
                        if let Ok(names) = listDirKinds(dir) { \
                            for s in names { n = n + s.byteLength } } \
-                       return \"export fn n() -> Int64 { return \" + n.toString() + \" }\" }";
+                       return vyrn\"export fn n() -> Int64 { return \\{n} }\" }";
         let root = "import { kinds } from \"./gen\" \
                     import { n } from kinds(\"./data\") \
                     fn main() -> Int64 { return n() }";
@@ -1889,8 +1902,8 @@ fn main() -> Int64 { return shape().byteLength }"#;
     #[test]
     fn generator_purity_violation_is_reported() {
         // A `gen fn` that writes a file fails the comptime-purity check.
-        let gen = "export gen fn bad(d: String) -> String { \
-                       let w = writeFile(\"x\", \"y\") return \"\" }";
+        let gen = "export gen fn bad(d: String) -> Code { \
+                       let w = writeFile(\"x\", \"y\") return vyrn\"\" }";
         let root = "import { bad } from \"./gen\" \
                     import { z } from bad(\"./d\") \
                     fn main() -> Int64 { return 0 }";
@@ -1902,10 +1915,10 @@ fn main() -> Int64 { return shape().byteLength }"#;
     fn same_relative_arg_in_different_dirs_does_not_collide_in_the_cache() {
         // Two modules in different directories call `consts("./data")`, each `./data` a
         // different file; the key folds in resolved inputs, so they never share an entry.
-        let gen = "export gen fn consts(dir: String) -> String { \
+        let gen = "export gen fn consts(dir: String) -> Code { \
                        return match readFile(dir + \"/n.txt\") { \
-                           Ok(s) => \"export fn val() -> Int64 { return \" + s + \" }\", \
-                           Err(e) => e } }";
+                           Ok(s) => vyrn\"export fn val() -> Int64 { return \\{parse(s) ?? 0} }\", \
+                           Err(e) => vyrn\"\" } }";
         let a = "import { consts } from \"../gen\" \
                  import * as g from consts(\"./data\") \
                  export fn na() -> Int64 { return g.val() }";
@@ -1931,7 +1944,7 @@ fn main() -> Int64 { return shape().byteLength }"#;
     /// generated module links `std/runtime`, which `map()` supplies.
     #[test]
     fn analyze_linked_runs_a_generator_import() {
-        let gen = "export gen fn mk(d: String) -> String {                        return \"export fn magic() -> Int64 { return 7 }\" }";
+        let gen = "export gen fn mk(d: String) -> Code {                        return vyrn\"export fn magic() -> Int64 { return 7 }\" }";
         let root = "import { mk } from \"./gen\"
                     import { magic } from mk(\"./data\")
                     fn main() -> Int64 { return magic() }";
@@ -1959,8 +1972,8 @@ fn main() -> Int64 { return shape().byteLength }"#;
     #[test]
     fn generator_over_output_cap_fails_loudly() {
         set_gen_budgets_for_test(None, Some(5));
-        let gen = "export gen fn big(d: String) -> String { \
-                       return \"this is far more than five bytes\" }";
+        let gen = "export gen fn big(d: String) -> Code { \
+                       return vyrn\"export fn far() -> Int64 { return 5 }\" }";
         let root = "import { big } from \"./gen\" \
                     import { z } from big(\"./d\") \
                     fn main() -> Int64 { return 0 }";
@@ -1972,10 +1985,10 @@ fn main() -> Int64 { return shape().byteLength }"#;
     #[test]
     fn identical_importer_and_arg_still_hits_the_cache() {
         // Same importer, same arg: a re-load hits the cache, so the generation runs once.
-        let gen = "export gen fn consts(dir: String) -> String { \
+        let gen = "export gen fn consts(dir: String) -> Code { \
                        return match readFile(dir + \"/n.txt\") { \
-                           Ok(s) => \"export fn val() -> Int64 { return \" + s + \" }\", \
-                           Err(e) => e } }";
+                           Ok(s) => vyrn\"export fn val() -> Int64 { return \\{parse(s) ?? 0} }\", \
+                           Err(e) => vyrn\"\" } }";
         let client = "import { consts } from \"../gen\" \
                       import { val } from consts(\"./data\") \
                       export fn na() -> Int64 { return val() }";

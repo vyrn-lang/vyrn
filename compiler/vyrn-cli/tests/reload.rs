@@ -130,15 +130,19 @@ fn main() -> Int64 {
 const OTHER: &str = "export fn helper(x: Int64) -> Int64 {\n    return x + 1\n}\n";
 
 /// A second entry in `data/` adds a declaration that refuses.
-const GEN: &str = r#"export gen fn consts(dir: String) -> String {
+const GEN: &str = r#"export gen fn consts(dir: String) -> Code {
     let many = match listDir(dir) {
         Ok(names) => names.length > 1,
         Err(e) => false,
     }
-    let extra = if many { "\nexport fn m() -> Int64 { return \"many\" }" } else { "" }
-    return match readFile("./data/n.txt") {
-        Ok(s) => "export fn n() -> Int64 { return " + s + " }" + extra,
-        Err(e) => e,
+    let extra = if many { vyrn"export fn m() -> Int64 { return \"many\" }\n" } else { vyrn"" }
+    let s = match readFile("./data/n.txt") {
+        Ok(t) => t,
+        Err(e) => "",
+    }
+    return match parse(s) {
+        Some(v) => vyrn"export fn n() -> Int64 { return \{v} }\n" + extra,
+        None => vyrn"export fn n() -> Int64 { return \{s} }\n" + extra,
     }
 }
 "#;

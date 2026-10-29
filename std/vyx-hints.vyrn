@@ -30,7 +30,7 @@
 /// preset severity. The rest are warnings.
 
 import { reportHere, Severity } from "std/diag"
-import { Finding, noPolicy, policyOf, reports, unusedWaivers, HintPolicy } from "std/hints"
+import { Finding, earned, findingsText, noPolicy, policyOf, reports, unusedWaivers, HintPolicy } from "std/hints"
 import { VyxAttr, VyxBody, VyxNode, vyxParseTemplate } from "std/vyx"
 import { join } from "std/code"
 import { contains, endsWith, slice, startsWith } from "std/strpred"
@@ -135,13 +135,18 @@ gen fn vhModule(checked: Int64) -> Code {
 
 /// Every report `src` (the text of the `.vyx` file at `file`) earns.
 gen fn vhCheck(p: HintPolicy, src: String, file: String) -> Code {
+    return reports(p, src, file, vhFindings(p, src))
+}
+
+/// What the rules find in `src` under `p`, the waiver audit included.
+gen fn vhFindings(p: HintPolicy, src: String) -> Array<Finding> {
+    let mut found: Array<Finding> = []
     let t = vyxParseTemplate(src)
     if t.err != "" {
         // The compile already fails with a better message; lint advice about
         // half a tree would bury it.
-        return vyrn""
+        return found
     }
-    let mut found: Array<Finding> = []
     vhNodes(t.nodes, false, false, false, false, found)
     // Only a template carrying a marker pays for the waiver audit.
     if contains(src, "vyrn-ignore") {
@@ -149,7 +154,7 @@ gen fn vhCheck(p: HintPolicy, src: String, file: String) -> Code {
             found.push(w)
         }
     }
-    return reports(p, src, file, found)
+    return found
 }
 
 fn vhNodes(
@@ -1822,9 +1827,9 @@ fn vhAnchorCol(attrs: Array<VyxAttr>) -> Int64 {
     return 1
 }
 
-/// The reports `vhCheck` writes, which a test can read.
+/// The reports `vhCheck` writes, as text a test can read.
 gen fn checkText(p: HintPolicy, src: String, file: String) -> String {
-    return render(vhCheck(p, src, file))
+    return findingsText(earned(p, src, vhFindings(p, src)), file)
 }
 
 /// A one-element template around `markup`, checked with no policy.
@@ -1863,7 +1868,7 @@ test "a click handler on a non-interactive element fires unless it is made reach
 
 test "an inline on* handler is an error; @click and data- attributes are not" {
     let out = checkOf("<div onclick=\"go()\">x</div>")
-    assert(contains(out, "//@diag error T.vyx:2:15 sec/inline-handler:"))
+    assert(contains(out, "error T.vyx:2:15 sec/inline-handler:"))
     assert(contains(out, "write `@click`"))
     assert(fires("<div @click=\"go()\" role=\"button\" tabindex=\"0\">x</div>", "sec/inline-handler") == false)
     assert(fires("<div data-nav=\"prefetch\">x</div>", "sec/inline-handler") == false)
@@ -1873,7 +1878,7 @@ test "an inline on* handler is an error; @click and data- attributes are not" {
 }
 
 test "a literal javascript: URL is an error; http, relative and dynamic are not" {
-    assert(contains(checkOf("<a href=\"javascript:go()\">x</a>"), "//@diag error T.vyx:2:10 sec/unsafe-url:"))
+    assert(contains(checkOf("<a href=\"javascript:go()\">x</a>"), "error T.vyx:2:10 sec/unsafe-url:"))
     assert(fires("<a href=\"JavaScript:go()\">x</a>", "sec/unsafe-url"))
     assert(fires("<a href=\"java\tscript:go()\">x</a>", "sec/unsafe-url"))
     assert(fires("<a href=\"/p/1\">x</a>", "sec/unsafe-url") == false)
@@ -1935,7 +1940,7 @@ test "a handler button inside a form fires unless it names its type" {
 }
 
 test "a static style attribute is an error; a bound :style is not" {
-    assert(contains(checkOf("<p style=\"color:red\">x</p>"), "//@diag error T.vyx:2:11 sec/inline-style:"))
+    assert(contains(checkOf("<p style=\"color:red\">x</p>"), "error T.vyx:2:11 sec/inline-style:"))
     assert(fires("<p :style=\"barStyle(b)\">x</p>", "sec/inline-style") == false)
     assert(fires("<p class=\"lede\">x</p>", "sec/inline-style") == false)
 }
@@ -2099,7 +2104,7 @@ test "configuration turns a rule off and moves another to error" {
     }
     let out = checkText(p, "<template>\n<img src=\"/a.png\"/>\n</template>\n", "T.vyx")
     assert(contains(out, "perf/img-size") == false)
-    assert(contains(out, "//@diag error T.vyx:2:11 a11y/img-alt:"))
+    assert(contains(out, "error T.vyx:2:11 a11y/img-alt:"))
 }
 
 test "a template that does not parse earns no advice" {

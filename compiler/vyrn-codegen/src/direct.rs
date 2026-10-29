@@ -115,13 +115,12 @@ struct Gen {
     read: u32,
     fetch: u32,
     text: u32,
-    raw: u32,
+    data: u32,
     splice: u32,
     name: u32,
     diag: u32,
     code_at: u32,
     at: u32,
-    raw_at: u32,
     concat: u32,
     render: u32,
     reflect: u32,
@@ -142,13 +141,12 @@ fn gen_imports(m: &mut Module) -> Gen {
         read: g("read"),
         fetch: g("fetch"),
         text: g("text"),
-        raw: g("raw"),
+        data: g("data"),
         name: g("name"),
         diag: g("diag"),
         code_at: g("codeAt"),
         at: g("at"),
         splice: g("splice"),
-        raw_at: g("rawAt"),
         concat: g("concat"),
         render: g("render"),
         reflect: g("reflect"),
@@ -5416,11 +5414,6 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 Ok(code)
             }
-            ("raw", 1) => {
-                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
-                b.ins(&Instruction::Call(g.raw));
-                Ok(code)
-            }
             ("name", 1) => {
                 self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
                 b.ins(&Instruction::Call(g.name));
@@ -5449,14 +5442,6 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(g.at));
                 Ok(code)
             }
-            ("rawAt", 4) => {
-                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
-                self.core_arg(m, b, name, args, 1, Some(&Type::Str), line)?;
-                self.core_arg(m, b, name, args, 2, Some(&Type::Int), line)?;
-                self.core_arg(m, b, name, args, 3, Some(&Type::Int), line)?;
-                b.ins(&Instruction::Call(g.raw_at));
-                Ok(code)
-            }
             // The host renders and stashes; the guest allocates and fetches ([`Fn_::fetch_str`]).
             ("render", 1) => {
                 self.core_arg(m, b, name, args, 0, Some(&code), line)?;
@@ -5481,10 +5466,10 @@ impl<'p> Fn_<'_, 'p> {
                 self.fetch_str(b, g);
                 Ok(Type::Str)
             }
-            // A reflected type's spelling as `Code`, the call site's data, as `raw` makes it.
+            // A reflected type's spelling as `Code`, the call site's data.
             (crate::GEN_CODE, 1) => {
                 self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
-                b.ins(&Instruction::Call(g.raw));
+                b.ins(&Instruction::Call(g.data));
                 Ok(code)
             }
             (crate::GEN_RESULT, 1) => {

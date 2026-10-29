@@ -1,7 +1,7 @@
 //! Runs a `gen fn` as compiled wasm: the generation engine.
 //!
 //! The generator's module is compiled with a synthesized `main` that
-//! dispatches on `args()[0]` and prints the result between two sentinel lines.
+//! dispatches on `args()[0]` and hands the result to the host's `result` import.
 //! File reads go through `GenInputs.resolver` and are recorded in
 //! `GenOutput.reads`; `lex`, `moduleInterface` and `contractOf` results cross
 //! by a host encoder and a synthesized decoder that walk the same static type.
@@ -24,7 +24,7 @@ use vyrn_frontend::consteval::ConstVal;
 #[cfg(feature = "host")]
 use vyrn_frontend::gen::{compiler_identity, GenEngine, GenRead};
 use vyrn_frontend::gen::{
-    Author, GenError, GenInputs, GenOutput, Kind, Pos, Rope, Shown, Span, Spliced, Written,
+    Author, GenError, GenInputs, GenOutput, Kind, Pos, Rope, Span, Spliced, Written,
 };
 use vyrn_frontend::loader::GEN_HOST;
 
@@ -32,13 +32,6 @@ use vyrn_frontend::loader::GEN_HOST;
 /// [`engine`]). A `gen fn` may not call the write capabilities, so this only
 /// declines a module that contains one somewhere.
 const UNSERVED: &[&str] = &["writeFile", "writeAtomic", "renameFile", "fsyncFile"];
-
-/// The wrapper frames the generated source between these two lines
-/// ([`wrapper_program`]), so the generator's compile-time `print` output splits
-/// off. Any count but one of each means the guest wrote a marker itself, and
-/// the run is declined.
-const RESULT_BEGIN: &str = "<<vyrn-genwasm-result>>";
-const RESULT_END: &str = "<<vyrn-genwasm-result-end>>";
 
 /// Returns the wasm generation engine, which a host passes to each load.
 #[cfg(feature = "host")]
@@ -309,21 +302,9 @@ pub fn run_pure(
             "the wrapper program cannot be synthesized".into(),
         ))?;
         let bytes = vyrn_codegen::direct::compile_gen_host(&wrapper)?;
-        let (stdout, mut code) =
+        let (_, mut code) =
             exec(&bytes, &[fn_name.to_string()], &atoms).map_err(GenError::Failed)?;
-        let written = match code.written() {
-            Some(written) => written,
-            None => {
-                let (_, source) =
-                    unframe_result(&stdout).map_err(|e| GenError::Failed(e.into()))?;
-                let source = String::from_utf8(source)
-                    .map_err(|_| GenError::Failed("generator emitted invalid UTF-8".into()))?;
-                Written {
-                    source,
-                    spans: None,
-                }
-            }
-        };
+        let written = code.written().map_err(GenError::Failed)?;
         let reads = Vec::new();
         Ok(GenOutput { written, reads })
     };
@@ -331,13 +312,14 @@ pub fn run_pure(
 }
 
 /// Whether the engine can serve this function: an exported `gen fn` returning
-/// `String` or `Code` and taking `String` or `Int64` parameters (written to argv
-/// and read back, `Int64` by `parse`), or one `TypeArg` (reflected, as
-/// `moduleInterface` is).
+/// `Code`, a module, or `String`, an editor companion's answer, and taking
+/// `String` or `Int64` parameters (written to argv and read back, `Int64` by
+/// `parse`), or one `TypeArg` (reflected, as `moduleInterface` is). The loader
+/// links only a `Code` result.
 fn dispatchable(f: &Function) -> bool {
     f.is_gen
         && f.exported
-        && vyrn_frontend::gen::writes_module(&f.ret)
+        && (returns_code(f) || f.ret == Type::Str)
         && (takes_type_arg(f)
             || f.params
                 .iter()
@@ -353,9 +335,9 @@ fn takes_type_arg(f: &Function) -> bool {
 }
 
 /// The generator's module with `is_gen` cleared, plus a `main` that dispatches
-/// on `args()[0]` to the requested generator and hands over its result: a
-/// `String` printed between the markers, a `Code` handle through the `result`
-/// import.
+/// on `args()[0]` to the requested generator and hands its result to the
+/// `result` import: a `Code` handle, or a `String` answer as the call site's
+/// data.
 ///
 /// Arguments and the name come from `args()`, so one artifact per module serves
 /// every generator in it for every call; `std/vyx` exports three generators
@@ -401,19 +383,11 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                 .collect(),
             0,
         );
-        let hand_over = match returns_code(f) {
-            true => vec![Stmt::expr(Expr::call(
-                vyrn_codegen::GEN_RESULT,
-                vec![call],
-                0,
-            ))],
-            // Framed between marker lines; see `unframe_result`.
-            false => vec![
-                Stmt::expr(Expr::call(GEN_HOST.print, vec![Expr::str(RESULT_BEGIN)], 0)),
-                Stmt::expr(Expr::call(GEN_HOST.print, vec![call], 0)),
-                Stmt::expr(Expr::call(GEN_HOST.print, vec![Expr::str(RESULT_END)], 0)),
-            ],
+        let code = match returns_code(f) {
+            true => call,
+            false => Expr::call(vyrn_codegen::GEN_CODE, vec![call], 0),
         };
+        let hand_over = Stmt::expr(Expr::call(vyrn_codegen::GEN_RESULT, vec![code], 0));
         body.push(Stmt::If {
             id: Id::NEW,
             cond: Expr::Binary {
@@ -436,7 +410,7 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                         )
                     })
                     .into_iter()
-                    .chain(hand_over)
+                    .chain([hand_over])
                     .chain([Stmt::ret(Expr::int(0), 0)])
                     .collect(),
             },
@@ -473,42 +447,6 @@ pub fn prepare(p: &mut Program) -> Option<()> {
     // Synthesized before the emitter sees the program, so every pass covers
     // them like any other function.
     reflect_entries(p)
-}
-
-/// Splits the guest's stdout into its compile-time prints and the generated
-/// source, by the framing [`wrapper_program`] emits: prints, begin marker,
-/// source, end marker. A generator's `print` output stays out of its result.
-/// Any other shape declines.
-fn unframe_result(stdout: &[u8]) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
-    let locate = |marker: &str| -> Vec<usize> {
-        let m = marker.as_bytes();
-        if stdout.len() < m.len() {
-            return Vec::new();
-        }
-        (0..=stdout.len() - m.len())
-            .filter(|i| &stdout[*i..*i + m.len()] == m)
-            .collect()
-    };
-    let begins = locate(RESULT_BEGIN);
-    let ends = locate(RESULT_END);
-    if begins.len() != 1 || ends.len() != 1 {
-        return Err("the guest did not frame its result exactly once");
-    }
-    let (begin, end) = (begins[0], ends[0]);
-    if begin >= end {
-        return Err("the guest framed its result backwards");
-    }
-    // Each `print` appends one newline.
-    let Some(inner) = stdout[begin + RESULT_BEGIN.len()..end].strip_prefix(b"\n") else {
-        return Err("the framed result does not begin where the wrapper put it");
-    };
-    let Some(source) = inner.strip_suffix(b"\n") else {
-        return Err("the framed result does not end where the wrapper put it");
-    };
-    if stdout[end + RESULT_END.len()..] != *b"\n" {
-        return Err("the framed result does not end where the wrapper put it");
-    }
-    Ok((stdout[..begin].to_vec(), source.to_vec()))
 }
 
 // Structured host results. `lex`, `moduleInterface` and `contractOf` each
@@ -993,23 +931,9 @@ impl Arena {
         })
     }
 
-    pub fn raw(&mut self, text: String) -> i64 {
+    /// A String as the call site's data.
+    pub fn data(&mut self, text: String) -> i64 {
         self.leaf(Span::data(text))
-    }
-
-    pub fn raw_at(&mut self, text: String, path: String, line: i64, col: i64) -> i64 {
-        let at = Pos {
-            line: line as usize,
-            col: col as usize,
-        };
-        let shown = Some(Shown {
-            path: path.into(),
-            at,
-        });
-        self.leaf(Span {
-            shown,
-            ..Span::data(text)
-        })
     }
 
     pub fn name(&mut self, s: &str) -> Result<i64, String> {
@@ -1088,10 +1012,11 @@ impl Arena {
         Ok(vyrn_frontend::gen::render_code(self.rope(h)?))
     }
 
-    /// What a `Code` generator wrote: the value its wrapper handed to `result`.
-    /// `None` for a `String` generator, whose result is framed in stdout.
-    pub fn written(&mut self) -> Option<Written> {
-        self.result.take().map(|code| Written::code(&code))
+    /// What the generator wrote: the value its wrapper handed to `result`.
+    pub fn written(&mut self) -> Result<Written, String> {
+        let code = self.result.take();
+        code.map(|code| Written::code(&code))
+            .ok_or_else(|| "the generator handed over no result".into())
     }
 }
 
@@ -1322,10 +1247,10 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
     )?;
     linker.func_wrap(
         "vyrn_gen",
-        "raw",
+        "data",
         |mut caller: Caller<'_, T<X>>, s: i32| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
-            Ok(host.gen.code.raw(cstr(data, s)?))
+            Ok(host.gen.code.data(cstr(data, s)?))
         },
     )?;
     linker.func_wrap(
@@ -1372,14 +1297,6 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
         |mut caller: Caller<'_, T<X>>, h: i64, path: i32, line: i64, col: i64| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
             denied(host.gen.code.at(h, &cstr(data, path)?, line, col))
-        },
-    )?;
-    linker.func_wrap(
-        "vyrn_gen",
-        "rawAt",
-        |mut caller: Caller<'_, T<X>>, s: i32, path: i32, line: i64, col: i64| -> Result<i64> {
-            let (data, host) = guest_mem(&mut caller)?;
-            Ok((host.gen.code).raw_at(cstr(data, s)?, cstr(data, path)?, line, col))
         },
     )?;
     // A `String` crosses as a pointer and anything else as `bits` and a null.
@@ -1825,8 +1742,7 @@ fn run_hosted(
 }
 
 /// Instantiates the module under [`wasi::Policy::generator`] and returns what
-/// the generator wrote: a `String` framed on stdout, or a `Code` handed over
-/// through the `result` import.
+/// the generator wrote, which its wrapper handed to the `result` import.
 ///
 /// Embedded rather than spawned: the `wasmtime` CLI's launch measured ~106 ms.
 #[cfg(feature = "host")]
@@ -1894,20 +1810,10 @@ fn run_wasm(
         .gen
         .drained()
         .map_err(|e| EngineError::Failed(e.to_string()))?;
-    // Compile-time prints go to the compiler's stdout, never into the source.
-    // A `Code` result came through the `result` import, so all of stdout is
-    // prints.
-    let stdout = guest.wasi.stdout.unwrap_or_default();
-    let (prints, written) = match guest.gen.code.written() {
-        Some(written) => (stdout, written),
-        None => {
-            let (prints, source) = unframe_result(&stdout).map_err(decline)?;
-            let source = String::from_utf8(source)
-                .map_err(|_| EngineError::Failed("generator emitted invalid UTF-8".into()))?;
-            let spans = None;
-            (prints, Written { source, spans })
-        }
-    };
+    // Compile-time prints go to the compiler's stdout, never into the source:
+    // the result came through the `result` import.
+    let prints = guest.wasi.stdout.unwrap_or_default();
+    let written = guest.gen.code.written().map_err(EngineError::Failed)?;
     if !prints.is_empty() {
         use std::io::Write;
         let mut out = std::io::stdout();
@@ -1921,39 +1827,6 @@ fn run_wasm(
 #[cfg(feature = "host")]
 mod tests {
     use super::*;
-
-    /// The framing `wrapper_program` emits, as the guest's stdout carries it.
-    fn framed(prints: &str, source: &str) -> Vec<u8> {
-        format!("{prints}{RESULT_BEGIN}\n{source}\n{RESULT_END}\n").into_bytes()
-    }
-
-    #[test]
-    fn a_generators_own_prints_never_enter_the_source() {
-        let (prints, source) = unframe_result(&framed("debug\n", "fn f() -> Int64 { return 1 }"))
-            .expect("the wrapper's own framing unframes");
-        assert_eq!(prints, b"debug\n");
-        assert_eq!(source, b"fn f() -> Int64 { return 1 }");
-
-        let (prints, source) = unframe_result(&framed("", "fn g() -> Str { return \"\" }"))
-            .expect("an unprinted frame still unframes");
-        assert!(prints.is_empty());
-        assert_eq!(source, b"fn g() -> Str { return \"\" }");
-    }
-
-    #[test]
-    fn stdout_that_does_not_frame_exactly_once_is_declined() {
-        // No markers.
-        assert!(unframe_result(b"fn f() -> Int64 { return 1 }\n").is_err());
-        // The generator printed a marker of its own: two begins.
-        let echoed = framed(
-            &format!("x{RESULT_BEGIN}\n"),
-            "fn f() -> Int64 { return 1 }",
-        );
-        assert!(unframe_result(&echoed).is_err());
-        // The result contains a marker: two ends.
-        let inside = framed("", &format!("fn f() -> Str {{ return \"{RESULT_END}\" }}"));
-        assert!(unframe_result(&inside).is_err());
-    }
 
     #[test]
     fn a_long_concatenation_chain_drops_without_recursing() {

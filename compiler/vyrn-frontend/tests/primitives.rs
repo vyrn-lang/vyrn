@@ -118,8 +118,6 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("blackBox", Compiler, "an optimizer barrier is a backend property"),
     ("@pull", Compiler, "the core's callee for a stream `for` head; no program spells it"),
     ("@strAppend", Compiler, "the core's callee for a String accumulator; no program spells it"),
-    ("raw", Compiler, "builds a code-quote value"),
-    ("rawAt", Compiler, "a code quote carrying an origin directive"),
     ("name", Compiler, "a Name, which no source can build: Vyrn cannot seal a type"),
     ("diag", Compiler, "a report the loader reads, which no copied text can forge"),
     ("codeAt", Compiler, "checks the text against the bytes the host read"),

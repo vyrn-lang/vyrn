@@ -341,10 +341,7 @@ fn code_import(
         ("text", [Str(s), Str(key), Int(line), Int(col)]) => {
             code.text(take(s), take(key), *line, *col)
         }
-        ("raw", [Str(s)]) => code.raw(take(s)),
-        ("rawAt", [Str(s), Str(path), Int(line), Int(col)]) => {
-            code.raw_at(take(s), take(path), *line, *col)
-        }
+        ("data", [Str(s)]) => code.data(take(s)),
         ("name", [Str(s)]) => code.name(s)?,
         ("diag", [Str(sev), Str(anchor), Str(msg)]) => code.diag(sev, anchor, msg)?,
         ("at", [Int(h), Str(path), Int(line), Int(col)]) => code.at(*h, path, *line, *col)?,

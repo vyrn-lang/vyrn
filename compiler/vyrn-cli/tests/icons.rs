@@ -122,9 +122,9 @@ fn the_input_root_rule_still_decides() {
     write(&dir.join("secret.txt"), "not yours");
     write(
         &dir.join("peek.vyrn"),
-        "export gen fn peek(p: String) -> String {\n\
+        "export gen fn peek(p: String) -> Code {\n\
          \x20   let s = match readFile(p + \"/../../secret.txt\") { Ok(t) => t, Err(e) => \"\" }\n\
-         \x20   return \"export fn s() -> Int64 { return 0 }\\n\"\n\
+         \x20   return vyrn\"export fn s() -> Int64 { return 0 }\\n\"\n\
          }\n",
     );
     write(

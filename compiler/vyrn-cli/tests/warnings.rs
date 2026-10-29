@@ -2,8 +2,8 @@
 //! binary.
 //!
 //! A warning rides a load that succeeded, so it changes neither the exit code
-//! nor a byte of program output, except under `--deny-warnings`. A `//@diag
-//! error` stops the build. The fixture is a purpose-built generator: no real
+//! nor a byte of program output, except under `--deny-warnings`. An `Error`
+//! report stops the build. The fixture is a purpose-built generator: no real
 //! generator emits a warning, so these tests are the channel's only proof.
 
 use std::path::{Path, PathBuf};
@@ -42,36 +42,38 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// Generators emitting a module with a `//@warning` or `//@diag` directive whose
-/// leading field is an origin position.
-const GEN_WARNING: &str = r#"export gen fn legacy(path: String) -> String {
-    return "//@warning " + path + ":2:1 `fn old` is deprecated — write `fn new` instead\n" +
-        "export fn greeting() -> String {\n    return \"hi\"\n}\n"
+/// Generators emitting a module with a report whose anchor is an input
+/// position.
+const GEN_WARNING: &str = r#"import { report, reportHere, Severity } from "std/diag"
+
+gen fn body() -> Code {
+    return vyrn"export fn greeting() -> String {\n    return \"hi\"\n}\n"
+}
+
+export gen fn legacy(path: String) -> Code {
+    return report(Warning, path, 2, 1, "`fn old` is deprecated — write `fn new` instead") + body()
 }
 
 /// The same module with nothing to say, for the byte-for-byte comparison.
-export gen fn quiet(path: String) -> String {
-    return "export fn greeting() -> String {\n    return \"hi\"\n}\n"
+export gen fn quiet(path: String) -> Code {
+    return body()
 }
 
-/// A generator with no source position to give writes `-` there.
-export gen fn unpositioned(path: String) -> String {
-    return "//@warning - `fn old` is deprecated\n" +
-        "export fn greeting() -> String {\n    return \"hi\"\n}\n"
+/// A report with no source position to give.
+export gen fn unpositioned(path: String) -> Code {
+    return reportHere(Warning, "`fn old` is deprecated") + body()
 }
 
-/// The same directive with its severity spelled out.
-export gen fn advises(path: String) -> String {
-    return "//@diag warning " + path + ":2:1 `fn old` is deprecated — write `fn new` instead\n" +
-        "export fn greeting() -> String {\n    return \"hi\"\n}\n"
+/// A report whose message spans two lines and whose position is below 1.
+export gen fn clamped(path: String) -> Code {
+    return report(Warning, path, 0, 0, "two\nlines") + body()
 }
 
 /// A report the generator says must STOP the build. The module it
 /// emits is perfectly valid — the refusal is the generator's judgement about its
 /// input, not a fault the compiler could have found.
-export gen fn refuses(path: String) -> String {
-    return "//@diag error " + path + ":2:1 `fn old` has no replacement — remove the call\n" +
-        "export fn greeting() -> String {\n    return \"hi\"\n}\n"
+export gen fn refuses(path: String) -> Code {
+    return report(Error, path, 2, 1, "`fn old` has no replacement — remove the call") + body()
 }
 "#;
 
@@ -116,6 +118,18 @@ fn run(tag: &str, genfn: &str, cmd: &str, extra: &[&str], env: &[(&str, &str)]) 
         stdout: String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
         stderr: String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n"),
     }
+}
+
+/// A report is one line, and a position below 1 is clamped to 1, not lost.
+#[test]
+fn a_report_is_one_line_at_a_clamped_position() {
+    let r = run("clamped", "clamped", "run", &[], &[]);
+    assert_eq!(r.code, 0, "the load SUCCEEDED:\n{}", r.stderr);
+    assert!(
+        r.stderr.contains("legacy.vyrn:1:1: warning: two lines"),
+        "{}",
+        r.stderr
+    );
 }
 
 #[test]
@@ -267,21 +281,6 @@ fn a_failing_load_reports_the_failure_and_not_the_advice() {
     assert!(
         !stderr.contains("warning:"),
         "no advice on a failure:\n{stderr}"
-    );
-}
-
-#[test]
-fn the_diag_directive_spells_the_warning_severity_out() {
-    // `//@warning X` and `//@diag warning X` are one mechanism, so the newer
-    // spelling must reach the user identically — including the anchor.
-    let r = run("advises", "advises", "run", &[], &[]);
-    assert_eq!(r.code, 0, "the load SUCCEEDED:\n{}", r.stderr);
-    assert_eq!(r.stdout, "hi\n");
-    assert!(
-        r.stderr
-            .contains("legacy.vyrn:2:1: warning: `fn old` is deprecated"),
-        "at the input file, as a warning:\n{}",
-        r.stderr
     );
 }
 

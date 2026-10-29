@@ -1,11 +1,10 @@
 type Age = Int64 where value >= 0
 
-export gen fn holds(t: TypeArg) -> String {
-    let mut out = ""
+export gen fn holds(t: TypeArg) -> Code {
+    let mut out = vyrn""
     for r in t.roots {
         let n = t.nodes[r].shape
-        out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String {\n"
-        out = out + "    return VyrnWp_" + n.spelling + "(v)\n}\n"
+        out = out + vyrn"fn \{name(n.name)}(v: \{t.nodes[r].code}) -> String {\n    return \{name("VyrnWp_" + n.spelling)}(v)\n}\n"
     }
     return out
 }

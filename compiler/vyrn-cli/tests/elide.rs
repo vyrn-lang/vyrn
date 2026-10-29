@@ -4484,7 +4484,7 @@ fn main() -> Int64 {
             r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
     return xs[i]
 }
-export gen fn g(t: TypeArg) -> String {
+export gen fn g(t: TypeArg) -> Code {
     let xs: Array<Int64> = [10, 20, 30]
     let mut s = 0
     let mut i = 0
@@ -4493,7 +4493,8 @@ export gen fn g(t: TypeArg) -> String {
         i = i + 1
     }
     let k = t.roots.length + 2
-    return "fn shown(v: Int64) -> Int64 {\n    return " + (s + w(xs, k)).toString() + "\n}\n"
+    let total = s + w(xs, k)
+    return vyrn"fn shown(v: Int64) -> Int64 {\n    return \{total}\n}\n"
 }
 "#,
         )],

@@ -1,9 +1,9 @@
-// A module's own `raw` and `render` beside a generator that means the builtins.
+// A module's own `name` and `render` beside a generator that means the builtins.
 import { surface } from "./lib/gen_surface"
 import { tagged } from surface("from-the-builtin")
 
-fn raw(s: String) -> String {
-    return "raw:" + s
+fn name(s: String) -> String {
+    return "name:" + s
 }
 
 fn render(n: Int64) -> String {
@@ -11,7 +11,7 @@ fn render(n: Int64) -> String {
 }
 
 fn main() -> Int64 {
-    print(raw("mine"))
+    print(name("mine"))
     print(render(7))
     print(tagged())
     return 0

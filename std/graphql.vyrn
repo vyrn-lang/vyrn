@@ -669,8 +669,8 @@ export gen fn sdl(contract: String) -> Code {
     }
 
     // The `\{doc}` splice is in expression position, so the compiler escapes
-    // `doc` as a string literal. A `//@diag` from the name registry
-    // goes in front, so the build fails in the generator's words.
+    // `doc` as a string literal. A report from the name registry goes in
+    // front, so the build fails in the generator's words.
     return diags + vyrn"""/// The contract's GraphQL SDL document (deterministic, byte-stable).
 export fn sdlText() -> String {
     return \{doc}

@@ -92,9 +92,8 @@ The level `code` runs at under `p`: its configured word, or the word for
 fn reports(p: HintPolicy, src: String, file: String, findings: Array<Finding>) -> Code
 ```
 
-The reports `findings` earn in `file` under `p`, in order: a finding whose
-rule is off, or whose line `src` waives, earns none. `src` is the text of
-`file`; the waiver markers are read from it.
+The reports `findings` earn in `file` under `p` (`earned`). `src` is the
+text of `file`.
 
 ## waived
 

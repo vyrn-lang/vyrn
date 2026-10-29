@@ -53,8 +53,7 @@ function parseRequest(b) {
 // pointer `splice` sends for any other value stays 0.
 const CODE_IMPORTS = {
   text: [0, 1],
-  raw: [0],
-  rawAt: [0, 1],
+  data: [0],
   name: [0],
   diag: [0, 1, 2],
   at: [1],

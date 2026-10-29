@@ -1,6 +1,7 @@
-gen fn g(t: TypeArg) -> String {
+gen fn g(t: TypeArg) -> Code {
     let s: Int64 = 1
-    return derive(g, s)
+    let again = derive(g, s)
+    return vyrn""
 }
 
 fn main() -> Int64 {

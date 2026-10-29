@@ -6,8 +6,8 @@ fn count(xs: Array<Int64>) -> Int64 {
     return xs.length
 }
 
-gen fn shout(t: TypeArg) -> String {
-    return "x"
+gen fn shout(t: TypeArg) -> Code {
+    return vyrn"x"
 }
 
 fn step(x: Int64) -> Int64 {
