@@ -2329,7 +2329,8 @@ std/codecs.vyrn	urlUnreserved	yes	yes, packed UInt8
 std/codecs.vyrn	urlEncode	yes	no, its effect set is alloc
 std/codecs.vyrn	urlDecode	yes	no, its effect set is alloc
 std/columns.vyrn	columns	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
-std/columns.vyrn	columnsOf	no, it keeps an index check	no, its effect set is alloc, trap
+std/columns.vyrn	columnsOf	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
+std/columns.vyrn	columnsType	yes	no, its effect set is gen-only
 std/connect.vyrn	connectCapFirst	yes	no, its effect set is alloc
 std/connect.vyrn	connectIsNamedType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/connect.vyrn	connectServiceName	yes	no, its effect set is alloc
