@@ -298,22 +298,16 @@ fn twKnownTopLevel() -> Array<String> {
     return out
 }
 
-gen fn twUnknownKeyErrors(theme: TwTheme) -> String {
+fn twUnknownKeyErrors(theme: TwTheme, out: modify Array<String>) {
     let known = twKnownTopLevel()
     let mut seen: Array<String> = []
-    let mut out = ""
     for e in theme.entries {
         let head = twHeadOf(e.key)
         if includes(known, head) == false && includes(seen, head) == false {
-            out = out
-            + render(reportHere(
-                Error,
-                "the theme has a top-level key `\{head}`, which names no utility family — the families are \{joinWith(twKnownTopLevel(), ", ")}",
-            ))
+            out.push("the theme has a top-level key `\{head}`, which names no utility family — the families are \{joinWith(twKnownTopLevel(), ", ")}")
             seen.push(head)
         }
     }
-    return out
 }
 
 fn twHeadOf(key: String) -> String {
@@ -466,66 +460,42 @@ fn twSafelist(theme: TwTheme) -> Array<String> {
     return out
 }
 
-gen fn twUnsafeSafelistErrors(safelist: Array<String>) -> String {
-    let mut out = ""
+fn twUnsafeSafelistErrors(safelist: Array<String>, out: modify Array<String>) {
     for name in safelist {
         if twClassSafe(name) == false {
-            out = out
-            + render(reportHere(
-                Error,
-                "safelisted class `\{name}` is not a CSS-safe class name — a class name must match `[a-z][a-z0-9-]*`",
-            ))
+            out.push("safelisted class `\{name}` is not a CSS-safe class name — a class name must match `[a-z][a-z0-9-]*`")
         }
     }
-    return out
 }
 
-gen fn twUnsafeNameErrors(vocab: Array<TwClassDef>) -> String {
-    let mut out = ""
+fn twUnsafeNameErrors(vocab: Array<TwClassDef>, out: modify Array<String>) {
     for c in vocab {
         if twClassSafe(c.name) == false {
-            out = out
-            + render(reportHere(
-                Error,
-                "the theme derives the class `\{c.name}`, which is not a CSS-safe class name — a class name must match `[a-z][a-z0-9-]*`, so rename the theme key it came from",
-            ))
+            out.push("the theme derives the class `\{c.name}`, which is not a CSS-safe class name — a class name must match `[a-z][a-z0-9-]*`, so rename the theme key it came from")
         }
     }
-    return out
 }
 
 /// A breakpoint key becomes a regex prefix and a selector prefix, so a key
 /// like `ev|xhack` would forge the type (`evbg-white` would compile).
-gen fn twUnsafeBreakpointErrors(breakpoints: Array<TwPair>) -> String {
-    let mut out = ""
+fn twUnsafeBreakpointErrors(breakpoints: Array<TwPair>, out: modify Array<String>) {
     for bp in breakpoints {
         if twClassSafe(bp.token) == false {
-            out = out
-            + render(reportHere(
-                Error,
-                "breakpoint `\{bp.token}` is not a CSS-safe class name — a breakpoint key becomes both a `\{bp.token}:` class prefix and a CSS selector prefix, so it must match `[a-z][a-z0-9-]*`",
-            ))
+            out.push("breakpoint `\{bp.token}` is not a CSS-safe class name — a breakpoint key becomes both a `\{bp.token}:` class prefix and a CSS selector prefix, so it must match `[a-z][a-z0-9-]*`")
         }
     }
-    return out
 }
 
 /// `safelist` is exempt: its leaves are class names, checked elsewhere.
-gen fn twUnsafeValueErrors(theme: TwTheme) -> String {
+fn twUnsafeValueErrors(theme: TwTheme, out: modify Array<String>) {
     let families = twKnownFamilies()
-    let mut out = ""
     for e in theme.entries {
         if includes(families, twHeadOf(e.key)) {
             if twCssValueSafe(e.value) == false {
-                out = out
-                + render(reportHere(
-                    Error,
-                    "theme key `\{e.key}` has the value `\{e.value}`, which is not safe to bake into CSS — a value is written into a rule body or a `@media` query, so it may not carry `{`, `}`, `;` or a comment",
-                ))
+                out.push("theme key `\{e.key}` has the value `\{e.value}`, which is not safe to bake into CSS — a value is written into a rule body or a `@media` query, so it may not carry `{`, `}`, `;` or a comment")
             }
         }
     }
-    return out
 }
 
 /// Escapes each `:` as `\:`, so `hover:bg-x` is a legal selector.
@@ -618,54 +588,56 @@ fn twTokenRegex(vocab: Array<TwClassDef>, breakpoints: Array<TwPair>, safelist: 
 
 /// Every check on a value, class name, safelisted name and breakpoint key.
 /// `twBuildModule`, the only producer of CSS and the token types, runs it first.
-gen fn twSheetSafetyErrors(theme: TwTheme, vocab: Array<TwClassDef>, breakpoints: Array<TwPair>, safelist: Array<String>) -> String {
-    let mut out = ""
-    out = out + twUnsafeValueErrors(theme)
-    out = out + twUnsafeNameErrors(vocab)
-    out = out + twUnsafeSafelistErrors(safelist)
-    out = out + twUnsafeBreakpointErrors(breakpoints)
+fn twSheetSafetyErrors(theme: TwTheme, vocab: Array<TwClassDef>, breakpoints: Array<TwPair>, safelist: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    twUnsafeValueErrors(theme, out)
+    twUnsafeNameErrors(vocab, out)
+    twUnsafeSafelistErrors(safelist, out)
+    twUnsafeBreakpointErrors(breakpoints, out)
     return out
 }
 
-/// A `gen fn` because `twEmitCss` renders a code quote.
-gen fn twBuildModule(theme: TwTheme, vocab: Array<TwClassDef>, breakpoints: Array<TwPair>, safelist: Array<String>) -> String {
-    let gate = twSheetSafetyErrors(theme, vocab, breakpoints, safelist)
-    if gate != "" {
-        return gate
+/// One report per message, in order.
+gen fn twReports(messages: Array<String>) -> Code {
+    let mut out = vyrn""
+    for m in messages {
+        out = out + reportHere(Error, m)
+    }
+    return out
+}
+
+gen fn twBuildModule(theme: TwTheme, vocab: Array<TwClassDef>, breakpoints: Array<TwPair>, safelist: Array<String>) -> Code {
+    let unsafe = twSheetSafetyErrors(theme, vocab, breakpoints, safelist)
+    if unsafe.length > 0 {
+        return twReports(unsafe)
     }
     let token = twTokenRegex(vocab, breakpoints, safelist)
-    let rawCss = twCssBody(vocab, breakpoints)
-    let mut out = "/// Generated by std/tw `tw` — do not edit.\n"
-    out = out + "import { Attr } from \"std/html\"\n"
+    let one = "(" + token + ")"
+    let many = "(" + token + "( " + token + ")*)"
+    let css = twCssBody(vocab, breakpoints)
+    // TwClass is finite, so the LSP enumerates it for completion. cls copies
+    // rather than consumes: the Attr outlives the call, and .vyx callers pass
+    // a prop, which is a read parameter.
+    return vyrn"""
+        import { Attr } from "std/html"
+        export type TwClass = String where value =~ \{one}
+        export type Tw = String where value =~ \{many}
+        /// A checked `class="…"` attribute: `c` is validated against the theme's
+        /// utility vocabulary at compile time (for a literal) or the boundary (dynamic).
+        export fn cls(c: Tw) -> Attr {
+            return Cls(c.copy())
+        }
+        /// The theme's full utility stylesheet (deterministic, byte-stable).
+        export fn css() -> String {
+            return \{css}
+        }
 
-    // Finite, so the LSP enumerates it for completion.
-    out = out + "export type TwClass = String where value =~ \"(" + token + ")\"\n"
-
-    out = out + "export type Tw = String where value =~ \"(" + token + "( " + token + ")*)\"\n"
-
-    out = out + "/// A checked `class=\"…\"` attribute: `c` is validated against the theme's\n"
-    out = out + "/// utility vocabulary at compile time (for a literal) or the boundary (dynamic).\n"
-    // `.copy()`, not `consume`: the `Attr` outlives the call, and `.vyx`
-    // callers pass a prop, which is a `read` parameter.
-    out = out + "export fn cls(c: Tw) -> Attr {\n    return Cls(c.copy())\n}\n"
-
-    // The `\{}` splice sits in expression position, so the compiler escapes
-    // the stylesheet as a string literal.
-    out = out + twEmitCss(rawCss)
-    return out
-}
-
-gen fn twEmitCss(rawCss: String) -> String {
-    return render(vyrn"""/// The theme's full utility stylesheet (deterministic, byte-stable).
-export fn css() -> String {
-    return \{rawCss}
-}
-""")
+        """
 }
 
 /// Reads the flat `theme.json` and returns the typed module. A malformed theme
 /// fails the load with a report naming the offending key.
-export gen fn tw(theme: String) -> String {
+export gen fn tw(theme: String) -> Code {
     return twLoaded(theme, readFile(theme))
 }
 
@@ -676,7 +648,7 @@ type TwRead = {
 }
 
 /// [`tw`] with the read handed in, so a test reaches the cannot-read report.
-gen fn twLoaded(theme: String, read: Result<String, String>) -> String {
+gen fn twLoaded(theme: String, read: Result<String, String>) -> Code {
     // A failed read is refused before parsing; the parser would mislabel it
     // as a theme fault.
     let got = match read {
@@ -684,24 +656,30 @@ gen fn twLoaded(theme: String, read: Result<String, String>) -> String {
         Err(e) => TwRead { data: "", err: e.copy() },
     }
     if got.err != "" {
-        return render(reportHere(Error, cannotReadTheme(theme, got.err)))
+        return reportHere(Error, cannotReadTheme(theme, got.err))
     }
     let parsed = twParseTheme(got.data)
     if parsed.ok == false {
-        return render(reportHere(Error, "`\{theme}` is not a usable theme — \{parsed.error}"))
+        return reportHere(Error, "`\{theme}` is not a usable theme — \{parsed.error}")
     }
-    let unknown = twUnknownKeyErrors(parsed)
-    if unknown != "" {
-        return unknown
+    let mut unknown: Array<String> = []
+    twUnknownKeyErrors(parsed, unknown)
+    if unknown.length > 0 {
+        return twReports(unknown)
     }
     let vocab = twBuildVocab(parsed)
     if vocab.length == 0 {
-        return render(reportHere(
+        return reportHere(
             Error,
             "`\{theme}` yields no utility classes — give it at least one entry under \{joinWith(twKnownFamilies(), ", ")}",
-        ))
+        )
     }
     return twBuildModule(parsed, vocab, twAxisOf(parsed, "breakpoints"), twSafelist(parsed))
+}
+
+/// The text `twLoaded` writes, which a test can read.
+gen fn loadedText(theme: String, read: Result<String, String>) -> String {
+    return render(twLoaded(theme, read))
 }
 
 fn cannotReadTheme(theme: String, why: String) -> String {
@@ -741,7 +719,7 @@ test "twAxisOf dashes color shade paths and keeps theme order" {
 }
 
 test "a theme that cannot be read is its own diagnostic, not a parse error" {
-    let out = twLoaded("./missing/theme.json", Err("No such file or directory"))
+    let out = loadedText("./missing/theme.json", Err("No such file or directory"))
     assert(
         contains(out, "//@diag error - std/tw cannot read the theme `./missing/theme.json`: No such file or directory"),
     )
@@ -829,20 +807,24 @@ test "safelist folds names into the token grammar after the derived vocabulary" 
 test "safelist rejects a name that is not CSS-safe" {
     let t = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"safelist\": [\"Book_Card\"] }")
     assert(t.ok)
-    let e = twUnsafeSafelistErrors(twSafelist(t))
-    assert(e.contains("safelisted class `Book_Card` is not a CSS-safe class name"))
+    let mut e: Array<String> = []
+    twUnsafeSafelistErrors(twSafelist(t), e)
+    assert(e[0].contains("safelisted class `Book_Card` is not a CSS-safe class name"))
 }
 
 test "safelist is a recognised top-level key (not an unknown-key error)" {
     let t = twParseTheme("{ \"safelist\": [\"prose\"] }")
     assert(t.ok)
-    assertEq(twUnknownKeyErrors(t), "")
+    let mut e: Array<String> = []
+    twUnknownKeyErrors(t, e)
+    assertEq(e.length, 0)
 }
 
 test "twUnknownKeyErrors names an unrecognised top-level key" {
     let t = twParseTheme("{ \"shadows\": { \"lg\": \"x\" } }")
-    let e = twUnknownKeyErrors(t)
-    assert(e.contains("top-level key `shadows`, which names no utility family"))
+    let mut e: Array<String> = []
+    twUnknownKeyErrors(t, e)
+    assert(e[0].contains("top-level key `shadows`, which names no utility family"))
 }
 
 test "twValueSafe accepts hex/length/ident and rejects injection" {
@@ -879,17 +861,23 @@ test "twCssValueSafe routes values through the std/scan single-token gate" {
 test "twUnsafeValueErrors names a CSS-injecting leaf value by key" {
     let t = twParseTheme("{ \"colors\": { \"evil\": \"red} body{display:none\" } }")
     assert(t.ok)
-    let e = twUnsafeValueErrors(t)
-    assert(e.contains("theme key `colors.evil` has the value"))
+    let mut e: Array<String> = []
+    twUnsafeValueErrors(t, e)
+    assert(e[0].contains("theme key `colors.evil` has the value"))
     let ok = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"spacing\": { \"2\": \"0.5rem\" } }")
-    assertEq(twUnsafeValueErrors(ok), "")
+    let mut none: Array<String> = []
+    twUnsafeValueErrors(ok, none)
+    assertEq(none.length, 0)
 }
 
 test "twUnsafeBreakpointErrors names a forging breakpoint key" {
     let t = twParseTheme("{ \"breakpoints\": { \"ev|xhack\": \"1px\" } }")
     assert(t.ok)
-    let e = twUnsafeBreakpointErrors(twAxisOf(t, "breakpoints"))
-    assert(e.contains("breakpoint `ev|xhack` is not a CSS-safe class name"))
+    let mut e: Array<String> = []
+    twUnsafeBreakpointErrors(twAxisOf(t, "breakpoints"), e)
+    assert(e[0].contains("breakpoint `ev|xhack` is not a CSS-safe class name"))
     let good = twParseTheme("{ \"breakpoints\": { \"md\": \"768px\" } }")
-    assertEq(twUnsafeBreakpointErrors(twAxisOf(good, "breakpoints")), "")
+    let mut none: Array<String> = []
+    twUnsafeBreakpointErrors(twAxisOf(good, "breakpoints"), none)
+    assertEq(none.length, 0)
 }

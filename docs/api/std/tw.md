@@ -25,7 +25,7 @@ class name or an unsafe CSS value fails generation, naming the offender.
 ## tw
 
 ```vyrn
-fn tw(theme: String) -> String
+fn tw(theme: String) -> Code
 ```
 
 Reads the flat `theme.json` and returns the typed module. A malformed theme

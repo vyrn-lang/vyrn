@@ -3335,7 +3335,7 @@ std/tw.vyrn	twDashDots	yes	no, its effect set is alloc
 std/tw.vyrn	twAxisOf	no, it calls `twDropHead`, which is not trap-free	no, its effect set is alloc, trap
 std/tw.vyrn	twKnownFamilies	yes	no, its effect set is alloc
 std/tw.vyrn	twKnownTopLevel	yes	no, its effect set is alloc
-std/tw.vyrn	twUnknownKeyErrors	no, it calls `twHeadOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/tw.vyrn	twUnknownKeyErrors	no, it calls `twHeadOf`, which is not trap-free	no, its effect set is alloc, trap
 std/tw.vyrn	twHeadOf	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
 std/tw.vyrn	twColorClasses	yes	no, its effect set is alloc
 std/tw.vyrn	twBoxDecl	yes	no, its effect set is alloc
@@ -3347,10 +3347,10 @@ std/tw.vyrn	twSizeClasses	yes	no, its effect set is alloc
 std/tw.vyrn	twStaticClasses	yes	no, its effect set is alloc
 std/tw.vyrn	twBuildVocab	no, it calls `twAxisOf`, which is not trap-free	no, its effect set is alloc, trap
 std/tw.vyrn	twSafelist	no, it calls `twAxisOf`, which is not trap-free	no, its effect set is alloc, trap
-std/tw.vyrn	twUnsafeSafelistErrors	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/tw.vyrn	twUnsafeNameErrors	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/tw.vyrn	twUnsafeBreakpointErrors	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/tw.vyrn	twUnsafeValueErrors	no, it calls `twHeadOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/tw.vyrn	twUnsafeSafelistErrors	yes	no, its effect set is alloc
+std/tw.vyrn	twUnsafeNameErrors	yes	no, its effect set is alloc
+std/tw.vyrn	twUnsafeBreakpointErrors	yes	no, its effect set is alloc
+std/tw.vyrn	twUnsafeValueErrors	no, it calls `twHeadOf`, which is not trap-free	no, its effect set is alloc, trap
 std/tw.vyrn	twCssEscape	yes	no, its effect set is alloc
 std/tw.vyrn	twStateLayer	yes	no, its effect set is alloc
 std/tw.vyrn	twRuleFlat	no, it keeps a division check	no, its effect set is alloc
@@ -3358,11 +3358,12 @@ std/tw.vyrn	twBlockLit	no, it calls `twRuleFlat`, which is not trap-free	no, its
 std/tw.vyrn	twCssBody	no, it calls `twBlockLit`, which is not trap-free	no, its effect set is alloc
 std/tw.vyrn	twBuildCss	no, it calls `twCssBody`, which is not trap-free	no, its effect set is alloc
 std/tw.vyrn	twTokenRegex	yes	no, its effect set is alloc
-std/tw.vyrn	twSheetSafetyErrors	no, it calls `twUnsafeValueErrors`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/tw.vyrn	twSheetSafetyErrors	no, it calls `twUnsafeValueErrors`, which is not trap-free	no, its effect set is alloc, trap
+std/tw.vyrn	twReports	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/tw.vyrn	twBuildModule	no, it calls `twCssBody`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/tw.vyrn	twEmitCss	yes	no, its effect set is alloc, gen-only
 std/tw.vyrn	tw	no, it calls `twLoaded`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/tw.vyrn	twLoaded	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/tw.vyrn	loadedText	no, it calls `twLoaded`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/tw.vyrn	cannotReadTheme	yes	no, its effect set is alloc
 std/ui.editor.vyrn	uiChrome	yes	no, its effect set is alloc
 std/ui.editor.vyrn	vyrnChromeUi	yes	no, its effect set is alloc
