@@ -1257,6 +1257,7 @@ examples/regionarena.vyrn	0	cbf29ce484222325	20	15	795df99dcc2fd51b
 examples/regionescape.vyrn	0	cbf29ce484222325	20	17	ffa9f9a518a91731
 examples/releaseacrossexit.vyrn	0	cbf29ce484222325	20	19	2c8cd1c04ac58841
 examples/releaseacrosstry.vyrn	0	cbf29ce484222325	20	19	4418bdbe20339883
+examples/releasepayloads.vyrn	0	cbf29ce484222325	20	17	94476dbf06891b8b
 examples/renamed_apart_local.vyrn	0	cbf29ce484222325	20	17	43f96395de6d35ea
 examples/reservewrap.vyrn	0	cbf29ce484222325	20	17	44432c28677f12fa
 examples/rest.vyrn	0	cbf29ce484222325	20	19	699cac2e355e7263

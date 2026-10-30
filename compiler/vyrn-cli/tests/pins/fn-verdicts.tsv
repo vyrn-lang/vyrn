@@ -1184,6 +1184,9 @@ examples/releaseacrosstry.vyrn	nested	yes	no, its effect set is alloc, write-out
 examples/releaseacrosstry.vyrn	overReturn	yes	no, its effect set is alloc, write-output
 examples/releaseacrosstry.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/releaseacrosstry.vyrn	Owned$Ring$release	yes	no, its effect set is alloc, write-output
+examples/releasepayloads.vyrn	main	yes	no, its effect set is alloc, write-output
+examples/releasepayloads.vyrn	Owned$Node$release	yes	no, its effect set is alloc, write-output
+examples/releasepayloads.vyrn	Owned$Leaf$release	yes	no, its effect set is alloc, write-output
 examples/renamed_apart_local.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/reservewrap.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/rest.vyrn	handle	no, it calls `mount`, which is not trap-free	no, its effect set is alloc, serve, module-state, trap

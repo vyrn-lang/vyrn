@@ -4836,7 +4836,7 @@ impl<'a> Builder<'a> {
             // the first build takes nothing, so the second build's rows need
             // a name to land on; [`Builder::drops_at`] skips a borrowed one.
             self.keyed(n, key);
-            if !owned {
+            if !owned && !consuming {
                 if let Some(m) = from {
                     if let Some(k) = self.body.names[m.index()].borrow_kind.clone() {
                         self.body.names[n.index()].borrow_kind = Some(k);

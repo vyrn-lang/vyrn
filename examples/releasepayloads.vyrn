@@ -1,0 +1,58 @@
+// A release takes every payload of a recursive enum: one word with no heap,
+// a wide record with no heap, a record with heap, itself and an array of itself.
+
+type Small = { x: Int64 }
+type Wide = { x: Int64, y: Int64, z: Int64 }
+type Named = { s: String, n: Int64, m: Int64 }
+
+type Node = enum {
+    Word(Small),
+    Point(Wide),
+    Text(Named),
+    Next(Node),
+    Many(Array<Node>),
+    Nothing }
+
+impl Owned for Node {
+    fn release(consume self) {
+        match consume self {
+            Word(a) => {
+                print("word \{a.x}")
+            }
+            Point(p) => {
+                print("point \{p.x + p.y + p.z}")
+            }
+            Text(t) => {
+                print("text \{t.s}")
+            }
+            Next(n) => {}
+            Many(ns) => {}
+            Nothing => {}
+        }
+    }
+}
+
+// An `if let` takes the receiver as a `match` does.
+type Leaf = enum { Kept(Wide), Gone }
+
+impl Owned for Leaf {
+    fn release(consume self) {
+        if let Kept(w) = consume self {
+            print("kept \{w.y}")
+        }
+    }
+}
+
+fn main() -> Int64 {
+    let n = Many([
+        Word(Small { x: 1 }),
+        Point(Wide { x: 1, y: 2, z: 3 }),
+        Text(Named { s: "a" + "b", n: 1, m: 2 }),
+        Next(Next(Word(Small { x: 2 }))),
+        Many([Nothing]),
+        Nothing])
+    let l = Kept(Wide { x: 1, y: 2, z: 3 })
+    let m = Gone
+    print("built")
+    return 0
+}
