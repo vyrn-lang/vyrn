@@ -1,0 +1,9 @@
+protocol P {
+    fn f(read self) -> read Int64
+}
+impl P for Int64 {
+    fn f(read self) -> read Int64 { return self }
+    type C = Int64
+    fn g(self) -> C { return self }
+}
+fn main() -> Int64 { return 0 }

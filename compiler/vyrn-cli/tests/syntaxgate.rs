@@ -1,28 +1,22 @@
-//! The grammar gate: `compiler/vyrn-syntax/vyrn.syntax` specifies the hand parser,
-//! and these tests hold it equal to the recognizer written from the grammar over
-//! every corpus root, the `.vyrn` files under `examples/`, `std/`, `site/` and
-//! `compiler/vyrn-cli/tests/`. The lexer's scanner is written from the grammar too,
-//! and both read its tokens, so a file that does not lex has one diagnostic and no
-//! comparison.
+//! The grammar gate: `compiler/vyrn-syntax/vyrn.syntax` is read by the recognizer
+//! written from it, and these tests hold what that says over every corpus root, the
+//! `.vyrn` files under `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`.
 //!
-//! - Diagnostics: the recognizer's list equals the hand list, line, column and
-//!   sentence. A hand list that holds a builder row (a `row` line of the grammar)
-//!   is compared up to that row, because the grammar does not state it and the
-//!   parser's recovery differs after it.
-//! - Shape: a file the hand parser accepts, the recognizer accepts, and each
-//!   declaration sits at the same kind and line in both.
+//! - Pin: `tests/pins/parse-diagnostics.tsv` holds what the parser says over each root
+//!   and its mutants, as a count and a hash per root. `VYRN_PIN=write` rewrites it.
 //! - Rows: the rows the grammar names equal the lex and parse rows: the rows of
-//!   `rules.rs` that `lexer.rs`, its scanner `lexer/grammar.rs` or `parser.rs`
-//!   names outside its tests.
+//!   `rules.rs` that the lexer, its scanner, the recognizer or the builder names
+//!   outside its tests.
 //!
 //! A deep program recurses through many rule frames, so each test runs on a
 //! thread with a large stack.
+
+mod common;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use vyrn_frontend::diagnostics::Diagnostic;
-use vyrn_frontend::recognizer::{recognize, Decl, Mark};
 use vyrn_frontend::rules::Rule;
 use vyrn_frontend::{lexer, parser};
 use vyrn_syntax::Grammar;
@@ -70,16 +64,6 @@ fn corpus() -> Vec<(String, String)> {
         .collect()
 }
 
-type Said = (usize, usize, String);
-
-/// What the hand parser and the recognizer say over the tokens of `src`, or
-/// `None` when it does not lex.
-fn both_lists(src: &str) -> Option<(Vec<Diagnostic>, Vec<Diagnostic>)> {
-    let toks = lexer::lex(src).ok()?;
-    let said = recognize(&toks).errors;
-    Some((parser::parse_accum(toks).1, said))
-}
-
 /// Runs `f` on a thread with a stack deep enough for the deepest witness.
 fn deep<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     let child = (std::thread::Builder::new())
@@ -91,135 +75,115 @@ fn deep<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         .expect("the thread ends")
 }
 
-/// Fails with the first `shown` lines of `diffs` and their count.
-fn verdict(what: &str, diffs: Vec<String>, files: usize) {
-    if diffs.is_empty() {
-        println!("{what}: {files} files equal");
-        return;
+/// The mutants of each root, a fixed sequence from a fixed seed: one token removed,
+/// doubled, replaced by another or moved, or another token's copy put after it.
+const MUTANTS_PER_ROOT: usize = 20;
+
+/// A xorshift generator, so a mutant's text depends only on the root and its place
+/// in the sequence.
+struct Seq(u64);
+
+impl Seq {
+    fn next(&mut self) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 as usize
     }
-    let shown: Vec<&String> = diffs.iter().take(12).collect();
-    let lines: Vec<&str> = shown.iter().map(|s| s.as_str()).collect();
-    panic!(
-        "{what}: {} of {files} files differ\n{}",
-        diffs.len(),
-        lines.join("\n")
-    );
+}
+
+/// The mutants of `src` that still lex.
+fn mutants(src: &str) -> Vec<String> {
+    let Ok(items) = lexer::lex_with_trivia(src) else {
+        return Vec::new();
+    };
+    let spans: Vec<_> = (items.into_iter())
+        .filter(|i| !matches!(i.kind, lexer::TrivKind::Comment))
+        .map(|i| i.span)
+        .collect();
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    let mut seq = Seq(0x9E37_79B9_7F4A_7C15);
+    (0..MUTANTS_PER_ROOT)
+        .map(|n| {
+            let at = spans[seq.next() % spans.len()].clone();
+            let other = spans[seq.next() % spans.len()].clone();
+            let (word, rest) = (&src[at.clone()], &src[other.clone()]);
+            match n % 5 {
+                0 => format!("{}{}", &src[..at.start], &src[at.end..]),
+                1 => format!("{} {word} {}", &src[..at.end], &src[at.end..]),
+                2 => format!("{} {rest} {}", &src[..at.start], &src[at.end..]),
+                3 => format!("{} {rest} {}", &src[..at.end], &src[at.end..]),
+                _ if other.start >= at.end => format!(
+                    "{}{} {word} {}",
+                    &src[..at.start],
+                    &src[at.end..other.start],
+                    &src[other.start..]
+                ),
+                _ => format!(
+                    "{} {word} {}{}",
+                    &src[..other.start],
+                    &src[other.start..at.start],
+                    &src[at.end..]
+                ),
+            }
+        })
+        .filter(|m| lexer::lex(m).is_ok())
+        .collect()
+}
+
+/// An FNV-1a hash over the line, column and sentence of each diagnostic given it.
+struct Heard(u64);
+
+impl Heard {
+    fn new() -> Heard {
+        Heard(0xCBF2_9CE4_8422_2325)
+    }
+
+    fn hear(&mut self, ds: &[Diagnostic]) {
+        for d in ds {
+            let said = format!("{}:{}: {}\n", d.line, d.col, d.message);
+            for byte in said.bytes() {
+                self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        }
+    }
 }
 
 #[test]
 #[ignore]
-fn the_grammar_refuses_as_the_parser_does() {
+fn the_parser_says_what_the_pin_holds() {
     deep(|| {
-        let g = grammar();
-        let builder: BTreeSet<&str> = g.builder_rows().collect();
-        let corpus = corpus();
-        let mut diffs = Vec::new();
-        for (name, src) in &corpus {
-            let Some((hand, said)) = both_lists(src) else {
-                continue;
+        let rows = corpus().into_iter().map(|(name, src)| {
+            let own = match lexer::lex(&src) {
+                Err(d) => vec![d],
+                Ok(toks) => parser::parse_accum(toks).1,
             };
-            let cut = (hand.iter())
-                .position(|d| d.rule.as_ref().is_some_and(|r| builder.contains(r.name())));
-            let said_of = |ds: Vec<Diagnostic>| -> Vec<Said> {
-                ds.into_iter().map(|d| (d.line, d.col, d.message)).collect()
-            };
-            let (hand, said) = (said_of(hand), said_of(said));
-            let same = match cut {
-                Some(k) => said.len() >= k && hand[..k] == said[..k],
-                None => hand == said,
-            };
-            if !same {
-                let one = |l: &[Said]| match l.first() {
-                    Some((line, col, m)) => {
-                        format!("{line}:{col}: {}", m.lines().next().unwrap_or(""))
-                    }
-                    None => "nothing".into(),
+            let mut own_hash = Heard::new();
+            own_hash.hear(&own);
+            let (mut runs, mut refused, mut hash) = (0, 0, Heard::new());
+            for mutant in mutants(&src) {
+                let Ok(toks) = lexer::lex(&mutant) else {
+                    continue;
                 };
-                diffs.push(format!(
-                    "{name} ({} hand, {} recognizer)\n  hand       {}\n  recognizer {}",
-                    hand.len(),
-                    said.len(),
-                    one(&hand[..cut.unwrap_or(hand.len())]),
-                    one(&said)
-                ));
+                let said = parser::parse_accum(toks).1;
+                runs += 1;
+                refused += !said.is_empty() as usize;
+                hash.hear(&said);
             }
-        }
-        verdict("diagnostics", diffs, corpus.len());
-    })
-}
-
-/// The declarations of a file the hand parser accepts, by kind and line, sorted.
-/// The prelude's types and the declarations the parser makes up (a `$` or `.` in
-/// the name) are not the file's.
-fn hand_decls(toks: Vec<lexer::Token>, prelude: &BTreeSet<String>) -> Option<Vec<(Decl, usize)>> {
-    let (p, errors) = parser::parse_accum(toks);
-    if !errors.is_empty() {
-        return None;
-    }
-    let mut out = Vec::new();
-    for f in p.functions.iter().filter(|f| !f.name.contains('$')) {
-        out.push((
-            if f.is_extern || f.is_export_extern {
-                Decl::Extern
-            } else {
-                Decl::FnDecl
-            },
-            f.line,
-        ));
-    }
-    for t in &p.type_decls {
-        if !t.name.contains('.') && !prelude.contains(&t.name) {
-            out.push((Decl::TypeDecl, t.line));
-        }
-    }
-    out.extend(p.globals.iter().map(|x| (Decl::Global, x.line)));
-    out.extend(p.imports.iter().map(|x| (Decl::Import, x.line)));
-    out.extend(p.protocols.iter().map(|x| (Decl::Protocol, x.line)));
-    out.extend(p.contracts.iter().map(|x| (Decl::Contract, x.line)));
-    out.extend(p.tests.iter().map(|x| (Decl::Test, x.line)));
-    out.extend(p.benches.iter().map(|x| (Decl::Bench, x.line)));
-    out.sort();
-    Some(out)
-}
-
-#[test]
-#[ignore]
-fn the_grammar_accepts_what_the_parser_accepts_in_its_shape() {
-    deep(|| {
-        let empty = lexer::lex("").expect("an empty file lexes");
-        let prelude: BTreeSet<String> = (parser::parse_accum(empty).0.type_decls.into_iter())
-            .map(|t| t.name)
-            .collect();
-        let (mut files, mut decls, mut diffs) = (0, 0, Vec::new());
-        for (name, src) in &corpus() {
-            let Ok(toks) = lexer::lex(src) else {
-                continue;
-            };
-            let found = recognize(&toks);
-            let mut tree: Vec<(Decl, usize)> = (found.marks.iter())
-                .filter_map(|m| match m {
-                    Mark::Decl(kind, at) => Some((*kind, toks[*at].line)),
-                    Mark::Word(_) => None,
-                })
-                .collect();
-            let Some(hand) = hand_decls(toks, &prelude) else {
-                continue;
-            };
-            files += 1;
-            decls += hand.len();
-            tree.sort();
-            if !found.errors.is_empty() || hand != tree {
-                let first = hand.iter().zip(&tree).find(|(a, b)| a != b);
-                diffs.push(format!(
-                    "{name}: {} errors, {} hand, {} recognizer, first {first:?}",
-                    found.errors.len(),
-                    hand.len(),
-                    tree.len()
-                ));
-            }
-        }
-        println!("shape: {decls} declarations");
-        verdict("shape", diffs, files);
+            format!(
+                "{name}\t{}\t{:016x}\t{runs}\t{refused}\t{:016x}",
+                own.len(),
+                own_hash.0,
+                hash.0
+            )
+        });
+        common::pin(
+            "parse-diagnostics",
+            "root\tsaid\thash\tmutants\trefused\thash",
+            rows,
+        );
     })
 }
 
@@ -230,11 +194,11 @@ fn every_row_the_grammar_names_has_a_witness() {
         let g = grammar();
         let mut seen = BTreeSet::new();
         for (_, src) in &corpus() {
-            let hand = match lexer::lex(src) {
+            let said = match lexer::lex(src) {
                 Err(d) => vec![d],
                 Ok(toks) => parser::parse_accum(toks).1,
             };
-            seen.extend(hand.iter().filter_map(|d| d.rule.as_ref().map(Rule::name)));
+            seen.extend(said.iter().filter_map(|d| d.rule.as_ref().map(Rule::name)));
         }
         let unwitnessed: Vec<&str> = (g.stated_rows().chain(g.builder_rows()))
             .filter(|r| !seen.contains(r))
@@ -264,16 +228,23 @@ fn rows_named_in(file: &str) -> BTreeSet<&'static str> {
 #[test]
 fn the_grammar_names_every_lex_and_parse_row() {
     let g = grammar();
-    let mut rows = rows_named_in("lexer.rs");
-    rows.extend(rows_named_in("lexer/grammar.rs"));
-    rows.extend(rows_named_in("parser.rs"));
+    let mut rows = BTreeSet::new();
+    for file in [
+        "lexer.rs",
+        "lexer/grammar.rs",
+        "recognizer.rs",
+        "recognizer/rules.rs",
+        "parser.rs",
+    ] {
+        rows.extend(rows_named_in(file));
+    }
     let named: BTreeSet<&str> = g.stated_rows().chain(g.builder_rows()).collect();
     let rows: BTreeSet<&str> = rows.into_iter().collect();
     let missing: Vec<&&str> = rows.difference(&named).collect();
     let extra: Vec<&&str> = named.difference(&rows).collect();
     assert!(
         missing.is_empty() && extra.is_empty(),
-        "rows the grammar does not name: {missing:?}; rows it names that the lexer and parser do not: {extra:?}"
+        "rows the grammar does not name: {missing:?}; rows it names that no reader names: {extra:?}"
     );
     println!(
         "rows: {} stated, {} builder",

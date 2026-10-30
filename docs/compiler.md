@@ -13,7 +13,7 @@ exact gate commands.
 
 ```
 source
-  -> lexer, parser                    vyrn-frontend  lexer.rs, parser.rs
+  -> lexer, recognizer, tree builder  vyrn-frontend  lexer.rs, recognizer.rs, parser.rs
   -> loader: imports, generators,     vyrn-frontend  loader.rs, gen.rs
      link into one Program                            (+ vyrn-genwasm)
   -> checker: types, predicates       vyrn-frontend  checker.rs
@@ -76,28 +76,34 @@ the variants with no spelling from one list in the generator. `CONTEXTUAL` holds
 the words of syntactic rules that no `keyword` line reserves. The scanner is one
 method per lexical rule, which calls a hook of `lexer.rs` once it matches. The
 hooks build the items and decode each literal's value. The file is committed, and `the_lexer_is_fresh` fails when it
-differs from a fresh run; `VYRN_PIN=write` rewrites it. `parser::parse` is recursive descent with precedence climbing. It
-recovers past a bad top-level declaration, so one file reports every parse
-error. The parser performs the pure syntax desugars: `??` into a `match` over
-`Pattern::Success` and `Pattern::Failure`, a refutable `let` into a `match`
-with `Pattern::Other`, `if let` and `while let` into a statement `match` with
-`Pattern::Other` (`Expr::as_if_let`), interpolation into a `@concat` chain. Source cannot
-spell these patterns or `@` names.
+differs from a fresh run; `VYRN_PIN=write` rewrites it.
 
-`compiler/vyrn-syntax/vyrn.syntax` specifies the lexer and the parser: a PEG
-whose upper-case rules commit as recursive descent does, so a failure after a
-commit is the parser's refusal at the same token. It names every lex and parse
-row: a `^Row` where the grammar states the mistake, and a `row` line for each
-row the parser raises from a token's value or a check over its tree. A change
-to the parser changes the grammar in the same commit, and the `syntaxgate`
-test holds the two equal. A change to the lexer is a change to the grammar.
+`compiler/vyrn-syntax/vyrn.syntax` is the grammar of the lexer and the parser: a
+PEG whose upper-case rules commit as recursive descent does, so a failure after
+a commit is the refusal at that token. It names every lex and parse row: a
+`^Row` where the grammar states the mistake, and a `row` line for each row
+raised from a token's value or a check over its tree. A change to what parses,
+or to where it refuses, is a change to the grammar.
 
 `recognizer/rules.rs` is the grammar's syntactic rules written as Rust by
 `vyrn_syntax::recognizer`, one method per rule, and `recognizer.rs` is the
-cursor it runs on. It reads the lexer's tokens, builds no tree, and records the
-declarations and the contextual words a rule consumed. The parser still builds
-the tree. `syntaxgate` compares the parser with it, and `classify::code_runs`
-reads it to colour source for the playground and the `codeRuns` builtin.
+cursor it runs on. It reads the lexer's tokens and records what the rules
+matched in one event buffer. `Recognizer::closed` raises each `row` line's
+refusal as the rule that holds it closes, and `Recognizer::many_recovering`
+recovers past a bad statement or top-level declaration, so one file reports
+every parse error. `classify::code_runs` reads the recognizer to colour source
+for the playground and the `codeRuns` builtin.
+
+`parser::parse` runs the recognizer and reads the finished run's events into the
+tree. The builder, `parser.rs`, raises no refusal and panics on an event the
+grammar cannot produce. It takes each token's payload instead of cloning it, so
+a read token holds nothing afterwards. A module that declares a method-form
+builtin's name runs the recognizer twice, because a `recv.m(..)` before the
+declaration reads differently. The builder performs the pure syntax desugars:
+`??` into a `match` over `Pattern::Success` and `Pattern::Failure`, a refutable
+`let` into a `match` with `Pattern::Other`, `if let` and `while let` into a
+statement `match` with `Pattern::Other` (`Expr::as_if_let`), interpolation into
+a `@concat` chain. Source cannot spell these patterns or `@` names.
 
 `loader::load_with_origins` builds one `ast::Program` from a root file. All
 I/O goes through a `ModuleResolver`, so the editor serves unsaved buffers and
@@ -657,11 +663,9 @@ The output of programs:
   differs. `VYRN_WASM_MANIFEST=write` rewrites the manifest; read every moved
   row with `wasm2wat` before committing it.
 - `reproducible.rs`: one source builds to one artifact in every process.
-- `syntaxgate.rs`: over every corpus root, the recognizer written from
-  `vyrn.syntax` gives the parser's diagnostics, line, column and sentence, and
-  each file the parser accepts has its declarations at the same kind and line
-  in the recognizer's marks. Every lex and parse row is named by the grammar
-  and refused by some root.
+- `syntaxgate.rs`: `tests/pins/parse-diagnostics.tsv` holds what the parser says
+  over every corpus root and 20 mutants of each, as a count and a hash per root.
+  Every lex and parse row is named by the grammar and refused by some root.
 
 The refusals:
 

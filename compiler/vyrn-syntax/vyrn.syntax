@@ -122,6 +122,8 @@ holeItem = '"' (!'"' ('\\' . / .))* ('"' / ^UnterminatedInterpString@q)
          / '//' (!'\n' .)*
          / '{' holeText '}'?
          / .
+// A string after its tag: a refusal in a hole points at the tag.
+tagged = string
 // A string with no hole: an import path, a test name, an `export to` path.
 plainStr = &('"""' (!'"""' !('\\' '{') ('\\' . / .))* '"""' / '"' (!'"' !('\\' '{') ('\\' . / .))* '"') string
 
@@ -135,7 +137,8 @@ byteBody = eof ^UnterminatedByte@q
 
 // ------------------------------------------------------------ declarations
 
-Ident = ident fail ^ExpectedIdent(found=found)
+// A `!` after a refusal: the refused token is past the cursor when recovery starts.
+Ident = ident fail ^ExpectedIdent(found=found)!
 Close = split '>'
 
 Module = many Item until eof recover decl ItemStart
@@ -153,61 +156,74 @@ ExportTarget = &('fn' / 'type' / 'protocol' / 'extern' 'fn' / 'gen' 'fn' / Contr
 Decl = Import / TypeDecl / FnDecl / GenFn / MutFn / Protocol / Contract / Impl / Global
      / Extern / Test / Bench / Logging / ~^TopLevelExpected(found=found)
 
-Import = i:'import' ( '*' ('as' / ^ImportStarAs(found=found)@(i,here)) ns:Ident ('from' / ^ImportStarFrom(ns=ns, found=found)@(i,here)) Source
+Import = i:'import' ( '*' ('as' / ^ImportStarAs(found=found)@(i,here)!) ns:Ident ('from' / ^ImportStarFrom(ns=ns, found=found)@(i,here)!) Source
                     / 'type'? '{' ('}' ^ImportEmpty@(i,here) / list ImportName sep ',' until '}' '}')
-                      ('from' / ^ImportFrom(found=found)@(i,here)) Source ) ';'?
+                      ('from' / ^ImportFrom(found=found)@(i,here)!) Source ) ';'?
+// The host reads the names a module answers to as these close.
 ImportName = Ident ('as' Ident)?
+DeclName = Ident
 Source = plainStr / &(ident '(') ident Args / ^ImportPathExpected(found=found)@(i,here)
 
-TypeDecl = 'type' Ident ('<' list Ident sep ',' until '>' Close)? '=' +collect(EnumType / Type) ('where' Expr)? ';'?
+TypeDecl = 'type' DeclName ('<' list TName sep ',' until '>' Close)? '=' +collect(EnumType / Type) ('where' Expr)? ';'?
 EnumType = 'enum' '{' list Variant sep ',' until '}' '}'
 Variant = Ident ('(' list Type sep ',' until ')' ')')?
 
-Global = 'let' 'mut'? n:Ident (':' Type)? ('=' / ^GlobalNeedsInit(name=n)) Expr ';'?
+Global = 'let' 'mut'? n:DeclName (':' Type)? ('=' / ^GlobalNeedsInit(name=n)) Expr ';'?
 
-FnDecl = 'fn' name:Ident TypeBinder? Params Ret? ('where' +nostruct(Expr))? Block
+FnDecl = 'fn' name:DeclName TypeBinder? Params Ret? ('where' +nostruct(Expr))? SkimBody
+// The host skips these unread in a module it skims or imports.
+SkimBody = Block
+TestBody = Block
 GenFn = &('gen' 'fn') 'gen' FnDecl
 MutFn = &('mut' 'fn') 'mut' FnDecl
 TypeBinder = '<' list TParam sep ',' until '>' Close
-TParam = Ident (':' Ident ('+' Ident)*)?
+TParam = TName (':' Ident ('+' Ident)*)?
+// A name a type then reads as bound: `TypeName` sets `scoped` for it.
+TName = Ident
 Params = '(' list Param sep ',' until ')' ')'
 Param = Ident ':' Cap? Type ('where' Expr)?
 CapWord = 'read' / 'modify' / 'consume'
 Cap = &(CapWord (ident / 'fn')) CapWord
 Ret = '->' ( &('consume' (ident / '(' / 'fn')) ^ConsumeResult
-           / &(('read' / 'modify') (ident / '(' / 'fn')) ^FreeFnCapability(name=name)
+           / &(('read' / 'modify') (ident / '(' / 'fn')) ^FreeFnCapability(name=name)!
            / Type )
 
-Extern = &('extern' 'fn') 'extern' 'fn' Ident Params ('->' Type)?
+Extern = &('extern' 'fn') 'extern' 'fn' DeclName Params ('->' Type)?
          ( ?exported (&'{' Block / ^ExportedExternBody) / &'{' ^ExternBody / ';'? )
-Test = &('test' plainStr) 'test' plainStr Block
-Bench = &('bench' plainStr) 'bench' plainStr Block
+Test = &('test' plainStr) 'test' plainStr TestBody
+Bench = &('bench' plainStr) 'bench' plainStr TestBody
 
-Logging = 'logging' '{' list LogField sep ',' until '}' '}'
+// The host refuses a second block as this closes.
+LogHead = 'logging'
+Logging = LogHead '{' list LogField sep ',' until '}' '}'
 LogField = k:'level' ':' LogLevel / k:'sink' ':' Sink / k:Ident ':' ^UnknownLoggingField(other=k)@k
 LogLevel = 'trace' / 'debug' / 'info' / 'warn' / 'error' / n:Ident ^UnknownLogLevel(name=n)@k
-Sink = 'stderr' / 'stdout' / s:'file' '(' (plainStr / ^FileSinkPath(found=found)@s) ')' / n:Ident ^UnknownSink(other=n)@n
+Sink = 'stderr' / 'stdout' / s:'file' '(' (plainStr / ^FileSinkPath(found=found)@s!) ')' / n:Ident ^UnknownSink(other=n)@n
 
-Protocol = 'protocol' pname:Ident '{' many PAssoc until (doc* !'type') many PItem until '}' '}'
-PAssoc = doc* t:'type' n:Ident (&'=' ^AssocTypeRhs(aname=n)@t / ';'?)
+Protocol = 'protocol' pname:DeclName '{' many PAssoc until (doc* !'type') many PItem until '}' '}'
+PAssoc = doc* t:'type' n:TName (&'=' ^AssocTypeRhs(aname=n)@t / ';'?)
 PItem = doc* ( &'}'
              / t:'type' n:Ident (&'=' ^AssocTypeRhs(aname=n)@t / ^AssocTypeAfterMethods(aname=n, name=pname)@t)
              / PMethod )
-PMethod = 'fn' Ident '(' SelfCap? 'self' (',' Ident ':' Cap? Type)* ')' ('->' RCap? Type)? ';'?
+PMethod = 'fn' DeclName '(' Recv 'self' (',' Ident ':' Cap? Type)* ')' ('->' RCap? Type)? ';'?
+Recv = SelfCap?
 SelfCap = &(CapWord 'self') CapWord
 RCap = &('consume' (ident / '(' / 'fn')) ^ConsumeResult / &(('read' / 'modify') (ident / '(' / 'fn')) ('read' / 'modify')
 
-Contract = &ContractHead 'contract' cname:Ident '{' many CItem until ('}' / eof) '}'
+Contract = &ContractHead 'contract' cname:CName '{' many CItem until ('}' / eof) '}'
+CName = Ident
 CItem = doc* (&'}' / CLet / CFn / ^ContractMemberExpected(name=cname, found=found))
 CLet = 'let' m:Ident (':' / ^ContractMemberNeedsType(name=m)) Type ('=' Expr)? ';'?
-CFn = 'fn' ( '*' '(' ('.' '.' / list CParam sep ',' until ')') ')' ('->' Type)? (&'=' ^ContractOpenRuleDefault)? ';'?
+CFn = 'fn' ( '*' '(' (&('.' '.') '.' '.' / list CParam sep ',' until ')') ')' ('->' Type)? (&'=' ^ContractOpenRuleDefault)? ';'?
            / m:Ident '(' (&('.' '.') ^ContractMemberParams(name=m) / list CParam sep ',' until ')') ')' ('->' Type)? ('=' Expr)? ';'? )
 CParam = Ident ':' Type
 
-Impl = 'impl' TypeBinder? proto:Ident 'for' ty:Type '{' many IAssoc until (doc* !'type') many IItem until '}' '}'
-IAssoc = doc* 'type' Ident '=' Type ';'?
-IItem = doc* ( &'}' / t:'type' n:Ident ^ImplAssocTypeOrder(aname=n, protocol=proto, ty=ty)@t / IMethod )
-IMethod = 'fn' Ident '(' SelfCap? 'self' (',' Ident ':' Cap? Type)* ')' ('->' RCap? Type)? Block
+// The host sets `methods` as a method that is no projection closes.
+Impl = 'impl' TypeBinder? proto:Ident 'for' ty:Type '{' -methods(many IItem until '}') '}'
+IBind = IHead '=' Type
+IHead = 'type' Ident
+IItem = doc* ( &'}' / ?methods t:'type' n:Ident ^ImplAssocTypeOrder(aname=n, protocol=proto, ty=ty)@t / IBind ';'? / IMethod )
+IMethod = 'fn' Ident '(' Recv 'self' (',' Ident ':' Cap? Type)* ')' ('->' RCap? Type)? Block
 
 // ------------------------------------------------------------------ types
 
@@ -216,17 +232,25 @@ Inter = TypeAtom ('&' TypeAtom)*
 nest TypeAtom = RecordType / FnType / int / DottedType / NamedType
 FnType = 'fn' '(' list Type sep ',' until ')' ')' ('->' Type)?
 DottedType = &(ident '.') ident ('.' Ident)+ ('<' list Type sep ',' until '>' Close)?
-NamedType = 'Stream' '<' Type Close
-          / 'Array' '<' Type (',' (int / ^ArraySize))? Close
-          / 'SmallArray' '<' Type (',' / ^SmallArrayNeedsCapacity) (int / ^SmallArrayCapacityType) Close
-          / 'Map' '<' Type ',' Type Close
-          / 'Option' '<' Type Close
-          / 'Result' '<' Type ',' Type Close
-          / n:('Omit' / 'Pick') '<' Type ((',' Ident)+ Close / Close ^NeedsField(name=n))
-          / 'Merge' '<' Type ',' Type Close
-          / 'Partial' '<' Type Close
-          / 'Readonly' '<' Type Close
-          / Ident ('<' list Type sep ',' until '>' Close)?
+NamedType = Primitive
+          / &('Stream' / 'Array' / 'SmallArray' / 'Map' / 'Option' / 'Result' / 'Omit' / 'Pick' / 'Merge' / 'Partial' / 'Readonly') Constructor
+          / TypeName (?scoped / '<' list Type sep ',' until '>' Close)?
+Primitive = 'Int64' / 'Int8' / 'Int16' / 'Int32' / 'UInt8' / 'UInt16' / 'UInt32' / 'UInt64'
+          / 'Float64' / 'Float32' / 'F32x4' / 'I32x4' / 'Mask32x4' / 'F64x2' / 'Mask64x2'
+          / 'Bool' / 'String' / 'Unit' / 'Logger'
+Constructor = 'Stream' '<' Type Close
+            / 'Array' '<' Type (',' (int / ^ArraySize))? Close
+            / 'SmallArray' '<' Type (',' / ^SmallArrayNeedsCapacity) (int / ^SmallArrayCapacityType) Close
+            / 'Map' '<' Type ',' Type Close
+            / 'Option' '<' Type Close
+            / 'Result' '<' Type ',' Type Close
+            / n:('Omit' / 'Pick') '<' Type ((',' Ident)+ Close / Close ^NeedsField(name=n))
+            / 'Merge' '<' Type ',' Type Close
+            / 'Partial' '<' Type Close
+            / 'Readonly' '<' Type Close
+// The host sets `scoped` as this closes: a type parameter or an associated type
+// in scope takes no type arguments.
+TypeName = Ident
 // Only the outermost record of a `type` declaration may refine a field.
 RecordType = ?collect -collect(+named(RecordBody)) / -named(RecordBody)
 RecordBody = '{' list Field sep ',' until '}' '}'
@@ -252,7 +276,12 @@ For = 'for' Ident 'in' (&('consume' ident) 'consume')? +nostruct(Expr) Block
 Region = 'region' Block
 Drop = 'drop' Ident ';'?
 Assign = &((ident / 'self') '=') (Ident / 'self') '=' Expr ';'?
-ExprStmt = Expr ('=' Expr)? ';'?
+ExprStmt = StmtExpr (?place '=' Expr ';'? / PlainStmt)
+// The host checks a call's write-back as this closes.
+PlainStmt = ';'?
+// The host sets `place` as this closes, when a store could follow: whether the
+// expression is a place.
+StmtExpr = Expr
 
 // ------------------------------------------------------------ expressions
 
@@ -271,29 +300,41 @@ Expr = climb Unary {
     }
 nest Unary = '-' Unary / '!' Unary / '~' Unary
            / &('consume' (ident / 'self')) 'consume' Postfix
-           / &('await' (ident / 'self')) 'await' Postfix
+           / &('await' (ident / 'self')) AwaitTail
            / Postfix
-Postfix = Primary Link*
+// The host refuses `await` over no call as this closes.
+AwaitTail = 'await' Postfix
+// Each link adds a node the later walks recurse into, so each counts toward `nest`.
+Postfix = Primary many Link until !('?' / '.' / '[') recover nest
 Link = '?' / '.' Ident Args? / '[' -nostruct(Expr) ']'
 Args = '(' -nostruct(list Expr sep ',' until ')') ')'
 
-Primary = &LambdaHead Lambda
+Primary = &(ident '->') Lambda
+        / !?nostruct &(ident '.' ident '{') NsStruct
+        / &(ident nonl string) ( 'vyrn' tagged
+                               / &(ident plainStr) t:ident ^TemplateNoHole(name=t)@t
+                               / Tagged )
+        / IdentExpr
+        / number / byte / string / 'true' / 'false'
+        / ArrayLit / Match / IfExpr
+        / &'(' &LambdaHead Lambda
         / &'||' ^LambdaNotHere(form='||', fix='`() -> ...`')
         / &'|' ^LambdaNotHere(form='|x|', fix='`x -> ...`, or `(x, y) -> ...` for more than one')
-        / number / byte / string / 'self' / 'true' / 'false'
+        / !?nostruct &('self' '.' ident '{') NsStruct
+        / 'self'
+        / !?nostruct &'(' &(VarHead '.' ident '{') NsStruct
         / '(' -nostruct(Expr) ')'
-        / ArrayLit / Match / IfExpr
-        / &('vyrn' nonl string) 'vyrn' string
-        / &(ident nonl plainStr) t:ident ^TemplateNoHole(name=t)@t
-        / &(ident nonl string) ident string
-        / &(ident '.' ident '{') !?nostruct ident '.' ident StructBody
-        / IdentExpr
-        fail ^UnexpectedToken(found=found)
-IdentExpr = ident (&('.' ident '?' '(') '.' ident)* (&('?' '(') '?')? (@(TypeArgs &'('))? (Args / !?nostruct StructBody / )
+        fail ^UnexpectedToken(found=found)!
+NsStruct = VarHead '.' ident StructBody
+VarHead = ident / 'self' / '(' VarHead ')'
+Tagged = ident tagged
+IdentExpr = ident (&('.' ident '?' '(') Folded)* (&('?' '(') Fallible)? (&'<' @(TypeArgs &'('))? (Args / !?nostruct StructBody / )
+Folded = '.' ident
+Fallible = '?'
 TypeArgs = '<' Type (',' Type)* '>'
 StructBody = '{' -nostruct(list SField sep ',' until '}') '}'
 SField = Ident ':' Expr
-LambdaHead = ident '->' / '(' ')' '->' / '(' ident (',' ident)* ')' '->'
+LambdaHead = '(' ')' '->' / '(' ident (',' ident)* ')' '->'
 Lambda = (ident / '(' list Ident sep ',' until ')' ')') '->' (Block / -nostruct(Expr))
 ArrayLit = '[' -nostruct( ':' ']' / ']'
                         / Expr ( ':' Expr (',' (&']' / Expr ':' Expr))* ']' / (',' (&']' / Expr))* ']' ) )

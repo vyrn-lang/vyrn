@@ -720,6 +720,7 @@ impl<'a> Meta<'a> {
                 let rec = match self.word_is("recover") {
                     false => Recover::None,
                     true if self.word_is("stmt") => Recover::Stmt,
+                    true if self.word_is("nest") => Recover::Nest,
                     true if self.word_is("decl") => Recover::Decl(Box::new(self.prefix()?)),
                     true => return Err("recover stmt | recover decl P".into()),
                 };
@@ -824,7 +825,7 @@ impl<'a> Meta<'a> {
         }
     }
 
-    /// Reads `Row(hole=source, ..)@anchor`. `site` is the one site-bound hole
+    /// Reads `Row(hole=source, ..)@anchor!`. `site` is the one site-bound hole
     /// source the row may use: `token` in the `expect` row, `inner` in an
     /// `embed`'s wrap row, `extent` in its trailing row, or none.
     fn throw(&mut self, site: &str) -> Result<Throw, String> {
@@ -879,6 +880,10 @@ impl<'a> Meta<'a> {
                 col = line;
             }
         }
+        let past = self.at_byte() == Some(b'!');
+        if past {
+            self.i += 1;
+        }
         let row: Rc<str> = Rc::from(row.as_str());
         self.rows.insert(row.clone());
         Ok(Throw {
@@ -886,6 +891,7 @@ impl<'a> Meta<'a> {
             holes,
             line,
             col,
+            past,
             labels: self.labels.clone(),
         })
     }

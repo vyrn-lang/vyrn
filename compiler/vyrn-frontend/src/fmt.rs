@@ -13,7 +13,7 @@
 
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{self, Tok, Token, Triv, TrivKind};
-use crate::parser::{self, Parser};
+use crate::parser;
 use crate::rules::refuse;
 
 /// Formats `source` into its canonical form. The input must lex but need not
@@ -89,7 +89,7 @@ fn semi_separates(prev: Option<&Triv>, rest: &[Triv]) -> bool {
     };
     let after_return = matches!(prev.map(|p| &p.kind), Some(TrivKind::Tok(Return)));
     // A binary operator, a postfix link, a call, a struct literal or a tagged string.
-    let continues = Parser::binop(next).is_some()
+    let continues = parser::binop(next).is_some()
         || matches!(
             next,
             QuestionQuestion

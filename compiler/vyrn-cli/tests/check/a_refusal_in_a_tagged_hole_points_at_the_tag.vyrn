@@ -1,0 +1,4 @@
+fn main() -> Int64 {
+    let t =     tag"a\{ . }"
+    return 0
+}

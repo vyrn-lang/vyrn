@@ -678,7 +678,7 @@ fn member_completion_offers_record_fields() {
 }
 
 /// A hole is re-lexed as its own source, so its positions count from the hole.
-/// `Parser::binder_pos` answers `(0, 0)` there and such a binder is not
+/// `Build::binder_pos` answers `(0, 0)` there and such a binder is not
 /// indexed, or the editor would point at an unrelated token.
 #[test]
 fn a_binder_inside_an_interpolation_is_not_a_local() {

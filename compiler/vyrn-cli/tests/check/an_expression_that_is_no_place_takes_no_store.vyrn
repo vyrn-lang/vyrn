@@ -1,0 +1,5 @@
+fn f() -> Int64 { return 0 }
+fn main() -> Int64 {
+    f() = 1
+    return 0
+}

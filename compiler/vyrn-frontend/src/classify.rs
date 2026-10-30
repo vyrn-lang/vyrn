@@ -2,7 +2,7 @@
 //! playground (`vyrn-play`) and the site (the `codeRuns` builtin).
 //!
 //! [`code_runs`] lexes the text and runs the recognizer over its tokens. The token
-//! kind decides a run's class, and the recognizer's [`Mark::Word`]s say which
+//! kind decides a run's class, and the recognizer's words say which
 //! identifiers a rule consumed as a word. A file that does not parse still has
 //! runs: recovery resumes at the next declaration or statement, and a token in the
 //! text it skips gets its kind's class and no word's.
@@ -11,7 +11,7 @@ use std::ops::Range;
 
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{self, Hole, Tok, Token, TrivKind};
-use crate::recognizer::{recognize, recognize_hole, Mark, Recognized};
+use crate::recognizer::{recognize, recognize_hole, Recognized};
 
 /// What colours a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,13 +75,7 @@ fn runs_in(
         .map(|i| (i.span.clone(), matches!(i.kind, TrivKind::Comment)))
         .collect();
     let toks = lexer::tokens(scan);
-    // A rule consumes tokens in order, so the marks are in order.
-    let mut words = (rule(&toks).marks.into_iter())
-        .filter_map(|m| match m {
-            Mark::Word(at) => Some(at),
-            Mark::Decl(..) => None,
-        })
-        .peekable();
+    let mut words = rule(&toks).words.into_iter().peekable();
     let push = |start: usize, stop: usize, class: Class, out: &mut Vec<Run>| {
         out.push(Run {
             start: base + start,

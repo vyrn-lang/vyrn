@@ -1,0 +1,9 @@
+a_statement_refusal_under_a_failed_type_list_stays.vyrn:2:15: unexpected token in expression: LBrace
+a_statement_refusal_under_a_failed_type_list_stays.vyrn:3:13: expected identifier, found Eq
+a_statement_refusal_under_a_failed_type_list_stays.vyrn:5:9: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found Gt
+a_statement_refusal_under_a_failed_type_list_stays.vyrn:5:10: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found LParen
+a_statement_refusal_under_a_failed_type_list_stays.vyrn:5:11: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found Int(1)
+a_statement_refusal_under_a_failed_type_list_stays.vyrn:5:12: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found RParen
+a_statement_refusal_under_a_failed_type_list_stays.vyrn:6:5: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found Return
+a_statement_refusal_under_a_failed_type_list_stays.vyrn:6:12: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found Int(0)
+a_statement_refusal_under_a_failed_type_list_stays.vyrn:7:1: expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or `logging` at top level, found RBrace

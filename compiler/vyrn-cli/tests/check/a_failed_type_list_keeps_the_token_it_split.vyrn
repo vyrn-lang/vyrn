@@ -1,0 +1,4 @@
+fn main() -> Int64 {
+    let s = sort<Asc<Int64>= 1
+    return 0
+}

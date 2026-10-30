@@ -4769,7 +4769,7 @@ fn link(
 /// Whether a skimmed body's tokens can mention a builtin whose mention links a
 /// runtime module ([`RT_MODULES`]): its name, or a `save`, `load`, `loadOr` or
 /// template, which the parser desugars to `toJson`, `fromJson` and `@str`
-/// (`Parser::storage_desugar`, `Parser::template`). A code quote `vyrn"..."`
+/// (`Build::storage_desugar`, `Build::template`). A code quote `vyrn"..."`
 /// desugars to host calls, so it mentions only what its holes mention: a
 /// runtime name, or a template.
 fn mentions_runtime(tokens: &[lexer::Token]) -> bool {

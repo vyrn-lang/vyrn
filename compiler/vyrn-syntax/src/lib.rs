@@ -12,8 +12,8 @@
 //!
 //! Entry points: [`load`] reads a grammar, [`lexer`] writes its lexical rules as
 //! Rust, and [`recognizer`] writes its syntactic rules. `vyrn.syntax` beside this
-//! file is Vyrn's grammar, and the `syntaxgate` test holds the hand parser equal to
-//! the written recognizer.
+//! file is Vyrn's grammar, and the `syntaxgate` test pins what the written recognizer
+//! says over the corpus.
 
 mod gen;
 mod load;
@@ -100,6 +100,9 @@ enum Recover {
     Stmt,
     /// At the next token that matches the expression, outside braces.
     Decl(Box<E>),
+    /// Nowhere: a failed item refuses. Each round counts as one `nest` level, on top
+    /// of the depth the loop started at, until the loop ends.
+    Nest,
 }
 
 /// One precedence level of a `climb`, loosest first.
@@ -157,6 +160,8 @@ struct Throw {
     holes: Vec<(Rc<str>, HoleSrc)>,
     line: At,
     col: At,
+    /// Whether the cursor passes the token here before recovery starts.
+    past: bool,
     /// The labels of the rule the refusal sits in, by [`At::Label`] index.
     labels: Vec<Rc<str>>,
 }

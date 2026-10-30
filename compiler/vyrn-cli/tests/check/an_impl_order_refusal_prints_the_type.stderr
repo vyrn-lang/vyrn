@@ -1,0 +1,2 @@
+an_impl_order_refusal_prints_the_type.vyrn:8:5: `type C = ..` must be declared before the methods of `impl P for A | B` — an associated type is resolved where it is named, so a method above it cannot see it
+an_impl_order_refusal_prints_the_type.vyrn:12:5: `type C = ..` must be declared before the methods of `impl P for Array<{ x: Int64, y: fn(Int64) -> Int64 }>` — an associated type is resolved where it is named, so a method above it cannot see it
