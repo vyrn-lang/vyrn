@@ -48,7 +48,7 @@ sysroot. A crate is judged on what it costs, not on a rule against crates.
 | `vyrn-genwasm` | runs a `gen fn` as compiled wasm inside a load; without its `host` feature, builds the module a host runs (`run_pure`) | `vyrn-frontend`, `vyrn-codegen`, `wasmtime` (feature `host`) |
 | `vyrn-lsp` | the language server, an adapter over `vyrn-frontend` | `vyrn-frontend`, `vyrn-lower`, `vyrn-genwasm` |
 | `vyrn-play` | the playground: the front end and the emitter compiled to `wasm32-unknown-unknown` | `vyrn-frontend`, `vyrn-codegen`, `vyrn-lower`, `vyrn-genwasm` without `host` |
-| `vyrn-syntax` | `vyrn.syntax` (Vyrn's grammar) and `syntax.syntax` (the file format), `lexer` and `recognizer`, which write the lexer's scanner and the recognizer from a grammar, and `parser`, which writes a grammar as a Vyrn module for `std/syntax`; `vyrn-frontend` serves `syntaxParser` with it | nothing |
+| `vyrn-syntax` | `vyrn.syntax` (Vyrn's grammar) and `syntax.syntax` (the file format), `lexer` and `recognizer`, which write the lexer's scanner and the recognizer from a grammar, `parser`, which writes a grammar as a Vyrn module for `std/syntax`, and `textmate`, which writes a grammar's editor files; `vyrn-frontend` serves `syntaxParser` with it | nothing |
 
 `vyrn-lsp`, `vyrn-genwasm` and `vyrn-play` are excluded from the workspace.
 Test and format the first two with `--manifest-path`. Build `vyrn-play` from

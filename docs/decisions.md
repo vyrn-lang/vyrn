@@ -434,7 +434,7 @@ pull request.
 - Vyrn does not build tools from source, wrap a package manager, or take a crate for curl, git or tar.
 - `vyrn build -o` writes its output through a staged file beside it and a rename (`manifest::stage_beside`), so a reader sees the last build or the new one and a failed build leaves the last one. The native route's intermediates (`<out>.wasm`, `<out>.w2c.c`) stay in place for inspection.
 - Native builds choose from a curated set of microarchitectures and always pass `-ffp-contract=off`, because FMA changes float bits.
-- The editor grammar colours only words the compiler names, and its keywords equal the lexer's.
+- `vyrn_syntax::textmate` writes the editor's TextMate grammar and language configuration from a grammar, committed and held by a pin test, so the editor colours only what the grammar states. A `.syntax` file carries no scope: a class comes from a lexical rule's name, in the writer's one vocabulary, and a naming convention no grammar can state is a value the caller passes.
 - A generator input is analysed through the module that claims it and whose generated code maps to it through its span table. A module claims a file when the first string argument of one of its generator imports resolves to the file or a directory above it; the import graph is the only registry, so there is no extension map.
 - One `.vsix` serves every platform; the server ships in each platform's release archive.
 

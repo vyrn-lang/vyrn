@@ -560,8 +560,10 @@ cargo test --manifest-path compiler/vyrn-lsp/Cargo.toml
 `editor/vscode/` is plain JavaScript with no compile step. `extension.js` starts
 `vyrn-lsp` and registers the commands; `vyrn.tmLanguage.json` and
 `vyx.tmLanguage.json` colour `.vyrn` and `.vyx` files without the server;
-`.von` files have their own language id and reuse the Vyrn grammar. The
-grammar's keywords must equal the lexer's; `editor/vscode/test/` checks it.
+`.von` files have their own language id and reuse the Vyrn grammar.
+`vyrn.tmLanguage.json` and `language-configuration.json` are written from
+`vyrn.syntax` by `vyrn_syntax::textmate`. Do not edit them: a test in `vyrn-syntax`
+holds them, and `VYRN_PIN=write` rewrites them.
 
 CodeLenses: Run and Profile over `fn main`; Run test over each `test` block
 and Run all tests over the first; the same pair for `bench` blocks; Run dev
