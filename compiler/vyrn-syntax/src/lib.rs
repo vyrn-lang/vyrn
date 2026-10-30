@@ -20,6 +20,7 @@ mod load;
 mod lower;
 mod parser;
 mod recognizer;
+mod shape;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;

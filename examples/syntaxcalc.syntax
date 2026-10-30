@@ -1,0 +1,90 @@
+// A small language: the form of every line of syntax.syntax, read by
+// examples/syntaxcalc.vyrn through std/syntax.
+syntax Calc
+
+keyword Let 'let'
+keyword Fn 'fn'
+keyword Return 'return'
+keyword If 'if'
+keyword True 'true'
+token Arrow '->'
+token FatArrow '=>'
+token EqEq '=='
+token GtEq '>='
+token OrOr '||'
+token Shr '>>'
+token Gt '>'
+token Lt '<'
+token Eq '='
+token Plus '+'
+token Minus '-'
+token Star '*'
+token Caret '^'
+token Dot '.'
+token Comma ','
+token Semi ';'
+token Colon ':'
+token LParen '('
+token RParen ')'
+token LBrace '{'
+token RBrace '}'
+
+nest 16 ^TooDeep(max='16')
+expect ^Expected(token=token, found=found)
+
+// A check of a tree's meaning, which the reader raises.
+row BadName
+
+trivia = (ws / comment)*
+comment = '//' (!'\n' .)*
+token = string / word / number / punct
+word = (alpha / '_') (alnum / '_')*
+ident = !reserved word
+number = digit+ ('.' [0-9]+)?
+string = q:'"' (!'"' strItem)* ('"' / ^UnterminatedString@q)
+strItem = '\\' escape / '{' hole / .
+escape = [n"\\{] / ^BadEscape(other=.)
+hole = embed(holeText, Expr, wrap=^InHole(detail=inner)@q, trailing=^HoleTrailing(src=extent)@q)
+       ('}' / ^UnclosedHole(at=.:?)@q)
+holeText = (!'}' .)*
+
+Program = many items:Item until eof recover decl ItemStart
+ItemStart = 'let' / 'fn'
+Item = Let / Fn / ^TopLevel(found=found)!
+
+Let = i:'let' mutable:'mut'? name:Name (':' ty:Type)?
+      ('=' / ^LetNeedsInit(name=name)@(i,here)) value:Expr End
+End = ';' / &'}' / ~^MissingSemi(fix='add a semicolon')
+Fn = 'fn' name:Name '(' list params:Name sep ',' until ')' ')' ('->' result:Type)? body:Block
+Name = ident fail ^ExpectedName(found=found)!
+Type = base:Name ('<' list args:Type sep ',' until '>' Close)?
+Close = split '>'
+
+nest Block = '{' many stmts:Stmt until ('}' / eof) recover stmt '}'
+Stmt = Let / Return / If / Bare
+Return = 'return' (&(';' / '}') / value:Expr) End
+If = 'if' +nostruct(cond:Expr) then:Block
+Bare = value:Expr End
+
+Expr = climb Unary {
+    left '||'
+    left '=='
+    left '<' '>='
+    left '+' '-'
+    left '*'
+    right '^'
+    }
+nest Unary = Neg / Postfix
+Neg = '-' operand:Unary
+Postfix = base:Primary many links:Link until !('.' / '(') recover nest
+Link = '.' field:Name / '(' -nostruct(list args:Expr sep ',' until ')') ')'
+Primary = Lambda / Paren / Tagged / Struct / Var / Num / Text / Yes
+Lambda = @(params:Params '=>') body:Expr
+Params = '(' list names:Name sep ',' until ')' ')'
+Paren = '(' -nostruct(inner:Expr) ')'
+Tagged = &(ident nonl string) tag:Name body:Text
+Struct = !?nostruct &(ident '{') name:Name '{' list fields:Name sep ',' until '}' '}'
+Var = name:ident
+Num = value:number
+Text = value:string
+Yes = 'true'

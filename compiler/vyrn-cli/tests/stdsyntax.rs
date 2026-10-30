@@ -70,6 +70,7 @@ fn a_written_parser_is_what_the_formatter_writes() {
     let grammars = [
         grammar_dir().join("syntax.syntax"),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/syntaxjson.syntax"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/syntaxcalc.syntax"),
     ];
     for grammar in grammars {
         let text = written(&grammar);

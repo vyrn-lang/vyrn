@@ -1,7 +1,8 @@
-ok, 37 bytes
-ok, 23 bytes
-ok, 2 bytes
-ok, 2 bytes
+{0: "a"=[6: 1 2 {13: "b"=null@19}] "c"="x
+"}, 37 bytes
+[2: true@3 false@9 -1.5e3], 23 bytes
+[0:], 2 bytes
+{0:}, 2 bytes
 1:27: expected "]"
 1:19: expected ":"
 1:49: expected "null"

@@ -1,0 +1,164 @@
+// A small language through std/syntax: every form of a grammar, read as a tree.
+// Recovery reports each mistake and goes on, a failed `@` releases the partial
+// tree it built, and the islands of a string parse at their own offsets.
+
+import { syntax, SyntaxError } from "std/syntax"
+import { Expr, Fn, Item, Let, Primary, Program, Row, Stmt, Type, Unary, parseProgram } from syntax("./syntaxcalc.syntax")
+
+fn say(row: Row) -> String {
+    return match row {
+        BadEscape(other) => "BadEscape \{other}",
+        BadName => "BadName",
+        Expected(token, found) => "Expected \{token} found \{found}",
+        ExpectedName(found) => "ExpectedName found \{found}",
+        HoleTrailing(src) => "HoleTrailing \{src}",
+        InHole(detail) => "InHole \{detail}",
+        LetNeedsInit(name) => "LetNeedsInit \{name}",
+        MissingSemi(fix) => "MissingSemi: \{fix}",
+        TooDeep(max) => "TooDeep \{max}",
+        TopLevel(found) => "TopLevel found \{found}",
+        UnclosedHole(at) => "UnclosedHole \{at}",
+        UnterminatedString => "UnterminatedString",
+    }
+}
+
+fn joined(xs: Array<String>) -> String {
+    let mut out = ""
+    for x in xs {
+        if out.byteLength > 0 {
+            out = out + " "
+        }
+        out = out + x
+    }
+    return out
+}
+
+fn showType(t: Type) -> String {
+    let mut args: Array<String> = []
+    for a in t.args {
+        args.push(showType(a))
+    }
+    return "\{t.base.text}<\{joined(args)}>"
+}
+
+fn showPrimary(p: Primary) -> String {
+    return match p {
+        PrimaryLambda(l) => "(fn/\{l.params.names.length.toString()} \{showExpr(l.body)})",
+        PrimaryParen(x) => showExpr(x.inner),
+        PrimaryTagged(x) => "\{x.tag.text}\{x.body.value.text}",
+        PrimaryStruct(x) => "\{x.name.text}{\{x.fields.length.toString()}}",
+        PrimaryVar(x) => x.name.text.copy(),
+        PrimaryNum(x) => x.value.text.copy(),
+        PrimaryText(x) => x.value.text.copy(),
+        PrimaryYes(x) => "yes@\{x.start.toString()}",
+    }
+}
+
+fn showUnary(u: Unary) -> String {
+    match u {
+        UnaryNeg(n) => {
+            return "(- \{showUnary(n.operand)})"
+        }
+        UnaryPostfix(x) => {
+            let mut out = showPrimary(x.base)
+            for link in x.links {
+                let mut name = "call/\{link.args.length.toString()}"
+                if let Some(f) = link.field {
+                    name = f.text.copy()
+                }
+                out = "\{out}.\{name}"
+            }
+            return out
+        }
+    }
+}
+
+fn showExpr(e: Expr) -> String {
+    return match e {
+        ExprUnary(u) => showUnary(u),
+        ExprOp(b) => "(\{b.op.text} \{showExpr(b.left)} \{showExpr(b.right)})",
+    }
+}
+
+fn showLet(l: Let) -> String {
+    let mut ty = ""
+    if let Some(t) = l.ty {
+        ty = ": \{showType(t)}"
+    }
+    let mut word = "let"
+    if let Some(m) = l.mutable {
+        word = "let mut"
+    }
+    return "\{word} \{l.name.text}\{ty} = \{showExpr(l.value)}"
+}
+
+fn showStmt(s: Stmt) -> String {
+    match s {
+        StmtLet(l) => {
+            return showLet(l)
+        }
+        StmtReturn(r) => {
+            if let Some(v) = r.value {
+                return "return \{showExpr(v)}"
+            }
+            return "return"
+        }
+        StmtIf(i) => {
+            return "if \{showExpr(i.cond)} [\{i.then.stmts.length.toString()}]"
+        }
+        StmtBare(b) => {
+            return showExpr(b.value)
+        }
+    }
+}
+
+fn showFn(f: Fn) -> String {
+    let mut body: Array<String> = []
+    for s in f.body.stmts {
+        body.push(showStmt(s))
+    }
+    let mut result = ""
+    if let Some(t) = f.result {
+        result = " -> \{showType(t)}"
+    }
+    return "fn \{f.name.text}/\{f.params.length.toString()}\{result} [\{joined(body)}]"
+}
+
+fn check(text: String) {
+    match parseProgram(text) {
+        Ok(program) => {
+            for item in program.items {
+                match item {
+                    ItemLet(l) => print(showLet(l)),
+                    ItemFn(f) => print(showFn(f)),
+                }
+            }
+        }
+        Err(errors) => {
+            for e in errors {
+                print("\{e.line.toString()}:\{e.col.toString()}: \{say(e.row)}")
+            }
+        }
+    }
+    print("--")
+}
+
+fn main() -> Int64 {
+    check("let a = 1 + 2 * 3 ^ 4 ^ 5 >= 6 == 7 || 8;")
+    check("// a comment\nlet mut xs: Map<String, Array<Int64>> = f(1, (x, y) => x + y).g(2).h;")
+    check("fn main(a, b) -> Int64 { let x = -a; if x < b { return x; } return; b.c }")
+    check("fn f() { if a { b; } let s = T { x, y }; return (a, b); }")
+    check("let t = tag\"a{1 + 2}b\"; let u = tag\n\"c\";")
+    check("let x 1;\nlet y = ;\nfn g( { }\nlet z = 2;")
+    check("fn f() {\n  let a = ;\n  let b = 1;\n  let = 2;\n}\nnope\nlet ok = 1;")
+    check("let a = 1")
+    check("let s = \"a{1 +}b\";")
+    check("let s = \"a{1 2}b\";")
+    check("let s = \"a{1\";")
+    check("let s = \"a{1")
+    check("let s = \"a\\qb\";")
+    check("let s = \"abc")
+    check("let a = ((((((((((((((((((1))))))))))))))))));")
+    check("let a = b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u;")
+    return 0
+}

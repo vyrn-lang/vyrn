@@ -1297,7 +1297,8 @@ examples/stringops.vyrn	0	cbf29ce484222325	20	15	b54a9330607eaa07
 examples/strings.vyrn	0	cbf29ce484222325	20	18	bface68ef260ed02
 examples/strpredbytes.vyrn	0	cbf29ce484222325	20	18	c1a562a04ce8ede1
 examples/sugarnames.vyrn	0	cbf29ce484222325	20	17	58578fff285bd315
-examples/syntaxjson.vyrn	0	cbf29ce484222325	20	16	bb94e74a893ae883
+examples/syntaxcalc.vyrn	0	cbf29ce484222325	20	19	fbfe13a9b154ea67
+examples/syntaxjson.vyrn	0	cbf29ce484222325	20	19	d34016082b390547
 examples/tagged.vyrn	0	cbf29ce484222325	20	18	89e6fc3589a5c921
 examples/tallybytes.vyrn	0	cbf29ce484222325	20	15	52bc84bfbacaedc0
 examples/templates.vyrn	0	cbf29ce484222325	20	14	3896a2e290631cf2
@@ -1428,7 +1429,7 @@ std/strings.vyrn	0	cbf29ce484222325	20	17	b629a5aa6d142897
 std/strpred.vyrn	0	cbf29ce484222325	20	17	9c14050c2040cc5b
 std/sum.vyrn	0	cbf29ce484222325	20	15	8c91500e0625df59
 std/symbolmap.vyrn	0	cbf29ce484222325	20	16	a2136b9a284642be
-std/syntax.vyrn	0	cbf29ce484222325	20	10	f3f41eddcfea0390
+std/syntax.vyrn	0	cbf29ce484222325	20	13	ee4b663ee331e4fa
 std/task.vyrn	0	cbf29ce484222325	20	15	60a812a24b4b99a6
 std/text.vyrn	0	cbf29ce484222325	20	14	bc0918ce6f331d94
 std/tile.vyrn	0	cbf29ce484222325	20	18	0d5778cdb398a9d9

@@ -1,8 +1,8 @@
-// A JSON grammar through std/syntax: the parser it writes accepts a document,
+// A JSON grammar through std/syntax: the parser it writes builds a typed tree,
 // and refuses each mistake at its row, line and column.
 
 import { syntax, SyntaxError } from "std/syntax"
-import { parseDocument, Document, Row } from syntax("./syntaxjson.syntax")
+import { parseDocument, Document, Json, Member, Row } from syntax("./syntaxjson.syntax")
 
 fn say(row: Row) -> String {
     return match row {
@@ -12,9 +12,43 @@ fn say(row: Row) -> String {
     }
 }
 
+/// A tree as text, each node at its byte span.
+fn show(v: Json) -> String {
+    let mut parts = ""
+    match v {
+        JsonObj(o) => {
+            for m in o.members {
+                parts = parts + " " + m.key.text.text + "=" + show(m.value)
+            }
+            return "{\{o.start.toString()}:\{parts}}"
+        }
+        JsonList(l) => {
+            for x in l.items {
+                parts = parts + " " + show(x)
+            }
+            return "[\{l.start.toString()}:\{parts}]"
+        }
+        JsonStr(s) => {
+            return s.text.text.copy()
+        }
+        JsonNum(n) => {
+            return n.text.text.copy()
+        }
+        JsonTrue(t) => {
+            return "true@\{t.start.toString()}"
+        }
+        JsonFalse(f) => {
+            return "false@\{f.start.toString()}"
+        }
+        JsonNull(n) => {
+            return "null@\{n.start.toString()}"
+        }
+    }
+}
+
 fn check(text: String) {
     match parseDocument(text) {
-        Ok(document) => print("ok, \{document.end.toString()} bytes"),
+        Ok(document) => print("\{show(document.value)}, \{document.end.toString()} bytes"),
         Err(errors) => {
             for e in errors {
                 print("\{e.line.toString()}:\{e.col.toString()}: \{say(e.row)}")

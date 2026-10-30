@@ -3,10 +3,18 @@
 //! [`parser`] lowers each rule a start rule reaches to one function over byte
 //! offsets, and each start rule to an exported `parse<Start>`. The written module
 //! holds one `Parse` record: the cursor, the end of the last token, the end of the
-//! text, the refusals, and one field per flag. A rule function returns whether its
-//! rule matched. A false answer with `p.refused` unset left the cursor where it was;
-//! with `p.refused` set the rule refused, and every caller up to a predicate or a
-//! `recover` hands the false on.
+//! text, the refusals, and one field per flag. A lexical rule's function answers
+//! whether it matched, and a syntactic rule's answers `Option<T>` of the type
+//! [`crate::shape`] gives it. A miss with `p.refused` unset left the cursor where it
+//! was; with `p.refused` set the rule refused, and every caller up to a predicate or
+//! a `recover` hands the miss on.
+//!
+//! A rule's labels are locals of its function, and it builds its record as it
+//! returns. A sequence that fails resets the labels bound inside it. So a partial
+//! value is always a local or an element the reset pops, and the compiler's placed
+//! release frees it at the function's exit or at the reset. A type that reaches
+//! itself holds a record on the cycle, and each such record has an `impl Owned` that
+//! takes the fields on the cycle apart.
 //!
 //! A syntactic rule keeps the cursor on the first byte of a token: each token it
 //! takes also takes the trivia after it, so a failed alternative pays no second skip
@@ -24,14 +32,12 @@ use std::rc::Rc;
 
 use crate::gen::walk;
 use crate::lower::{free_labels, miss, Miss};
+use crate::shape::{shapes, type_name, Field, Mult, Shape, Ty};
 use crate::{At, Builtin, Embed, Grammar, HoleSrc, Level, Lit, Recover, Refused, RuleId, Throw, E};
 
 /// The rules a file may define that no rule has to read: a host's lexer starts at
 /// `scan`, and `trivia` and `token` serve the parser itself.
 const NOT_STARTS: &[&str] = &["scan", "trivia", "token"];
-
-/// The type names a written module uses for itself, which no rule may take.
-const TAKEN: &[&str] = &["Row", "Parse"];
 
 /// Returns the Vyrn source of `g`'s parser, or where the grammar has no such parser
 /// and why.
@@ -59,8 +65,9 @@ pub fn parser(g: &Grammar) -> Result<String, Refused> {
             ));
         }
     }
+    refuse_wide_classes(g, &rules)?;
     let rows = rows(g);
-    refuse_clashes(g, &starts, &rows)?;
+    let shapes = shapes(g, &rules, rows.keys())?;
     let mut w = Writer {
         g,
         free: free_labels(g, &rules),
@@ -71,6 +78,9 @@ pub fn parser(g: &Grammar) -> Result<String, Refused> {
         at: starts[0],
         kept: BTreeSet::new(),
         scope: Vec::new(),
+        shapes,
+        take: None,
+        looking: 0,
     };
     for &r in &rules {
         w.rule(r)?;
@@ -78,7 +88,26 @@ pub fn parser(g: &Grammar) -> Result<String, Refused> {
     for &r in &starts {
         w.entry(r)?;
     }
-    Ok(w.finish(&starts))
+    Ok(w.finish(&rules))
+}
+
+/// Refuses a character class that names a character outside ASCII: the loader reads
+/// a class by bytes, so such a member would match part of a character.
+fn refuse_wide_classes(g: &Grammar, rules: &[RuleId]) -> Result<(), Refused> {
+    for &r in rules {
+        let rule = g.body(r);
+        let mut wide = false;
+        walk(&rule.body, &mut |e| {
+            if let E::Class(ranges, _) = e {
+                wide |= ranges.iter().any(|&(a, b)| !a.is_ascii() || !b.is_ascii());
+            }
+        });
+        if wide {
+            let sentence = format!("rule `{}`: a character class holds ASCII only", rule.name);
+            return Err(Refused::at(rule.line, 1, sentence));
+        }
+    }
+    Ok(())
 }
 
 /// Refuses a flag a rule reads and no rule sets: it is a hook of a host, and a
@@ -208,40 +237,8 @@ fn rows(g: &Grammar) -> BTreeMap<Rc<str>, Vec<Rc<str>>> {
     rows
 }
 
-/// Refuses two written names that would clash: a start rule's type or a row on a
-/// name the module uses, or on each other.
-fn refuse_clashes(
-    g: &Grammar,
-    starts: &[RuleId],
-    rows: &BTreeMap<Rc<str>, Vec<Rc<str>>>,
-) -> Result<(), Refused> {
-    let mut names: BTreeSet<String> = rows.keys().map(|r| r.to_string()).collect();
-    names.extend(TAKEN.iter().map(|n| n.to_string()));
-    for &r in starts {
-        let rule = g.body(r);
-        if !names.insert(type_name(&rule.name)) {
-            let sentence = format!(
-                "rule `{}` writes the type `{}`, and the module already has that name",
-                rule.name,
-                type_name(&rule.name)
-            );
-            return Err(Refused::at(rule.line, 1, sentence));
-        }
-    }
-    Ok(())
-}
-
 fn is_name(s: &str) -> bool {
     s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
-
-/// `file` as `File`.
-fn type_name(rule: &str) -> String {
-    let mut cs = rule.chars();
-    match cs.next() {
-        Some(c) => c.to_ascii_uppercase().to_string() + cs.as_str(),
-        None => String::new(),
-    }
 }
 
 /// A Vyrn string literal that spells `s`.
@@ -360,6 +357,13 @@ struct Writer<'g> {
     kept: BTreeSet<Rc<str>>,
     /// The labels bound where the writer stands.
     scope: Vec<Rc<str>>,
+    /// Each rule's shape, by rule index.
+    shapes: Vec<Shape>,
+    /// What wraps the value of a rule reference in a rule with no labels: the
+    /// variant of a choice, empty for the rule that is its one reference.
+    take: Option<String>,
+    /// How many predicates the writer stands in. A predicate keeps nothing.
+    looking: usize,
 }
 
 impl Writer<'_> {
@@ -447,39 +451,142 @@ impl Writer<'_> {
         self.kept = kept;
     }
 
+    /// The type a syntactic rule answers with, and a lexical rule's value.
+    fn ty(&self, t: Ty) -> String {
+        match t {
+            Ty::Text => "Lexeme".to_string(),
+            Ty::Rule(r) => match &self.shapes[r.0 as usize] {
+                Shape::Same(x) => self.ty(Ty::Rule(*x)),
+                Shape::Lexical => "Lexeme".to_string(),
+                _ => type_name(&self.g.body(r).name),
+            },
+        }
+    }
+
+    /// A field's type.
+    fn field_ty(&self, f: &Field) -> String {
+        let t = self.ty(f.ty);
+        match f.mult {
+            Mult::One => t,
+            Mult::Opt => format!("Option<{t}>"),
+            Mult::Many => format!("Array<{t}>"),
+        }
+    }
+
+    /// The local that holds a field while its rule runs.
+    fn field_local(&mut self, f: &Field) {
+        let t = self.ty(f.ty);
+        match f.mult {
+            Mult::Many => self.line(format!("let mut {}Kept: Array<{t}> = []", f.name)),
+            _ => self.line(format!("let mut {}Kept: Option<{t}> = None", f.name)),
+        }
+    }
+
     fn rule(&mut self, r: RuleId) -> Result<(), Refused> {
         self.start_rule(r);
         let rule = self.g.body(r);
         let params = self.labels(r, ": Int64");
+        let answer = match rule.syntactic {
+            true => format!("Option<{}>", self.ty(Ty::Rule(r))),
+            false => "Bool".to_string(),
+        };
+        let miss_answer = if rule.syntactic { "None" } else { "false" };
         self.open(format!(
-            "fn {}(text: String, p: modify Parse{params}) -> Bool {{",
+            "fn {}(text: String, p: modify Parse{params}) -> {answer} {{",
             self.function(r)
         ));
         if let E::Climb(operand, levels) = &rule.body {
             return self.climb(r, operand, levels);
         }
-        let nest = match (&self.g.nest_limit, rule.nest) {
-            (Some((max, t)), true) => {
-                self.open(format!("if p.depth >= {max} {{"));
-                self.refuse(t, None);
-                self.line("return false");
-                self.close();
-                self.line("p.depth = p.depth + 1");
-                true
+        if let (Some((max, t)), true) = (&self.g.nest_limit, rule.nest) {
+            self.open(format!("if p.depth >= {max} {{"));
+            self.refuse(t, None);
+            self.line(format!("return {miss_answer}"));
+            self.close();
+            self.line("p.depth = p.depth + 1");
+        }
+        let shape = self.shapes[r.0 as usize].clone();
+        match &shape {
+            Shape::Record(fields) => {
+                self.line("let start = p.pos");
+                fields.iter().for_each(|f| self.field_local(f));
             }
-            _ => false,
+            Shape::Choice(_) | Shape::Same(_) => {
+                let t = self.ty(Ty::Rule(r));
+                self.line(format!("let mut itKept: Option<{t}> = None"));
+            }
+            Shape::Lexical | Shape::Climb(_) => {}
+        }
+        let hit = match (&shape, &rule.body) {
+            (Shape::Choice(variants), E::Alt(v)) => self.choice(v, variants)?,
+            (Shape::Same(_), body) => {
+                self.take = Some(String::new());
+                let hit = self.hit(body)?;
+                self.take = None;
+                hit
+            }
+            (_, E::Seq(v)) if !v.is_empty() => self.seq(v, false)?,
+            (_, body) => self.hit(body)?,
         };
-        if nest {
+        if rule.nest {
             let h = self.local("h");
-            self.put(&format!("let {h} = "), &rule.body)?;
+            self.line(format!("let {h} = {hit}"));
             self.line("p.depth = p.depth - 1");
-            self.line(format!("return {h}"));
+            self.answer(r, &shape, &h);
         } else {
-            self.put("return ", &rule.body)?;
+            self.answer(r, &shape, &hit);
         }
         self.close();
         self.o.push('\n');
         Ok(())
+    }
+
+    /// The last lines of a rule's function, once `hit` says whether it matched.
+    fn answer(&mut self, r: RuleId, shape: &Shape, hit: &str) {
+        match shape {
+            Shape::Lexical => self.line(format!("return {hit}")),
+            Shape::Choice(_) | Shape::Same(_) => {
+                self.open(format!("if !{hit} {{"));
+                self.line("return None");
+                self.close();
+                self.line("return itKept");
+            }
+            Shape::Record(fields) => {
+                self.open(format!("if !{hit} {{"));
+                self.line("return None");
+                self.close();
+                let mut parts = Vec::new();
+                for f in fields {
+                    let q = if f.mult == Mult::One { "?" } else { "" };
+                    parts.push(format!("{}: {}Kept{q}", f.name, f.name));
+                }
+                parts.push("start: start".to_string());
+                parts.push("end: endOf(p, start)".to_string());
+                let ty = self.ty(Ty::Rule(r));
+                self.line(format!("return Some({ty} {{ {} }})", parts.join(", ")));
+            }
+            Shape::Climb(_) => {}
+        }
+    }
+
+    /// A rule that is a choice of rule references: each alternative's one reference
+    /// is its variant.
+    fn choice(&mut self, v: &[E], variants: &[Option<String>]) -> Result<String, Refused> {
+        let h = self.local("h");
+        self.line(format!("let mut {h} = false"));
+        for (i, (x, variant)) in v.iter().zip(variants).enumerate() {
+            if i > 0 {
+                self.open(format!("if !{h} && !p.refused {{"));
+            }
+            self.take = variant.clone();
+            let hit = self.hit(x)?;
+            self.take = None;
+            self.line(format!("{h} = {hit}"));
+            if i > 0 {
+                self.close();
+            }
+        }
+        Ok(h)
     }
 
     /// A `climb` rule's function, the one that climbs, and the one that reads an
@@ -487,32 +594,51 @@ impl Writer<'_> {
     /// consumed before each descent.
     fn climb(&mut self, r: RuleId, operand: &E, levels: &[Level]) -> Result<(), Refused> {
         let f = self.function(r);
+        let ty = self.ty(Ty::Rule(r));
         self.line(format!("return {f}From(text, p, 0)"));
         self.close();
         self.o.push('\n');
         self.open(format!(
-            "fn {f}From(text: String, p: modify Parse, min: Int64) -> Bool {{"
+            "fn {f}From(text: String, p: modify Parse, min: Int64) -> Option<{ty}> {{"
         ));
-        let hit = self.hit(operand)?;
-        self.open(format!("if !{hit} {{"));
-        self.line("return false");
-        self.close();
+        let E::Ref(first) = operand else {
+            return Err(self.no("the operand of a `climb` is one rule".into()));
+        };
+        self.line("let start = p.pos");
+        self.line(format!(
+            "let operand = {}(text, p{})?",
+            self.function(*first),
+            self.labels(*first, "")
+        ));
+        self.line(format!(
+            "let mut left = {ty}{}(operand)",
+            type_name(&self.g.body(*first).name)
+        ));
         self.open("while true {");
         self.line(format!("let op = {f}Op(text, p)"));
         self.open("if op < 0 || op / 2 < min {");
         self.line("break");
         self.close();
+        self.line("let at = p.pos");
+        self.line("let past = p.pos + p.oplen");
         self.open("if !advance(text, p, p.oplen) {");
-        self.line("return false");
+        self.line("return None");
         self.close();
-        self.open(format!("if !{f}From(text, p, op / 2 + 1 - op % 2) {{"));
+        self.line(format!("let right = {f}From(text, p, op / 2 + 1 - op % 2)"));
+        self.open("if let Some(r) = right {");
+        self.line("let lexeme = Lexeme { text: textOf(text, at, past), start: at, end: past }");
+        self.line(format!(
+            "left = {ty}Op({ty}Binary {{ left: left, op: lexeme, right: r, start: start, end: endOf(p, start) }})"
+        ));
+        self.ind -= 1;
+        self.open("} else {");
         self.open("if !p.refused {");
         self.refuse_miss(operand);
         self.close();
-        self.line("return false");
+        self.line("return None");
         self.close();
         self.close();
-        self.line("return true");
+        self.line("return Some(left)");
         self.close();
         self.o.push('\n');
         self.open(format!(
@@ -541,9 +667,10 @@ impl Writer<'_> {
     fn entry(&mut self, r: RuleId) -> Result<(), Refused> {
         self.start_rule(r);
         let rule = self.g.body(r);
-        let ty = type_name(&rule.name);
+        let ty = self.ty(Ty::Rule(r));
         self.open(format!(
-            "export fn parse{ty}(text: String) -> Result<{ty}, Array<SyntaxError<Row>>> {{"
+            "export fn parse{}(text: String) -> Result<{ty}, Array<SyntaxError<Row>>> {{",
+            type_name(&rule.name)
         ));
         let flags: String = (self.g.flags.iter())
             .map(|f| format!(", {f}: false"))
@@ -554,19 +681,39 @@ impl Writer<'_> {
         if rule.syntactic && self.g.rule("trivia").is_some() {
             self.line("lexTrivia(text, p)");
         }
-        self.line("let start = p.pos");
-        self.line(format!("let hit = {}(text, p)", self.function(r)));
-        self.open("if !hit && !p.refused {");
-        self.refuse_miss(&E::Ref(r));
-        self.close();
-        self.open("if hit && !p.refused && p.pos < p.stop {");
-        self.refuse_expected("Eof");
-        self.close();
-        self.open("if p.errors.length > 0 {");
+        if rule.syntactic {
+            self.open(format!(
+                "if let Some(value) = {}(text, p) {{",
+                self.function(r)
+            ));
+            self.open("if !p.refused && p.pos < p.stop {");
+            self.refuse_expected("Eof");
+            self.close();
+            self.open("if p.errors.length == 0 {");
+            self.line("return Ok(value)");
+            self.close();
+            self.ind -= 1;
+            self.open("} else {");
+            self.open("if !p.refused {");
+            self.refuse_miss(&E::Ref(r));
+            self.close();
+            self.close();
+        } else {
+            self.open(format!("if {}(text, p) {{", self.function(r)));
+            self.open("if !p.refused && p.pos < p.stop {");
+            self.refuse_expected("Eof");
+            self.close();
+            self.open("if p.errors.length == 0 {");
+            self.line("return Ok(Lexeme { text: text.copy(), start: 0, end: p.pos })");
+            self.close();
+            self.ind -= 1;
+            self.open("} else {");
+            self.open("if !p.refused {");
+            self.refuse_miss(&E::Ref(r));
+            self.close();
+            self.close();
+        }
         self.line("return Err(consume p.errors)");
-        self.close();
-        let end = if rule.syntactic { "p.last" } else { "p.pos" };
-        self.line(format!("return Ok({ty} {{ start: start, end: {end} }})"));
         self.close();
         self.o.push('\n');
         Ok(())
@@ -574,7 +721,7 @@ impl Writer<'_> {
 
     /// The module around the rule functions: the types, then the rules, then the
     /// helpers the text calls.
-    fn finish(self, starts: &[RuleId]) -> String {
+    fn finish(self, rules: &[RuleId]) -> String {
         let g = self.g;
         let mut head = String::from("import { SyntaxError } from \"std/syntax\"\n\n");
         head.push_str("export type Row = enum {\n");
@@ -586,10 +733,7 @@ impl Writer<'_> {
             };
         }
         head.push_str("}\n\n");
-        for &r in starts {
-            let ty = type_name(&g.body(r).name);
-            let _ = writeln!(head, "export type {ty} = {{ start: Int64, end: Int64 }}\n");
-        }
+        self.types(&mut head, rules);
         head.push_str("type Parse = {\n    pos: Int64,\n    last: Int64,\n    stop: Int64,\n    oplen: Int64,\n    quiet: Int64,\n    looking: Int64,\n    depth: Int64,\n    refused: Bool,\n    errors: Array<SyntaxError<Row>>,\n");
         for f in &g.flags {
             let _ = writeln!(head, "    {f}: Bool,");
@@ -610,11 +754,65 @@ impl Writer<'_> {
         head + &text
     }
 
+    /// Writes the types of `rules`, and an `impl Owned` for each record on a cycle.
+    fn types(&self, o: &mut String, rules: &[RuleId]) {
+        let _ = writeln!(
+            o,
+            "export type Lexeme = {{ text: String, start: Int64, end: Int64 }}\n"
+        );
+        for &r in rules {
+            let name = type_name(&self.g.body(r).name);
+            match &self.shapes[r.0 as usize] {
+                Shape::Record(fields) => {
+                    let mut parts: Vec<String> = (fields.iter())
+                        .map(|f| format!("{}: {}", f.name, self.field_ty(f)))
+                        .collect();
+                    parts.push("start: Int64".to_string());
+                    parts.push("end: Int64".to_string());
+                    let _ = writeln!(o, "export type {name} = {{ {} }}\n", parts.join(", "));
+                }
+                Shape::Choice(variants) => {
+                    let mut parts: Vec<String> = Vec::new();
+                    for (v, t) in crate::shape::variants(self.g, variants, r) {
+                        let part = format!("{v}({})", self.ty(Ty::Rule(t)));
+                        if !parts.contains(&part) {
+                            parts.push(part);
+                        }
+                    }
+                    let _ = writeln!(o, "export type {name} = enum {{ {} }}\n", parts.join(", "));
+                }
+                Shape::Climb(operand) => {
+                    let _ = writeln!(
+                        o,
+                        "export type {name} = enum {{ {name}{}({}), {name}Op({name}Binary) }}\n",
+                        type_name(&self.g.body(*operand).name),
+                        self.ty(Ty::Rule(*operand))
+                    );
+                    let _ = writeln!(
+                        o,
+                        "export type {name}Binary = {{ left: {name}, op: Lexeme, right: {name}, start: Int64, end: Int64 }}\n"
+                    );
+                }
+                Shape::Same(_) | Shape::Lexical => {}
+            }
+        }
+        for (name, fields) in crate::shape::recursive_records(self.g, &self.shapes, rules) {
+            let _ = writeln!(
+                o,
+                "impl Owned for {name} {{\n    fn release(consume self) {{"
+            );
+            for f in fields {
+                let _ = writeln!(o, "        let {f}Kept = consume self.{f}");
+            }
+            let _ = writeln!(o, "    }}\n}}\n");
+        }
+    }
+
     /// Writes `e`, then the line that starts with `head` and ends in whether `e`
     /// matched. A call that is a rule's whole answer needs no local of its own.
     fn put(&mut self, head: &str, e: &E) -> Result<(), Refused> {
         let call = match e {
-            E::Ref(r) if self.g.body(*r).syntactic == self.syntactic() => {
+            E::Ref(r) if !self.g.body(*r).syntactic && !self.syntactic() => {
                 format!("{}(text, p{})", self.function(*r), self.labels(*r, ""))
             }
             _ => self.hit(e)?,
@@ -680,7 +878,7 @@ impl Writer<'_> {
                 );
             }
             E::Seq(v) if v.is_empty() => "true".into(),
-            E::Seq(v) => self.seq(v)?,
+            E::Seq(v) => self.seq(v, true)?,
             E::Alt(v) => {
                 let h = self.local("h");
                 self.put(&format!("let mut {h} = "), &v[0])?;
@@ -719,6 +917,7 @@ impl Writer<'_> {
                 self.close();
                 h
             }
+            E::Field(label, x) if self.syntactic() && self.looking == 0 => self.keep(label, x)?,
             E::Field(_, x) | E::Guard(_, x) => self.hit(x)?,
             E::Throw(t) => {
                 self.refuse(t, None);
@@ -811,14 +1010,109 @@ impl Writer<'_> {
         let h = self.local("h");
         let args = self.labels(r, "");
         let f = self.function(r);
-        if self.syntactic() && !callee.syntactic {
-            self.line(format!("let mut {h} = {f}(text, p{args})"));
-            self.open(format!("if {h} {{"));
-            self.line(format!("{h} = advance(text, p, 0)"));
-            self.close();
-        } else {
-            self.line(format!("let {h} = {f}(text, p{args})"));
+        if !callee.syntactic {
+            let take = self
+                .take
+                .clone()
+                .filter(|_| self.syntactic() && self.looking == 0);
+            if let Some(variant) = take {
+                self.take = None;
+                let h = self.text_value(&E::Ref(r), &move |w: &Writer<'_>, v: String| {
+                    w.kept_it(&variant, v)
+                })?;
+                return Ok(h);
+            }
+            if self.syntactic() {
+                self.line(format!("let mut {h} = {f}(text, p{args})"));
+                self.open(format!("if {h} {{"));
+                self.line(format!("{h} = advance(text, p, 0)"));
+                self.close();
+            } else {
+                self.line(format!("let {h} = {f}(text, p{args})"));
+            }
+            return Ok(h);
         }
+        self.line(format!("let mut {h} = false"));
+        let store = match self.take.take().filter(|_| self.looking == 0) {
+            Some(variant) => self.kept_it(&variant, "v".to_string()),
+            None => String::new(),
+        };
+        self.open(format!("if let Some(v) = {f}(text, p{args}) {{"));
+        if !store.is_empty() {
+            self.line(store);
+        }
+        self.line(format!("{h} = true"));
+        self.close();
+        Ok(h)
+    }
+
+    /// The line that stores a rule reference's value `v` as the rule's answer.
+    fn kept_it(&self, variant: &str, v: String) -> String {
+        match variant.is_empty() {
+            true => format!("itKept = Some({v})"),
+            false => format!("itKept = Some({variant}({v}))"),
+        }
+    }
+
+    /// The line that stores `v` in the field of `label`.
+    fn store(&self, label: &str, v: &str) -> String {
+        let many = match &self.shapes[self.at.0 as usize] {
+            Shape::Record(fields) => {
+                (fields.iter()).any(|f| &*f.name == label && f.mult == Mult::Many)
+            }
+            _ => false,
+        };
+        match many {
+            true => format!("{label}Kept.push({v})"),
+            false => format!("{label}Kept = Some({v})"),
+        }
+    }
+
+    /// `label:x`: a label on a repetition labels each item, one on a rule reference
+    /// keeps its value, and one on anything else keeps the text it matched.
+    fn keep(&mut self, label: &Rc<str>, x: &E) -> Result<String, Refused> {
+        let at = |y: &E| Box::new(E::Field(label.clone(), Box::new(y.clone())));
+        match x {
+            E::Star(y) => self.hit(&E::Star(at(y))),
+            E::Plus(y) => self.hit(&E::Plus(at(y))),
+            E::Opt(y) => self.hit(&E::Opt(at(y))),
+            E::Try(y) => self.hit(&E::Try(at(y))),
+            E::Many(y, c, rec) => self.hit(&E::Many(at(y), c.clone(), rec.clone())),
+            E::List(y, sep, c) => self.hit(&E::List(at(y), sep.clone(), c.clone())),
+            E::SetFlag(f, v, y) => self.hit(&E::SetFlag(*f, *v, at(y))),
+            E::Ref(r) if self.g.body(*r).syntactic => {
+                let (h, args) = (self.local("h"), self.labels(*r, ""));
+                self.line(format!("let mut {h} = false"));
+                self.open(format!(
+                    "if let Some(v) = {}(text, p{args}) {{",
+                    self.function(*r)
+                ));
+                self.line(self.store(label, "v"));
+                self.line(format!("{h} = true"));
+                self.close();
+                Ok(h)
+            }
+            _ => {
+                let label = label.clone();
+                self.text_value(x, &move |w: &Writer<'_>, v: String| w.store(&label, &v))
+            }
+        }
+    }
+
+    /// `x`, whose match a `Lexeme` holds; `store` writes the line that keeps it.
+    fn text_value(
+        &mut self,
+        x: &E,
+        store: &dyn Fn(&Writer<'_>, String) -> String,
+    ) -> Result<String, Refused> {
+        let (from, h) = (self.local("q"), self.local("h"));
+        self.line(format!("let {from} = p.pos"));
+        self.put(&format!("let {h} = "), x)?;
+        self.open(format!("if {h} {{"));
+        let value =
+            format!("Lexeme {{ text: textOf(text, {from}, p.last), start: {from}, end: p.last }}");
+        self.line(store(self, value));
+        self.close();
         Ok(h)
     }
 
@@ -841,11 +1135,14 @@ impl Writer<'_> {
 
     /// A sequence: each element runs while those before it matched. In a syntactic
     /// rule, an element that fails after the sequence moved is a refusal unless a
-    /// predicate is looking. A label binds the elements after it.
-    fn seq(&mut self, v: &[E]) -> Result<String, Refused> {
+    /// predicate is looking. A label binds the elements after it. When `reset`, a
+    /// failure takes back the fields this sequence kept; a rule's whole body needs no
+    /// reset, because its function answers `None` and its locals go.
+    fn seq(&mut self, v: &[E], reset: bool) -> Result<String, Refused> {
         let depth = self.scope.len();
         let (q, l) = self.save();
         let h = self.local("h");
+        let resets = self.resets(v, reset);
         for x in v {
             if let E::Field(label, _) = x {
                 if self.kept.contains(label) {
@@ -867,8 +1164,8 @@ impl Writer<'_> {
                 self.line(format!("{label}From = p.pos"));
             }
             match i {
-                0 => self.put(&format!("let mut {h} = "), inner)?,
-                _ => self.put(&format!("{h} = "), inner)?,
+                0 => self.put(&format!("let mut {h} = "), x)?,
+                _ => self.put(&format!("{h} = "), x)?,
             }
             if i > 0 && self.syntactic() {
                 self.open(format!(
@@ -889,10 +1186,49 @@ impl Writer<'_> {
             }
         }
         self.scope.truncate(depth);
+        if !resets.is_empty() {
+            self.open(format!("if !{h} {{"));
+            for line in resets {
+                self.line(line);
+            }
+            self.close();
+        }
         self.open(format!("if !{h} && !p.refused {{"));
         self.restore(&q, &l);
         self.close();
         Ok(h)
+    }
+
+    /// The lines that take back the fields `v` keeps, when an element after a kept
+    /// field can fail. A repeated field shrinks to its length here, which this writes
+    /// as a local.
+    fn resets(&mut self, v: &[E], reset: bool) -> Vec<String> {
+        let Shape::Record(fields) = self.shapes[self.at.0 as usize].clone() else {
+            return Vec::new();
+        };
+        if !reset || !self.syntactic() || self.looking > 0 {
+            return Vec::new();
+        }
+        let mut inner = Vec::new();
+        for (i, x) in v.iter().enumerate() {
+            if i + 1 < v.len() {
+                inner.extend(crate::shape::labels_in(x));
+            }
+        }
+        let mut out = Vec::new();
+        for f in fields.iter().filter(|f| inner.contains(&f.name)) {
+            match f.mult {
+                Mult::Many => {
+                    let n = self.local("n");
+                    self.line(format!("let {n} = {}Kept.length", f.name));
+                    out.push(format!("while {}Kept.length > {n} {{", f.name));
+                    out.push(format!("    let extra = {}Kept.pop()", f.name));
+                    out.push("}".to_string());
+                }
+                _ => out.push(format!("{}Kept = None", f.name)),
+            }
+        }
+        out
     }
 
     /// `e*`: stops when `e` fails or matches empty.
@@ -933,7 +1269,9 @@ impl Writer<'_> {
         let h = self.local("h");
         self.line("p.looking = p.looking + 1");
         self.line("p.quiet = p.quiet + 1");
+        self.looking += 1;
         self.put(&format!("let {h} = "), x)?;
+        self.looking -= 1;
         self.line("p.looking = p.looking - 1");
         self.line("p.quiet = p.quiet - 1");
         self.line("p.refused = false");
@@ -1106,7 +1444,14 @@ impl Writer<'_> {
         }
         let f = self.function(em.inner);
         let args = self.labels(em.inner, "");
-        self.line(format!("{h} = {f}(text, p{args})"));
+        if self.g.body(em.inner).syntactic {
+            self.line(format!("{h} = false"));
+            self.open(format!("if let Some(v) = {f}(text, p{args}) {{"));
+            self.line(format!("{h} = true"));
+            self.close();
+        } else {
+            self.line(format!("{h} = {f}(text, p{args})"));
+        }
         self.open(format!("if !{h} && !p.refused {{"));
         self.refuse_miss(&E::Ref(em.inner));
         self.close();
@@ -1327,6 +1672,18 @@ fn bump(text: String, p: modify Parse) {
             .to_string(),
         ),
         (
+            "endOf",
+            "/// Where a rule that started at `start` ends: at the last token it took.
+fn endOf(p: Parse, start: Int64) -> Int64 {
+    if p.last > start {
+        return p.last
+    }
+    return start
+}
+"
+            .to_string(),
+        ),
+        (
             "advance",
             format!(
                 "/// Passes a token of `n` bytes and the trivia after it. False if the trivia refuses.
@@ -1540,6 +1897,44 @@ mod tests {
             let sentence = refusal(grammar);
             assert!(sentence.contains("already has that name"), "{sentence}");
         }
+    }
+
+    #[test]
+    fn a_class_outside_ascii_is_refused() {
+        let sentence = refusal("expect ^E\na = [\u{e9}]\n");
+        assert!(sentence.contains("ASCII only"), "{sentence}");
+    }
+
+    #[test]
+    fn a_label_of_two_types_is_refused() {
+        let sentence = refusal("expect ^E\nA = x:B x:'c'\nB = 'b'\n");
+        assert!(sentence.contains("holds two types"), "{sentence}");
+    }
+
+    #[test]
+    fn a_label_no_field_can_spell_is_refused() {
+        for label in ["start", "end", "fn"] {
+            let sentence = refusal(&format!("expect ^E\nA = {label}:'x'\n"));
+            assert!(sentence.contains(&format!("label `{label}`")), "{sentence}");
+        }
+    }
+
+    #[test]
+    fn an_alternative_that_keeps_nothing_beside_a_reference_is_refused() {
+        let sentence = refusal("expect ^E\nA = B / 'c'\nB = 'b'\n");
+        assert!(sentence.contains("no clear type"), "{sentence}");
+    }
+
+    #[test]
+    fn a_cycle_of_references_with_no_record_is_refused() {
+        let sentence = refusal("expect ^E\nA = '(' A ')' / B\nB = 'b'\n");
+        assert!(sentence.contains("no record to end at"), "{sentence}");
+    }
+
+    #[test]
+    fn a_climb_over_no_one_rule_is_refused() {
+        let sentence = refusal("expect ^E\nA = climb 'x' { left '+' }\n");
+        assert!(sentence.contains("one rule"), "{sentence}");
     }
 
     #[test]

@@ -683,6 +683,31 @@ The whole `Code` API:
 
 Each span of a `Code` value has an author: a quote's text is written by the module that holds the quote, text `codeAt` copied by its input file, and a `String`, number, `Bool` or `Name` in a hole by the call site. `at` moves where an error shows, never the author. An import a generator writes is judged as its author (see `export to`), so `export to` a generator's module admits the imports its quotes write, and a generator cannot copy past it an import its caller may not write. A relative specifier resolves beside its author: text `codeAt` copied beside its input file, quote text beside the module that holds the quote, and a `String` in a hole beside the file that wrote the generator call. A name the call site wrote, such as a handler's `Name`, resolves in the file that wrote the generator call without an import; a name a quote spells resolves in the quote's module. `name`, `codeAt`, `at` and `diag` mean the builtin only in a call that is no method call and passes their argument count, so `w.at(1)` and `at(w, 1)` stay `Index`'s.
 
+### A grammar writes a parser
+
+`import { parseFile, File, Row } from syntax("./x.syntax")` writes a parser as ordinary Vyrn code, which runs at generation and at run time alike. `std/syntax` exports `syntax` and `SyntaxError<R>`, and `compiler/vyrn-syntax/syntax.syntax` is the file format. A `.syntax` file is an input like any other, named through the `inputs` globs.
+
+- Each rule no other rule reads is a start rule, apart from `trivia`, `token` and `scan`. It writes `parse<Start>(text: String) -> Result<Start, Array<SyntaxError<Row>>>`, which refuses text the rule leaves unread.
+- `Row` has one variant per `^Row` and per `row` line, with one `String` per hole in the order the file first names them. A grammar holds no sentence, so a reader states each row's in one `match`.
+- `SyntaxError<Row>` holds the row, a 1-based `line` and `col` in bytes, and `end`, the byte offset past the refused token. A parser answers with its own `Row`, so one grammar's refusal has no type in another.
+- A syntactic rule commits and reads tokens, with `trivia` between them. A lexical rule backtracks and reads bytes. A character outside ASCII counts as a letter.
+
+A label is a field, and every record holds its `start` and `end` byte offsets:
+
+| The rule or label | Its type |
+|---|---|
+| `name:X` | a field of `X`'s type |
+| a label on `*`, `+`, `many` or `list`, or twice in a sequence | an `Array` of it |
+| a label on `?`, or in only some alternatives | an `Option` of it |
+| a label on a lexical rule, a literal or a group | `Lexeme { text, start, end }` |
+| no label, a choice of rule references | an enum with a variant `<Rule><Reference>` per alternative |
+| no label, one required reference | that reference |
+| any other rule | a record of its span alone |
+| `climb` | an enum `<Rule><Operand>(..)`, `<Rule>Op(<Rule>Binary)`, where `<Rule>Binary` is `{ left, op, right, start, end }` |
+| a lexical start rule | `Lexeme` |
+
+The writer refuses a grammar at its line, with a report, when a rule reads a flag no rule sets, when a label holds two types or no field can spell it, when an alternative that keeps nothing stands beside one that keeps a rule, when rules reach each other through references alone, or when two written names clash. A rule reached through such a cycle has a label in its place: `Paren = '(' inner:Expr ')'`.
+
 ### Contracts
 
 A `contract` declares the exports a module may have. A generator compares a module with it; the compiler checks nothing else about it.

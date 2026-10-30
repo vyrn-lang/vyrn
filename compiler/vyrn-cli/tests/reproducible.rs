@@ -96,6 +96,30 @@ fn all_equal(runs: &[Vec<u8>], what: &str) {
     }
 }
 
+/// A grammar writes the same parser in every process: the writer's tables are ordered
+/// by the file, and its rows by name.
+#[test]
+fn the_same_grammar_writes_the_same_parser_in_every_process() {
+    let example =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/syntaxcalc.vyrn");
+    let runs: Vec<Vec<u8>> = (0..RUNS)
+        .map(|_| {
+            let out = vyrn()
+                .arg("emit-gen")
+                .arg(&example)
+                .output()
+                .expect("vyrn emit-gen");
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out.stdout
+        })
+        .collect();
+    all_equal(&runs, "the written parser");
+}
+
 #[test]
 fn the_same_source_builds_to_the_same_wasm_bytes_in_every_process() {
     let (dir, src) = source();
