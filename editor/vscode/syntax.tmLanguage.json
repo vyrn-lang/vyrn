@@ -1,0 +1,19 @@
+{
+  "comment": "Written by vyrn_syntax::textmate from syntax.syntax. VYRN_PIN=write cargo test -p vyrn-syntax rewrites it.",
+  "name": "syntax",
+  "scopeName": "source.syntax",
+  "patterns": [
+    { "name": "comment.line.syntax", "begin": "\\/\\/", "end": "(?>\\x0a|\\z)", "beginCaptures": { "0": { "name": "punctuation.definition.comment.line.begin.syntax" } }, "endCaptures": { "0": { "name": "punctuation.definition.comment.line.end.syntax" } }, "patterns": [] },
+    { "name": "string.quoted.syntax", "match": "\\'(?>(?:(?>\\\\[\\s\\S]|(?!\\')[\\s\\S]))*)\\'" },
+    { "name": "keyword.control.syntax", "match": "\\b(?:nest|stmt)\\b(?=\\s*(?:[ \\x09\\x0d]|[ \\x09]|[A-Za-z_]|\\!|\\&|\\'|\\(|\\)|\\*|\\+|\\,|\\-|\\.|\\/|\\/\\/|\\?|\\@|\\[|\\^|\\x0a|\\x0d|\\{|\\~|climb\\b|embed\\b|fail\\b|list\\b|many\\b|recover\\b|sep\\b|split\\b|until\\b))" },
+    { "name": "keyword.control.syntax", "match": "\\b(?:climb|expect|keyword|left|list|many|nest|right|row|split|syntax|token)\\b(?=\\s*(?:[ \\x09]))" },
+    { "name": "keyword.control.syntax", "match": "\\b(?:decl|sep|until)\\b(?=\\s*(?:[ \\x09]|[A-Za-z_]|\\!|\\&|\\'|\\(|\\+|\\-|\\.|\\/\\/|\\?|\\@|\\[|\\^|\\x0a|\\x0d|\\~|climb\\b|embed\\b|list\\b|many\\b|split\\b))" },
+    { "name": "keyword.control.syntax", "match": "\\b(?:trailing|wrap)\\b(?=\\s*(?:[ \\x09]|\\/\\/|\\=|\\x0a|\\x0d))" },
+    { "name": "keyword.control.syntax", "match": "\\b(?:fail)\\b(?=\\s*(?:[ \\x09]|\\/\\/|\\^|\\x0a|\\x0d))" },
+    { "name": "keyword.control.syntax", "match": "\\b(?:recover)\\b(?=\\s*(?:[ \\x09]|\\/\\/|\\x0a|\\x0d|decl\\b|nest\\b|stmt\\b))" },
+    { "name": "keyword.control.syntax", "match": "\\b(?:embed)\\b(?=\\s*(?:\\())" }
+  ],
+  "repository": {
+
+  }
+}

@@ -11,9 +11,10 @@
 //! written in itself.
 //!
 //! Entry points: [`load`] reads a grammar, [`lexer`] writes its lexical rules as
-//! Rust, [`recognizer`] writes its syntactic rules, and [`parser`] writes a whole
-//! grammar as a Vyrn module. `vyrn.syntax` beside this file is Vyrn's grammar, and
-//! the `syntaxgate` test pins what the written recognizer says over the corpus.
+//! Rust, [`recognizer`] writes its syntactic rules, [`parser`] writes a whole grammar
+//! as a Vyrn module, and [`textmate`] and [`language_configuration`] write its editor
+//! files. `vyrn.syntax` beside this file is Vyrn's grammar, and the `syntaxgate` test
+//! pins what the written recognizer says over the corpus.
 
 mod gen;
 mod load;
@@ -21,6 +22,7 @@ mod lower;
 mod parser;
 mod recognizer;
 mod shape;
+mod textmate;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -29,6 +31,7 @@ pub use gen::lexer;
 pub use load::load;
 pub use parser::parser;
 pub use recognizer::recognizer;
+pub use textmate::{language_configuration, textmate, Naming};
 
 /// Why a grammar does not load or does not lower: a sentence at a 1-based line and
 /// column of its file.

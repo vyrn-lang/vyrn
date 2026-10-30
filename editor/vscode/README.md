@@ -15,11 +15,11 @@ It is deliberately tiny and plain-JavaScript (no TypeScript compile step):
   registers the ▶ Run / ▶ Run test CodeLenses + the `vyrn.run` / `vyrn.test` /
   `vyrn.testAll` commands (terminal launchers; no server needed). The server
   does the language-analysis work.
-- `vyrn.tmLanguage.json` — a TextMate grammar (colors) derived from the real
-  lexer token set: keywords, PascalCase types/variants, function calls,
-  contextual capability modifiers (`consume`/`share`/`modify`/`read`), tagged
-  templates, and structural regex highlighting after `=~`. Works even without
-  the server.
+- `vyrn.tmLanguage.json` — a TextMate grammar (colors) written from
+  `compiler/vyrn-syntax/vyrn.syntax`: strings with their escapes and holes,
+  reserved words, contextual words where the grammar reads them, numbers,
+  operators, and the naming conventions for types and calls. Works even without
+  the server. Do not edit it: `VYRN_PIN=write cargo test -p vyrn-syntax` rewrites it.
 - `snippets/vyrn.json` — snippets for `fn`, `main`, record/enum `type`,
   `protocol`, `impl`, `match`, `import`, the `logging` block, and `test`.
 - `language-configuration.json` — `//` comment toggle + bracket matching.
@@ -114,9 +114,11 @@ mapping is identity: tag `v0.1.0-indev`, `"version": "0.1.0-indev"`.
 editor/vscode/
   package.json              extension manifest + grammar/language/snippet contributions
   extension.js              the LSP client + ▶ Run / ▶ Run test CodeLenses/commands (plain JS)
-  vyrn.tmLanguage.json      TextMate grammar
+  vyrn.tmLanguage.json      TextMate grammar, written from vyrn.syntax
   snippets/vyrn.json        snippets (fn, main, type, protocol, impl, match, import, logging, test)
-  language-configuration.json
+  language-configuration.json   written from vyrn.syntax
+  syntax.tmLanguage.json    TextMate grammar of .syntax files, written from syntax.syntax
+  syntax-language-configuration.json   written from syntax.syntax
   node_modules/             vscode-languageclient (gitignored)
 ```
 
