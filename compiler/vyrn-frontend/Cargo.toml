@@ -5,14 +5,16 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Vyrn front end: lexer, parser, AST and type checker."
 
+# One edge, and it reads no crate: `syntaxParser` writes a parser with the one
+# reader of the `.syntax` format.
 [dependencies]
+vyrn-syntax = { path = "../vyrn-syntax" }
 
-# NOTHING, and that is the point: the front end is what every other crate reads,
-# so it reads no one. Tests are the exception — the `library-run` tests run
+# The front end is what every other crate reads, so it reads no other part of the
+# compiler. Tests are the exception — the `library-run` tests run
 # a linked program on the compiled route, which is the direct backend
 # plus the driver's WASI host, so the two are DEV-dependencies. Cargo allows the
-# cycle back to `vyrn-cli` for a dev-dependency; the shipped crate keeps an empty
-# list above.
+# cycle back to `vyrn-cli` for a dev-dependency.
 [dev-dependencies]
 vyrn-codegen = { path = "../vyrn-codegen" }
 vyrn-cli = { path = "../vyrn-cli", default-features = false }

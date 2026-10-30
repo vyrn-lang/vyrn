@@ -1,0 +1,6 @@
+import { fromAnother } from "./a_generator_names_a_path_of_its_own"
+import { parseFile } from fromAnother("./a_flag_no_rule_sets_is_a_report.syntax")
+
+fn main() -> Int64 {
+    return 0
+}

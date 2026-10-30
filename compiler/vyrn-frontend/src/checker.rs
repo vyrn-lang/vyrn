@@ -5041,6 +5041,7 @@ impl<'a> Checker<'a> {
                     "render" => "`render` is",
                     "lex" => "`lex` is",
                     "codeRuns" => "`codeRuns` is",
+                    "syntaxParser" => "`syntaxParser` is",
                     "name" => "`name` is",
                     "diag" => "`diag` is",
                     "codeAt" => "`codeAt` is",

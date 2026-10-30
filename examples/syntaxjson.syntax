@@ -1,0 +1,21 @@
+// JSON as a grammar: the toy examples/syntaxjson.vyrn reads with std/syntax.
+syntax Json
+
+expect ^Expected(token=token)
+
+trivia = [ \t\r\n]*
+
+Document = value:Json
+Json = Obj / List / Str / Num / True / False / Null
+Obj = '{' list members:Member sep ',' until '}' '}'
+Member = key:Str ':' value:Json
+List = '[' list items:Json sep ',' until ']' ']'
+Str = text:string
+Num = text:number
+True = 'true'
+False = 'false'
+Null = 'null'
+
+string = q:'"' (!'"' strItem)* ('"' / ^UnterminatedString@q)
+strItem = '\\' ([\\/"bfnrt] / 'u' hex hex hex hex / ^BadEscape(found=.)) / [^\\]
+number = '-'? ('0' / [1-9] digit*) ('.' digit+)? ([eE] [+-]? digit+)?

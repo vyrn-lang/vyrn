@@ -1,0 +1,1 @@
+syntax_parser_is_gen_only.vyrn:2:0: `syntaxParser` is only available during generation

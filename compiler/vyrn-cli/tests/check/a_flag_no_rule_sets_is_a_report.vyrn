@@ -1,0 +1,6 @@
+import { syntax } from "std/syntax"
+import { parseFile } from syntax("./a_flag_no_rule_sets_is_a_report.syntax")
+
+fn main() -> Int64 {
+    return 0
+}

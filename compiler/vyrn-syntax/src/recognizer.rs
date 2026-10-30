@@ -15,6 +15,7 @@ use std::fmt::Write;
 use std::rc::Rc;
 
 use crate::gen::{snake, walk};
+use crate::lower::{free_labels, miss, Miss};
 use crate::{At, Builtin, Embed, Grammar, HoleSrc, Level, Recover, RuleId, Throw, E};
 
 /// The lexical rules a syntactic rule reads, each with the tokens its match lexes
@@ -72,11 +73,10 @@ const ENTRIES: &[&str] = &["Type", "Block"];
 pub fn recognizer(g: &Grammar) -> Result<String, String> {
     let root = g.rule(ROOT).ok_or("the grammar has no `Module` rule")?;
     let rules = reachable(g, root);
-    let mut l = Lower {
+    let l = Lower {
         g,
-        free: vec![BTreeSet::new(); g.rules.len()],
+        free: free_labels(g, &rules),
     };
-    l.solve(&rules);
     l.emit(&rules)
 }
 
@@ -123,75 +123,6 @@ struct Lower<'g> {
 type Scope = Vec<Rc<str>>;
 
 impl Lower<'_> {
-    /// Computes `free` by iteration to its least fixed point. It only grows and is
-    /// bounded by the grammar's labels, so the loop ends.
-    fn solve(&mut self, rules: &[RuleId]) {
-        loop {
-            let mut moved = false;
-            for &r in rules {
-                let mut free = BTreeSet::new();
-                self.reads(&self.g.body(r).body, &mut Vec::new(), &mut free);
-                let i = r.0 as usize;
-                moved |= free != self.free[i];
-                self.free[i] = free;
-            }
-            if !moved {
-                return;
-            }
-        }
-    }
-
-    /// Adds to `out` each label `e` reads that `bound` does not hold. A label binds
-    /// the rest of the sequence it sits in.
-    fn reads(&self, e: &E, bound: &mut Scope, out: &mut BTreeSet<Rc<str>>) {
-        let mut read = |l: &Rc<str>, bound: &Scope| {
-            if !bound.contains(l) {
-                out.insert(l.clone());
-            }
-        };
-        match e {
-            E::Seq(v) => {
-                let depth = bound.len();
-                for x in v {
-                    self.reads(x, bound, out);
-                    if let E::Field(l, _) = x {
-                        bound.push(l.clone());
-                    }
-                }
-                bound.truncate(depth);
-            }
-            E::Alt(v) => v.iter().for_each(|x| self.reads(x, bound, out)),
-            E::Star(x) | E::Plus(x) | E::Opt(x) | E::And(x) | E::Not(x) | E::Try(x) => {
-                self.reads(x, bound, out)
-            }
-            E::Field(_, x) | E::SetFlag(_, _, x) | E::Climb(x, _) => self.reads(x, bound, out),
-            E::Many(a, b, rec) => {
-                self.reads(a, bound, out);
-                self.reads(b, bound, out);
-                if let Recover::Decl(c) = rec {
-                    self.reads(c, bound, out);
-                }
-            }
-            E::List(a, b, c) => [a, b, c].iter().for_each(|x| self.reads(x, bound, out)),
-            E::Ref(r) if self.g.body(*r).syntactic => {
-                self.free[r.0 as usize].iter().for_each(|l| read(l, bound));
-            }
-            E::Throw(t) | E::Skip(t) => {
-                for at in [t.line, t.col] {
-                    if let At::Label(i) = at {
-                        read(&t.labels[i], bound);
-                    }
-                }
-                for (_, src) in &t.holes {
-                    if let HoleSrc::Label(l) = src {
-                        read(l, bound);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn emit(&self, rules: &[RuleId]) -> Result<String, String> {
         let mut o = String::from(PRELUDE);
         let _ = writeln!(
@@ -679,57 +610,12 @@ impl Lower<'_> {
     }
 
     /// The refusal a committed failure of `e` states, as a Rust expression of type
-    /// `R`: its rule's `fail` row, its own throw, or the `expect` row for its first
-    /// literal. The grammar has no left recursion, so the descent ends.
+    /// `R`.
     fn err(&self, e: &E, scope: &Scope) -> Result<String, String> {
-        Ok(match e {
-            E::Lit(l) => self.expected(&l.s),
-            E::Split(s) => self.expected(s),
-            E::Ref(r) => match &self.g.body(*r).fail {
-                Some(t) => self.throw(t, scope)?,
-                None => self.err(&self.g.body(*r).body, scope)?,
-            },
-            E::Alt(v) => match v.last() {
-                Some(x) => self.err(x, scope)?,
-                None => self.expected(""),
-            },
-            E::Seq(v) => {
-                let required = v.iter().find(|x| {
-                    !matches!(
-                        x,
-                        E::Star(_)
-                            | E::Opt(_)
-                            | E::Not(_)
-                            | E::TestFlag(_)
-                            | E::Builtin(Builtin::NoNl)
-                    )
-                });
-                match required {
-                    Some(x) => self.err(x, scope)?,
-                    None => self.expected(""),
-                }
-            }
-            E::Field(_, x)
-            | E::Plus(x)
-            | E::Try(x)
-            | E::SetFlag(_, _, x)
-            | E::Climb(x, _)
-            | E::And(x)
-            | E::Guard(_, x) => self.err(x, scope)?,
-            E::Throw(t) => self.throw(t, scope)?,
-            E::Embed(em) => self.err(&em.extent, scope)?,
-            _ => self.expected(""),
-        })
-    }
-
-    /// The `expect` row for the literal `s`: the token's name, or the spelling
-    /// quoted when no token line names it.
-    fn expected(&self, s: &str) -> String {
-        let name = match self.token(s) {
-            Ok(name) => name.to_string(),
-            Err(_) => format!("{s:?}"),
-        };
-        format!("me.expected({name:?})")
+        match miss(self.g, e) {
+            Miss::Row(t) => self.throw(t, scope),
+            Miss::Expected(name) => Ok(format!("me.expected({name:?})")),
+        }
     }
 
     /// A refusal as a Rust expression of type `R`.

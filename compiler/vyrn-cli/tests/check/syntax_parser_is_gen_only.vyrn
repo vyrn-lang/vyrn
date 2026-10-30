@@ -1,0 +1,4 @@
+fn main() -> Int64 {
+    let c = syntaxParser("./x.syntax")
+    return 0
+}

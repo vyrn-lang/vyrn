@@ -12,23 +12,23 @@ use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use crate::{
-    is_word, At, Builtin, ByteSet, Embed, Grammar, HoleSrc, Level, Lit, Recover, Rule, RuleId,
-    Throw, E,
+    is_word, At, Builtin, ByteSet, Embed, Grammar, HoleSrc, Level, Lit, Recover, Refused, Rule,
+    RuleId, Throw, E,
 };
 
-/// Reads the grammar `src`, or says which definition is wrong and why.
-pub fn load(src: &str) -> Result<Grammar, String> {
+/// Reads the grammar `src`, or says where it is wrong and why.
+pub fn load(src: &str) -> Result<Grammar, Refused> {
     let defs = definitions(src)?;
     let mut tokens: Vec<(String, String, bool)> = Vec::new();
     let mut builder: BTreeSet<Rc<str>> = BTreeSet::new();
     let mut by_name: HashMap<String, RuleId> = HashMap::new();
     // The directives and the rule names first, so a reference may precede its
     // rule. A throw waits for the second pass, which knows every name.
-    let mut heads: Vec<(usize, String, &str, bool)> = Vec::new();
-    let mut throws: Vec<(usize, Option<u32>, &str)> = Vec::new();
+    let mut heads: Vec<(usize, &str, String, &str, bool)> = Vec::new();
+    let mut throws: Vec<(usize, &str, Option<u32>, &str)> = Vec::new();
     for (line, d) in &defs {
         let words: Vec<&str> = d.split_whitespace().collect();
-        let err = |what: &str| format!("line {line}: {what}");
+        let err = |what: &str| Refused::at(*line, 1, what);
         match words.as_slice() {
             ["syntax", _] => {}
             [head @ ("keyword" | "token"), name, lit] if *name != "=" => {
@@ -41,12 +41,14 @@ pub fn load(src: &str) -> Result<Grammar, String> {
             ["nest", n, ..] if n.parse::<u32>().is_ok() => {
                 throws.push((
                     *line,
+                    d,
                     n.parse().ok(),
                     d.split_once(n).map_or("", |(_, r)| r),
                 ));
             }
             ["expect", ..] if words.get(1) != Some(&"=") => {
-                throws.push((*line, None, d.split_once("expect").map_or("", |(_, r)| r)));
+                let rest = d.split_once("expect").map_or("", |(_, r)| r);
+                throws.push((*line, d, None, rest));
             }
             _ => {
                 let (lhs, rhs) = d
@@ -63,7 +65,7 @@ pub fn load(src: &str) -> Result<Grammar, String> {
                 {
                     return Err(err(&format!("rule `{name}` is defined twice")));
                 }
-                heads.push((*line, name, rhs, nest));
+                heads.push((*line, d, name, rhs, nest));
             }
         }
     }
@@ -76,21 +78,27 @@ pub fn load(src: &str) -> Result<Grammar, String> {
         rows: BTreeSet::new(),
     };
     let mut rules = Vec::new();
-    for (line, name, rhs, nest) in &heads {
-        let at = |e: String| format!("line {line}: rule {name}: {e}");
+    for (line, d, name, rhs, nest) in &heads {
+        let site = Site {
+            line: *line,
+            d,
+            rhs,
+        };
+        let at = |m: &Meta, e: String| site.refused(m, format!("rule {name}: {e}"));
         m.start(rhs);
-        let body = m.alt().map_err(at)?;
+        let body = m.alt().map_err(|e| at(&m, e))?;
         let fail = match m.word_is("fail") {
             true => {
-                m.eat(b'^').map_err(at)?;
-                Some(Rc::new(m.throw("").map_err(at)?))
+                m.eat(b'^').map_err(|e| at(&m, e))?;
+                Some(Rc::new(m.throw("").map_err(|e| at(&m, e))?))
             }
             false => None,
         };
-        m.end().map_err(at)?;
+        m.end().map_err(|e| at(&m, e))?;
         let syntactic = name.starts_with(|c: char| c.is_ascii_uppercase());
         rules.push(Rule {
             name: name.clone(),
+            line: *line,
             syntactic,
             body,
             nest: *nest,
@@ -99,22 +107,23 @@ pub fn load(src: &str) -> Result<Grammar, String> {
     }
     // A `nest N ^Row` line carries its limit; an `expect ^Row` line none.
     let (mut nest_limit, mut expect) = (None, None);
-    for (line, limit, text) in throws {
-        let at = |e: String| format!("line {line}: {e}");
+    for (line, d, limit, text) in throws {
+        let site = Site { line, d, rhs: text };
         m.start(text);
-        m.eat(b'^').map_err(at)?;
+        m.eat(b'^').map_err(|e| site.refused(&m, e))?;
         let t = Rc::new(
             m.throw(if limit.is_some() { "" } else { "token" })
-                .map_err(at)?,
+                .map_err(|e| site.refused(&m, e))?,
         );
-        m.end().map_err(at)?;
+        m.end().map_err(|e| site.refused(&m, e))?;
         match limit {
             Some(n) => nest_limit = Some((n, t)),
             None => expect = Some(t),
         }
     }
     if let Some(r) = m.rows.intersection(&builder).next() {
-        return Err(format!("row `{r}` is both stated and a builder's"));
+        let sentence = format!("row `{r}` is both stated and a builder's");
+        return Err(Refused::at(1, 1, sentence));
     }
     let rule = |n: &str| by_name.get(n).copied();
     let mut g = Grammar {
@@ -123,7 +132,9 @@ pub fn load(src: &str) -> Result<Grammar, String> {
         tokens,
         flags: m.flags,
         nest_limit,
-        expect: expect.ok_or("a grammar names its expect row: `expect ^Row(..)`")?,
+        expect: expect.ok_or_else(|| {
+            Refused::at(1, 1, "a grammar names its expect row: `expect ^Row(..)`")
+        })?,
         stated: m.rows,
         builder,
         rules,
@@ -143,12 +154,40 @@ pub fn load(src: &str) -> Result<Grammar, String> {
     Ok(g)
 }
 
-/// Splits `src` into definitions, each with its first line's number.
-fn definitions(src: &str) -> Result<Vec<(usize, String)>, String> {
+/// Where one definition's expression text stands in the file.
+struct Site<'a> {
+    line: usize,
+    /// The definition's whole text, whose lines are the file's lines from `line` on.
+    d: &'a str,
+    /// The suffix of `d` the reader was started on.
+    rhs: &'a str,
+}
+
+impl Site<'_> {
+    /// `sentence` at the reader's byte, as a line and a column of the file.
+    fn refused(&self, m: &Meta, sentence: String) -> Refused {
+        let at = (self.d.len() - self.rhs.len() + m.i).min(self.d.len());
+        let before = &self.d.as_bytes()[..at];
+        let newlines = before.iter().filter(|b| **b == b'\n').count();
+        let line_start = before
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |i| i + 1);
+        Refused::at(self.line + newlines, at - line_start + 1, sentence)
+    }
+}
+
+/// Splits `src` into definitions, each with its first line's number. A blank or
+/// comment line inside a definition stays a newline, so the definition's lines stay
+/// the file's lines.
+fn definitions(src: &str) -> Result<Vec<(usize, String)>, Refused> {
     let mut defs: Vec<(usize, String)> = Vec::new();
     for (n, line) in src.lines().enumerate() {
         let code = strip_comment(line);
         if code.trim().is_empty() {
+            if let Some(last) = defs.last_mut() {
+                last.1.push('\n');
+            }
             continue;
         }
         if !line.starts_with([' ', '\t']) {
@@ -157,9 +196,10 @@ fn definitions(src: &str) -> Result<Vec<(usize, String)>, String> {
             last.1.push('\n');
             last.1.push_str(code);
         } else {
-            return Err(format!(
-                "line {}: a continuation before any definition",
-                n + 1
+            return Err(Refused::at(
+                n + 1,
+                1,
+                "a continuation before any definition",
             ));
         }
     }
@@ -169,7 +209,7 @@ fn definitions(src: &str) -> Result<Vec<(usize, String)>, String> {
 /// Refuses a rule that can call itself before it consumes a character, so the
 /// written code's recursion has a measure: the text left, then the depth in the
 /// acyclic graph of calls at one position.
-fn refuse_left_recursion(g: &Grammar) -> Result<(), String> {
+fn refuse_left_recursion(g: &Grammar) -> Result<(), Refused> {
     // Nullability is a least fixpoint; each round sets one more rule or stops,
     // so there are at most `rules + 1` rounds.
     let mut nullable = vec![false; g.rules.len()];
@@ -214,7 +254,8 @@ fn refuse_left_recursion(g: &Grammar) -> Result<(), String> {
         let mut path = Vec::new();
         if visit(r, &calls, &mut state, &mut path) {
             let names: Vec<&str> = path.iter().map(|&i| g.rules[i].name.as_str()).collect();
-            return Err(format!("left recursion: {}", names.join(" -> ")));
+            let sentence = format!("left recursion: {}", names.join(" -> "));
+            return Err(Refused::at(g.rules[r].line, 1, sentence));
         }
     }
     Ok(())

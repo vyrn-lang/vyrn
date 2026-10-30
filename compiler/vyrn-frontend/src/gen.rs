@@ -1,5 +1,6 @@
 //! Generation machinery: the splice rule, the
-//! `Code` rope, its renderer and span table, the `lex` token literal, the sandbox's
+//! `Code` rope, its renderer and span table, the `lex` token literal, the span
+//! `syntaxParser` answers, the sandbox's
 //! path rule, `moduleInterface`'s reflection, and the seam the driver installs
 //! the generation engine through. Nothing here walks a tree: each function
 //! takes a resolver, a path or a source, and returns an `Expr` or a `String`.
@@ -271,6 +272,31 @@ pub fn diag_span(severity: &str, anchor: &str, message: &str) -> Result<Span, St
     })
 }
 
+/// Returns what `syntaxParser` answers for the grammar at `path`, whose `bytes` the
+/// run read, `None` when it could not: the parser as code by module `key`, or a report
+/// at the place the grammar goes wrong.
+pub fn syntax_parser_span(key: &str, path: &str, bytes: Option<&[u8]>) -> Result<Span, String> {
+    let report = |at: String, sentence: &str| diag_span("error", &at, &sentence.replace('\n', " "));
+    let Some(bytes) = bytes else {
+        return report(format!("{path}:1:1"), "cannot read this grammar");
+    };
+    let Ok(src) = std::str::from_utf8(bytes) else {
+        return report(format!("{path}:1:1"), "a grammar is UTF-8 text");
+    };
+    match vyrn_syntax::load(src).and_then(|g| vyrn_syntax::parser(&g)) {
+        Ok(text) => Ok(Span {
+            text,
+            author: Author::File {
+                key: Arc::from(key),
+                at: Pos { line: 1, col: 1 },
+            },
+            shown: None,
+            kind: Kind::Code,
+        }),
+        Err(e) => report(format!("{path}:{}:{}", e.line, e.col), &e.sentence),
+    }
+}
+
 /// Returns the span `codeAt` copies: `text`, which must stand at `line:col`
 /// (1-based) of `bytes`, the input at resolver key `key` that the generator
 /// read, written by that input. `path` is the generator's spelling, which its
@@ -473,6 +499,8 @@ pub struct GenInputs<'a> {
     /// The load options (std root, manifest aliases), so `moduleInterface` can
     /// link the reflected module's imports.
     pub opts: &'a crate::loader::LoadOptions,
+    /// The key of the module that holds the generator.
+    pub module: String,
     /// The importing module's directory: the base for relative paths.
     pub importer_dir: String,
     /// Resolved path prefixes the generator may read under: its constant path

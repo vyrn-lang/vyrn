@@ -1,0 +1,4 @@
+syntax Hooked
+expect ^E
+File = 'a'
+     / ?hooked 'b'

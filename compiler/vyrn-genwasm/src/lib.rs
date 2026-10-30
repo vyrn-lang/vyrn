@@ -249,6 +249,9 @@ fn serve(
         Ok(content) => {
             let bytes = content.into_bytes();
             reads.push((resolved, Some(bytes.clone())));
+            if mode == MODE_SYNTAX {
+                return syntax_parser(inputs, path, Some(&bytes));
+            }
             // Recorded before the NUL rule rejects it: the cache must notice
             // when the file changes.
             if mode == MODE_READ && bytes.contains(&0) {
@@ -265,9 +268,23 @@ fn serve(
                 // would lose the remedy.
                 return Err(why);
             }
+            if mode == MODE_SYNTAX {
+                return syntax_parser(inputs, path, None);
+            }
             Ok(Served::Bytes(1, Vec::new()))
         }
     }
+}
+
+/// Answers `syntaxParser` with the span of the grammar's parser or of its report.
+#[cfg(feature = "host")]
+fn syntax_parser(
+    inputs: &GenInputs<'_>,
+    path: &str,
+    bytes: Option<&[u8]>,
+) -> Result<Served, String> {
+    vyrn_frontend::gen::syntax_parser_span(&inputs.module, path, bytes)
+        .map(|span| Served::Span(Box::new(span)))
 }
 
 /// Runs generator `fn_name` without wasmtime, for the playground, where the
@@ -846,6 +863,9 @@ const MODE_LIST_KINDS: i32 = 4;
 /// Not a read: `codeAt` asks for the bytes a read already served.
 #[cfg(feature = "host")]
 const MODE_CODE_AT: i32 = 5;
+/// `syntaxParser`: a read, whose bytes the host thread writes a parser from.
+#[cfg(feature = "host")]
+const MODE_SYNTAX: i32 = 7;
 
 /// One unit of a structured host result. Encoder and decoder walk the same
 /// static type, so the variant is not a tag the decoder consults: a `nextInt`
@@ -1166,6 +1186,7 @@ struct Caps {
 enum Served {
     Bytes(i32, Vec<u8>),
     Copy(String, Vec<u8>),
+    Span(Box<Span>),
     /// Encoded on the guest thread, so one [`encode`] call serves all three
     /// structured builtins.
     Lit(Box<Expr>),
@@ -1221,7 +1242,7 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                     streams.stash = bytes;
                     Ok((status as i64) << 32 | len)
                 }
-                Ok(Ok(Served::Lit(_) | Served::Copy(..))) => {
+                Ok(Ok(Served::Lit(_) | Served::Copy(..) | Served::Span(_))) => {
                     Err(Error::msg("read answered with a literal"))
                 }
                 // A scoping violation traps.
@@ -1303,6 +1324,25 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
     )?;
     linker.func_wrap(
         "vyrn_gen",
+        "syntaxParser",
+        |mut caller: Caller<'_, T<X>>, path: i32| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let streams = &mut host.gen;
+            let path = cstr(data, path)?;
+            let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
+            caps.req
+                .send((path, MODE_SYNTAX))
+                .map_err(|_| Error::msg("generator host is gone"))?;
+            match caps.resp.recv() {
+                Ok(Ok(Served::Span(span))) => Ok(streams.code.leaf(*span)),
+                Ok(Ok(_)) => Err(Error::msg("syntaxParser answered with no span")),
+                Ok(Err(msg)) => Err(Error::new(Denied(msg))),
+                Err(_) => Err(Error::msg("generator host is gone")),
+            }
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
         "at",
         |mut caller: Caller<'_, T<X>>, h: i64, path: i32, line: i64, col: i64| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
@@ -1368,7 +1408,7 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                         .map_err(|_| Error::msg("generator host is gone"))?;
                     let lit = match caps.resp.recv() {
                         Ok(Ok(Served::Lit(lit))) => lit,
-                        Ok(Ok(Served::Bytes(..) | Served::Copy(..))) => {
+                        Ok(Ok(Served::Bytes(..) | Served::Copy(..) | Served::Span(_))) => {
                             return Err(Error::msg("module reflection answered with bytes"))
                         }
                         // A scoping violation traps.

@@ -1,0 +1,37 @@
+let a = (|| (== (>= (+ 1 (* 2 (^ 3 (^ 4 5)))) 6) 7) 8)
+--
+let mut xs: Map<String<> Array<Int64<>>> = f.call/2.g.call/1.h
+--
+fn main/2 -> Int64<> [let x = (- a) if (< x b) [1] return b.c]
+--
+1:51: Expected RParen found ,
+--
+2:1: MissingSemi: add a semicolon
+2:4: TopLevel found ;
+--
+1:7: LetNeedsInit x
+2:9: Expected True found ;
+3:7: ExpectedName found {
+--
+2:11: Expected True found ;
+4:7: ExpectedName found =
+6:1: TopLevel found nope
+--
+1:10: MissingSemi: add a semicolon
+--
+1:9: InHole Expected
+--
+1:9: HoleTrailing 1 2
+--
+1:9: HoleTrailing 1";
+--
+1:9: UnclosedHole ''
+--
+1:12: BadEscape q
+--
+1:9: UnterminatedString
+--
+1:25: TooDeep 16
+--
+1:38: TooDeep 16
+--
