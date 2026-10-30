@@ -54,7 +54,13 @@ const DECL_COLUMNS: &[(&str, &[&str])] = &[
 
 /// The files a keyword is stated in. No pass below the parser sees one.
 const KEYWORD_COLUMNS: &[(&str, &[&str])] = &[
-    ("lexer", &["vyrn-frontend/src/lexer.rs"]),
+    (
+        "lexer",
+        &[
+            "vyrn-frontend/src/lexer.rs",
+            "vyrn-frontend/src/lexer/grammar.rs",
+        ],
+    ),
     ("parser", &["vyrn-frontend/src/parser.rs"]),
     ("fmt", &["vyrn-frontend/src/fmt.rs"]),
 ];
@@ -229,39 +235,18 @@ fn declarations() -> Vec<String> {
     out
 }
 
-/// Every `"word" => Tok::Name` row of the lexer's `keywords` table, in order.
-/// `editor/vscode/test/grammar.test.mjs` reads the same anchor.
+/// Every `keyword Name 'word'` line of the grammar as (word, name), in order.
 fn keywords() -> Vec<(String, String)> {
-    let src = compiler_file("vyrn-frontend/src/lexer.rs");
-    let at = src
-        .find("\n    keywords {\n")
-        .expect("the `keywords` table is gone from lexer.rs — this test needs a new anchor");
-    let body = &src[at..src[at..]
-        .find("\n    }")
-        .map(|e| at + e)
-        .unwrap_or(src.len())];
-    let mut out = Vec::new();
-    for line in body.lines() {
-        let t = line.trim();
-        let Some(rest) = t.strip_prefix('"') else {
-            continue;
-        };
-        let Some((word, tail)) = rest.split_once('"') else {
-            continue;
-        };
-        let Some(tok) = tail.split("Tok::").nth(1) else {
-            continue;
-        };
-        let tok: String = tok
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric())
-            .collect();
-        if !tok.is_empty() {
-            out.push((word.to_string(), tok));
-        }
-    }
-    assert!(out.len() > 15, "only {} keyword arms found", out.len());
-    out
+    let src = compiler_file("vyrn-syntax/vyrn.syntax");
+    let rows: Vec<(String, String)> = src
+        .lines()
+        .filter_map(|l| {
+            let (name, word) = l.strip_prefix("keyword ")?.split_once(' ')?;
+            Some((word.trim_matches('\'').to_string(), name.to_string()))
+        })
+        .collect();
+    assert!(rows.len() > 15, "only {} keyword lines read", rows.len());
+    rows
 }
 
 /// Pins `tests/pins/<name>.tsv`: a row per label with a count per column and
@@ -311,8 +296,8 @@ fn the_keyword_census_matches_its_pin() {
 
 #[test]
 fn the_contextual_words_match_their_pin() {
-    // `tests/contextual_words.rs` holds the playground's list equal to the
-    // site's; a word added to both without a row here is invisible to the census.
+    // `tests/contextual_words.rs` holds the playground's list to the grammar's; a
+    // word added to it without a row here is invisible to the census.
     let play = std::fs::read_to_string(repo_root().join("compiler/vyrn-play/src/lib.rs"))
         .expect("the playground crate");
     let anchor = "const CONTEXTUAL: &[&str] = &[";

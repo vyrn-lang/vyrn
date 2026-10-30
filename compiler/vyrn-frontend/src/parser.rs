@@ -271,7 +271,7 @@ pub(crate) struct Parser {
 
 /// Returns how a binary operator is written, for a diagnostic that quotes one.
 ///
-/// Derived from [`Parser::binop`] and `lexer::punct_text`, so the spelling is
+/// Derived from [`Parser::binop`] and `lexer::punct_tok`, so the spelling is
 /// stated once. The search over 36 spellings runs only while formatting a
 /// message.
 pub fn binop_text(op: BinOp) -> &'static str {
