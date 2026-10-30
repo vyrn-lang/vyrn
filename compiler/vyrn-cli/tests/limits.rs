@@ -52,8 +52,9 @@ fn text(o: &Output) -> String {
 }
 
 /// The compiler parses source the user did not write (remote
-/// modules), and the LSP parses whatever is on disk. Four shapes, because the
-/// parser has four recursive edges a file can drive, and one counter covers all.
+/// modules), and the LSP parses whatever is on disk. Five shapes, because the
+/// parser has four recursive edges a file can drive and the lexer one, the
+/// braces of an interpolation hole, and one limit covers all.
 #[test]
 fn deeply_nested_source_is_a_diagnostic_not_an_abort() {
     let deep = 200_000;
@@ -87,6 +88,14 @@ fn deeply_nested_source_is_a_diagnostic_not_an_abort() {
                 "fn main() -> Int64 {{\n{}    return 0\n{}    return 0\n}}\n",
                 "    if true {\n".repeat(5000),
                 "    }\n".repeat(5000)
+            ),
+        ),
+        (
+            "holes",
+            format!(
+                "fn main() -> Int64 {{\n    print(\"\\{{{}0{}}}\")\n    return 0\n}}\n",
+                "{".repeat(deep),
+                "}".repeat(deep)
             ),
         ),
     ];

@@ -11,15 +11,17 @@
 //! syntax.syntax` is the file format, written in itself.
 //!
 //! Entry points: [`load`] reads a grammar, [`parse`] runs one of its rules over a
-//! text. `vyrn.syntax` beside this file is Vyrn's grammar, and the `syntaxgate`
+//! text, and [`lexer`] writes a grammar's lexical rules as Rust. `vyrn.syntax` beside this file is Vyrn's grammar, and the `syntaxgate`
 //! test holds the hand lexer and parser equal to it.
 
+mod gen;
 mod load;
 mod run;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
+pub use gen::lexer;
 pub use load::load;
 pub use run::{parse, Diag, HoleValue, Node, NodeKind, Parse, Stage};
 
