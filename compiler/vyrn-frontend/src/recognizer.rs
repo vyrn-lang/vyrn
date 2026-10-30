@@ -5,8 +5,7 @@
 //! on. [`recognize`] reads a file and [`recognize_hole`] an interpolation hole's
 //! expression. Each returns the refusals, as the parser states them, and the
 //! [`Mark`]s its readers read: the `syntaxgate` test reads the declarations, and
-//! [`crate::classify`] reads the words a rule consumed. Nothing else calls it, and
-//! the parser still builds the tree.
+//! [`crate::classify`] reads the words a rule consumed. The parser builds the tree.
 //!
 //! Protocol between the two files. A rule's method returns `Ok(false)` with the
 //! cursor and the marks unmoved, or `Err` with the cursor where the refusal arose.
@@ -60,6 +59,11 @@ pub fn recognize_hole(tokens: &[Token]) -> Recognized {
 }
 
 fn run<'t>(tokens: &'t [Token], rule: impl FnOnce(&mut Recognizer<'t>) -> R) -> Recognized {
+    // Every recovery loop ends at `Eof`, so a slice without it would never end.
+    assert!(
+        matches!(tokens.last(), Some(t) if t.tok == Tok::Eof),
+        "the tokens end in Eof"
+    );
     let mut r = Recognizer::over(tokens);
     let _ = rule(&mut r);
     r.errors.extend(r.refusal.take().map(|d| *d));

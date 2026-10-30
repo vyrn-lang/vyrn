@@ -261,6 +261,14 @@ protocol Owned {
     fn release(consume self)
 }
 
+// One coloured run of `codeRuns`: a byte range of its source and the stylesheet
+// class that colours it.
+type CodeRun = {
+    start: Int64,
+    stop: Int64,
+    class: String
+}
+
 protocol MustUse {}
 
 protocol Show {

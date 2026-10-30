@@ -1,5 +1,4 @@
 import { substring, split } from "std/strings"
-import { includes } from "std/arrays"
 import { escapeHtml } from "./code"
 import { quotedList, branch, lookup } from "./gensrc"
 
@@ -107,10 +106,6 @@ binarySearch(xs, 30)  // needs sorted(byAge)
     ]
 }
 
-fn contextual() -> Array<String> {
-    return ["read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as", "await"]
-}
-
 fn emit(cls: String, text: String) -> String {
     if cls == "" {
         return escapeHtml(text)
@@ -129,14 +124,6 @@ fn emit(cls: String, text: String) -> String {
     return out
 }
 
-fn digitByte(b: UInt8) -> Bool {
-    return b >= '0' && b <= '9'
-}
-
-fn letterByte(b: UInt8) -> Bool {
-    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
-}
-
 export fn lineStarts(src: String) -> Array<Int64> {
     let mut out: Array<Int64> = [0]
     let raw = bytes(src)
@@ -150,197 +137,18 @@ export fn lineStarts(src: String) -> Array<Int64> {
     return out
 }
 
-fn scanString(raw: Array<UInt8>, start: Int64) -> Int64 {
-    let mut i = start + 1
-    while i < raw.length && raw[i] != '"' {
-        if raw[i] == 92 && i + 1 < raw.length && raw[i + 1] == '{' {
-            i = holeEnd(raw, i + 2)
-        } else if raw[i] == 92 {
-            i = i + 1
-        }
-        i = i + 1
-    }
-    if i < raw.length {
-        i = i + 1
-    }
-    return i
-}
-
-// The `}` that closes a hole whose source starts at `at`, past nested braces and strings.
-fn holeEnd(raw: Array<UInt8>, at: Int64) -> Int64 {
-    let mut depth = 0
-    let mut i = at
-    while i < raw.length {
-        if raw[i] == '"' {
-            i = scanString(raw, i)
-        } else {
-            if raw[i] == '}' {
-                if depth == 0 {
-                    return i
-                }
-                depth = depth - 1
-            }
-            if raw[i] == '{' {
-                depth = depth + 1
-            }
-            i = i + 1
-        }
-    }
-    return i
-}
-
-fn scanToEol(raw: Array<UInt8>, start: Int64) -> Int64 {
-    let mut i = start
-    while i < raw.length && raw[i] != 10 {
-        i = i + 1
-    }
-    return i
-}
-
-fn scanNumber(raw: Array<UInt8>, start: Int64) -> Int64 {
-    if raw[start] == 39 {
-        let mut i = start + 1
-        while i < raw.length && raw[i] != 39 {
-            if raw[i] == 92 {
-                i = i + 1
-            }
-            i = i + 1
-        }
-        if i < raw.length {
-            i = i + 1
-        }
-        return i
-    }
-    let mut i = start
-    while i < raw.length && (digitByte(raw[i]) || letterByte(raw[i])) {
-        i = i + 1
-    }
-    if i + 1 < raw.length && raw[i] == '.' && digitByte(raw[i + 1]) {
-        i = i + 1
-        while i < raw.length && (digitByte(raw[i]) || letterByte(raw[i])) {
-            i = i + 1
-        }
-    }
-    return i
-}
-
-fn extentOf(raw: Array<UInt8>, start: Int64, kind: String, text: String) -> Int64 {
-    if kind == "string" || kind == "template" {
-        return scanString(raw, start)
-    }
-    if kind == "doc" || kind == "error" {
-        return scanToEol(raw, start)
-    }
-    if kind == "int" || kind == "float" {
-        return scanNumber(raw, start)
-    }
-    return start + text.byteLength
-}
-
-fn classOf(kind: String, text: String, callee: Bool) -> String {
-    if kind == "keyword" {
-        return "k"
-    }
-    if kind == "string" || kind == "template" {
-        return "s"
-    }
-    if kind == "int" || kind == "float" {
-        return "n"
-    }
-    if kind == "doc" {
-        return "c"
-    }
-    if kind == "ident" {
-        if includes(contextual(), text) {
-            return "k"
-        }
-        let b = bytes(text)
-        if b.length > 0 && b[0] >= 'A' && b[0] <= 'Z' {
-            return "t"
-        }
-        if callee {
-            return "f"
-        }
-    }
-    return ""
-}
-
-gen fn isPunct(t: Token, text: String) -> Bool {
-    return t.kind == "punct" && t.text == text
-}
-
-// A name a `(` follows, or the name `fn` declares.
-gen fn callee(toks: Array<Token>, i: Int64) -> Bool {
-    let called = i + 1 < toks.length && isPunct(toks[i + 1], "(")
-    return called || (i > 0 && toks[i - 1].kind == "keyword" && toks[i - 1].text == "fn")
-}
-
-fn trivia(src: String, raw: Array<UInt8>, from: Int64, to: Int64) -> String {
-    let mut out = ""
-    let mut plain = from
-    let mut i = from
-    while i < to {
-        if raw[i] == '/' && i + 1 < to && raw[i + 1] == '/' {
-            out = out + emit("", substring(src, plain, i))
-            let stop = scanToEol(raw, i)
-            let end = if stop < to { stop } else { to }
-            out = out + emit("c", substring(src, i, end))
-            plain = end
-            i = end
-        } else {
-            i = i + 1
-        }
-    }
-    return out + emit("", substring(src, plain, to))
-}
-
-// The interpolated string from `start` to `stop`: each hole as code, the rest as string.
-gen fn template(src: String, raw: Array<UInt8>, start: Int64, stop: Int64) -> String {
-    let mut out = ""
-    let mut from = start
-    let mut i = start
-    while i + 1 < stop {
-        if raw[i] == 92 && raw[i + 1] == '{' {
-            let close = holeEnd(raw, i + 2)
-            let hole = substring(src, i + 2, close)
-            out = out + emit("s", substring(src, from, i)) + emit("i", substring(src, i, i + 2))
-            out = out + highlightSrc(hole, lex(hole)) + emit("i", substring(src, close, close + 1))
-            from = close + 1
-            i = close + 1
-        } else if raw[i] == 92 {
-            i = i + 2
-        } else {
-            i = i + 1
-        }
-    }
-    return out + emit("s", substring(src, from, stop))
-}
-
-export gen fn highlightSrc(src: String, toks: Array<Token>) -> String {
-    let raw = bytes(src)
-    let starts = lineStarts(src)
+export gen fn highlightSrc(src: String) -> String {
     let mut out = ""
     let mut cursor = 0
-    let mut i = 0
-    for t in toks {
-        let start = starts[t.line - 1] + t.col - 1
-        if start >= cursor {
-            out = out + trivia(src, raw, cursor, start)
-            let stop = extentOf(raw, start, t.kind, t.text)
-            if t.kind == "template" {
-                out = out + template(src, raw, start, stop)
-            } else {
-                out = out + emit(classOf(t.kind, t.text, callee(toks, i)), substring(src, start, stop))
-            }
-            cursor = stop
-        }
-        i = i + 1
+    for run in codeRuns(src) {
+        out = out + emit("", substring(src, cursor, run.start)) + emit(run.class, substring(src, run.start, run.stop))
+        cursor = run.stop
     }
-    return out + trivia(src, raw, cursor, raw.length)
+    return out + emit("", substring(src, cursor, src.byteLength))
 }
 
-export gen fn highlightRows(src: String, toks: Array<Token>) -> Array<String> {
-    let all = split(highlightSrc(src, toks), "\n")
+export gen fn highlightRows(src: String) -> Array<String> {
+    let all = split(highlightSrc(src), "\n")
     let mut out: Array<String> = []
     let mut i = 0
     while i < all.length {
@@ -356,7 +164,7 @@ export gen fn vyrnCode() -> Code {
     let mut lines: Array<Code> = []
     let mut sources: Array<Code> = []
     for p in pieces() {
-        lines.push(branch("id", p.id, quotedList(highlightRows(p.src, lex(p.src)))))
+        lines.push(branch("id", p.id, quotedList(highlightRows(p.src))))
         sources.push(branch("id", p.id, vyrn"\{p.src}"))
     }
     let linesFn = lookup("hlLines", "id", vyrn"Array<String>", lines, vyrn"[]")
@@ -373,35 +181,4 @@ export gen fn vyrnCode() -> Code {
 test "a coloured run never crosses a newline, so every line is balanced markup" {
     assertEq(emit("s", "a\nb"), "<span class=\"s\">a</span>\n<span class=\"s\">b</span>")
     assertEq(emit("", "a<b"), "a&lt;b")
-}
-
-test "a number ends where the language ends it" {
-    assertEq(scanNumber(bytes("1.0.toString()"), 0), 3)
-    assertEq(scanNumber(bytes("'A' x"), 0), 3)
-    assertEq(scanNumber(bytes("0x1F,"), 0), 4)
-}
-
-test "a string's extent is its quotes, not its decoded text" {
-    assertEq(scanString(bytes("\"a//b\" x"), 0), 6)
-    assertEq(scanString(bytes("\"a\\\"b\""), 0), 6)
-    assertEq(scanString(bytes("\"a\\{f(\"x\")}b\" y"), 0), 13)
-}
-
-test "a capability word is a keyword here and an ordinary name is not" {
-    assert(includes(contextual(), "consume"))
-    assert(!includes(contextual(), "consumer"))
-    assertEq(classOf("ident", "read", false), "k")
-    assertEq(classOf("ident", "Ticket", false), "t")
-    assertEq(classOf("ident", "seats", false), "")
-    assertEq(classOf("keyword", "where", false), "k")
-}
-
-test "await is a keyword here" {
-    assertEq(classOf("ident", "await", false), "k")
-}
-
-test "a lower-case callee is a function and a capital one stays a type" {
-    assertEq(classOf("ident", "print", true), "f")
-    assertEq(classOf("ident", "Some", true), "t")
-    assertEq(classOf("ident", "panic", true), "k")
 }

@@ -124,6 +124,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("at", Compiler, "sets where errors show, which only the host records"),
     ("render", Compiler, "a code quote back to text"),
     ("lex", Compiler, "the compiler's OWN lexer"),
+    ("codeRuns", Compiler, "the compiler's OWN classifier"),
     ("@codeQuote", Compiler, "the desugar of vyrn\"…\", its parts and holes in one call"),
     ("__vyrnGenReflect", Compiler, "a generator host's reflection, moved out as atoms"),
     ("__vyrnGenNextInt", Compiler, "as `__vyrnGenReflect`: the next Int64 atom"),

@@ -375,7 +375,7 @@ impl Lower<'_> {
             o,
             "    ",
             "Returns the spelling of a reserved word, or `None`.",
-            "pub(super) fn keyword_text(&self) -> Option<&'static str>",
+            "pub(crate) fn keyword_text(&self) -> Option<&'static str>",
             "self",
             words.iter().map(name_of),
         );

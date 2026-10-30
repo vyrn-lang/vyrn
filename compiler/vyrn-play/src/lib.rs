@@ -1,5 +1,5 @@
 //! The Vyrn front end as a wasm module for the website's playground:
-//! [`play_tokens`] (highlighting with the compiler's lexer), [`play_check`]
+//! [`play_tokens`] (highlighting with the compiler's classifier), [`play_check`]
 //! (diagnostics from the real loader) and [`play_compile`] (the bytes
 //! `vyrn build --target wasm` writes). [`play_complete`], [`play_hover`] and
 //! [`play_signature`] answer the editor from the analysis `vyrn-lsp` serves,
@@ -16,8 +16,9 @@
 
 use std::cell::RefCell;
 
+use vyrn_frontend::classify::code_runs;
 use vyrn_frontend::diagnostics::{Diagnostic, Severity};
-use vyrn_frontend::lexer::{self, Tok, Triv, TrivKind};
+use vyrn_frontend::lexer::{self, Tok};
 use vyrn_frontend::loader::{LoadOptions, MapResolver};
 use vyrn_frontend::rules::{IntoHole, Rule};
 use vyrn_frontend::{
@@ -104,133 +105,24 @@ fn publish_json(json: String) -> usize {
     publish(json.into_bytes())
 }
 
-/// Words the grammar reads as keywords in position and the lexer returns as
-/// identifiers. The same list as `site/app/hl.vyrn`.
-const CONTEXTUAL: &[&str] = &[
-    "read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as", "await",
-];
-
-/// The stylesheet's CSS class for one lexed item (`k`, `s`, `n`, `c`, `t`,
-/// `f`), or `""` for text with no colour. `callee` says a `(` follows the item
-/// or `fn` precedes it, as `site/app/hl.vyrn` decides.
-fn class_of(item: &Triv, callee: bool) -> &'static str {
-    match &item.kind {
-        TrivKind::Comment | TrivKind::Doc(_) => "c",
-        TrivKind::Tok(tok) => match tok {
-            Tok::Str(_) | Tok::TemplateStr { .. } => "s",
-            Tok::Int(_) | Tok::Byte(_) | Tok::Float(_) => "n",
-            Tok::Doc(_) => "c",
-            Tok::Ident(name) => {
-                if CONTEXTUAL.contains(&name.as_str()) {
-                    "k"
-                } else if name.starts_with(char::is_uppercase) {
-                    "t"
-                } else if callee {
-                    "f"
-                } else {
-                    ""
-                }
-            }
-            other => {
-                if lexer::token_name_and_text(other).0 == "keyword" {
-                    "k"
-                } else {
-                    ""
-                }
-            }
-        },
-    }
-}
-
-fn tok_of(item: &Triv) -> Option<&Tok> {
-    match &item.kind {
-        TrivKind::Tok(t) => Some(t),
-        _ => None,
-    }
-}
-
-/// One coloured run: `[start, length, class]`, in UTF-16 code units, because
-/// that is what a JavaScript string index counts.
+/// The coloured runs: `[start, length, class]` in UTF-16 code units, because that
+/// is what a JavaScript string index counts. Mid-keystroke the source is often not
+/// lexable; the page shows plain text for that frame.
 fn tokens_json(src: &str) -> String {
-    let mut spans = Vec::new();
-    match paint(src, 0, &mut spans) {
-        Ok(()) => format!("{{\"spans\":[{}]}}", spans.join(",")),
-        // Mid-keystroke the source is often not lexable; the page shows plain
-        // text for this frame.
-        Err(d) => format!("{{\"error\":{}}}", json_str(&d.message)),
-    }
-}
-
-/// Pushes the runs of `src`, which starts `base` UTF-16 units into the buffer.
-fn paint(src: &str, base: usize, out: &mut Vec<String>) -> Result<(), Diagnostic> {
-    let items = lexer::lex_with_trivia(src)?;
-    let mut byte_at = 0usize;
-    let mut u16_at = base;
-    let mut prev: Option<&Tok> = None;
-    for (i, item) in items.iter().enumerate() {
-        let callee = matches!(items[i + 1..].iter().find_map(tok_of), Some(Tok::LParen))
-            || matches!(prev, Some(Tok::Fn));
-        if let Some(t) = tok_of(item) {
-            prev = Some(t);
-        }
-        let text = item.text(src);
-        if text.is_empty() {
-            continue;
-        }
-        // Each item's `text` is its verbatim source slice, in source order, so
-        // a forward search finds its extent.
-        let Some(found) = src[byte_at..].find(text) else {
-            continue;
-        };
-        let start = byte_at + found;
-        u16_at += src[byte_at..start].encode_utf16().count();
-        let len = text.encode_utf16().count();
-        if let TrivKind::Tok(Tok::TemplateStr { exprs, .. }) = &item.kind {
-            paint_template(text, exprs, u16_at, out)?;
-        } else {
-            let cls = class_of(item, callee);
-            if !cls.is_empty() {
-                out.push(format!("[{u16_at},{len},\"{cls}\"]"));
-            }
-        }
+    let runs = match code_runs(src) {
+        Ok(runs) => runs,
+        Err(d) => return format!("{{\"error\":{}}}", json_str(&d.message)),
+    };
+    let (mut byte_at, mut u16_at) = (0, 0);
+    let mut spans = Vec::with_capacity(runs.len());
+    for run in runs {
+        u16_at += src[byte_at..run.start].encode_utf16().count();
+        let len = src[run.start..run.stop].encode_utf16().count();
+        spans.push(format!("[{u16_at},{len},\"{}\"]", run.class.css()));
         u16_at += len;
-        byte_at = start + text.len();
+        byte_at = run.stop;
     }
-    Ok(())
-}
-
-/// Pushes the runs of the interpolated string `text`, which starts at UTF-16
-/// offset `at`: each hole is painted as code, the rest as string. A hole's
-/// source is shorter than `text`, so the recursion ends.
-fn paint_template(
-    text: &str,
-    holes: &[lexer::Hole],
-    mut at: usize,
-    out: &mut Vec<String>,
-) -> Result<(), Diagnostic> {
-    let mut from = 0usize;
-    for hole in holes {
-        let Some(found) = text[from..].find(&format!("\\{{{}", hole.src)) else {
-            break;
-        };
-        let n = text[from..from + found].encode_utf16().count();
-        if n > 0 {
-            out.push(format!("[{at},{n},\"s\"]"));
-        }
-        at += n;
-        out.push(format!("[{at},2,\"i\"]"));
-        paint(&hole.src, at + 2, out)?;
-        at += 2 + hole.src.encode_utf16().count();
-        // The lexer ends a hole at its closing `}`, one byte.
-        out.push(format!("[{at},1,\"i\"]"));
-        at += 1;
-        from += found + 2 + hole.src.len() + 1;
-    }
-    out.push(format!(
-        "[{at},{},\"s\"]",
-        text[from..].encode_utf16().count()
-    ));
-    Ok(())
+    format!("{{\"spans\":[{}]}}", spans.join(","))
 }
 
 /// The standard library, as `build.rs` walked it out of `std/`.
@@ -602,7 +494,7 @@ fn complete_json(src: &str, line: usize, col: usize) -> String {
         for c in scope_completions(&analysis(src), line) {
             out.push(completion_json(&c));
         }
-        for k in lexer::KEYWORDS.iter().chain(CONTEXTUAL) {
+        for k in lexer::KEYWORDS.iter().chain(lexer::CONTEXTUAL) {
             out.push(item_json(k, "keyword", "keyword", None));
         }
     }
@@ -840,8 +732,42 @@ mod tests {
     #[test]
     fn a_capability_word_is_a_keyword_and_an_ordinary_name_is_not() {
         let classes = |src: &str| -> Vec<String> { spans(src).into_iter().map(|s| s.2).collect() };
-        assert_eq!(classes("let x = consume\n"), vec!["k", "k"]);
+        assert_eq!(classes("let x = consume y\n"), vec!["k", "k"]);
         assert_eq!(classes("let consumer = 1\n"), vec!["k", "n"]);
+    }
+
+    /// The runs of a page's source: a hole, a triple-quoted string with a quote in
+    /// it, a syntax error mid-file and text wider than a UTF-16 unit.
+    #[test]
+    fn a_page_of_every_shape_has_these_runs() {
+        let src = "// \u{1f30a}\nfn f(a: read T) -> String {\n    let = 1\n    return \"\u{e9}\\{a.g(1)}\"\n}\nlet q = \"\"\"x \"y\"\"\"\n";
+        let got: Vec<(String, String)> = spans(src)
+            .into_iter()
+            .map(|(s, l, c)| (slice16(src, s, l), c))
+            .collect();
+        let want = [
+            ("// \u{1f30a}", "c"),
+            ("fn", "k"),
+            ("f", "f"),
+            ("read", "k"),
+            ("T", "t"),
+            ("String", "t"),
+            ("let", "k"),
+            ("1", "n"),
+            ("return", "k"),
+            ("\"\u{e9}", "s"),
+            ("\\{", "i"),
+            ("g", "f"),
+            ("1", "n"),
+            ("}", "i"),
+            ("\"", "s"),
+            ("let", "k"),
+            ("\"\"\"x \"y\"\"\"", "s"),
+        ];
+        let want: Vec<(String, String)> = (want.iter())
+            .map(|(t, c)| (t.to_string(), c.to_string()))
+            .collect();
+        assert_eq!(got, want);
     }
 
     #[test]

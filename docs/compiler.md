@@ -96,8 +96,8 @@ test holds the two equal. A change to the lexer is a change to the grammar.
 `vyrn_syntax::recognizer`, one method per rule, and `recognizer.rs` is the
 cursor it runs on. It reads the lexer's tokens, builds no tree, and records the
 declarations and the contextual words a rule consumed. The parser still builds
-the tree, so the `vyrn` binary does not call it. `syntaxgate` compares the parser
-with it.
+the tree. `syntaxgate` compares the parser with it, and `classify::code_runs`
+reads it to colour source for the playground and the `codeRuns` builtin.
 
 `loader::load_with_origins` builds one `ast::Program` from a root file. All
 I/O goes through a `ModuleResolver`, so the editor serves unsaved buffers and

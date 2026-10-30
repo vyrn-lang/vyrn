@@ -88,6 +88,7 @@ pub const GEN_RESULT: &str = "__vyrnGenResult";
 pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
 pub const GEN_ENTRY_MODULE_CODE: &str = "__vyrnGenModuleCode";
 pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
+pub const GEN_ENTRY_CODE_RUNS: &str = "__vyrnGenCodeRuns";
 pub const GEN_ENTRY_TYPE_ARG: &str = "__vyrnGenTypeArg";
 
 /// The nullary entry `contractOf(contract)` calls, one per contract.
@@ -5039,6 +5040,7 @@ impl<'a> Checker<'a> {
                 let surface = match name {
                     "render" => "`render` is",
                     "lex" => "`lex` is",
+                    "codeRuns" => "`codeRuns` is",
                     "name" => "`name` is",
                     "diag" => "`diag` is",
                     "codeAt" => "`codeAt` is",

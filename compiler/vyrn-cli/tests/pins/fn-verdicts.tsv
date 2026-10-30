@@ -2034,23 +2034,10 @@ site/app/history.vyrn	releaseRows	no, it calls `loadHistory`, which is not trap-
 site/app/history.vyrn	testBlockCount	no, it calls `loadHistory`, which is not trap-free	no, its effect set is alloc, fs-read, module-state
 site/app/history.vyrn	testFileCount	no, it calls `loadHistory`, which is not trap-free	no, its effect set is alloc, fs-read, module-state
 site/app/hl.vyrn	pieces	yes	no, its effect set is alloc
-site/app/hl.vyrn	contextual	yes	no, its effect set is alloc
 site/app/hl.vyrn	emit	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
-site/app/hl.vyrn	digitByte	yes	yes, packed UInt8
-site/app/hl.vyrn	letterByte	yes	yes, packed UInt8
 site/app/hl.vyrn	lineStarts	yes	no, its effect set is alloc
-site/app/hl.vyrn	scanString	no, it keeps an index check	no, it is not trap-free
-site/app/hl.vyrn	holeEnd	no, it calls `scanString`, which is not trap-free	no, it is not trap-free
-site/app/hl.vyrn	scanToEol	no, it keeps an index check	no, it is not trap-free
-site/app/hl.vyrn	scanNumber	no, it keeps an index check	no, it is not trap-free
-site/app/hl.vyrn	extentOf	no, it calls `scanString`, which is not trap-free	no, it is not trap-free
-site/app/hl.vyrn	classOf	yes	no, its effect set is alloc
-site/app/hl.vyrn	isPunct	yes	no, `t` is Token, not an integer, Bool or a read array of one
-site/app/hl.vyrn	callee	no, it keeps an index check	no, it is not trap-free
-site/app/hl.vyrn	trivia	no, it keeps an index check	no, its effect set is alloc, trap
-site/app/hl.vyrn	template	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
-site/app/hl.vyrn	highlightSrc	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
-site/app/hl.vyrn	highlightRows	no, it calls `highlightSrc`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+site/app/hl.vyrn	highlightSrc	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+site/app/hl.vyrn	highlightRows	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 site/app/hl.vyrn	vyrnCode	no, it calls `highlightRows`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 site/app/icons.vyrn	Icon	no, it calls `iconProvider`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 site/app/markdown.vyrn	markdownHtml	no, it keeps an index check	no, its effect set is alloc, trap

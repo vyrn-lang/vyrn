@@ -5,6 +5,7 @@ pub mod artifacts;
 pub mod ast;
 pub mod audience;
 pub mod checker;
+pub mod classify;
 pub mod codec;
 pub mod consteval;
 pub mod contracts;

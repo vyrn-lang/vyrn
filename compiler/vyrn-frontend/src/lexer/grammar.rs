@@ -97,7 +97,7 @@ pub enum Tok {
 
 impl Tok {
     /// Returns the spelling of a reserved word, or `None`.
-    pub(super) fn keyword_text(&self) -> Option<&'static str> {
+    pub(crate) fn keyword_text(&self) -> Option<&'static str> {
         Some(match self {
             Self::Fn => "fn",
             Self::Let => "let",
