@@ -1,0 +1,1 @@
+row_empty_byte.vyrn:2:13: empty byte literal; a byte literal holds exactly one byte, e.g. 'a' or '\x0a'

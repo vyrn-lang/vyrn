@@ -287,6 +287,7 @@ pull request.
 - Every limit is one constant, derived where it is used, and a test checks the derivations.
 - Error text is canonical Vyrn wording, never the operating system's.
 - The parser refuses nesting deeper than 1,024 with a diagnostic, because remote modules and the LSP parse untrusted input.
+- `compiler/vyrn-syntax/vyrn.syntax` is the specification of the hand lexer and parser, held equal by `syntaxgate`. It states shape only: a mistake it can recognize is a `^Row` there, and a check that compares names, counts or reads a token's value stays in the parser as a `row` line. The `vyrn` binary does not link the engine.
 - Diagnostics speak intent: what you asked for, what blocks it, how to fix it. They say read, modify and consume, never "borrow" or "lifetime".
 - A refusal of the lexer, parser, loader, checker, kernel, typed judgment or core builder is a row in `vyrn-frontend/src/rules.rs`: a `Rule` names its holes, its sentence and its fixes, and the diagnostic carries the rule with its hole text. Sites that print the same sentence name the same rule. A way out a site picks by its own state is a row too, rendered under another (`Diagnostic::more`). Text written outside these passes (generator output, manifest and schema errors) stays a string in `Diagnostic::error`.
 - The runtime (allocator, strings, maps, arrays, I/O, traps, regions) is Vyrn in `std/runtime`. The raw memory and WASI primitives are declarations in `std/mem`, importable only by `std/runtime`.

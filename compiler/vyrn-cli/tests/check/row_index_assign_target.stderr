@@ -1,0 +1,1 @@
+row_index_assign_target.vyrn:2:12: the left side of an index assignment `[i] = ..` must be an array variable, a record field, or an array element

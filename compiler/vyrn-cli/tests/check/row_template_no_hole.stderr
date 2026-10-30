@@ -1,0 +1,1 @@
+row_template_no_hole.vyrn:2:13: a tagged template `sql".."` needs at least one `\{ }` interpolation; use a plain string otherwise

@@ -1,0 +1,4 @@
+logging { level: debug }
+logging { level: info }
+
+fn main() -> Int64 { return 0 }

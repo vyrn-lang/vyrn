@@ -288,13 +288,16 @@ and exits 1 if any would.
 The printer reads the token stream with comments and chooses only the
 whitespace between raw token texts. It sets indentation (4 spaces per brace
 depth) and intra-line spacing, drops semicolons, collapses runs of blank lines
-to one and ends the file with one newline. It never joins or splits a line and
+to one and ends the file with one newline. It keeps a `;` whose removal would
+join two statements: one before a token that continues an expression, as in
+`let x = 1; -2`, or after a bare `return`. It never joins or splits a line and
 never rewrites a literal.
 
-The safety invariant: `lex(fmt(src))` equals `lex(src)` with the `;` tokens
-removed. `fmt` checks it on every call; a mismatch is an error and the file is
-left untouched. The input needs only to lex, not to parse, so format-on-save
-works on a half-typed buffer.
+The safety invariant: the output's tokens are the input's on the same lines,
+less the dropped `;`, and the parser gives the same program and diagnostics
+with and without those `;`. `fmt` checks it on every call; a mismatch is an
+error and the file is left untouched. The input needs only to lex, not to
+parse, so format-on-save works on a half-typed buffer.
 
 `vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]` prints a
 JSON file as VON (Vyrn Object Notation) with a typed header.

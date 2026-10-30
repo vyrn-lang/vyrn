@@ -1,0 +1,1 @@
+row_export_needs_decl.vyrn:1:8: `export` must be followed by `fn`, `type`, `protocol`, `contract`, `extern fn`, `gen fn`, or `mut fn`

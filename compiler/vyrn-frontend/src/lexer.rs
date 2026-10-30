@@ -612,10 +612,9 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
             }
             let text = &src[span(start, i)];
             let tok = if is_float {
-                let value: f64 = text
-                    .parse()
-                    .map_err(|_| refuse!("lex", line, col, InvalidFloat, text))?;
-                Tok::Float(value)
+                // Every `digits.digits` text is in f64::from_str's grammar, which rounds a
+                // text too large to infinity, so the parse never fails.
+                Tok::Float(text.parse().expect("digits.digits parses as f64"))
             } else {
                 // A literal above `i64::MAX`, reachable only for `UInt64`, keeps its `u64` bit
                 // pattern.

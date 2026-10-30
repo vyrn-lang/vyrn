@@ -1,0 +1,1 @@
+row_single_quoted_string.vyrn:2:13: single-quoted strings are not allowed: '…' is a single byte (e.g. 'a', '\n', '\x41'); use "…" for text

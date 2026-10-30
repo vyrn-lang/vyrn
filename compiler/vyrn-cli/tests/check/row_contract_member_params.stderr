@@ -1,0 +1,1 @@
+row_contract_member_params.vyrn:2:10: contract member `a` cannot take `(..)` — only the open rule `fn *(..)` may leave its parameters open, because a named member's arity is part of what the name promises

@@ -1164,6 +1164,7 @@ dependencies = [
  "vyrn-frontend",
  "vyrn-genwasm",
  "vyrn-lower",
+ "vyrn-syntax",
  "wasmtime",
  "webpki-root-certs",
 ]
@@ -1204,6 +1205,10 @@ version = "0.0.0"
 dependencies = [
  "vyrn-frontend",
 ]
+
+[[package]]
+name = "vyrn-syntax"
+version = "0.0.0"
 
 [[package]]
 name = "walkdir"

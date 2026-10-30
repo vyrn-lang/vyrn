@@ -1,0 +1,3 @@
+logging { level: loud }
+
+fn main() -> Int64 { return 0 }

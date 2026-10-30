@@ -1,0 +1,1 @@
+row_import_path_expected.vyrn:1:19: expected a module path string or a generator call after `from`, found Int(42)

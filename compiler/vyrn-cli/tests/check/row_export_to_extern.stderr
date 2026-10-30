@@ -1,0 +1,1 @@
+row_export_to_extern.vyrn:1:17: an `extern fn` takes no `export to` — the JS host imports it, not a module

@@ -48,6 +48,7 @@ sysroot. A crate is judged on what it costs, not on a rule against crates.
 | `vyrn-genwasm` | runs a `gen fn` as compiled wasm inside a load; without its `host` feature, builds the module a host runs (`run_pure`) | `vyrn-frontend`, `vyrn-codegen`, `wasmtime` (feature `host`) |
 | `vyrn-lsp` | the language server, an adapter over `vyrn-frontend` | `vyrn-frontend`, `vyrn-lower`, `vyrn-genwasm` |
 | `vyrn-play` | the playground: the front end and the emitter compiled to `wasm32-unknown-unknown` | `vyrn-frontend`, `vyrn-codegen`, `vyrn-lower`, `vyrn-genwasm` without `host` |
+| `vyrn-syntax` | the grammar engine, `vyrn.syntax` (Vyrn's grammar) and `syntax.syntax` (the file format); only the `syntaxgate` test reads it | nothing |
 
 `vyrn-lsp`, `vyrn-genwasm` and `vyrn-play` are excluded from the workspace.
 Test and format the first two with `--manifest-path`. Build `vyrn-play` from
@@ -76,6 +77,14 @@ error. The parser performs the pure syntax desugars: `??` into a `match` over
 with `Pattern::Other`, `if let` and `while let` into a statement `match` with
 `Pattern::Other` (`Expr::as_if_let`), interpolation into a `@concat` chain. Source cannot
 spell these patterns or `@` names.
+
+`compiler/vyrn-syntax/vyrn.syntax` specifies the lexer and the parser: a PEG
+whose upper-case rules commit as recursive descent does, so a failure after a
+commit is the parser's refusal at the same token. It names every lex and parse
+row: a `^Row` where the grammar states the mistake, and a `row` line for each
+row the parser raises from a token's value or a check over its tree. A change
+to the lexer or the parser changes the grammar in the same commit, and the
+`syntaxgate` test holds the two equal.
 
 `loader::load_with_origins` builds one `ast::Program` from a root file. All
 I/O goes through a `ModuleResolver`, so the editor serves unsaved buffers and
@@ -635,6 +644,11 @@ The output of programs:
   differs. `VYRN_WASM_MANIFEST=write` rewrites the manifest; read every moved
   row with `wasm2wat` before committing it.
 - `reproducible.rs`: one source builds to one artifact in every process.
+- `syntaxgate.rs`: over every corpus root, `vyrn.syntax` gives the hand lexer
+  and parser's diagnostics, line, column and sentence, and each file the
+  parser accepts has its declarations at the same kind and line in the
+  grammar's tree. Every lex and parse row is named by the grammar and
+  refused by some root.
 
 The refusals:
 

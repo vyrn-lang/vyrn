@@ -1,0 +1,5 @@
+gen fn g() -> String {
+    return render(vyrn"let s = \"")
+}
+
+fn main() -> Int64 { return 0 }

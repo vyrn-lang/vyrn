@@ -1,0 +1,1 @@
+row_import_star_from.vyrn:1:15: expected `from` after `import * as m`, found Str("std/math")

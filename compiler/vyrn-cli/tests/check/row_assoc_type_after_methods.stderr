@@ -1,0 +1,1 @@
+row_assoc_type_after_methods.vyrn:3:5: `type A` must be declared before the methods of `P` — an associated type is resolved where it is named, so a signature above it cannot see it

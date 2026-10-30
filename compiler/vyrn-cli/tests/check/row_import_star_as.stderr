@@ -1,0 +1,1 @@
+row_import_star_as.vyrn:1:10: expected `as` after `import *`, found Ident("from")

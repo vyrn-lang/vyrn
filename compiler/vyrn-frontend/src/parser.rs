@@ -216,7 +216,7 @@ fn parse_with(
     (program, errors, skimmed)
 }
 
-struct Parser {
+pub(crate) struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     /// Whether this parser reads an interpolation hole rather than the file.
@@ -695,12 +695,13 @@ impl Parser {
     }
 
     fn expect_ident(&mut self) -> Result<String, Diagnostic> {
+        let (line, col) = (self.line(), self.col());
         match self.advance() {
             Tok::Ident(name) => Ok(name),
             other => Err(refuse!(
                 "parse",
-                self.line(),
-                self.col(),
+                line,
+                col,
                 ExpectedIdent,
                 found = format!("{:?}", other)
             )),
@@ -907,10 +908,11 @@ impl Parser {
                 }
                 // `test "name" { body }`: `test` is a starter only before a string
                 // literal.
-                Tok::Ident(name)
-                    if name == "test" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
+                Tok::Ident(word)
+                    if word == "test"
+                        && let Tok::Str(name) = &self.tokens[self.pos + 1].tok =>
                 {
-                    match self.named_block("test") {
+                    match self.named_block(name.clone()) {
                         Ok(Some(mut t)) => {
                             t.doc = doc;
                             tests.push(t);
@@ -923,10 +925,11 @@ impl Parser {
                     }
                 }
                 // `bench "name" { body }`, contextual like `test`.
-                Tok::Ident(name)
-                    if name == "bench" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
+                Tok::Ident(word)
+                    if word == "bench"
+                        && let Tok::Str(name) = &self.tokens[self.pos + 1].tok =>
                 {
-                    match self.named_block("bench") {
+                    match self.named_block(name.clone()) {
                         Ok(Some(mut b)) => {
                             b.doc = doc;
                             benches.push(b);
@@ -1677,26 +1680,28 @@ impl Parser {
         // the target's exports to the flat namespace.
         if *self.peek() == Tok::Star {
             self.advance();
+            let at = self.col();
             match self.advance() {
                 Tok::Ident(kw) if kw == "as" => {}
                 other => {
                     return Err(refuse!(
                         "parse",
                         line,
-                        self.col(),
+                        at,
                         ImportStarAs,
                         found = format!("{other:?}")
                     ))
                 }
             }
             let ns = self.expect_ident()?;
+            let at = self.col();
             match self.advance() {
                 Tok::Ident(kw) if kw == "from" => {}
                 other => {
                     return Err(refuse!(
                         "parse",
                         line,
-                        self.col(),
+                        at,
                         ImportStarFrom,
                         ns,
                         found = format!("{other:?}")
@@ -1740,13 +1745,14 @@ impl Parser {
         if names.is_empty() {
             return Err(refuse!("parse", line, self.col(), ImportEmpty));
         }
+        let at = self.col();
         match self.advance() {
             Tok::Ident(kw) if kw == "from" => {}
             other => {
                 return Err(refuse!(
                     "parse",
                     line,
-                    self.col(),
+                    at,
                     ImportFrom,
                     found = format!("{other:?}")
                 ))
@@ -2178,26 +2184,14 @@ impl Parser {
         })
     }
 
-    /// `test "name" { body }` and `bench "name" { body }`: one declaration.
-    /// The caller has checked the lookahead, so `word` only words the
-    /// refusal. The checker allows `assert`/`assertEq` in a test and `blackBox` in
-    /// a bench. `None` for an imported module's block, skipped unparsed.
-    fn named_block(&mut self, word: &str) -> Result<Option<NamedBlock>, Diagnostic> {
+    /// `test "name" { body }` and `bench "name" { body }`: one declaration, at the
+    /// word, whose string the caller read as `name`. The checker allows
+    /// `assert`/`assertEq` in a test and `blackBox` in a bench. `None` for an
+    /// imported module's block, skipped unparsed.
+    fn named_block(&mut self, name: String) -> Result<Option<NamedBlock>, Diagnostic> {
         let line = self.line();
-        self.advance();
-        let name = match self.advance() {
-            Tok::Str(s) => s,
-            other => {
-                return Err(refuse!(
-                    "parse",
-                    self.line(),
-                    self.col(),
-                    NameStringExpected,
-                    word,
-                    found = format!("{other:?}")
-                ))
-            }
-        };
+        // Past the word and the string, without copying them; `Eof` follows the string.
+        self.pos += 2;
         if self.imported {
             self.skip_braces()?;
             return Ok(None);
@@ -3167,7 +3161,7 @@ impl Parser {
     /// The bitwise family sits between comparison and arithmetic, so
     /// `x & mask == 0` is `(x & mask) == 0` and `a + b << c` is `(a + b) << c`.
     /// Within it, tightest first: `~` (in [`unary`]), `<< >>`, `&`, `^`, `|`.
-    fn binop(tok: &Tok) -> Option<(BinOp, u8)> {
+    pub(crate) fn binop(tok: &Tok) -> Option<(BinOp, u8)> {
         Some(match tok {
             Tok::OrOr => (BinOp::Or, 1),
             Tok::AndAnd => (BinOp::And, 2),

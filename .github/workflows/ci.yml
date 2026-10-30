@@ -554,6 +554,9 @@ jobs:
       - name: The relation identity census over the corpus
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test canon -- --ignored --nocapture
+      - name: The hand lexer and parser against vyrn.syntax over the corpus
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test syntaxgate -- --ignored --nocapture
 
   route:
     name: the native route (wasm2c == wasm)

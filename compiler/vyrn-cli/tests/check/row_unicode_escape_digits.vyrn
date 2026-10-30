@@ -1,0 +1,4 @@
+fn main() -> Int64 {
+    let s = "\u{zz}"
+    return 0
+}

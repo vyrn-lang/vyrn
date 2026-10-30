@@ -1,0 +1,2 @@
+row_lambda_not_here.vyrn:2:13: `|x| ...` is not a lambda here; a lambda takes its parameters before an arrow
+  fix: `x -> ...`, or `(x, y) -> ...` for more than one

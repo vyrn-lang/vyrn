@@ -1,0 +1,1 @@
+row_small_array_needs_capacity.vyrn:1:25: `SmallArray<T, N>` needs an inline capacity, e.g. `SmallArray<Int64, 16>`

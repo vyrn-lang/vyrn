@@ -1,0 +1,4 @@
+fn main() -> Int64 {
+    let f = |x| x
+    return 0
+}

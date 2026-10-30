@@ -1,0 +1,1 @@
+row_contract_open_rule_default.vyrn:2:23: a contract's open rule cannot have a default — it describes the shape of exports whose names the contract does not know, so there is no absent member for a default to supply

@@ -1,0 +1,10 @@
+protocol P {
+    type A
+    fn f(self) -> A
+}
+impl P for Int64 {
+    fn f(self) -> Int64 { return 1 }
+    type A = Int64
+}
+
+fn main() -> Int64 { return 0 }

@@ -22,6 +22,28 @@ macro_rules! rules {
         }
 
         impl Rule {
+            /// Every row's name, in file order.
+            pub const ROWS: &'static [&'static str] = &[$(stringify!($rule)),*];
+
+            /// Returns the row's name.
+            pub fn name(&self) -> &'static str {
+                match self {
+                    $(Rule::$rule { .. } => stringify!($rule),)*
+                }
+            }
+
+            /// Builds the row named `row` with each hole's text from `text`, or
+            /// `None` for an unknown row or a hole `text` cannot fill. The
+            /// `syntaxgate` test renders a grammar's refusals with it.
+            pub fn from_text(row: &str, text: impl Fn(&str) -> Option<String>) -> Option<Rule> {
+                match row {
+                    $(stringify!($rule) => Some(Rule::$rule {
+                        $($hole: Hole::Text(text(stringify!($hole))?)),*
+                    }),)*
+                    _ => None,
+                }
+            }
+
             /// Renders the sentence by linked names, then one fix line per way
             /// out.
             pub fn render(&self) -> String {
@@ -781,7 +803,6 @@ rules! {
     UnterminatedInterp {} "unterminated `\\{{` interpolation";
     EmptyInterp {} "empty `\\{{ }}` interpolation";
     UnknownEscape { other } "unknown escape `\\{other}`";
-    InvalidFloat { text } "invalid float literal: {text}";
     IntOutOfRange { text } "integer literal out of range: {text}";
     UnexpectedChar { c } "unexpected character {c}";
     ExpectedIdent { found } "expected identifier, found {found}";
@@ -867,7 +888,6 @@ rules! {
         "`fn {name}` cannot return a capability — a projection's result \
         is a place inside its receiver, and a free function has none. \
         Declare it on an `impl`.";
-    NameStringExpected { word, found } "expected a {word} name string, found {found}";
     ExportedExternBody {}
         "an exported extern needs a body — a body-less `extern fn` is an import";
     ExternBody {} "an `extern fn` has no body";
@@ -924,8 +944,7 @@ rules! {
     FloorCannotInclude { artifact, target, module, what }
         "artifact `{artifact}` ({target}) cannot include `{module}`: {what}";
     FormatterInvariant {}
-        "internal formatter error: output would change the token sequence \
-        (source left unchanged)";
+        "internal formatter error: output would change the parse (source left unchanged)";
     DeriveWroteDerive {} "a `derive` generator wrote a `derive` call";
     AudienceCannotImport { importer, from, imported, to }
         "`{importer}` is {from} and cannot import `{imported}`, which is {to}";
