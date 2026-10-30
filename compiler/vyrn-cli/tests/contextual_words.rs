@@ -1,12 +1,9 @@
 //! The playground (`compiler/vyrn-play/src/lib.rs`) and the site highlighter
-//! (`site/app/hl.vyrn`) colour the same contextual words. Neither can import
-//! the other (one is `wasm32-unknown-unknown` Rust, the other a Vyrn
-//! generator), so the list is written twice and this test stops the copies
-//! drifting. The editor grammar answers a different question (words in a
-//! `.vyrn` file) and is checked against the lexer by
-//! `editor/vscode/test/grammar.test.mjs`.
+//! (`site/app/hl.vyrn`) each hold a list of contextual words. The grammar is the
+//! home of those words, as [`CONTEXTUAL`] writes them, so each list is held to it.
 
 use std::path::{Path, PathBuf};
+use vyrn_frontend::lexer::CONTEXTUAL;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -36,25 +33,27 @@ fn words_after(src: &str, open: &str) -> Vec<String> {
     out
 }
 
+/// The words the highlighter at `file` lists after `open` that the grammar does
+/// not state.
+fn strays(file: &str, open: &str) -> Vec<String> {
+    let src = std::fs::read_to_string(repo_root().join(file)).expect("the highlighter");
+    let mut words = words_after(&src, open);
+    words.retain(|w| !CONTEXTUAL.contains(&w.as_str()));
+    words
+}
+
+/// Both highlighters colour the builtin `panic` as a word. A builtin is a name the
+/// checker knows, so no rule of the grammar states it.
+const BUILTIN: &[&str] = &["panic"];
+
 #[test]
-fn the_playground_and_the_site_colour_the_same_contextual_words() {
-    let root = repo_root();
-    let play = std::fs::read_to_string(root.join("compiler/vyrn-play/src/lib.rs"))
-        .expect("the playground crate");
-    let site =
-        std::fs::read_to_string(root.join("site/app/hl.vyrn")).expect("the site highlighter");
+fn the_playground_colours_only_the_grammars_contextual_words() {
+    let open = "const CONTEXTUAL: &[&str] = &[";
+    assert_eq!(strays("compiler/vyrn-play/src/lib.rs", open), BUILTIN);
+}
 
-    let a = words_after(&play, "const CONTEXTUAL: &[&str] = &[");
-    let b = words_after(&site, "fn contextual() -> Array<String> {\n    return [");
-
-    assert!(
-        a.len() >= 8,
-        "only {} words read from the playground — the shape changed",
-        a.len()
-    );
-    assert_eq!(
-        a, b,
-        "the playground and the site disagree about which words are contextual:\n  \
-         playground: {a:?}\n  site:       {b:?}"
-    );
+#[test]
+fn the_site_colours_only_the_grammars_contextual_words() {
+    let open = "fn contextual() -> Array<String> {\n    return [";
+    assert_eq!(strays("site/app/hl.vyrn", open), BUILTIN);
 }

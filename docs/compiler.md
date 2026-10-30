@@ -70,10 +70,12 @@ import.
 ## The front end
 
 `lexer::scan` reads the source once; `lexer::lex` and the formatter read the
-scan. Its scanner, `lexer/grammar.rs`, is the lexical rules of `vyrn.syntax`
-written as Rust by `vyrn_syntax::lexer`: one method per rule, which calls a
-hook of `lexer.rs` once it matches. The hooks build the items and decode each
-literal's value. The file is committed, and `the_lexer_is_fresh` fails when it
+scan. `lexer/grammar.rs` is `vyrn.syntax` written as Rust by `vyrn_syntax::lexer`.
+`Tok`, its lookups and `KEYWORDS` come from the `keyword` and `token` lines, and
+the variants with no spelling from one list in the generator. `CONTEXTUAL` holds
+the words of syntactic rules that no `keyword` line reserves. The scanner is one
+method per lexical rule, which calls a hook of `lexer.rs` once it matches. The
+hooks build the items and decode each literal's value. The file is committed, and `the_lexer_is_fresh` fails when it
 differs from a fresh run; `VYRN_PIN=write` rewrites it. `parser::parse` is recursive descent with precedence climbing. It
 recovers past a bad top-level declaration, so one file reports every parse
 error. The parser performs the pure syntax desugars: `??` into a `match` over

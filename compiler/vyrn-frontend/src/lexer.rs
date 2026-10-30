@@ -3,6 +3,9 @@
 #[rustfmt::skip]
 mod grammar;
 
+pub(crate) use grammar::punct_tok;
+pub use grammar::{Tok, CONTEXTUAL, KEYWORDS, PUNCT_SPELLINGS};
+
 use crate::diagnostics::Diagnostic;
 use crate::rules::{refuse, Rule};
 
@@ -68,11 +71,11 @@ pub fn token_name_and_text(tok: &Tok) -> (String, String) {
         Tok::Doc(s) => ("doc".to_string(), s.clone()),
         Tok::Ident(s) => ("ident".to_string(), s.clone()),
         Tok::Eof => ("eof".to_string(), String::new()),
-        t => match keyword_text(t) {
+        t => match t.keyword_text() {
             Some(w) => ("keyword".to_string(), w.to_string()),
             None => (
                 "punct".to_string(),
-                punct_text(t)
+                t.punct_text()
                     .expect("every token that is not a literal, a keyword or `Eof` is punctuation")
                     .to_string(),
             ),
@@ -128,154 +131,6 @@ pub struct Scan {
     pub items: Vec<Triv>,
     pub end_line: usize,
     pub end_col: usize,
-}
-
-/// Every token kind with its spelling: the one token table. It generates `Tok` and
-/// each direction of lookup on it, so a kind is written once.
-///
-/// `tests/forms.rs` and `editor/vscode/test/grammar.test.mjs` parse the
-/// `"word" => Tok::Name` rows of `keywords` as text. Keep one row per line, spelled
-/// that way.
-macro_rules! tokens {
-    (
-        payload { $($payload:tt)* }
-        keywords { $($w:literal => Tok::$t:ident),* $(,)? }
-        two { $(($a:literal, $b:literal) => $tt:ident),* $(,)? }
-        one { $($c:literal => $ot:ident),* $(,)? }
-    ) => {
-        /// A lexical token kind.
-        #[derive(Debug, Clone, PartialEq)]
-        pub enum Tok {
-            $($payload)*
-            $($t,)*
-            $($tt,)*
-            $($ot,)*
-            Eof,
-        }
-
-        fn keyword_text(tok: &Tok) -> Option<&'static str> {
-            Some(match tok {
-                $(Tok::$t => $w,)*
-                _ => return None,
-            })
-        }
-
-        /// Returns the spelling of a punctuation token, or `None`.
-        pub fn punct_text(tok: &Tok) -> Option<&'static str> {
-            Some(match tok {
-                $(Tok::$tt => concat!($a, $b),)*
-                $(Tok::$ot => concat!($c),)*
-                _ => return None,
-            })
-        }
-
-        /// Returns the punctuation token a spelling names, or `None`.
-        pub(crate) fn punct_tok(text: &str) -> Option<Tok> {
-            match text {
-                $(concat!($a, $b) => Some(Tok::$tt),)*
-                $(concat!($c) => Some(Tok::$ot),)*
-                _ => None,
-            }
-        }
-
-        /// Every punctuation spelling, two-character forms first. The form
-        /// census (`tests/forms.rs`) counts operators against it.
-        pub const PUNCT_SPELLINGS: &[&str] = &[$(concat!($a, $b),)* $(concat!($c),)*];
-
-        /// Every reserved word, in table order.
-        pub const KEYWORDS: &[&str] = &[$($w,)*];
-    };
-}
-
-tokens! {
-    payload {
-        Int(i64),
-        /// A byte literal `'c'`: one ASCII byte, an integer literal the checker
-        /// defaults to `UInt8`.
-        Byte(u8),
-        Float(f64),
-        /// A string literal with its escapes decoded.
-        Str(String),
-        /// An interpolated string `"a\{e}b"`. `parts` are the decoded fragments,
-        /// always `exprs.len() + 1` of them; the parser parses `exprs`.
-        TemplateStr {
-            parts: Vec<String>,
-            exprs: Vec<Hole>,
-        },
-        /// A `///` doc line as markdown, one leading space stripped. The parser attaches
-        /// it to the next declaration.
-        Doc(String),
-        Ident(String),
-    }
-    keywords {
-        "fn" => Tok::Fn,
-        "let" => Tok::Let,
-        "mut" => Tok::Mut,
-        "if" => Tok::If,
-        "else" => Tok::Else,
-        "while" => Tok::While,
-        "for" => Tok::For,
-        "in" => Tok::In,
-        "drop" => Tok::Drop,
-        "protocol" => Tok::Protocol,
-        "import" => Tok::Import,
-        "export" => Tok::Export,
-        "impl" => Tok::Impl,
-        "self" => Tok::Vself,
-        "return" => Tok::Return,
-        "true" => Tok::True,
-        "false" => Tok::False,
-        "type" => Tok::Type,
-        "enum" => Tok::Enum,
-        "where" => Tok::Where,
-        "match" => Tok::Match,
-        "region" => Tok::Region,
-        "break" => Tok::Break,
-        "continue" => Tok::Continue,
-    }
-    two {
-        ('-', '>') => Arrow,
-        ('=', '>') => FatArrow,
-        ('=', '~') => TildeMatch,
-        ('=', '=') => EqEq,
-        ('!', '=') => NotEq,
-        ('<', '=') => LtEq,
-        ('>', '=') => GtEq,
-        ('&', '&') => AndAnd,
-        ('|', '|') => OrOr,
-        // Maximal munch, so two postfix `?` are written `(x?)?`.
-        ('?', '?') => QuestionQuestion,
-        ('<', '<') => Shl,
-        // Lexes greedily; in type position the parser splits `>>` into two `>`,
-        // so `Array<Array<T>>` parses.
-        ('>', '>') => Shr,
-    }
-    one {
-        '(' => LParen,
-        ')' => RParen,
-        '{' => LBrace,
-        '}' => RBrace,
-        '[' => LBracket,
-        ']' => RBracket,
-        ',' => Comma,
-        ';' => Semi,
-        ':' => Colon,
-        '.' => Dot,
-        '+' => Plus,
-        '-' => Minus,
-        '*' => Star,
-        '/' => Slash,
-        '%' => Percent,
-        '=' => Eq,
-        '<' => Lt,
-        '>' => Gt,
-        '!' => Bang,
-        '?' => Question,
-        '|' => Pipe,
-        '&' => Amp,
-        '^' => Caret,
-        '~' => Tilde,
-    }
 }
 
 /// Scans `src` once into every lexical item and the end position.

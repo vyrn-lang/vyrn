@@ -39,8 +39,11 @@ token LtEq '<='
 token GtEq '>='
 token AndAnd '&&'
 token OrOr '||'
+// Maximal munch, so two postfix `?` are written `(x?)?`.
 token QuestionQuestion '??'
 token Shl '<<'
+// Lexes greedily; in type position the parser splits `>>` into two `>`, so
+// `Array<Array<T>>` parses.
 token Shr '>>'
 token LParen '('
 token RParen ')'

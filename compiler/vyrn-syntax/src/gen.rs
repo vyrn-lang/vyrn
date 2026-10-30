@@ -1,7 +1,8 @@
-//! Writes `vyrn-frontend`'s scanner from a grammar's lexical rules.
+//! Writes `vyrn-frontend`'s token table and scanner from a grammar.
 //!
-//! [`lexer`] lowers each lexical rule that `scan` reaches to one method of
-//! `Scanner`, and the token table to `keyword` and `punct_at`. A rule that
+//! [`lexer`] writes `Tok` and its spellings from the `keyword` and `token` lines
+//! and the contextual words from the syntactic rules, and it lowers each lexical
+//! rule that `scan` reaches to one method of `Scanner`. A rule that
 //! matches calls the host's hook of the same name with its extent and with the
 //! labels it reads from its callers; the host builds the tokens and decodes
 //! their values. The output is committed as
@@ -17,7 +18,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::rc::Rc;
 
-use crate::{At, Builtin, Grammar, HoleSrc, RuleId, Throw, E};
+use crate::{At, Builtin, Grammar, HoleSrc, Lit, Recover, RuleId, Throw, E};
 
 /// The scanner's own names, which no rule or label may take.
 const TAKEN: &[&str] = &[
@@ -41,8 +42,8 @@ const TAKEN: &[&str] = &[
     "rule",
 ];
 
-/// Returns the Rust source of the scanner for `g`'s `scan` rule, or why the
-/// grammar's lexical rules do not lower.
+/// Returns the Rust source of `g`'s token table and of the scanner for its `scan`
+/// rule, or why the grammar's lexical rules do not lower.
 pub fn lexer(g: &Grammar) -> Result<String, String> {
     let scan = g.scan_rule.ok_or("the grammar has no `scan` rule")?;
     let rules = reachable(g, scan)?;
@@ -90,7 +91,11 @@ fn reachable(g: &Grammar, scan: RuleId) -> Result<Vec<RuleId>, String> {
                 g.body(r).name
             ));
         }
-        refs(&g.body(r).body, &mut todo);
+        walk(&g.body(r).body, &mut |e| {
+            if let E::Ref(callee) = e {
+                todo.push(*callee);
+            }
+        });
     }
     Ok((0..g.rules.len())
         .filter(|&i| seen[i])
@@ -98,18 +103,61 @@ fn reachable(g: &Grammar, scan: RuleId) -> Result<Vec<RuleId>, String> {
         .collect())
 }
 
-/// Pushes every rule `e` calls.
-fn refs(e: &E, out: &mut Vec<RuleId>) {
+/// Calls `f` on `e` and on every expression inside it, outermost first. The rule
+/// an `embed` parses its island with is not inside it.
+fn walk(e: &E, f: &mut dyn FnMut(&E)) {
+    f(e);
     match e {
-        E::Ref(r) => out.push(*r),
-        E::Seq(v) | E::Alt(v) => v.iter().for_each(|x| refs(x, out)),
-        E::Star(x) | E::Plus(x) | E::Opt(x) | E::And(x) | E::Not(x) | E::Try(x) => refs(x, out),
-        E::Field(_, x) | E::Guard(_, x) | E::SetFlag(_, _, x) | E::Climb(x, _) => refs(x, out),
-        E::Embed(em) => refs(&em.extent, out),
-        E::Many(a, b, _) => [a, b].iter().for_each(|x| refs(x, out)),
-        E::List(a, b, c) => [a, b, c].iter().for_each(|x| refs(x, out)),
+        E::Seq(v) | E::Alt(v) => v.iter().for_each(|x| walk(x, f)),
+        E::Star(x) | E::Plus(x) | E::Opt(x) | E::And(x) | E::Not(x) | E::Try(x) => walk(x, f),
+        E::Field(_, x) | E::Guard(_, x) | E::SetFlag(_, _, x) | E::Climb(x, _) => walk(x, f),
+        E::Embed(em) => walk(&em.extent, f),
+        E::Many(a, b, recover) => {
+            walk(a, f);
+            walk(b, f);
+            if let Recover::Decl(c) = recover {
+                walk(c, f);
+            }
+        }
+        E::List(a, b, c) => [a, b, c].iter().for_each(|x| walk(x, f)),
         _ => {}
     }
+}
+
+/// Whether `e` or an expression inside it satisfies `p`.
+fn any(e: &E, p: &dyn Fn(&E) -> bool) -> bool {
+    let mut hit = false;
+    walk(e, &mut |x| hit |= p(x));
+    hit
+}
+
+/// The contextual words: the words of syntactic rules that no `keyword` line
+/// reserves, in the order the grammar first names them.
+fn contextual(g: &Grammar) -> Vec<Rc<str>> {
+    let mut words: Vec<Rc<str>> = Vec::new();
+    let mut add = |l: &Lit| {
+        if l.word && !g.reserved.contains(&*l.s) && !words.contains(&l.s) {
+            words.push(l.s.clone());
+        }
+    };
+    for rule in g.rules.iter().filter(|r| r.syntactic) {
+        walk(&rule.body, &mut |e| match e {
+            E::Lit(l) => add(l),
+            E::Climb(_, levels) => levels
+                .iter()
+                .flat_map(|level| &level.ops)
+                .for_each(&mut add),
+            _ => {}
+        });
+    }
+    words
+}
+
+/// The punctuation lines of `g`, longest spelling first, in file order otherwise.
+fn punct_lines(g: &Grammar) -> Vec<&(String, String, bool)> {
+    let mut punct: Vec<_> = g.tokens.iter().filter(|t| !t.2).collect();
+    punct.sort_by_key(|t| std::cmp::Reverse(t.1.len()));
+    punct
 }
 
 /// `strItem` as `str_item`.
@@ -246,25 +294,7 @@ impl Lower<'_> {
 
     /// Whether matching `e` calls a hook.
     fn hooks(e: &E) -> bool {
-        let mut calls = Vec::new();
-        refs(e, &mut calls);
-        !calls.is_empty() || Self::any(e, &|x| matches!(x, E::Builtin(Builtin::Punct)))
-    }
-
-    /// Whether `e` or an expression inside it satisfies `p`.
-    fn any(e: &E, p: &dyn Fn(&E) -> bool) -> bool {
-        p(e) || match e {
-            E::Seq(v) | E::Alt(v) => v.iter().any(|x| Self::any(x, p)),
-            E::Star(x)
-            | E::Plus(x)
-            | E::Opt(x)
-            | E::And(x)
-            | E::Not(x)
-            | E::Field(_, x)
-            | E::Guard(_, x) => Self::any(x, p),
-            E::Embed(em) => Self::any(&em.extent, p),
-            _ => false,
-        }
+        any(e, &|x| matches!(x, E::Ref(_) | E::Builtin(Builtin::Punct)))
     }
 
     /// Refuses `e` if a failure could undo a hook already called: a hook in a
@@ -281,7 +311,7 @@ impl Lower<'_> {
                 }
             }
             E::And(x) | E::Not(x) => {
-                if Self::hooks(x) || Self::any(x, &|y| matches!(y, E::Throw(_))) {
+                if Self::hooks(x) || any(x, &|y| matches!(y, E::Throw(_))) {
                     return Err("a predicate calls a rule or refuses".into());
                 }
             }
@@ -298,6 +328,7 @@ impl Lower<'_> {
     fn emit(&self, rules: &[RuleId], scan: RuleId) -> String {
         let mut o = String::new();
         o.push_str(PRELUDE);
+        self.tokens(&mut o);
         o.push_str(HOOKS_HEAD);
         for &r in rules {
             let name = snake(&self.g.body(r).name);
@@ -308,7 +339,6 @@ impl Lower<'_> {
             );
         }
         o.push_str("}\n");
-        self.keywords(&mut o);
         o.push_str(SCANNER);
         self.punct(&mut o);
         for &r in rules {
@@ -326,14 +356,66 @@ impl Lower<'_> {
             .collect()
     }
 
-    /// The keyword table: a free function, because the host reads it.
-    fn keywords(&self, o: &mut String) {
-        o.push_str("\n/// Returns the reserved word `word` spells, or `None`.\n");
-        o.push_str("pub(super) fn keyword(word: &str) -> Option<Tok> {\n    Some(match word {\n");
-        for (name, s, _) in self.g.tokens.iter().filter(|t| t.2) {
-            let _ = writeln!(o, "        {s:?} => Tok::{name},");
+    /// The token table: `Tok`, each direction of lookup on it, and the word lists.
+    fn tokens(&self, o: &mut String) {
+        let tokens = &self.g.tokens;
+        let words: Vec<_> = tokens.iter().filter(|t| t.2).collect();
+        let punct = punct_lines(self.g);
+        let name_of = |t: &&(String, String, bool)| format!("Self::{} => {:?}", t.0, t.1);
+        let tok_of = |t: &&(String, String, bool)| format!("{:?} => Tok::{}", t.1, t.0);
+        o.push_str(
+            "/// A lexical token kind.\n#[derive(Debug, Clone, PartialEq)]\npub enum Tok {\n",
+        );
+        o.push_str(UNSPELLED);
+        for (name, _, _) in tokens {
+            let _ = writeln!(o, "    {name},");
         }
-        o.push_str("        _ => return None,\n    })\n}\n");
+        o.push_str("}\n\nimpl Tok {\n");
+        lookup(
+            o,
+            "    ",
+            "Returns the spelling of a reserved word, or `None`.",
+            "pub(super) fn keyword_text(&self) -> Option<&'static str>",
+            "self",
+            words.iter().map(name_of),
+        );
+        o.push('\n');
+        lookup(
+            o,
+            "    ",
+            "Returns the spelling of a punctuation token, or `None`.",
+            "pub(super) fn punct_text(&self) -> Option<&'static str>",
+            "self",
+            punct.iter().map(name_of),
+        );
+        o.push_str("}\n\n");
+        lookup(
+            o,
+            "",
+            "Returns the reserved word `word` spells, or `None`.",
+            "pub(super) fn keyword(word: &str) -> Option<Tok>",
+            "word",
+            words.iter().map(tok_of),
+        );
+        o.push('\n');
+        lookup(
+            o,
+            "",
+            "Returns the punctuation token a spelling names, or `None`.",
+            "pub(crate) fn punct_tok(text: &str) -> Option<Tok>",
+            "text",
+            punct.iter().map(tok_of),
+        );
+        o.push_str("\n/// Every reserved word, in table order.\n");
+        spellings(o, "KEYWORDS", words.iter().map(|t| t.1.as_str()));
+        o.push_str("/// Every punctuation spelling, longest first.\n");
+        spellings(o, "PUNCT_SPELLINGS", punct.iter().map(|t| t.1.as_str()));
+        o.push_str(
+            "/// The words the lexer hands back as identifiers and a syntactic rule reads by\n",
+        );
+        o.push_str("/// position, in the order the grammar first names them.\n");
+        let contextual = contextual(self.g);
+        spellings(o, "CONTEXTUAL", contextual.iter().map(|w| &**w));
     }
 
     /// The `punct` builtin: the punctuation table, longest spelling first.
@@ -341,10 +423,7 @@ impl Lower<'_> {
         o.push_str("    /// Matches the longest punctuation spelling at the cursor.\n");
         o.push_str("    fn punct(&mut self) -> Result<bool, Box<Diagnostic>> {\n");
         o.push_str("        let (tok, n) = match &self.src.as_bytes()[self.pos..] {\n");
-        let mut punct: Vec<&(String, String, bool)> =
-            self.g.tokens.iter().filter(|t| !t.2).collect();
-        punct.sort_by_key(|t| std::cmp::Reverse(t.1.len()));
-        for (name, s, _) in punct {
+        for (name, s, _) in punct_lines(self.g) {
             let bytes: Vec<String> = s
                 .bytes()
                 .map(|b| format!("b'{}'", b.escape_ascii()))
@@ -622,6 +701,33 @@ impl Lower<'_> {
 }
 
 /// A predicate on `c` as a closure.
+/// Writes a function indented by `ind` that returns the arm of `arms` matching
+/// `subject`, or `None`.
+fn lookup(
+    o: &mut String,
+    ind: &str,
+    doc: &str,
+    sign: &str,
+    subject: &str,
+    arms: impl Iterator<Item = String>,
+) {
+    let _ = writeln!(o, "{ind}/// {doc}\n{ind}{sign} {{");
+    let _ = writeln!(o, "{ind}    Some(match {subject} {{");
+    for arm in arms {
+        let _ = writeln!(o, "{ind}        {arm},");
+    }
+    let _ = writeln!(o, "{ind}        _ => return None,\n{ind}    }})\n{ind}}}");
+}
+
+/// Writes `pub const name: &[&str]` with one spelling per line.
+fn spellings<'a>(o: &mut String, name: &str, words: impl Iterator<Item = &'a str>) {
+    let _ = writeln!(o, "pub const {name}: &[&str] = &[");
+    for w in words {
+        let _ = writeln!(o, "    {w:?},");
+    }
+    o.push_str("];\n\n");
+}
+
 fn closure(p: &str) -> String {
     match p {
         "true" => "|_| true".into(),
@@ -658,15 +764,39 @@ const PRELUDE: &str = "\
 // edit: the test the_lexer_is_fresh fails when this file differs from a fresh
 // run, and VYRN_PIN=write rewrites it.
 
-//! The lexical rules of `vyrn.syntax` as Rust: one method of [`Scanner`] per
-//! rule that `scan` reaches. A method returns `Ok(false)` with the cursor
-//! unmoved when its rule does not match, and the host's error when the rule
-//! refuses. The host's [`Hooks`] build the tokens.
+//! The token table and the lexical rules of `vyrn.syntax` as Rust. [`Tok`] and
+//! its lookups come from the `keyword` and `token` lines. [`Scanner`] has one
+//! method per rule that `scan` reaches. A method returns `Ok(false)` with the
+//! cursor unmoved when its rule does not match, and the host's error when the
+//! rule refuses. The host's [`Hooks`] build the tokens.
 
+use super::Hole;
 use crate::diagnostics::Diagnostic;
-use crate::lexer::Tok;
 use crate::rules::{rule, Rule};
 
+";
+
+/// The variants of `Tok` that have no spelling, so no line of a grammar states
+/// them. Rust cannot split one enum across two files, and a nested enum would
+/// wrap every token a pass matches, so this one list is the hand half of `Tok`.
+const UNSPELLED: &str = "    Int(i64),
+    /// A byte literal `'c'`: one ASCII byte, an integer literal the checker
+    /// defaults to `UInt8`.
+    Byte(u8),
+    Float(f64),
+    /// A string literal with its escapes decoded.
+    Str(String),
+    /// An interpolated string `\"a\\{e}b\"`. `parts` are the decoded fragments,
+    /// always `exprs.len() + 1` of them; the parser parses `exprs`.
+    TemplateStr {
+        parts: Vec<String>,
+        exprs: Vec<Hole>,
+    },
+    /// A `///` doc line as markdown, one leading space stripped. The parser attaches
+    /// it to the next declaration.
+    Doc(String),
+    Ident(String),
+    Eof,
 ";
 
 const HOOKS_HEAD: &str = "\
@@ -766,6 +896,14 @@ impl<'s, H: Hooks> Scanner<'s, H> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    #[test]
+    fn a_contextual_word_is_a_syntactic_word_no_keyword_reserves() {
+        let grammar = "keyword Fn 'fn'\nexpect ^E\nA = 'fn' 'as' '-' b 'as' 'to'\nb = 'lexical'\n";
+        let g = crate::load(grammar).expect("the grammar loads");
+        let words = super::contextual(&g);
+        assert_eq!(words.iter().map(|w| &**w).collect::<Vec<_>>(), ["as", "to"]);
+    }
 
     #[test]
     fn the_lexer_is_fresh() {

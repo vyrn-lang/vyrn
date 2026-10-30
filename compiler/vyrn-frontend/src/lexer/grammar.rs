@@ -2,14 +2,357 @@
 // edit: the test the_lexer_is_fresh fails when this file differs from a fresh
 // run, and VYRN_PIN=write rewrites it.
 
-//! The lexical rules of `vyrn.syntax` as Rust: one method of [`Scanner`] per
-//! rule that `scan` reaches. A method returns `Ok(false)` with the cursor
-//! unmoved when its rule does not match, and the host's error when the rule
-//! refuses. The host's [`Hooks`] build the tokens.
+//! The token table and the lexical rules of `vyrn.syntax` as Rust. [`Tok`] and
+//! its lookups come from the `keyword` and `token` lines. [`Scanner`] has one
+//! method per rule that `scan` reaches. A method returns `Ok(false)` with the
+//! cursor unmoved when its rule does not match, and the host's error when the
+//! rule refuses. The host's [`Hooks`] build the tokens.
 
+use super::Hole;
 use crate::diagnostics::Diagnostic;
-use crate::lexer::Tok;
 use crate::rules::{rule, Rule};
+
+/// A lexical token kind.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tok {
+    Int(i64),
+    /// A byte literal `'c'`: one ASCII byte, an integer literal the checker
+    /// defaults to `UInt8`.
+    Byte(u8),
+    Float(f64),
+    /// A string literal with its escapes decoded.
+    Str(String),
+    /// An interpolated string `"a\{e}b"`. `parts` are the decoded fragments,
+    /// always `exprs.len() + 1` of them; the parser parses `exprs`.
+    TemplateStr {
+        parts: Vec<String>,
+        exprs: Vec<Hole>,
+    },
+    /// A `///` doc line as markdown, one leading space stripped. The parser attaches
+    /// it to the next declaration.
+    Doc(String),
+    Ident(String),
+    Eof,
+    Fn,
+    Let,
+    Mut,
+    If,
+    Else,
+    While,
+    For,
+    In,
+    Drop,
+    Protocol,
+    Import,
+    Export,
+    Impl,
+    Vself,
+    Return,
+    True,
+    False,
+    Type,
+    Enum,
+    Where,
+    Match,
+    Region,
+    Break,
+    Continue,
+    Arrow,
+    FatArrow,
+    TildeMatch,
+    EqEq,
+    NotEq,
+    LtEq,
+    GtEq,
+    AndAnd,
+    OrOr,
+    QuestionQuestion,
+    Shl,
+    Shr,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Comma,
+    Semi,
+    Colon,
+    Dot,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Eq,
+    Lt,
+    Gt,
+    Bang,
+    Question,
+    Pipe,
+    Amp,
+    Caret,
+    Tilde,
+}
+
+impl Tok {
+    /// Returns the spelling of a reserved word, or `None`.
+    pub(super) fn keyword_text(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Fn => "fn",
+            Self::Let => "let",
+            Self::Mut => "mut",
+            Self::If => "if",
+            Self::Else => "else",
+            Self::While => "while",
+            Self::For => "for",
+            Self::In => "in",
+            Self::Drop => "drop",
+            Self::Protocol => "protocol",
+            Self::Import => "import",
+            Self::Export => "export",
+            Self::Impl => "impl",
+            Self::Vself => "self",
+            Self::Return => "return",
+            Self::True => "true",
+            Self::False => "false",
+            Self::Type => "type",
+            Self::Enum => "enum",
+            Self::Where => "where",
+            Self::Match => "match",
+            Self::Region => "region",
+            Self::Break => "break",
+            Self::Continue => "continue",
+            _ => return None,
+        })
+    }
+
+    /// Returns the spelling of a punctuation token, or `None`.
+    pub(super) fn punct_text(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Arrow => "->",
+            Self::FatArrow => "=>",
+            Self::TildeMatch => "=~",
+            Self::EqEq => "==",
+            Self::NotEq => "!=",
+            Self::LtEq => "<=",
+            Self::GtEq => ">=",
+            Self::AndAnd => "&&",
+            Self::OrOr => "||",
+            Self::QuestionQuestion => "??",
+            Self::Shl => "<<",
+            Self::Shr => ">>",
+            Self::LParen => "(",
+            Self::RParen => ")",
+            Self::LBrace => "{",
+            Self::RBrace => "}",
+            Self::LBracket => "[",
+            Self::RBracket => "]",
+            Self::Comma => ",",
+            Self::Semi => ";",
+            Self::Colon => ":",
+            Self::Dot => ".",
+            Self::Plus => "+",
+            Self::Minus => "-",
+            Self::Star => "*",
+            Self::Slash => "/",
+            Self::Percent => "%",
+            Self::Eq => "=",
+            Self::Lt => "<",
+            Self::Gt => ">",
+            Self::Bang => "!",
+            Self::Question => "?",
+            Self::Pipe => "|",
+            Self::Amp => "&",
+            Self::Caret => "^",
+            Self::Tilde => "~",
+            _ => return None,
+        })
+    }
+}
+
+/// Returns the reserved word `word` spells, or `None`.
+pub(super) fn keyword(word: &str) -> Option<Tok> {
+    Some(match word {
+        "fn" => Tok::Fn,
+        "let" => Tok::Let,
+        "mut" => Tok::Mut,
+        "if" => Tok::If,
+        "else" => Tok::Else,
+        "while" => Tok::While,
+        "for" => Tok::For,
+        "in" => Tok::In,
+        "drop" => Tok::Drop,
+        "protocol" => Tok::Protocol,
+        "import" => Tok::Import,
+        "export" => Tok::Export,
+        "impl" => Tok::Impl,
+        "self" => Tok::Vself,
+        "return" => Tok::Return,
+        "true" => Tok::True,
+        "false" => Tok::False,
+        "type" => Tok::Type,
+        "enum" => Tok::Enum,
+        "where" => Tok::Where,
+        "match" => Tok::Match,
+        "region" => Tok::Region,
+        "break" => Tok::Break,
+        "continue" => Tok::Continue,
+        _ => return None,
+    })
+}
+
+/// Returns the punctuation token a spelling names, or `None`.
+pub(crate) fn punct_tok(text: &str) -> Option<Tok> {
+    Some(match text {
+        "->" => Tok::Arrow,
+        "=>" => Tok::FatArrow,
+        "=~" => Tok::TildeMatch,
+        "==" => Tok::EqEq,
+        "!=" => Tok::NotEq,
+        "<=" => Tok::LtEq,
+        ">=" => Tok::GtEq,
+        "&&" => Tok::AndAnd,
+        "||" => Tok::OrOr,
+        "??" => Tok::QuestionQuestion,
+        "<<" => Tok::Shl,
+        ">>" => Tok::Shr,
+        "(" => Tok::LParen,
+        ")" => Tok::RParen,
+        "{" => Tok::LBrace,
+        "}" => Tok::RBrace,
+        "[" => Tok::LBracket,
+        "]" => Tok::RBracket,
+        "," => Tok::Comma,
+        ";" => Tok::Semi,
+        ":" => Tok::Colon,
+        "." => Tok::Dot,
+        "+" => Tok::Plus,
+        "-" => Tok::Minus,
+        "*" => Tok::Star,
+        "/" => Tok::Slash,
+        "%" => Tok::Percent,
+        "=" => Tok::Eq,
+        "<" => Tok::Lt,
+        ">" => Tok::Gt,
+        "!" => Tok::Bang,
+        "?" => Tok::Question,
+        "|" => Tok::Pipe,
+        "&" => Tok::Amp,
+        "^" => Tok::Caret,
+        "~" => Tok::Tilde,
+        _ => return None,
+    })
+}
+
+/// Every reserved word, in table order.
+pub const KEYWORDS: &[&str] = &[
+    "fn",
+    "let",
+    "mut",
+    "if",
+    "else",
+    "while",
+    "for",
+    "in",
+    "drop",
+    "protocol",
+    "import",
+    "export",
+    "impl",
+    "self",
+    "return",
+    "true",
+    "false",
+    "type",
+    "enum",
+    "where",
+    "match",
+    "region",
+    "break",
+    "continue",
+];
+
+/// Every punctuation spelling, longest first.
+pub const PUNCT_SPELLINGS: &[&str] = &[
+    "->",
+    "=>",
+    "=~",
+    "==",
+    "!=",
+    "<=",
+    ">=",
+    "&&",
+    "||",
+    "??",
+    "<<",
+    ">>",
+    "(",
+    ")",
+    "{",
+    "}",
+    "[",
+    "]",
+    ",",
+    ";",
+    ":",
+    ".",
+    "+",
+    "-",
+    "*",
+    "/",
+    "%",
+    "=",
+    "<",
+    ">",
+    "!",
+    "?",
+    "|",
+    "&",
+    "^",
+    "~",
+];
+
+/// The words the lexer hands back as identifiers and a syntactic rule reads by
+/// position, in the order the grammar first names them.
+pub const CONTEXTUAL: &[&str] = &[
+    "logging",
+    "extern",
+    "gen",
+    "test",
+    "bench",
+    "contract",
+    "to",
+    "as",
+    "from",
+    "read",
+    "modify",
+    "consume",
+    "level",
+    "sink",
+    "trace",
+    "debug",
+    "info",
+    "warn",
+    "error",
+    "stderr",
+    "stdout",
+    "file",
+    "Stream",
+    "Array",
+    "SmallArray",
+    "Map",
+    "Option",
+    "Result",
+    "Omit",
+    "Pick",
+    "Merge",
+    "Partial",
+    "Readonly",
+    "lazy",
+    "await",
+    "vyrn",
+];
 
 /// What the host does when a lexical rule matches. A rule calls its hook once
 /// it has matched `start..end`, a byte range of the source, with the labels it
@@ -72,37 +415,6 @@ pub(super) trait Hooks {
     fn byte_body(&mut self, start: usize, end: usize, q: usize) -> Result<(), Box<Diagnostic>> {
         Ok(())
     }
-}
-
-/// Returns the reserved word `word` spells, or `None`.
-pub(super) fn keyword(word: &str) -> Option<Tok> {
-    Some(match word {
-        "fn" => Tok::Fn,
-        "let" => Tok::Let,
-        "mut" => Tok::Mut,
-        "if" => Tok::If,
-        "else" => Tok::Else,
-        "while" => Tok::While,
-        "for" => Tok::For,
-        "in" => Tok::In,
-        "drop" => Tok::Drop,
-        "protocol" => Tok::Protocol,
-        "import" => Tok::Import,
-        "export" => Tok::Export,
-        "impl" => Tok::Impl,
-        "self" => Tok::Vself,
-        "return" => Tok::Return,
-        "true" => Tok::True,
-        "false" => Tok::False,
-        "type" => Tok::Type,
-        "enum" => Tok::Enum,
-        "where" => Tok::Where,
-        "match" => Tok::Match,
-        "region" => Tok::Region,
-        "break" => Tok::Break,
-        "continue" => Tok::Continue,
-        _ => return None,
-    })
 }
 
 /// A cursor over the source and the hooks it reports to.
