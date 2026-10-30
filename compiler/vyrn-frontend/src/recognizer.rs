@@ -19,6 +19,7 @@
 mod rules;
 
 pub use rules::Decl;
+use rules::Hook;
 
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{self, Hole, Tok, Token};
@@ -66,11 +67,13 @@ fn run<'t>(tokens: &'t [Token], rule: impl FnOnce(&mut Recognizer<'t>) -> R) -> 
     );
     let mut r = Recognizer::over(tokens);
     let _ = rule(&mut r);
-    r.errors.extend(r.refusal.take().map(|d| *d));
-    // The sort is stable: two refusals at one token stay in the order they arose.
-    r.errors.sort_by_key(|d| (d.line, d.col));
+    let mut errors = r.decl_errors;
+    errors.extend(r.refusal.take().map(|d| *d));
+    errors.append(&mut r.errors);
+    // The sort is stable: two refusals at one token stay in the order above.
+    errors.sort_by_key(|d| (d.line, d.col));
     Recognized {
-        errors: r.errors,
+        errors,
         marks: r.marks,
     }
 }
@@ -119,9 +122,20 @@ struct Recognizer<'t> {
     quiet: u32,
     /// The refusal `Err` carries, when `quiet` is 0.
     refusal: Option<Box<Diagnostic>>,
-    /// The refusals the runs of `many_recovering` and `skip` recovered from.
+    /// The refusals a declaration's recovery recorded. They sort before `errors`
+    /// at one token, as the two lists of the parser do.
+    decl_errors: Vec<Diagnostic>,
+    /// The refusals a statement's recovery recorded.
     errors: Vec<Diagnostic>,
     marks: Vec<Mark>,
+    /// The names a type reads as bound here: the type parameters and the associated
+    /// types of the declaration running, which a hole inherits.
+    scope: Vec<&'t str>,
+    /// The tokens an `@e` split: they stay split when the `@e` fails, as the parser
+    /// splits a token in place and rewinds only its cursor.
+    kept_splits: Vec<u32>,
+    /// Whether the method running declared a capability result.
+    projection: bool,
 }
 
 /// The token a split `>>` leaves.
@@ -142,8 +156,12 @@ impl<'t> Recognizer<'t> {
             looking: 0,
             quiet: 0,
             refusal: None,
+            decl_errors: Vec::new(),
             errors: Vec::new(),
             marks: Vec::new(),
+            scope: Vec::new(),
+            kept_splits: Vec::new(),
+            projection: false,
         }
     }
 
@@ -166,10 +184,9 @@ impl<'t> Recognizer<'t> {
     /// Moves past the token at the cursor. At `Eof` the cursor stays.
     #[inline]
     fn bump(&mut self) {
-        self.cur = Cursor {
-            at: (self.cur.at + 1).min(self.toks.len() as u32 - 1),
-            split: false,
-        };
+        let at = (self.cur.at + 1).min(self.toks.len() as u32 - 1);
+        let split = !self.kept_splits.is_empty() && self.kept_splits.contains(&at);
+        self.cur = Cursor { at, split };
     }
 
     /// Consumes the unit token `want`.
@@ -207,12 +224,43 @@ impl<'t> Recognizer<'t> {
         self.marks.push(Mark::Decl(decl, start.at as usize));
     }
 
+    /// Reads the rule `hook` that matched from `start`.
+    fn closed(&mut self, hook: Hook, start: Cursor) {
+        let name = |at: u32| match &self.toks[at as usize].tok {
+            Tok::Ident(name) => Some(name.as_str()),
+            _ => None,
+        };
+        match hook {
+            Hook::TName => self.scope.extend(name(start.at)),
+            Hook::IBind => self.scope.extend(name(start.at + 1)),
+            Hook::TypeName => {
+                self.flags.scoped = name(start.at).is_some_and(|n| self.scope.contains(&n));
+            }
+            Hook::RCap => self.projection = true,
+            Hook::IMethod => {
+                self.flags.methods |= !self.projection;
+                self.projection = false;
+            }
+            Hook::StmtExpr => {
+                self.flags.place = matches!(self.peek(), Tok::Eq)
+                    && crate::parser::is_store_target(
+                        &self.toks[start.at as usize..self.cur.at as usize],
+                    );
+            }
+        }
+    }
+
     /// `split '>'`: takes one `>`. A `>>` leaves a `>` and a `>=` leaves an `=`, as
     /// [`crate::parser`] does closing a generic list.
     fn close_gt(&mut self) -> bool {
         match self.peek() {
             Tok::Gt => self.bump(),
-            Tok::Shr | Tok::GtEq => self.cur.split = true,
+            Tok::Shr | Tok::GtEq => {
+                self.cur.split = true;
+                if self.quiet > 0 {
+                    self.kept_splits.push(self.cur.at);
+                }
+            }
             _ => return false,
         }
         true
@@ -300,20 +348,39 @@ impl<'t> Recognizer<'t> {
             if self.look(&until) {
                 return Ok(true);
             }
+            if decl.is_some() {
+                self.scope.clear();
+                self.projection = false;
+            }
             let c = self.catch();
-            match item(self) {
+            // This site records the refusal, even under an `@e` that discards the
+            // refusal around it. The cursor of the `@e` moves back; the record stays.
+            let quiet = self.quiet;
+            if self.looking == 0 {
+                self.quiet = 0;
+            }
+            let result = item(self);
+            let result = match result {
+                Ok(false) => miss(self),
+                other => other,
+            };
+            self.quiet = quiet;
+            match result {
                 Ok(true) if self.cur == c.save.cur => return Ok(true),
                 Ok(true) => continue,
-                Ok(false) => {
-                    let _ = miss(self);
-                }
-                Err(Refused) => {}
+                _ => {}
             }
             self.uncatch(c);
-            self.errors.extend(self.refusal.take().map(|d| *d));
+            let refusal = self.refusal.take().map(|d| *d);
             match &decl {
-                Some(starts) => self.sync_to_decl(starts),
-                None => self.sync_to_stmt(c.save.cur),
+                Some(starts) => {
+                    self.decl_errors.extend(refusal);
+                    self.sync_to_decl(starts);
+                }
+                None => {
+                    self.errors.extend(refusal);
+                    self.sync_to_stmt(c.save.cur);
+                }
             }
             if self.cur <= c.save.cur {
                 return Ok(true);
@@ -378,16 +445,15 @@ impl<'t> Recognizer<'t> {
         self.toks[c.from.at as usize].col
     }
 
-    /// The source of the tokens a label matched, spelled as a type prints.
+    /// What a label matched, as a refusal prints it: a name, or the type it spells.
     fn text(&self, c: Capture) -> String {
-        let mut out = String::new();
-        for t in &self.toks[c.from.at as usize..c.to.at as usize] {
-            out.push_str(&lexer::token_name_and_text(&t.tok).1);
-            if t.tok == Tok::Comma {
-                out.push(' ');
-            }
+        match &self.toks[c.from.at as usize..c.to.at as usize] {
+            [Token {
+                tok: Tok::Ident(name),
+                ..
+            }] => name.clone(),
+            toks => crate::parser::type_text(toks),
         }
-        out
     }
 
     /// What the token here prints as in a refusal.
@@ -404,19 +470,28 @@ impl<'t> Recognizer<'t> {
         Err(Refused)
     }
 
+    /// `^Row!`: refuses as [`Recognizer::refuse`] does, with the token here past the
+    /// cursor.
+    fn refuse_past(&mut self, at: (usize, usize), rule: impl FnOnce(&Self) -> Rule) -> R {
+        let refused = self.refuse(at, rule);
+        self.bump();
+        refused
+    }
+
     /// `~^Row`: records the refusal, skips one token, and goes on.
     fn skip(&mut self, at: (usize, usize), rule: impl FnOnce(&Self) -> Rule) {
         if self.quiet == 0 {
             let d = Diagnostic::refusal(at.0, at.1, "parse", rule(self));
-            self.errors.push(d);
+            self.decl_errors.push(d);
         }
         self.bump();
     }
 
     /// The `string` token, with each hole read by `inner` unless a predicate is
-    /// looking. A hole's refusal points at the token.
+    /// looking. A hole's refusal points at the token, or at the tag before it.
     fn string_token(
         &mut self,
+        tagged: bool,
         inner: for<'a, 'b> fn(&'a mut Recognizer<'b>) -> R,
         wrap: fn(String) -> Rule,
         trailing: fn(&str) -> Rule,
@@ -425,7 +500,13 @@ impl<'t> Recognizer<'t> {
         if !matches!(tok, Tok::Str(_) | Tok::TemplateStr { .. }) {
             return Ok(false);
         }
-        let at = self.here();
+        let at = match tagged {
+            true => {
+                let tag = &self.toks[self.cur.at as usize - 1];
+                (tag.line, tag.col)
+            }
+            false => self.here(),
+        };
         self.bump();
         if let (Tok::TemplateStr { exprs, .. }, 0) = (tok, self.looking) {
             for hole in exprs {

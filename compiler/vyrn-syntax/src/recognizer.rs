@@ -21,7 +21,7 @@ use crate::{At, Builtin, Embed, Grammar, HoleSrc, Level, Recover, RuleId, Throw,
 /// to. `string` is the host's, because a string holds holes.
 const TERMINALS: &[(&str, &str)] = &[
     ("ident", "Tok::Ident(_)"),
-    ("int", "Tok::Int(_)"),
+    ("int", "Tok::Int(0..)"),
     ("number", "Tok::Int(_) | Tok::Float(_)"),
     ("plainStr", "Tok::Str(_)"),
     ("byte", "Tok::Byte(_)"),
@@ -32,6 +32,9 @@ const TERMINALS: &[(&str, &str)] = &[
 const DECLS: &[&str] = &[
     "FnDecl", "Extern", "TypeDecl", "Global", "Import", "Protocol", "Contract", "Test", "Bench",
 ];
+
+/// The rules whose close the host reads: the names a type reads as bound.
+const HOOKS: &[&str] = &["TName", "TypeName", "IBind", "StmtExpr", "RCap", "IMethod"];
 
 /// The rule a file is, and the rule the host reads an `embed` island with.
 const ROOT: &str = "Module";
@@ -176,9 +179,13 @@ impl Lower<'_> {
         for d in decls {
             let _ = writeln!(o, "    {d},");
         }
+        o.push_str("}\n\n/// A rule whose close the host reads.\n#[derive(Clone, Copy)]\npub(super) enum Hook {\n");
+        for h in HOOKS {
+            let _ = writeln!(o, "    {h},");
+        }
         o.push_str("}\n\n/// The grammar's context flags.\n#[derive(Clone, Copy, Default)]\npub(super) struct Flags {\n");
         for f in &self.g.flags {
-            let _ = writeln!(o, "    {f}: bool,");
+            let _ = writeln!(o, "    pub(super) {f}: bool,");
         }
         o.push_str("}\n\nimpl Recognizer<'_> {\n");
         let expected = self.throw(&self.g.expect, &Vec::new())?;
@@ -216,8 +223,9 @@ impl Lower<'_> {
         let _ = writeln!(
             o,
             "    /// The `string` token; the host parses each hole with `{name}`.
-    fn string(&mut self) -> R {{
+    fn string(&mut self, tagged: bool) -> R {{
         self.string_token(
+            tagged,
             |me| {{
                 if !me.{inner}()? {{
                     {miss}?;
@@ -261,7 +269,8 @@ impl Lower<'_> {
             _ => "",
         };
         let decl = DECLS.contains(&&*rule.name);
-        if decl {
+        let hook = HOOKS.contains(&&*rule.name);
+        if decl || hook {
             o.push_str("        let start = me.cur;\n");
         }
         let mut body = self.expr(&rule.body, &mut scope, 2)?;
@@ -275,6 +284,13 @@ impl Lower<'_> {
             let _ = writeln!(
                 o,
                 "        if hit {{\n            me.decl(Decl::{}, start);\n        }}",
+                rule.name
+            );
+        }
+        if hook {
+            let _ = writeln!(
+                o,
+                "        if hit {{\n            me.closed(Hook::{}, start);\n        }}",
                 rule.name
             );
         }
@@ -451,8 +467,10 @@ impl Lower<'_> {
                 .collect();
             return Ok(format!("me.{}({})?", snake(&rule.name), args.join(", ")));
         }
-        if rule.name == "string" {
-            return Ok("me.string()?".into());
+        match &*rule.name {
+            "string" => return Ok("me.string(false)?".into()),
+            "tagged" => return Ok("me.string(true)?".into()),
+            _ => {}
         }
         let (_, tok) = (TERMINALS.iter())
             .find(|t| t.0 == rule.name)
@@ -559,7 +577,12 @@ impl Lower<'_> {
 
     /// A refusal as a Rust expression of type `R`.
     fn throw(&self, t: &Throw, scope: &Scope) -> Result<String, String> {
-        self.throw_as("me.refuse", t, scope)
+        let via = if t.past {
+            "me.refuse_past"
+        } else {
+            "me.refuse"
+        };
+        self.throw_as(via, t, scope)
     }
 
     /// `t` handed to the host's method `via`, with where it points and how its

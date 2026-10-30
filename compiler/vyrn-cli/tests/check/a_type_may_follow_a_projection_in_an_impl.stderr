@@ -1,0 +1,2 @@
+a_type_may_follow_a_projection_in_an_impl.vyrn:4:1: `impl P for Int64` binds `type C`, which protocol `P` does not declare
+a_type_may_follow_a_projection_in_an_impl.vyrn:7:8: `impl P for Int64` provides `fn g(self) -> Int64`, which protocol `P` does not declare — dispatch knows only a protocol's own method names, so this one is reachable from nowhere; did you mean `f`?

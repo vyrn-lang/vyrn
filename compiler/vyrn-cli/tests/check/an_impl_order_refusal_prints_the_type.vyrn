@@ -1,0 +1,14 @@
+protocol P {
+    fn f(self) -> Int64
+}
+type A = { a: Int64 }
+type B = { b: Int64 }
+impl P for A | B {
+    fn f(self) -> Int64 { return 1 }
+    type C = Int64
+}
+impl P for Array<{ x: Int64, y: fn(Int64) -> Int64 }> {
+    fn f(self) -> Int64 { return 1 }
+    type C = Int64
+}
+fn main() -> Int64 { return 0 }

@@ -148,6 +148,125 @@ fn the_grammar_refuses_as_the_parser_does() {
     })
 }
 
+/// The mutants of each root, a fixed sequence from a fixed seed: one token removed,
+/// doubled, replaced by another or moved, or another token's copy put after it.
+const MUTANTS_PER_ROOT: usize = 20;
+
+/// A xorshift generator, so a mutant's text depends only on the root and its place
+/// in the sequence.
+struct Seq(u64);
+
+impl Seq {
+    fn next(&mut self) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 as usize
+    }
+}
+
+/// The mutants of `src` that still lex.
+fn mutants(src: &str) -> Vec<String> {
+    let Ok(items) = lexer::lex_with_trivia(src) else {
+        return Vec::new();
+    };
+    let spans: Vec<_> = (items.into_iter())
+        .filter(|i| !matches!(i.kind, lexer::TrivKind::Comment))
+        .map(|i| i.span)
+        .collect();
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    let mut seq = Seq(0x9E37_79B9_7F4A_7C15);
+    (0..MUTANTS_PER_ROOT)
+        .map(|n| {
+            let at = spans[seq.next() % spans.len()].clone();
+            let other = spans[seq.next() % spans.len()].clone();
+            let (word, rest) = (&src[at.clone()], &src[other.clone()]);
+            match n % 5 {
+                0 => format!("{}{}", &src[..at.start], &src[at.end..]),
+                1 => format!("{} {word} {}", &src[..at.end], &src[at.end..]),
+                2 => format!("{} {rest} {}", &src[..at.start], &src[at.end..]),
+                3 => format!("{} {rest} {}", &src[..at.end], &src[at.end..]),
+                _ if other.start >= at.end => format!(
+                    "{}{} {word} {}",
+                    &src[..at.start],
+                    &src[at.end..other.start],
+                    &src[other.start..]
+                ),
+                _ => format!(
+                    "{} {word} {}{}",
+                    &src[..other.start],
+                    &src[other.start..at.start],
+                    &src[at.end..]
+                ),
+            }
+        })
+        .filter(|m| lexer::lex(m).is_ok())
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn the_grammar_refuses_mutants_as_the_parser_does() {
+    deep(|| {
+        let g = grammar();
+        let builder: BTreeSet<&str> = g.builder_rows().collect();
+        let mut pairs: std::collections::BTreeMap<String, (usize, String)> = Default::default();
+        let (mut runs, mut refused, mut differ) = (0, 0, 0);
+        for (name, src) in &corpus() {
+            for mutant in mutants(src) {
+                let Some((hand, said)) = both_lists(&mutant) else {
+                    continue;
+                };
+                runs += 1;
+                refused += !hand.is_empty() as usize;
+                let cut = (hand.iter())
+                    .position(|d| d.rule.as_ref().is_some_and(|r| builder.contains(r.name())));
+                let key = |d: &Diagnostic| (d.line, d.col, d.message.clone());
+                let (h, r): (Vec<Said>, Vec<Said>) = (
+                    hand.iter().map(key).collect(),
+                    said.iter().map(key).collect(),
+                );
+                let same = match cut {
+                    Some(k) => r.len() >= k && h[..k] == r[..k],
+                    None => h == r,
+                };
+                if same {
+                    continue;
+                }
+                differ += 1;
+                let k = cut.unwrap_or(h.len());
+                let i = (0..k.min(r.len()))
+                    .find(|&i| h[i] != r[i])
+                    .unwrap_or(k.min(r.len()));
+                let row = |d: Option<&Diagnostic>| {
+                    d.and_then(|d| d.rule.as_ref().map(|r| r.name().to_string()))
+                        .unwrap_or_else(|| "nothing".into())
+                };
+                let line = h.get(i).or(r.get(i)).map_or(1, |d| d.0);
+                let e = pairs
+                    .entry(format!("{} | {}", row(hand.get(i)), row(said.get(i))))
+                    .or_default();
+                e.0 += 1;
+                if e.1.is_empty() {
+                    e.1 = format!(
+                        "{name}\n    hand {:?}\n    rec  {:?}\n    line {line}: {}",
+                        h.get(i),
+                        r.get(i),
+                        mutant.lines().nth(line.saturating_sub(1)).unwrap_or("")
+                    );
+                }
+            }
+        }
+        println!("mutants: {runs}, refused {refused}, differ {differ}");
+        let lines: Vec<String> = (pairs.iter())
+            .map(|(k, (n, ex))| format!("{n} {k}\n  {ex}"))
+            .collect();
+        assert!(lines.is_empty(), "{}", lines.join("\n"));
+    })
+}
+
 /// The declarations of a file the hand parser accepts, by kind and line, sorted.
 /// The prelude's types and the declarations the parser makes up (a `$` or `.` in
 /// the name) are not the file's.

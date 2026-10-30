@@ -1,0 +1,7 @@
+fn main() -> Int64 {
+    let s = g<{ x: Int64 where (y -> {
+        let = 1
+        return 1
+    }) }>(1)
+    return 0
+}

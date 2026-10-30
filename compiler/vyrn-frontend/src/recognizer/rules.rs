@@ -24,13 +24,27 @@ pub enum Decl {
     Contract,
 }
 
+/// A rule whose close the host reads.
+#[derive(Clone, Copy)]
+pub(super) enum Hook {
+    TName,
+    TypeName,
+    IBind,
+    StmtExpr,
+    RCap,
+    IMethod,
+}
+
 /// The grammar's context flags.
 #[derive(Clone, Copy, Default)]
 pub(super) struct Flags {
-    exported: bool,
-    collect: bool,
-    nostruct: bool,
-    named: bool,
+    pub(super) exported: bool,
+    pub(super) collect: bool,
+    pub(super) nostruct: bool,
+    pub(super) methods: bool,
+    pub(super) scoped: bool,
+    pub(super) named: bool,
+    pub(super) place: bool,
 }
 
 impl Recognizer<'_> {
@@ -41,11 +55,12 @@ impl Recognizer<'_> {
     }
 
     /// The `string` token; the host parses each hole with `Expr`.
-    fn string(&mut self) -> R {
+    fn string(&mut self, tagged: bool) -> R {
         self.string_token(
+            tagged,
             |me| {
                 if !me._expr()? {
-                    me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?;
+                    me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?;
                 }
                 Ok(true)
             },
@@ -280,13 +295,13 @@ impl Recognizer<'_> {
                     (me.eat(&Tok::Star)
                         && ((
                         me.word("as")
-                        || me.refuse((me.line_of(l_i), me.here().1), |me| rule!(ImportStarAs, found = me.found()))?
-                    ) || (me.committed(p0) && me.refuse((me.line_of(l_i), me.here().1), |me| rule!(ImportStarAs, found = me.found()))?))
-                        && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_ns = Capture { from, to: me.cur };
+                        || me.refuse_past((me.line_of(l_i), me.here().1), |me| rule!(ImportStarAs, found = me.found()))?
+                    ) || (me.committed(p0) && me.refuse_past((me.line_of(l_i), me.here().1), |me| rule!(ImportStarAs, found = me.found()))?))
+                        && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_ns = Capture { from, to: me.cur };
                         ((
                         me.word("from")
-                        || me.refuse((me.line_of(l_i), me.here().1), |me| rule!(ImportStarFrom, ns = me.text(l_ns), found = me.found()))?
-                    ) || (me.committed(p0) && me.refuse((me.line_of(l_i), me.here().1), |me| rule!(ImportStarFrom, ns = me.text(l_ns), found = me.found()))?))
+                        || me.refuse_past((me.line_of(l_i), me.here().1), |me| rule!(ImportStarFrom, ns = me.text(l_ns), found = me.found()))?
+                    ) || (me.committed(p0) && me.refuse_past((me.line_of(l_i), me.here().1), |me| rule!(ImportStarFrom, ns = me.text(l_ns), found = me.found()))?))
                         && (me._source(l_i)? || (me.committed(p0) && me.refuse((me.line_of(l_i), me.here().1), |me| rule!(ImportPathExpected, found = me.found()))?)) }) }))
                     || { me.back(p0); false }
                 })
@@ -303,15 +318,15 @@ impl Recognizer<'_> {
                         })
                         || ({
                             let p0 = me.save();
-                            (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } if !me._import_name()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true })
+                            (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } if !me._import_name()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true })
                                 && (me.eat(&Tok::RBrace) || (me.committed(p0) && me.expected("RBrace")?)))
                             || { me.back(p0); false }
                         })
                     ) || (me.committed(p0) && me.expected("\"\"")?))
                         && ((
                         me.word("from")
-                        || me.refuse((me.line_of(l_i), me.here().1), |me| rule!(ImportFrom, found = me.found()))?
-                    ) || (me.committed(p0) && me.refuse((me.line_of(l_i), me.here().1), |me| rule!(ImportFrom, found = me.found()))?))
+                        || me.refuse_past((me.line_of(l_i), me.here().1), |me| rule!(ImportFrom, found = me.found()))?
+                    ) || (me.committed(p0) && me.refuse_past((me.line_of(l_i), me.here().1), |me| rule!(ImportFrom, found = me.found()))?))
                         && (me._source(l_i)? || (me.committed(p0) && me.refuse((me.line_of(l_i), me.here().1), |me| rule!(ImportPathExpected, found = me.found()))?)))
                     || { me.back(p0); false }
                 })
@@ -333,7 +348,7 @@ impl Recognizer<'_> {
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.word("as")
-                    && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true }))
             || { me.back(p0); false }
@@ -366,11 +381,11 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Type)
-                && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Lt)
-                    && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::Gt))) { break; } if !me._ident()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                    && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::Gt))) { break; } if !me._t_name()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
                 || { me.back(p0); false }
             }); true })
@@ -378,11 +393,11 @@ impl Recognizer<'_> {
                 && (({ let old = std::mem::replace(&mut me.flags.collect, true); let hit = (
                 me._enum_type()?
                 || me._type()?
-            ); me.flags.collect = old; hit }) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+            ); me.flags.collect = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Where)
-                    && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                    && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true })
                 && ({ let _ = me.eat(&Tok::Semi); true }))
@@ -400,7 +415,7 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (me.eat(&Tok::Enum)
                 && (me.eat(&Tok::LBrace) || (me.committed(p0) && me.expected("LBrace")?))
-                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } if !me._variant()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } if !me._variant()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RBrace) || (me.committed(p0) && me.expected("RBrace")?)))
             || { me.back(p0); false }
         });
@@ -415,7 +430,7 @@ impl Recognizer<'_> {
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::LParen)
-                    && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._type()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                    && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._type()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                     && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?)))
                 || { me.back(p0); false }
             }); true }))
@@ -431,18 +446,18 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (me.eat(&Tok::Let)
                 && ({ let _ = me.eat(&Tok::Mut); true })
-                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_n = Capture { from, to: me.cur };
+                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_n = Capture { from, to: me.cur };
                 ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Colon)
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true })
                 && ((
                 me.eat(&Tok::Eq)
                 || me.refuse((me.here().0, me.here().1), |me| rule!(GlobalNeedsInit, name = me.text(l_n)))?
             ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(GlobalNeedsInit, name = me.text(l_n)))?))
-                && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                 && ({ let _ = me.eat(&Tok::Semi); true }) }) }))
             || { me.back(p0); false }
         });
@@ -458,14 +473,14 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Fn)
-                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_name = Capture { from, to: me.cur };
+                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_name = Capture { from, to: me.cur };
                 ({ let _ = me._type_binder()?; true })
                 && (me._params()? || (me.committed(p0) && me.expected("LParen")?))
                 && ({ let _ = me._ret(l_name)?; true })
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Where)
-                    && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                    && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true })
                 && (me._block()? || (me.committed(p0) && me.expected("LBrace")?)) }) }))
@@ -516,7 +531,7 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Lt)
-                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::Gt))) { break; } if !me._t_param()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::Gt))) { break; } if !me._t_param()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
             || { me.back(p0); false }
         });
@@ -527,15 +542,15 @@ impl Recognizer<'_> {
         let me = self;
         let hit = ({
             let p0 = me.save();
-            (me._ident()?
+            (me._t_name()?
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Colon)
-                    && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && ({ loop { let p = me.cur; if !({
                     let p0 = me.save();
                     (me.eat(&Tok::Plus)
-                        && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                        && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                     || { me.back(p0); false }
                 }) || me.cur == p { break; } } true }))
                 || { me.back(p0); false }
@@ -545,12 +560,22 @@ impl Recognizer<'_> {
         Ok(hit)
     }
 
+    fn _t_name(&mut self) -> R {
+        let me = self;
+        let start = me.cur;
+        let hit = me._ident()?;
+        if hit {
+            me.closed(Hook::TName, start);
+        }
+        Ok(hit)
+    }
+
     fn _params(&mut self) -> R {
         let me = self;
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::LParen)
-                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._param()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._param()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?)))
             || { me.back(p0); false }
         });
@@ -564,11 +589,11 @@ impl Recognizer<'_> {
             (me._ident()?
                 && (me.eat(&Tok::Colon) || (me.committed(p0) && me.expected("Colon")?))
                 && ({ let _ = me._cap()?; true })
-                && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Where)
-                    && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                    && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true }))
             || { me.back(p0); false }
@@ -643,7 +668,7 @@ impl Recognizer<'_> {
                     || { me.back(p0); false }
                 })
                 || me._type()?
-            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+            ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -662,12 +687,12 @@ impl Recognizer<'_> {
             })))
                 && (me.word("extern") || (me.committed(p0) && me.expected("\"extern\"")?))
                 && (me.eat(&Tok::Fn) || (me.committed(p0) && me.expected("Fn")?))
-                && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && (me._params()? || (me.committed(p0) && me.expected("LParen")?))
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Arrow)
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true })
                 && ((
@@ -751,7 +776,7 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (me.word("logging")
                 && (me.eat(&Tok::LBrace) || (me.committed(p0) && me.expected("LBrace")?))
-                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } if !me._log_field()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } if !me._log_field()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RBrace) || (me.committed(p0) && me.expected("RBrace")?)))
             || { me.back(p0); false }
         });
@@ -764,14 +789,14 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (({ let from = me.cur; me.word("level") && ({ let l_k = Capture { from, to: me.cur };
                     (me.eat(&Tok::Colon) || (me.committed(p0) && me.expected("Colon")?))
-                    && (me._log_level(l_k)? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) }) }))
+                    && (me._log_level(l_k)? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) }) }))
                 || { me.back(p0); false }
             })
             || ({
                 let p0 = me.save();
                 (({ let from = me.cur; me.word("sink") && ({ let l_k = Capture { from, to: me.cur };
                     (me.eat(&Tok::Colon) || (me.committed(p0) && me.expected("Colon")?))
-                    && (me._sink()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) }) }))
+                    && (me._sink()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) }) }))
                 || { me.back(p0); false }
             })
             || ({
@@ -810,8 +835,8 @@ impl Recognizer<'_> {
                     (me.eat(&Tok::LParen) || (me.committed(p0) && me.expected("LParen")?))
                     && ((
                     me.eat_if(matches!(me.peek(), Tok::Str(_)))
-                    || me.refuse((me.line_of(l_s), me.col_of(l_s)), |me| rule!(FileSinkPath, found = me.found()))?
-                ) || (me.committed(p0) && me.refuse((me.line_of(l_s), me.col_of(l_s)), |me| rule!(FileSinkPath, found = me.found()))?))
+                    || me.refuse_past((me.line_of(l_s), me.col_of(l_s)), |me| rule!(FileSinkPath, found = me.found()))?
+                ) || (me.committed(p0) && me.refuse_past((me.line_of(l_s), me.col_of(l_s)), |me| rule!(FileSinkPath, found = me.found()))?))
                     && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?)) }) }))
                 || { me.back(p0); false }
             })
@@ -830,7 +855,7 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Protocol)
-                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_pname = Capture { from, to: me.cur };
+                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_pname = Capture { from, to: me.cur };
                 (me.eat(&Tok::LBrace) || (me.committed(p0) && me.expected("LBrace")?))
                 && (({ loop { if me.look(|me| Ok(({
                     let p0 = me.save();
@@ -854,7 +879,7 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (({ loop { let p = me.cur; if !me.eat_if(matches!(me.peek(), Tok::Doc(_))) || me.cur == p { break; } } true })
                 && ({ let from = me.cur; (me.eat(&Tok::Type) || (me.committed(p0) && me.expected("Type")?)) && ({ let l_t = Capture { from, to: me.cur };
-                ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_n = Capture { from, to: me.cur };
+                ({ let from = me.cur; (me._t_name()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_n = Capture { from, to: me.cur };
                 ((
                 ({
                     let p0 = me.save();
@@ -879,7 +904,7 @@ impl Recognizer<'_> {
                 || ({
                     let p0 = me.save();
                     (({ let from = me.cur; me.eat(&Tok::Type) && ({ let l_t = Capture { from, to: me.cur };
-                        ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_n = Capture { from, to: me.cur };
+                        ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_n = Capture { from, to: me.cur };
                         ((
                         ({
                             let p0 = me.save();
@@ -903,17 +928,17 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Fn)
-                && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && (me.eat(&Tok::LParen) || (me.committed(p0) && me.expected("LParen")?))
                 && ({ let _ = me._self_cap()?; true })
                 && (me.eat(&Tok::Vself) || (me.committed(p0) && me.expected("Vself")?))
                 && ({ loop { let p = me.cur; if !({
                 let p0 = me.save();
                 (me.eat(&Tok::Comma)
-                    && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me.eat(&Tok::Colon) || (me.committed(p0) && me.expected("Colon")?))
                     && ({ let _ = me._cap()?; true })
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }) || me.cur == p { break; } } true })
                 && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?))
@@ -921,7 +946,7 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.eat(&Tok::Arrow)
                     && ({ let _ = me._r_cap()?; true })
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true })
                 && ({ let _ = me.eat(&Tok::Semi); true }))
@@ -948,6 +973,7 @@ impl Recognizer<'_> {
 
     fn _r_cap(&mut self) -> R {
         let me = self;
+        let start = me.cur;
         let hit = ({
                 let p0 = me.save();
                 (me.look(|me| Ok(({
@@ -984,6 +1010,9 @@ impl Recognizer<'_> {
                 ) || (me.committed(p0) && me.expected("\"modify\"")?)))
                 || { me.back(p0); false }
             });
+        if hit {
+            me.closed(Hook::RCap, start);
+        }
         Ok(hit)
     }
 
@@ -994,7 +1023,7 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (me.look(|me| Ok(me._contract_head()?))
                 && (me.word("contract") || (me.committed(p0) && me.expected("\"contract\"")?))
-                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_cname = Capture { from, to: me.cur };
+                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_cname = Capture { from, to: me.cur };
                 (me.eat(&Tok::LBrace) || (me.committed(p0) && me.expected("LBrace")?))
                 && (({ loop { if me.look(|me| Ok((
                     me.eat(&Tok::RBrace)
@@ -1030,16 +1059,16 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Let)
-                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_m = Capture { from, to: me.cur };
+                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_m = Capture { from, to: me.cur };
                 ((
                 me.eat(&Tok::Colon)
                 || me.refuse((me.here().0, me.here().1), |me| rule!(ContractMemberNeedsType, name = me.text(l_m)))?
             ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ContractMemberNeedsType, name = me.text(l_m)))?))
-                && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Eq)
-                    && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                    && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true })
                 && ({ let _ = me.eat(&Tok::Semi); true }) }) }))
@@ -1061,17 +1090,23 @@ impl Recognizer<'_> {
                         && ((
                         ({
                             let p0 = me.save();
-                            (me.eat(&Tok::Dot)
+                            (me.look(|me| Ok(({
+                                let p0 = me.save();
+                                (me.eat(&Tok::Dot)
+                                    && (me.eat(&Tok::Dot) || (me.committed(p0) && me.expected("Dot")?)))
+                                || { me.back(p0); false }
+                            })))
+                                && (me.eat(&Tok::Dot) || (me.committed(p0) && me.expected("Dot")?))
                                 && (me.eat(&Tok::Dot) || (me.committed(p0) && me.expected("Dot")?)))
                             || { me.back(p0); false }
                         })
-                        || ({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._c_param()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true })
+                        || ({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._c_param()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true })
                     ) || (me.committed(p0) && me.expected("\"\"")?))
                         && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?))
                         && ({ let _ = ({
                         let p0 = me.save();
                         (me.eat(&Tok::Arrow)
-                            && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                            && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                         || { me.back(p0); false }
                     }); true })
                         && ({ let _ = ({
@@ -1099,25 +1134,25 @@ impl Recognizer<'_> {
                                 && (me.refuse((me.here().0, me.here().1), |me| rule!(ContractMemberParams, name = me.text(l_m)))? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ContractMemberParams, name = me.text(l_m)))?)))
                             || { me.back(p0); false }
                         })
-                        || ({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._c_param()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true })
+                        || ({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._c_param()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true })
                     ) || (me.committed(p0) && me.expected("\"\"")?))
                         && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?))
                         && ({ let _ = ({
                         let p0 = me.save();
                         (me.eat(&Tok::Arrow)
-                            && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                            && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                         || { me.back(p0); false }
                     }); true })
                         && ({ let _ = ({
                         let p0 = me.save();
                         (me.eat(&Tok::Eq)
-                            && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                            && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                         || { me.back(p0); false }
                     }); true })
                         && ({ let _ = me.eat(&Tok::Semi); true }) }) }))
                     || { me.back(p0); false }
                 })
-            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+            ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -1129,7 +1164,7 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (me._ident()?
                 && (me.eat(&Tok::Colon) || (me.committed(p0) && me.expected("Colon")?))
-                && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -1141,35 +1176,31 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (me.eat(&Tok::Impl)
                 && ({ let _ = me._type_binder()?; true })
-                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_proto = Capture { from, to: me.cur };
+                && ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_proto = Capture { from, to: me.cur };
                 (me.eat(&Tok::For) || (me.committed(p0) && me.expected("For")?))
-                && ({ let from = me.cur; (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_ty = Capture { from, to: me.cur };
+                && ({ let from = me.cur; (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_ty = Capture { from, to: me.cur };
                 (me.eat(&Tok::LBrace) || (me.committed(p0) && me.expected("LBrace")?))
-                && (({ loop { if me.look(|me| Ok(({
-                    let p0 = me.save();
-                    (({ loop { let p = me.cur; if !me.eat_if(matches!(me.peek(), Tok::Doc(_))) || me.cur == p { break; } } true })
-                        && (!me.look(|me| Ok(me.eat(&Tok::Type))) || (me.committed(p0) && me.expected("\"\"")?)))
-                    || { me.back(p0); false }
-                }))) { break; } let p = me.cur; if !me._i_assoc()? { me.expected("Type")?; } if me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
-                && (({ loop { if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } let p = me.cur; if !me._i_item(l_proto, l_ty)? { me.expected("Fn")?; } if me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                && (({ let old = std::mem::replace(&mut me.flags.methods, false); let hit = ({ loop { if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } let p = me.cur; if !me._i_item(l_proto, l_ty)? { me.expected("Fn")?; } if me.cur == p { break; } } true }); me.flags.methods = old; hit }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RBrace) || (me.committed(p0) && me.expected("RBrace")?)) }) }) }) }))
             || { me.back(p0); false }
         });
         Ok(hit)
     }
 
-    fn _i_assoc(&mut self) -> R {
+    fn _i_bind(&mut self) -> R {
         let me = self;
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
-            (({ loop { let p = me.cur; if !me.eat_if(matches!(me.peek(), Tok::Doc(_))) || me.cur == p { break; } } true })
-                && (me.eat(&Tok::Type) || (me.committed(p0) && me.expected("Type")?))
-                && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+            (me.eat(&Tok::Type)
+                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && (me.eat(&Tok::Eq) || (me.committed(p0) && me.expected("Eq")?))
-                && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
-                && ({ let _ = me.eat(&Tok::Semi); true }))
+                && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::IBind, start);
+        }
         Ok(hit)
     }
 
@@ -1182,9 +1213,16 @@ impl Recognizer<'_> {
                 me.look(|me| Ok(me.eat(&Tok::RBrace)))
                 || ({
                     let p0 = me.save();
-                    (({ let from = me.cur; me.eat(&Tok::Type) && ({ let l_t = Capture { from, to: me.cur };
-                        ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_n = Capture { from, to: me.cur };
+                    (me.flags.methods
+                        && ({ let from = me.cur; (me.eat(&Tok::Type) || (me.committed(p0) && me.expected("Type")?)) && ({ let l_t = Capture { from, to: me.cur };
+                        ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_n = Capture { from, to: me.cur };
                         (me.refuse((me.line_of(l_t), me.col_of(l_t)), |me| rule!(ImplAssocTypeOrder, aname = me.text(l_n), protocol = me.text(l_proto), ty = me.text(l_ty)))? || (me.committed(p0) && me.refuse((me.line_of(l_t), me.col_of(l_t)), |me| rule!(ImplAssocTypeOrder, aname = me.text(l_n), protocol = me.text(l_proto), ty = me.text(l_ty)))?)) }) }) }) }))
+                    || { me.back(p0); false }
+                })
+                || ({
+                    let p0 = me.save();
+                    (me._i_bind()?
+                        && ({ let _ = me.eat(&Tok::Semi); true }))
                     || { me.back(p0); false }
                 })
                 || me._i_method()?
@@ -1196,20 +1234,21 @@ impl Recognizer<'_> {
 
     fn _i_method(&mut self) -> R {
         let me = self;
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Fn)
-                && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && (me.eat(&Tok::LParen) || (me.committed(p0) && me.expected("LParen")?))
                 && ({ let _ = me._self_cap()?; true })
                 && (me.eat(&Tok::Vself) || (me.committed(p0) && me.expected("Vself")?))
                 && ({ loop { let p = me.cur; if !({
                 let p0 = me.save();
                 (me.eat(&Tok::Comma)
-                    && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me.eat(&Tok::Colon) || (me.committed(p0) && me.expected("Colon")?))
                     && ({ let _ = me._cap()?; true })
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }) || me.cur == p { break; } } true })
                 && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?))
@@ -1217,12 +1256,15 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.eat(&Tok::Arrow)
                     && ({ let _ = me._r_cap()?; true })
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true })
                 && (me._block()? || (me.committed(p0) && me.expected("LBrace")?)))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::IMethod, start);
+        }
         Ok(hit)
     }
 
@@ -1234,7 +1276,7 @@ impl Recognizer<'_> {
                 && ({ loop { let p = me.cur; if !({
                 let p0 = me.save();
                 (me.eat(&Tok::Pipe)
-                    && (me._inter()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._inter()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }) || me.cur == p { break; } } true }))
             || { me.back(p0); false }
@@ -1250,7 +1292,7 @@ impl Recognizer<'_> {
                 && ({ loop { let p = me.cur; if !({
                 let p0 = me.save();
                 (me.eat(&Tok::Amp)
-                    && (me._type_atom()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._type_atom()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }) || me.cur == p { break; } } true }))
             || { me.back(p0); false }
@@ -1266,7 +1308,7 @@ impl Recognizer<'_> {
         me.depth += 1;
         let hit = me._record_type()?
             || me._fn_type()?
-            || me.eat_if(matches!(me.peek(), Tok::Int(_)))
+            || me.eat_if(matches!(me.peek(), Tok::Int(0..)))
             || me._dotted_type()?
             || me._named_type()?;
         me.depth -= 1;
@@ -1279,12 +1321,12 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (me.eat(&Tok::Fn)
                 && (me.eat(&Tok::LParen) || (me.committed(p0) && me.expected("LParen")?))
-                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._type()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._type()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?))
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Arrow)
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true }))
             || { me.back(p0); false }
@@ -1306,18 +1348,18 @@ impl Recognizer<'_> {
                 && ((({
                 let p0 = me.save();
                 (me.eat(&Tok::Dot)
-                    && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }) && ({ loop { let p = me.cur; if !({
                 let p0 = me.save();
                 (me.eat(&Tok::Dot)
-                    && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }) || me.cur == p { break; } } true })) || (me.committed(p0) && me.expected("Dot")?))
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Lt)
-                    && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::Gt))) { break; } if !me._type()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                    && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::Gt))) { break; } if !me._type()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
                 || { me.back(p0); false }
             }); true }))
@@ -1332,7 +1374,7 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.word("Stream")
                     && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
                 || { me.back(p0); false }
             })
@@ -1340,12 +1382,12 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.word("Array")
                     && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && ({ let _ = ({
                     let p0 = me.save();
                     (me.eat(&Tok::Comma)
                         && ((
-                        me.eat_if(matches!(me.peek(), Tok::Int(_)))
+                        me.eat_if(matches!(me.peek(), Tok::Int(0..)))
                         || me.refuse((me.here().0, me.here().1), |me| rule!(ArraySize))?
                     ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ArraySize))?)))
                     || { me.back(p0); false }
@@ -1357,13 +1399,13 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.word("SmallArray")
                     && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && ((
                     me.eat(&Tok::Comma)
                     || me.refuse((me.here().0, me.here().1), |me| rule!(SmallArrayNeedsCapacity))?
                 ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(SmallArrayNeedsCapacity))?))
                     && ((
-                    me.eat_if(matches!(me.peek(), Tok::Int(_)))
+                    me.eat_if(matches!(me.peek(), Tok::Int(0..)))
                     || me.refuse((me.here().0, me.here().1), |me| rule!(SmallArrayCapacityType))?
                 ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(SmallArrayCapacityType))?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
@@ -1373,9 +1415,9 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.word("Map")
                     && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me.eat(&Tok::Comma) || (me.committed(p0) && me.expected("Comma")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
                 || { me.back(p0); false }
             })
@@ -1383,7 +1425,7 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.word("Option")
                     && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
                 || { me.back(p0); false }
             })
@@ -1391,9 +1433,9 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.word("Result")
                     && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me.eat(&Tok::Comma) || (me.committed(p0) && me.expected("Comma")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
                 || { me.back(p0); false }
             })
@@ -1404,19 +1446,19 @@ impl Recognizer<'_> {
                     || me.word("Pick")
                 ) && ({ let l_n = Capture { from, to: me.cur };
                     (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && ((
                     ({
                         let p0 = me.save();
                         ((({
                             let p0 = me.save();
                             (me.eat(&Tok::Comma)
-                                && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                             || { me.back(p0); false }
                         }) && ({ loop { let p = me.cur; if !({
                             let p0 = me.save();
                             (me.eat(&Tok::Comma)
-                                && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                             || { me.back(p0); false }
                         }) || me.cur == p { break; } } true }))
                             && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
@@ -1435,9 +1477,9 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.word("Merge")
                     && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me.eat(&Tok::Comma) || (me.committed(p0) && me.expected("Comma")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
                 || { me.back(p0); false }
             })
@@ -1445,7 +1487,7 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.word("Partial")
                     && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
                 || { me.back(p0); false }
             })
@@ -1453,22 +1495,54 @@ impl Recognizer<'_> {
                 let p0 = me.save();
                 (me.word("Readonly")
                     && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
                 || { me.back(p0); false }
             })
+            || me.word("Int64")
+            || me.word("Int8")
+            || me.word("Int16")
+            || me.word("Int32")
+            || me.word("UInt8")
+            || me.word("UInt16")
+            || me.word("UInt32")
+            || me.word("UInt64")
+            || me.word("Float64")
+            || me.word("Float32")
+            || me.word("F32x4")
+            || me.word("I32x4")
+            || me.word("Mask32x4")
+            || me.word("F64x2")
+            || me.word("Mask64x2")
+            || me.word("Bool")
+            || me.word("String")
+            || me.word("Unit")
+            || me.word("Logger")
             || ({
                 let p0 = me.save();
-                (me._ident()?
-                    && ({ let _ = ({
-                    let p0 = me.save();
-                    (me.eat(&Tok::Lt)
-                        && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::Gt))) { break; } if !me._type()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
-                        && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
-                    || { me.back(p0); false }
-                }); true }))
+                (me._type_name()?
+                    && ({ let _ = (
+                    me.flags.scoped
+                    || ({
+                        let p0 = me.save();
+                        (me.eat(&Tok::Lt)
+                            && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::Gt))) { break; } if !me._type()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                            && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
+                        || { me.back(p0); false }
+                    })
+                ); true }))
                 || { me.back(p0); false }
             });
+        Ok(hit)
+    }
+
+    fn _type_name(&mut self) -> R {
+        let me = self;
+        let start = me.cur;
+        let hit = me._ident()?;
+        if hit {
+            me.closed(Hook::TypeName, start);
+        }
         Ok(hit)
     }
 
@@ -1489,7 +1563,7 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::LBrace)
-                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } if !me._field()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } if !me._field()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RBrace) || (me.committed(p0) && me.expected("RBrace")?)))
             || { me.back(p0); false }
         });
@@ -1510,11 +1584,11 @@ impl Recognizer<'_> {
                         me.flags.named
                         || me.refuse((me.line_of(l_l), me.col_of(l_l)), |me| rule!(LazyAnonymous))?
                     ) || (me.committed(p0) && me.refuse((me.line_of(l_l), me.col_of(l_l)), |me| rule!(LazyAnonymous))?))
-                        && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                        && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                         && ({ let _ = ({
                         let p0 = me.save();
                         (({ let from = me.cur; me.eat(&Tok::Where) && ({ let l_w = Capture { from, to: me.cur };
-                            (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                            (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                             && ((
                             me.flags.named
                             || me.refuse((me.line_of(l_w), me.col_of(l_w)), |me| rule!(WhereAnonymous))?
@@ -1530,7 +1604,7 @@ impl Recognizer<'_> {
                         && ({ let _ = ({
                         let p0 = me.save();
                         (({ let from = me.cur; me.eat(&Tok::Where) && ({ let l_w = Capture { from, to: me.cur };
-                            (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                            (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                             && ((
                             me.flags.named
                             || me.refuse((me.line_of(l_w), me.col_of(l_w)), |me| rule!(WhereAnonymous))?
@@ -1539,7 +1613,7 @@ impl Recognizer<'_> {
                     }); true }))
                     || { me.back(p0); false }
                 })
-            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+            ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -1560,7 +1634,7 @@ impl Recognizer<'_> {
                     || matches!(me.peek(), Tok::Eof)
                 )),
                     |me| Ok(me._b_item()?),
-                    |me| me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found())),
+                    |me| me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found())),
                     None::<fn(&mut Self) -> R>,
                 )? || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RBrace) || (me.committed(p0) && me.expected("RBrace")?)))
@@ -1628,25 +1702,25 @@ impl Recognizer<'_> {
                 || ({
                     let p0 = me.save();
                     (({ let _ = me.eat(&Tok::Mut); true })
-                        && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                        && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                         && ({ let _ = ({
                         let p0 = me.save();
                         (me.eat(&Tok::Colon)
-                            && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                            && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                             && ({ let _ = ({
                             let p0 = me.save();
                             (me.eat(&Tok::Where)
-                                && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                                && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                             || { me.back(p0); false }
                         }); true }))
                         || { me.back(p0); false }
                     }); true })
                         && (me.eat(&Tok::Eq) || (me.committed(p0) && me.expected("Eq")?))
-                        && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                        && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                         && ({ let _ = me.eat(&Tok::Semi); true }))
                     || { me.back(p0); false }
                 })
-            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) }) }))
+            ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) }) }))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -1658,10 +1732,10 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (me.eat_if(matches!(me.peek(), Tok::Ident(_)))
                 && (me.eat(&Tok::LParen) || (me.committed(p0) && me.expected("LParen")?))
-                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._ident()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._ident()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?))
                 && (me.eat(&Tok::Eq) || (me.committed(p0) && me.expected("Eq")?))
-                && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                 && ({ let _ = me.eat(&Tok::Semi); true }))
             || { me.back(p0); false }
         });
@@ -1680,7 +1754,7 @@ impl Recognizer<'_> {
                     || matches!(me.peek(), Tok::Eof)
                 )))
                 || me._expr()?
-            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+            ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                 && ({ let _ = me.eat(&Tok::Semi); true }))
             || { me.back(p0); false }
         });
@@ -1718,9 +1792,9 @@ impl Recognizer<'_> {
                 ({
                     let p0 = me.save();
                     (me.eat(&Tok::Let)
-                        && (me._pattern()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                        && (me._pattern()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                         && (me.eat(&Tok::Eq) || (me.committed(p0) && me.expected("Eq")?))
-                        && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                        && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                         && (me._block()? || (me.committed(p0) && me.expected("LBrace")?))
                         && ({ let _ = me._else()?; true }))
                     || { me.back(p0); false }
@@ -1732,7 +1806,7 @@ impl Recognizer<'_> {
                         && ({ let _ = me._else()?; true }))
                     || { me.back(p0); false }
                 })
-            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+            ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -1751,9 +1825,9 @@ impl Recognizer<'_> {
                         ({
                             let p0 = me.save();
                             (me.eat(&Tok::Let)
-                                && (me._pattern()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                                && (me._pattern()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                                 && (me.eat(&Tok::Eq) || (me.committed(p0) && me.expected("Eq")?))
-                                && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                                && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                                 && (me._block()? || (me.committed(p0) && me.expected("LBrace")?))
                                 && ({ let _ = me._else()?; true }))
                             || { me.back(p0); false }
@@ -1765,7 +1839,7 @@ impl Recognizer<'_> {
                                 && ({ let _ = me._else()?; true }))
                             || { me.back(p0); false }
                         })
-                    ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                    ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                     || { me.back(p0); false }
                 })
                 || me._block()?
@@ -1784,9 +1858,9 @@ impl Recognizer<'_> {
                 ({
                     let p0 = me.save();
                     (me.eat(&Tok::Let)
-                        && (me._pattern()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                        && (me._pattern()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                         && (me.eat(&Tok::Eq) || (me.committed(p0) && me.expected("Eq")?))
-                        && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                        && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                         && (me._block()? || (me.committed(p0) && me.expected("LBrace")?)))
                     || { me.back(p0); false }
                 })
@@ -1796,7 +1870,7 @@ impl Recognizer<'_> {
                         && (me._block()? || (me.committed(p0) && me.expected("LBrace")?)))
                     || { me.back(p0); false }
                 })
-            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+            ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -1807,7 +1881,7 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::For)
-                && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && (me.eat(&Tok::In) || (me.committed(p0) && me.expected("In")?))
                 && ({ let _ = ({
                 let p0 = me.save();
@@ -1820,7 +1894,7 @@ impl Recognizer<'_> {
                     && (me.word("consume") || (me.committed(p0) && me.expected("\"consume\"")?)))
                 || { me.back(p0); false }
             }); true })
-                && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                 && (me._block()? || (me.committed(p0) && me.expected("LBrace")?)))
             || { me.back(p0); false }
         });
@@ -1843,7 +1917,7 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Drop)
-                && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && ({ let _ = me.eat(&Tok::Semi); true }))
             || { me.back(p0); false }
         });
@@ -1868,7 +1942,7 @@ impl Recognizer<'_> {
                 || me.eat(&Tok::Vself)
             ) || (me.committed(p0) && me.expected("Vself")?))
                 && (me.eat(&Tok::Eq) || (me.committed(p0) && me.expected("Eq")?))
-                && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                 && ({ let _ = me.eat(&Tok::Semi); true }))
             || { me.back(p0); false }
         });
@@ -1879,16 +1953,27 @@ impl Recognizer<'_> {
         let me = self;
         let hit = ({
             let p0 = me.save();
-            (me._expr()?
+            (me._stmt_expr()?
                 && ({ let _ = ({
                 let p0 = me.save();
-                (me.eat(&Tok::Eq)
-                    && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                (me.flags.place
+                    && (me.eat(&Tok::Eq) || (me.committed(p0) && me.expected("Eq")?))
+                    && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                 || { me.back(p0); false }
             }); true })
                 && ({ let _ = me.eat(&Tok::Semi); true }))
             || { me.back(p0); false }
         });
+        Ok(hit)
+    }
+
+    fn _stmt_expr(&mut self) -> R {
+        let me = self;
+        let start = me.cur;
+        let hit = me._expr()?;
+        if hit {
+            me.closed(Hook::StmtExpr, start);
+        }
         Ok(hit)
     }
 
@@ -1907,7 +1992,7 @@ impl Recognizer<'_> {
             }
             me.bump();
             if !me._expr_from(if right { level } else { level + 1 })? {
-                me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?;
+                me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?;
             }
         }
         Ok(true)
@@ -1950,19 +2035,19 @@ impl Recognizer<'_> {
         let hit = ({
                 let p0 = me.save();
                 (me.eat(&Tok::Minus)
-                    && (me._unary()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                    && (me._unary()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                 || { me.back(p0); false }
             })
             || ({
                 let p0 = me.save();
                 (me.eat(&Tok::Bang)
-                    && (me._unary()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                    && (me._unary()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                 || { me.back(p0); false }
             })
             || ({
                 let p0 = me.save();
                 (me.eat(&Tok::Tilde)
-                    && (me._unary()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                    && (me._unary()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                 || { me.back(p0); false }
             })
             || ({
@@ -1977,7 +2062,7 @@ impl Recognizer<'_> {
                     || { me.back(p0); false }
                 })))
                     && (me.word("consume") || (me.committed(p0) && me.expected("\"consume\"")?))
-                    && (me._postfix()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                    && (me._postfix()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                 || { me.back(p0); false }
             })
             || ({
@@ -1992,7 +2077,7 @@ impl Recognizer<'_> {
                     || { me.back(p0); false }
                 })))
                     && (me.word("await") || (me.committed(p0) && me.expected("\"await\"")?))
-                    && (me._postfix()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                    && (me._postfix()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                 || { me.back(p0); false }
             })
             || me._postfix()?;
@@ -2017,14 +2102,14 @@ impl Recognizer<'_> {
             || ({
                 let p0 = me.save();
                 (me.eat(&Tok::Dot)
-                    && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && ({ let _ = me._args()?; true }))
                 || { me.back(p0); false }
             })
             || ({
                 let p0 = me.save();
                 (me.eat(&Tok::LBracket)
-                    && (({ let old = std::mem::replace(&mut me.flags.nostruct, false); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                    && (({ let old = std::mem::replace(&mut me.flags.nostruct, false); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                     && (me.eat(&Tok::RBracket) || (me.committed(p0) && me.expected("RBracket")?)))
                 || { me.back(p0); false }
             });
@@ -2036,7 +2121,7 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::LParen)
-                && (({ let old = std::mem::replace(&mut me.flags.nostruct, false); let hit = ({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._expr()? { me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }); me.flags.nostruct = old; hit }) || (me.committed(p0) && me.expected("\"\"")?))
+                && (({ let old = std::mem::replace(&mut me.flags.nostruct, false); let hit = ({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._expr()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }); me.flags.nostruct = old; hit }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?)))
             || { me.back(p0); false }
         });
@@ -2063,16 +2148,33 @@ impl Recognizer<'_> {
                     && (me.refuse((me.here().0, me.here().1), |me| rule!(LambdaNotHere, form = "|x|", fix = "`x -> ...`, or `(x, y) -> ...` for more than one"))? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(LambdaNotHere, form = "|x|", fix = "`x -> ...`, or `(x, y) -> ...` for more than one"))?)))
                 || { me.back(p0); false }
             })
+            || ({
+                let p0 = me.save();
+                (me.look(|me| Ok(({
+                    let p0 = me.save();
+                    (me._var_head()?
+                        && (me.eat(&Tok::Dot) || (me.committed(p0) && me.expected("Dot")?))
+                        && (me.eat_if(matches!(me.peek(), Tok::Ident(_))) || (me.committed(p0) && me.expected("\"_\"")?))
+                        && (me.eat(&Tok::LBrace) || (me.committed(p0) && me.expected("LBrace")?)))
+                    || { me.back(p0); false }
+                })))
+                    && (!me.look(|me| Ok(me.flags.nostruct)) || (me.committed(p0) && me.expected("\"\"")?))
+                    && (me._var_head()? || (me.committed(p0) && me.expected("LParen")?))
+                    && (me.eat(&Tok::Dot) || (me.committed(p0) && me.expected("Dot")?))
+                    && (me.eat_if(matches!(me.peek(), Tok::Ident(_))) || (me.committed(p0) && me.expected("\"_\"")?))
+                    && (me._struct_body()? || (me.committed(p0) && me.expected("LBrace")?)))
+                || { me.back(p0); false }
+            })
             || me.eat_if(matches!(me.peek(), Tok::Int(_) | Tok::Float(_)))
             || me.eat_if(matches!(me.peek(), Tok::Byte(_)))
-            || me.string()?
+            || me.string(false)?
             || me.eat(&Tok::Vself)
             || me.eat(&Tok::True)
             || me.eat(&Tok::False)
             || ({
                 let p0 = me.save();
                 (me.eat(&Tok::LParen)
-                    && (({ let old = std::mem::replace(&mut me.flags.nostruct, false); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                    && (({ let old = std::mem::replace(&mut me.flags.nostruct, false); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                     && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?)))
                 || { me.back(p0); false }
             })
@@ -2085,11 +2187,11 @@ impl Recognizer<'_> {
                     let p0 = me.save();
                     (me.word("vyrn")
                         && (me.no_newline() || (me.committed(p0) && me.expected("\"\"")?))
-                        && (me.string()? || (me.committed(p0) && me.expected("\"\\\"\"")?)))
+                        && (me.string(false)? || (me.committed(p0) && me.expected("\"\\\"\"")?)))
                     || { me.back(p0); false }
                 })))
                     && (me.word("vyrn") || (me.committed(p0) && me.expected("\"vyrn\"")?))
-                    && (me.string()? || (me.committed(p0) && me.expected("\"\\\"\"")?)))
+                    && (me.string(true)? || (me.committed(p0) && me.expected("\"\\\"\"")?)))
                 || { me.back(p0); false }
             })
             || ({
@@ -2111,31 +2213,28 @@ impl Recognizer<'_> {
                     let p0 = me.save();
                     (me.eat_if(matches!(me.peek(), Tok::Ident(_)))
                         && (me.no_newline() || (me.committed(p0) && me.expected("\"\"")?))
-                        && (me.string()? || (me.committed(p0) && me.expected("\"\\\"\"")?)))
+                        && (me.string(false)? || (me.committed(p0) && me.expected("\"\\\"\"")?)))
                     || { me.back(p0); false }
                 })))
                     && (me.eat_if(matches!(me.peek(), Tok::Ident(_))) || (me.committed(p0) && me.expected("\"_\"")?))
-                    && (me.string()? || (me.committed(p0) && me.expected("\"\\\"\"")?)))
-                || { me.back(p0); false }
-            })
-            || ({
-                let p0 = me.save();
-                (me.look(|me| Ok(({
-                    let p0 = me.save();
-                    (me.eat_if(matches!(me.peek(), Tok::Ident(_)))
-                        && (me.eat(&Tok::Dot) || (me.committed(p0) && me.expected("Dot")?))
-                        && (me.eat_if(matches!(me.peek(), Tok::Ident(_))) || (me.committed(p0) && me.expected("\"_\"")?))
-                        && (me.eat(&Tok::LBrace) || (me.committed(p0) && me.expected("LBrace")?)))
-                    || { me.back(p0); false }
-                })))
-                    && (!me.look(|me| Ok(me.flags.nostruct)) || (me.committed(p0) && me.expected("\"\"")?))
-                    && (me.eat_if(matches!(me.peek(), Tok::Ident(_))) || (me.committed(p0) && me.expected("\"_\"")?))
-                    && (me.eat(&Tok::Dot) || (me.committed(p0) && me.expected("Dot")?))
-                    && (me.eat_if(matches!(me.peek(), Tok::Ident(_))) || (me.committed(p0) && me.expected("\"_\"")?))
-                    && (me._struct_body()? || (me.committed(p0) && me.expected("LBrace")?)))
+                    && (me.string(true)? || (me.committed(p0) && me.expected("\"\\\"\"")?)))
                 || { me.back(p0); false }
             })
             || me._ident_expr()?;
+        Ok(hit)
+    }
+
+    fn _var_head(&mut self) -> R {
+        let me = self;
+        let hit = me.eat_if(matches!(me.peek(), Tok::Ident(_)))
+            || me.eat(&Tok::Vself)
+            || ({
+                let p0 = me.save();
+                (me.eat(&Tok::LParen)
+                    && (me._var_head()? || (me.committed(p0) && me.expected("LParen")?))
+                    && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?)))
+                || { me.back(p0); false }
+            });
         Ok(hit)
     }
 
@@ -2195,11 +2294,11 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Lt)
-                && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && ({ loop { let p = me.cur; if !({
                 let p0 = me.save();
                 (me.eat(&Tok::Comma)
-                    && (me._type()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }) || me.cur == p { break; } } true })
                 && (me.eat(&Tok::Gt) || (me.committed(p0) && me.expected("Gt")?)))
@@ -2213,7 +2312,7 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::LBrace)
-                && (({ let old = std::mem::replace(&mut me.flags.nostruct, false); let hit = ({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } if !me._s_field()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }); me.flags.nostruct = old; hit }) || (me.committed(p0) && me.expected("\"\"")?))
+                && (({ let old = std::mem::replace(&mut me.flags.nostruct, false); let hit = ({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RBrace))) { break; } if !me._s_field()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }); me.flags.nostruct = old; hit }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RBrace) || (me.committed(p0) && me.expected("RBrace")?)))
             || { me.back(p0); false }
         });
@@ -2226,7 +2325,7 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (me._ident()?
                 && (me.eat(&Tok::Colon) || (me.committed(p0) && me.expected("Colon")?))
-                && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -2273,7 +2372,7 @@ impl Recognizer<'_> {
                 || ({
                     let p0 = me.save();
                     (me.eat(&Tok::LParen)
-                        && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._ident()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                        && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._ident()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                         && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?)))
                     || { me.back(p0); false }
                 })
@@ -2282,7 +2381,7 @@ impl Recognizer<'_> {
                 && ((
                 me._block()?
                 || ({ let old = std::mem::replace(&mut me.flags.nostruct, false); let hit = me._expr()?; me.flags.nostruct = old; hit })
-            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+            ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -2308,7 +2407,7 @@ impl Recognizer<'_> {
                         ({
                             let p0 = me.save();
                             (me.eat(&Tok::Colon)
-                                && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                                && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                                 && ({ loop { let p = me.cur; if !({
                                 let p0 = me.save();
                                 (me.eat(&Tok::Comma)
@@ -2318,10 +2417,10 @@ impl Recognizer<'_> {
                                         let p0 = me.save();
                                         (me._expr()?
                                             && (me.eat(&Tok::Colon) || (me.committed(p0) && me.expected("Colon")?))
-                                            && (me._expr()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                                            && (me._expr()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                                         || { me.back(p0); false }
                                     })
-                                ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                                ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                                 || { me.back(p0); false }
                             }) || me.cur == p { break; } } true })
                                 && (me.eat(&Tok::RBracket) || (me.committed(p0) && me.expected("RBracket")?)))
@@ -2335,7 +2434,7 @@ impl Recognizer<'_> {
                                     && ((
                                     me.look(|me| Ok(me.eat(&Tok::RBracket)))
                                     || me._expr()?
-                                ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                                ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
                                 || { me.back(p0); false }
                             }) || me.cur == p { break; } } true })
                                 && (me.eat(&Tok::RBracket) || (me.committed(p0) && me.expected("RBracket")?)))
@@ -2344,7 +2443,7 @@ impl Recognizer<'_> {
                     ) || (me.committed(p0) && me.expected("RBracket")?)))
                     || { me.back(p0); false }
                 })
-            ); me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+            ); me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -2355,12 +2454,12 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Match)
-                && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+                && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                 && (me.eat(&Tok::LBrace) || (me.committed(p0) && me.expected("LBrace")?))
                 && (({ loop { if me.look(|me| Ok((
                     me.eat(&Tok::RBrace)
                     || matches!(me.peek(), Tok::Eof)
-                ))) { break; } let p = me.cur; if !me._arm()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                ))) { break; } let p = me.cur; if !me._arm()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                 && (me.eat(&Tok::RBrace) || (me.committed(p0) && me.expected("RBrace")?)))
             || { me.back(p0); false }
         });
@@ -2389,7 +2488,7 @@ impl Recognizer<'_> {
                     ) || (me.committed(p0) && me.expected("RBrace")?)))
                     || { me.back(p0); false }
                 })
-            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+            ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -2403,13 +2502,13 @@ impl Recognizer<'_> {
                 && ({ loop { let p = me.cur; if !({
                 let p0 = me.save();
                 (me.eat(&Tok::Dot)
-                    && (me._ident()? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                    && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
                 || { me.back(p0); false }
             }) || me.cur == p { break; } } true })
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::LParen)
-                    && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._ident()? { me.refuse((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
+                    && (({ loop { let p = me.cur; if me.look(|me| Ok(me.eat(&Tok::RParen))) { break; } if !me._ident()? { me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?; } if !me.eat(&Tok::Comma) || me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?))
                     && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?)))
                 || { me.back(p0); false }
             }); true }))
@@ -2423,7 +2522,7 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (({ let from = me.cur; me.eat(&Tok::If) && ({ let l_i = Capture { from, to: me.cur };
-                (me._if_tail(l_i)? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)) }) }))
+                (me._if_tail(l_i)? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)) }) }))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -2448,7 +2547,7 @@ impl Recognizer<'_> {
                         ({
                             let p0 = me.save();
                             (({ let from = me.cur; me.eat(&Tok::If) && ({ let l_i = Capture { from, to: me.cur };
-                                (me._if_tail(l_i)? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)) }) }))
+                                (me._if_tail(l_i)? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)) }) }))
                             || { me.back(p0); false }
                         })
                         || me._if_branch()?
@@ -2490,7 +2589,7 @@ impl Recognizer<'_> {
                     ) || (me.committed(p0) && me.refuse((me.line_of(l_b), me.here().1), |me| rule!(IfExprStatements))?)))
                     || { me.back(p0); false }
                 })
-            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
+            ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                 && (me.eat(&Tok::RBrace) || (me.committed(p0) && me.expected("RBrace")?)) }) }))
             || { me.back(p0); false }
         });

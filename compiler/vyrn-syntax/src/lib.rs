@@ -157,6 +157,8 @@ struct Throw {
     holes: Vec<(Rc<str>, HoleSrc)>,
     line: At,
     col: At,
+    /// Whether the cursor passes the token here before recovery starts.
+    past: bool,
     /// The labels of the rule the refusal sits in, by [`At::Label`] index.
     labels: Vec<Rc<str>>,
 }

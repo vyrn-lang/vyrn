@@ -122,6 +122,8 @@ holeItem = '"' (!'"' ('\\' . / .))* ('"' / ^UnterminatedInterpString@q)
          / '//' (!'\n' .)*
          / '{' holeText '}'?
          / .
+// A string after its tag: a refusal in a hole points at the tag.
+tagged = string
 // A string with no hole: an import path, a test name, an `export to` path.
 plainStr = &('"""' (!'"""' !('\\' '{') ('\\' . / .))* '"""' / '"' (!'"' !('\\' '{') ('\\' . / .))* '"') string
 
@@ -135,7 +137,8 @@ byteBody = eof ^UnterminatedByte@q
 
 // ------------------------------------------------------------ declarations
 
-Ident = ident fail ^ExpectedIdent(found=found)
+// A `!` after a refusal: the refused token is past the cursor when recovery starts.
+Ident = ident fail ^ExpectedIdent(found=found)!
 Close = split '>'
 
 Module = many Item until eof recover decl ItemStart
@@ -153,13 +156,13 @@ ExportTarget = &('fn' / 'type' / 'protocol' / 'extern' 'fn' / 'gen' 'fn' / Contr
 Decl = Import / TypeDecl / FnDecl / GenFn / MutFn / Protocol / Contract / Impl / Global
      / Extern / Test / Bench / Logging / ~^TopLevelExpected(found=found)
 
-Import = i:'import' ( '*' ('as' / ^ImportStarAs(found=found)@(i,here)) ns:Ident ('from' / ^ImportStarFrom(ns=ns, found=found)@(i,here)) Source
+Import = i:'import' ( '*' ('as' / ^ImportStarAs(found=found)@(i,here)!) ns:Ident ('from' / ^ImportStarFrom(ns=ns, found=found)@(i,here)!) Source
                     / 'type'? '{' ('}' ^ImportEmpty@(i,here) / list ImportName sep ',' until '}' '}')
-                      ('from' / ^ImportFrom(found=found)@(i,here)) Source ) ';'?
+                      ('from' / ^ImportFrom(found=found)@(i,here)!) Source ) ';'?
 ImportName = Ident ('as' Ident)?
 Source = plainStr / &(ident '(') ident Args / ^ImportPathExpected(found=found)@(i,here)
 
-TypeDecl = 'type' Ident ('<' list Ident sep ',' until '>' Close)? '=' +collect(EnumType / Type) ('where' Expr)? ';'?
+TypeDecl = 'type' Ident ('<' list TName sep ',' until '>' Close)? '=' +collect(EnumType / Type) ('where' Expr)? ';'?
 EnumType = 'enum' '{' list Variant sep ',' until '}' '}'
 Variant = Ident ('(' list Type sep ',' until ')' ')')?
 
@@ -169,7 +172,9 @@ FnDecl = 'fn' name:Ident TypeBinder? Params Ret? ('where' +nostruct(Expr))? Bloc
 GenFn = &('gen' 'fn') 'gen' FnDecl
 MutFn = &('mut' 'fn') 'mut' FnDecl
 TypeBinder = '<' list TParam sep ',' until '>' Close
-TParam = Ident (':' Ident ('+' Ident)*)?
+TParam = TName (':' Ident ('+' Ident)*)?
+// A name a type then reads as bound: `TypeName` sets `scoped` for it.
+TName = Ident
 Params = '(' list Param sep ',' until ')' ')'
 Param = Ident ':' Cap? Type ('where' Expr)?
 CapWord = 'read' / 'modify' / 'consume'
@@ -186,10 +191,10 @@ Bench = &('bench' plainStr) 'bench' plainStr Block
 Logging = 'logging' '{' list LogField sep ',' until '}' '}'
 LogField = k:'level' ':' LogLevel / k:'sink' ':' Sink / k:Ident ':' ^UnknownLoggingField(other=k)@k
 LogLevel = 'trace' / 'debug' / 'info' / 'warn' / 'error' / n:Ident ^UnknownLogLevel(name=n)@k
-Sink = 'stderr' / 'stdout' / s:'file' '(' (plainStr / ^FileSinkPath(found=found)@s) ')' / n:Ident ^UnknownSink(other=n)@n
+Sink = 'stderr' / 'stdout' / s:'file' '(' (plainStr / ^FileSinkPath(found=found)@s!) ')' / n:Ident ^UnknownSink(other=n)@n
 
 Protocol = 'protocol' pname:Ident '{' many PAssoc until (doc* !'type') many PItem until '}' '}'
-PAssoc = doc* t:'type' n:Ident (&'=' ^AssocTypeRhs(aname=n)@t / ';'?)
+PAssoc = doc* t:'type' n:TName (&'=' ^AssocTypeRhs(aname=n)@t / ';'?)
 PItem = doc* ( &'}'
              / t:'type' n:Ident (&'=' ^AssocTypeRhs(aname=n)@t / ^AssocTypeAfterMethods(aname=n, name=pname)@t)
              / PMethod )
@@ -200,13 +205,14 @@ RCap = &('consume' (ident / '(' / 'fn')) ^ConsumeResult / &(('read' / 'modify') 
 Contract = &ContractHead 'contract' cname:Ident '{' many CItem until ('}' / eof) '}'
 CItem = doc* (&'}' / CLet / CFn / ^ContractMemberExpected(name=cname, found=found))
 CLet = 'let' m:Ident (':' / ^ContractMemberNeedsType(name=m)) Type ('=' Expr)? ';'?
-CFn = 'fn' ( '*' '(' ('.' '.' / list CParam sep ',' until ')') ')' ('->' Type)? (&'=' ^ContractOpenRuleDefault)? ';'?
+CFn = 'fn' ( '*' '(' (&('.' '.') '.' '.' / list CParam sep ',' until ')') ')' ('->' Type)? (&'=' ^ContractOpenRuleDefault)? ';'?
            / m:Ident '(' (&('.' '.') ^ContractMemberParams(name=m) / list CParam sep ',' until ')') ')' ('->' Type)? ('=' Expr)? ';'? )
 CParam = Ident ':' Type
 
-Impl = 'impl' TypeBinder? proto:Ident 'for' ty:Type '{' many IAssoc until (doc* !'type') many IItem until '}' '}'
-IAssoc = doc* 'type' Ident '=' Type ';'?
-IItem = doc* ( &'}' / t:'type' n:Ident ^ImplAssocTypeOrder(aname=n, protocol=proto, ty=ty)@t / IMethod )
+// The host sets `methods` as a method that is no projection closes.
+Impl = 'impl' TypeBinder? proto:Ident 'for' ty:Type '{' -methods(many IItem until '}') '}'
+IBind = 'type' Ident '=' Type
+IItem = doc* ( &'}' / ?methods t:'type' n:Ident ^ImplAssocTypeOrder(aname=n, protocol=proto, ty=ty)@t / IBind ';'? / IMethod )
 IMethod = 'fn' Ident '(' SelfCap? 'self' (',' Ident ':' Cap? Type)* ')' ('->' RCap? Type)? Block
 
 // ------------------------------------------------------------------ types
@@ -226,7 +232,13 @@ NamedType = 'Stream' '<' Type Close
           / 'Merge' '<' Type ',' Type Close
           / 'Partial' '<' Type Close
           / 'Readonly' '<' Type Close
-          / Ident ('<' list Type sep ',' until '>' Close)?
+          / 'Int64' / 'Int8' / 'Int16' / 'Int32' / 'UInt8' / 'UInt16' / 'UInt32' / 'UInt64'
+          / 'Float64' / 'Float32' / 'F32x4' / 'I32x4' / 'Mask32x4' / 'F64x2' / 'Mask64x2'
+          / 'Bool' / 'String' / 'Unit' / 'Logger'
+          / TypeName (?scoped / '<' list Type sep ',' until '>' Close)?
+// The host sets `scoped` as this closes: a type parameter or an associated type
+// in scope takes no type arguments.
+TypeName = Ident
 // Only the outermost record of a `type` declaration may refine a field.
 RecordType = ?collect -collect(+named(RecordBody)) / -named(RecordBody)
 RecordBody = '{' list Field sep ',' until '}' '}'
@@ -252,7 +264,10 @@ For = 'for' Ident 'in' (&('consume' ident) 'consume')? +nostruct(Expr) Block
 Region = 'region' Block
 Drop = 'drop' Ident ';'?
 Assign = &((ident / 'self') '=') (Ident / 'self') '=' Expr ';'?
-ExprStmt = Expr ('=' Expr)? ';'?
+ExprStmt = StmtExpr (?place '=' Expr)? ';'?
+// The host sets `place` as this closes, when a store could follow: whether the
+// expression is a place.
+StmtExpr = Expr
 
 // ------------------------------------------------------------ expressions
 
@@ -280,15 +295,16 @@ Args = '(' -nostruct(list Expr sep ',' until ')') ')'
 Primary = &LambdaHead Lambda
         / &'||' ^LambdaNotHere(form='||', fix='`() -> ...`')
         / &'|' ^LambdaNotHere(form='|x|', fix='`x -> ...`, or `(x, y) -> ...` for more than one')
+        / &(VarHead '.' ident '{') !?nostruct VarHead '.' ident StructBody
         / number / byte / string / 'self' / 'true' / 'false'
         / '(' -nostruct(Expr) ')'
         / ArrayLit / Match / IfExpr
-        / &('vyrn' nonl string) 'vyrn' string
+        / &('vyrn' nonl string) 'vyrn' tagged
         / &(ident nonl plainStr) t:ident ^TemplateNoHole(name=t)@t
-        / &(ident nonl string) ident string
-        / &(ident '.' ident '{') !?nostruct ident '.' ident StructBody
+        / &(ident nonl string) ident tagged
         / IdentExpr
-        fail ^UnexpectedToken(found=found)
+        fail ^UnexpectedToken(found=found)!
+VarHead = ident / 'self' / '(' VarHead ')'
 IdentExpr = ident (&('.' ident '?' '(') '.' ident)* (&('?' '(') '?')? (@(TypeArgs &'('))? (Args / !?nostruct StructBody / )
 TypeArgs = '<' Type (',' Type)* '>'
 StructBody = '{' -nostruct(list SField sep ',' until '}') '}'

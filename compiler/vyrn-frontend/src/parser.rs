@@ -415,6 +415,39 @@ fn as_fn_body(src: &str) -> String {
     format!("fn __vyrn_probe__() {{\n{src}\n}}")
 }
 
+/// The type `tokens` spell, as a refusal prints it.
+pub(crate) fn type_text(tokens: &[Token]) -> String {
+    let mut toks = tokens.to_vec();
+    toks.push(Token {
+        tok: Tok::Eof,
+        line: 0,
+        col: 0,
+    });
+    Parser::over(toks)
+        .type_()
+        .map_or_else(|_| String::new(), |t| t.to_string())
+}
+
+/// Whether `tokens` hold an expression that a `=` after it stores into, or that
+/// the statement refuses as a store target.
+pub(crate) fn is_store_target(tokens: &[Token]) -> bool {
+    let mut toks = tokens.to_vec();
+    toks.push(Token {
+        tok: Tok::Eof,
+        line: 0,
+        col: 0,
+    });
+    let Ok(e) = Parser::over(toks).expr() else {
+        return false;
+    };
+    let mut under = &e;
+    while let Expr::Field { expr, .. } = under {
+        under = expr;
+    }
+    store_target(&e).is_some()
+        || matches!(under, Expr::Call { name, args, .. } if name == "@at" && args.len() == 2)
+}
+
 /// Returns the root's id and name, the steps from the root to the place the
 /// leaf writes into, and the leaf, of the store target `e`: a field or an
 /// element of a place (`a`, `a.f`, `a[i]`, `@slot(a, i)`, to any depth). `None`
