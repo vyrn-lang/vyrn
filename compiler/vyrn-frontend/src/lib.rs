@@ -32,6 +32,7 @@ pub mod prelude;
 pub mod prim;
 pub mod prof;
 pub mod project;
+pub mod recognizer;
 pub mod regex;
 pub mod rules;
 pub mod schema;

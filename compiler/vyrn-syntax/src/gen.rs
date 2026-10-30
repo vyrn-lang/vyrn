@@ -11,8 +11,8 @@
 //!
 //! The lowering refuses what it cannot keep exact: a syntactic form in a lexical
 //! rule, a rule call or a refusal inside a predicate, a label no caller binds,
-//! and a hook that a later failure could undo, because the interpreter would
-//! undo that match and a hook cannot be taken back.
+//! and a hook that a later failure could undo, because a hook cannot be taken
+//! back.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -105,7 +105,7 @@ fn reachable(g: &Grammar, scan: RuleId) -> Result<Vec<RuleId>, String> {
 
 /// Calls `f` on `e` and on every expression inside it, outermost first. The rule
 /// an `embed` parses its island with is not inside it.
-fn walk(e: &E, f: &mut dyn FnMut(&E)) {
+pub(crate) fn walk(e: &E, f: &mut dyn FnMut(&E)) {
     f(e);
     match e {
         E::Seq(v) | E::Alt(v) => v.iter().for_each(|x| walk(x, f)),
@@ -161,7 +161,7 @@ fn punct_lines(g: &Grammar) -> Vec<&(String, String, bool)> {
 }
 
 /// `strItem` as `str_item`.
-fn snake(name: &str) -> String {
+pub(crate) fn snake(name: &str) -> String {
     let mut s = String::new();
     for c in name.chars() {
         if c.is_ascii_uppercase() {

@@ -2,7 +2,7 @@
 //!
 //! A definition starts in column 0 and an indented line continues it; `//`
 //! outside a literal or a class starts a comment. Directives: `syntax Name`,
-//! `keyword Name 'w'`, `token Name 'p'`, `opener 'p'..`, `nest N ^Row`,
+//! `keyword Name 'w'`, `token Name 'p'`, `nest N ^Row`,
 //! `expect ^Row(..)` and `row Name`. Every other definition is a rule,
 //! `[nest] Name = expression [fail ^Row]`. The loader refuses a reference to an
 //! undefined rule and a left-recursive rule, so every rule call either consumes
@@ -26,7 +26,6 @@ pub fn load(src: &str) -> Result<Grammar, String> {
     // rule. A throw waits for the second pass, which knows every name.
     let mut heads: Vec<(usize, String, &str, bool)> = Vec::new();
     let mut throws: Vec<(usize, Option<u32>, &str)> = Vec::new();
-    let mut openers: Vec<String> = Vec::new();
     for (line, d) in &defs {
         let words: Vec<&str> = d.split_whitespace().collect();
         let err = |what: &str| format!("line {line}: {what}");
@@ -35,11 +34,6 @@ pub fn load(src: &str) -> Result<Grammar, String> {
             [head @ ("keyword" | "token"), name, lit] if *name != "=" => {
                 let spelling = unquote(lit).ok_or_else(|| err("a token spelling is a literal"))?;
                 tokens.push((name.to_string(), spelling, *head == "keyword"));
-            }
-            ["opener", lits @ ..] if lits.first() != Some(&"=") => {
-                for l in lits {
-                    openers.push(unquote(l).ok_or_else(|| err("an opener is a literal"))?);
-                }
             }
             ["row", name] => {
                 builder.insert(Rc::from(*name));
@@ -73,10 +67,6 @@ pub fn load(src: &str) -> Result<Grammar, String> {
             }
         }
     }
-    let spellings: Vec<Rc<str>> = (tokens.iter().map(|t| t.1.as_str()))
-        .chain(openers.iter().map(String::as_str))
-        .map(Rc::from)
-        .collect();
     let mut m = Meta {
         s: b"",
         i: 0,
@@ -89,7 +79,7 @@ pub fn load(src: &str) -> Result<Grammar, String> {
     for (line, name, rhs, nest) in &heads {
         let at = |e: String| format!("line {line}: rule {name}: {e}");
         m.start(rhs);
-        let mut body = m.alt().map_err(at)?;
+        let body = m.alt().map_err(at)?;
         let fail = match m.word_is("fail") {
             true => {
                 m.eat(b'^').map_err(at)?;
@@ -99,9 +89,6 @@ pub fn load(src: &str) -> Result<Grammar, String> {
         };
         m.end().map_err(at)?;
         let syntactic = name.starts_with(|c: char| c.is_ascii_uppercase());
-        if syntactic {
-            munch(&mut body, &spellings);
-        }
         rules.push(Rule {
             name: name.clone(),
             syntactic,
@@ -131,8 +118,6 @@ pub fn load(src: &str) -> Result<Grammar, String> {
     }
     let rule = |n: &str| by_name.get(n).copied();
     let mut g = Grammar {
-        trivia: rule("trivia"),
-        token_rule: rule("token"),
         scan_rule: rule("scan"),
         reserved: tokens.iter().filter(|t| t.2).map(|t| t.1.clone()).collect(),
         tokens,
@@ -145,7 +130,13 @@ pub fn load(src: &str) -> Result<Grammar, String> {
         by_name,
     };
     refuse_left_recursion(&g)?;
-    let bodies: Vec<E> = g.rules.iter().map(|r| guard(&g, &r.body)).collect();
+    // A guard tests the next byte, so only a lexical rule has one.
+    let bodies: Vec<E> = (g.rules.iter())
+        .map(|r| match r.syntactic {
+            true => r.body.clone(),
+            false => guard(&g, &r.body),
+        })
+        .collect();
     for (r, b) in g.rules.iter_mut().zip(bodies) {
         r.body = b;
     }
@@ -175,59 +166,8 @@ fn definitions(src: &str) -> Result<Vec<(usize, String)>, String> {
     Ok(defs)
 }
 
-/// Gives every punctuation literal its longer token spellings (maximal munch).
-fn munch(e: &mut E, spellings: &[Rc<str>]) {
-    let lit = |l: &mut Lit| {
-        if !l.word {
-            let longer: Vec<Rc<str>> = (spellings.iter())
-                .filter(|t| t.len() > l.s.len() && t.starts_with(&*l.s))
-                .cloned()
-                .collect();
-            l.longer = longer.into();
-        }
-    };
-    match e {
-        E::Lit(l) => lit(l),
-        E::Climb(x, levels) => {
-            munch(x, spellings);
-            let mut lv: Vec<Level> = Vec::new();
-            for l in levels.iter() {
-                let mut ops = l.ops.clone();
-                ops.iter_mut().for_each(lit);
-                lv.push(Level {
-                    right: l.right,
-                    ops,
-                });
-            }
-            *levels = lv.into();
-        }
-        E::Many(a, b, r) => {
-            munch(a, spellings);
-            munch(b, spellings);
-            if let Recover::Decl(p) = r {
-                munch(p, spellings);
-            }
-        }
-        _ => children_mut(e)
-            .into_iter()
-            .for_each(|x| munch(x, spellings)),
-    }
-}
-
-/// The sub-expressions of `e` that run at its own position or after it.
-fn children_mut(e: &mut E) -> Vec<&mut E> {
-    match e {
-        E::Seq(v) | E::Alt(v) => v.iter_mut().collect(),
-        E::Star(x) | E::Plus(x) | E::Opt(x) | E::And(x) | E::Not(x) | E::Try(x) => vec![&mut **x],
-        E::Field(_, x) | E::SetFlag(_, _, x) | E::Climb(x, _) | E::Guard(_, x) => vec![&mut **x],
-        E::Many(a, b, _) => vec![&mut **a, &mut **b],
-        E::List(a, b, c) => vec![&mut **a, &mut **b, &mut **c],
-        _ => Vec::new(),
-    }
-}
-
 /// Refuses a rule that can call itself before it consumes a character, so the
-/// interpreter's recursion has a measure: the text left, then the depth in the
+/// written code's recursion has a measure: the text left, then the depth in the
 /// acyclic graph of calls at one position.
 fn refuse_left_recursion(g: &Grammar) -> Result<(), String> {
     // Nullability is a least fixpoint; each round sets one more rule or stops,
@@ -668,7 +608,6 @@ impl<'a> Meta<'a> {
         Lit {
             word: s.chars().last().is_some_and(is_word),
             s: Rc::from(s.as_str()),
-            longer: Rc::from(Vec::new()),
         }
     }
 
