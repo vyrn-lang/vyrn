@@ -33,13 +33,13 @@ primary = '(' sp alt? sp ')'
         / ('+' / '-') name '(' sp alt sp ')'
         / '?' name
         / 'split' gap lit
-        / 'many' gap prefix sp 'until' sp prefix (sp 'recover' sp ('stmt' / 'decl' sp prefix))?
+        / 'many' gap prefix sp 'until' sp prefix (sp 'recover' sp ('stmt' / 'nest' / 'decl' sp prefix))?
         / 'list' gap prefix sp 'sep' sp prefix sp 'until' sp prefix
         / 'climb' gap prefix sp '{' (sp level)* sp '}'
         / 'embed' '(' sp alt sp ',' sp name (sp ',' sp ('wrap' / 'trailing') sp '=' sp throw)* sp ')'
         / !stop name
 level = ('left' / 'right') (gap lit)+ ';'?
-throw = '^' name ('(' hole (',' sp hole)* ')')? ('@' (name / '(' name ',' sp name ')'))?
+throw = '^' name ('(' hole (',' sp hole)* ')')? ('@' (name / '(' name ',' sp name ')'))? '!'?
 hole = name '=' (lit / '.:?' / '.' / name)
 name = [A-Za-z_] [A-Za-z0-9_.]*
 lit = '\'' ('\\' . / !'\'' .)* '\''

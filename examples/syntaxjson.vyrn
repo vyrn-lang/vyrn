@@ -1,0 +1,41 @@
+// A JSON grammar through std/syntax: the parser it writes accepts a document,
+// and refuses each mistake at its row, line and column.
+
+import { syntax, SyntaxError } from "std/syntax"
+import { parseDocument, Document, Row } from syntax("./syntaxjson.syntax")
+
+fn say(row: Row) -> String {
+    return match row {
+        BadEscape(found) => "a bad escape: " + found,
+        Expected(token) => "expected " + token,
+        UnterminatedString => "an unterminated string",
+    }
+}
+
+fn check(text: String) {
+    match parseDocument(text) {
+        Ok(document) => print("ok, \{document.end.toString()} bytes"),
+        Err(errors) => {
+            for e in errors {
+                print("\{e.line.toString()}:\{e.col.toString()}: \{say(e.row)}")
+            }
+        }
+    }
+}
+
+fn main() -> Int64 {
+    check("""{"a": [1, 2, {"b": null}], "c": "x\n"}""")
+    check("""  [true, false, -1.5e3]  """)
+    check("[]")
+    check("{}")
+    check("""  [1, [2, [3, {"k": true}]""")
+    check("""{"a": [1, 2], "b" 3}""")
+    check("""[{"a": 1, "b": [true, false, null, "s"]}, {"c": }]""")
+    check("[1] x")
+    check("\"abc")
+    check("\"a\\qc\"")
+    check("")
+    check("nullx")
+    check("[1,\n 2,\n 3 4]")
+    return 0
+}

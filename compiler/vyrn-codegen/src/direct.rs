@@ -120,6 +120,7 @@ struct Gen {
     name: u32,
     diag: u32,
     code_at: u32,
+    syntax_parser: u32,
     at: u32,
     concat: u32,
     render: u32,
@@ -145,6 +146,7 @@ fn gen_imports(m: &mut Module) -> Gen {
         name: g("name"),
         diag: g("diag"),
         code_at: g("codeAt"),
+        syntax_parser: g("syntaxParser"),
         at: g("at"),
         splice: g("splice"),
         concat: g("concat"),
@@ -5432,6 +5434,11 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_arg(m, b, name, args, 2, Some(&Type::Int), line)?;
                 self.core_arg(m, b, name, args, 3, Some(&Type::Str), line)?;
                 b.ins(&Instruction::Call(g.code_at));
+                Ok(code)
+            }
+            ("syntaxParser", 1) => {
+                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
+                b.ins(&Instruction::Call(g.syntax_parser));
                 Ok(code)
             }
             ("at", 4) => {

@@ -1187,6 +1187,7 @@ dependencies = [
  "vyrn-codegen",
  "vyrn-genwasm",
  "vyrn-lower",
+ "vyrn-syntax",
 ]
 
 [[package]]

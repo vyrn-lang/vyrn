@@ -1,0 +1,6 @@
+// An unclosed group, on the third line of its rule.
+syntax Bad
+expect ^E
+File = 'a'
+  // a note
+     / ( 'b'

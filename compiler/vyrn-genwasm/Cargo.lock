@@ -849,6 +849,9 @@ dependencies = [
 [[package]]
 name = "vyrn-frontend"
 version = "0.0.0"
+dependencies = [
+ "vyrn-syntax",
+]
 
 [[package]]
 name = "vyrn-genwasm"
@@ -866,6 +869,10 @@ version = "0.0.0"
 dependencies = [
  "vyrn-frontend",
 ]
+
+[[package]]
+name = "vyrn-syntax"
+version = "0.0.0"
 
 [[package]]
 name = "wasm-encoder"

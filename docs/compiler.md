@@ -48,7 +48,7 @@ sysroot. A crate is judged on what it costs, not on a rule against crates.
 | `vyrn-genwasm` | runs a `gen fn` as compiled wasm inside a load; without its `host` feature, builds the module a host runs (`run_pure`) | `vyrn-frontend`, `vyrn-codegen`, `wasmtime` (feature `host`) |
 | `vyrn-lsp` | the language server, an adapter over `vyrn-frontend` | `vyrn-frontend`, `vyrn-lower`, `vyrn-genwasm` |
 | `vyrn-play` | the playground: the front end and the emitter compiled to `wasm32-unknown-unknown` | `vyrn-frontend`, `vyrn-codegen`, `vyrn-lower`, `vyrn-genwasm` without `host` |
-| `vyrn-syntax` | `vyrn.syntax` (Vyrn's grammar) and `syntax.syntax` (the file format), and `lexer` and `recognizer`, which write the lexer's scanner and the recognizer from a grammar; the `syntaxgate` test and the two freshness tests read it | nothing |
+| `vyrn-syntax` | `vyrn.syntax` (Vyrn's grammar) and `syntax.syntax` (the file format), `lexer` and `recognizer`, which write the lexer's scanner and the recognizer from a grammar, and `parser`, which writes a grammar as a Vyrn module for `std/syntax`; `vyrn-frontend` serves `syntaxParser` with it | nothing |
 
 `vyrn-lsp`, `vyrn-genwasm` and `vyrn-play` are excluded from the workspace.
 Test and format the first two with `--manifest-path`. Build `vyrn-play` from
@@ -616,8 +616,10 @@ module generator returns `Code`; an editor companion's `String` answer crosses
 as one span of the call site's data. File reads
 go through the loader's resolver and are recorded as the generator's inputs;
 `lex`, `moduleInterface`, `moduleCode` and `contractOf` cross as a host
-encoding and a synthesized decoder. A generator the engine declines is an
-error: "the installed generation engine declined it".
+encoding and a synthesized decoder. `syntaxParser` reads its grammar the same
+way and answers with one span: the module `vyrn_syntax::parser` writes, by the
+generator's module, or a report at the grammar's line and column. A generator
+the engine declines is an error: "the installed generation engine declined it".
 
 A `Code` value is a rope of spans (`gen::Rope`): concatenation is a node, not
 a copy. Each span carries its author (`gen::Author`) and where its errors show

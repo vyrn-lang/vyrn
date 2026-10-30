@@ -1244,6 +1244,12 @@ fn table() -> Vec<Builtin> {
             .effect(GenOnly)
             .takes(&[1], takes_one)
             .typed(vec![Str], arr(Type::Named("CodeRun".to_string())), None),
+        // The parser a grammar writes, or the report of why it writes none.
+        b("syntaxParser")
+            .spec(Spec::Host)
+            .effect(GenOnly)
+            .takes(&[1], takes_one)
+            .typed(vec![Str], code(), None),
         b("render")
             .spec(Spec::Host)
             .effect(GenOnly)

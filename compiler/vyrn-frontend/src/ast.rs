@@ -364,8 +364,16 @@ pub const DEFAULT_LOG_LEVEL: usize = 2;
 /// They are not reserved: a module that declares or imports one means its own.
 /// The question is asked of the calling module's scope, never of the linked
 /// program (see [`Program::surface_shadows`]).
-pub const SURFACE_BUILTINS: [&str; 7] =
-    ["render", "lex", "codeRuns", "name", "diag", "codeAt", "at"];
+pub const SURFACE_BUILTINS: [&str; 8] = [
+    "render",
+    "lex",
+    "codeRuns",
+    "syntaxParser",
+    "name",
+    "diag",
+    "codeAt",
+    "at",
+];
 
 pub fn is_surface_builtin(name: &str) -> bool {
     SURFACE_BUILTINS.contains(&name)

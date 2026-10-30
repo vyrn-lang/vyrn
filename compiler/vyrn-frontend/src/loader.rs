@@ -2621,6 +2621,7 @@ pub(crate) fn generation(
                 engine,
                 resolver,
                 opts: inner,
+                module: gen_mod_key.to_string(),
                 importer_dir: call.importer_dir.clone(),
                 allowed: call.allowed.clone(),
                 aliased: call.aliased.clone(),

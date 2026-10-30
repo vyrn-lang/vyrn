@@ -3,6 +3,6 @@ name = "vyrn-syntax"
 version = "0.0.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Reads a .syntax file and writes Vyrn's lexer and recognizer from it."
+description = "Reads a .syntax file and writes Vyrn's lexer and recognizer, and a parser in Vyrn, from it."
 
 [dependencies]

@@ -54,8 +54,7 @@ rustls-ffi = { version = "=0.15.7", default-features = false, features = ["ring"
 [build-dependencies]
 webpki-root-certs = "1"
 
-# The grammar engine, for `tests/syntaxgate.rs` alone: the `vyrn` binary does
-# not link it.
+# The grammar reader, which `tests/syntaxgate.rs` calls directly.
 [dev-dependencies]
 vyrn-syntax = { path = "../vyrn-syntax" }
 

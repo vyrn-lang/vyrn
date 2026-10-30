@@ -276,6 +276,8 @@ pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
         // A report: its severity word, its anchor and its message.
         ("diag", &[I32, I32, I32], &[I64]),
         ("codeAt", &[I32, I64, I64, I32], &[I64]),
+        // The parser a grammar writes.
+        ("syntaxParser", &[I32], &[I64]),
         ("at", &[I64, I32, I64, I64], &[I64]),
         ("concat", &[I64, I64], &[I64]),
         ("render", &[I64], &[I64]),

@@ -1,0 +1,6 @@
+import { syntax } from "std/syntax"
+import { parseFile } from syntax("./a_grammar_that_is_absent.syntax")
+
+fn main() -> Int64 {
+    return 0
+}

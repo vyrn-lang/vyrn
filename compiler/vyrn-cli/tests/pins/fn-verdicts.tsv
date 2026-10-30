@@ -1647,6 +1647,9 @@ examples/strpredbytes.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/sugarnames.vyrn	at	yes	yes, emulated Int64
 examples/sugarnames.vyrn	toString	yes	no, the result is String, not an integer, Bool or a read array of one
 examples/sugarnames.vyrn	main	yes	no, its effect set is alloc, write-output
+examples/syntaxjson.vyrn	say	yes	no, its effect set is alloc
+examples/syntaxjson.vyrn	check	no, it calls `parseDocument`, which is not trap-free	no, its effect set is alloc, write-output
+examples/syntaxjson.vyrn	main	no, it calls `check`, which is not trap-free	no, its effect set is alloc, write-output
 examples/tagged.vyrn	sql	yes	no, its effect set is alloc
 examples/tagged.vyrn	showValue	yes	no, its effect set is alloc
 examples/tagged.vyrn	main	yes	no, its effect set is alloc, write-output
@@ -3246,6 +3249,7 @@ std/symbolmap.vyrn	originJson	yes	no, its effect set is alloc
 std/symbolmap.vyrn	mapJson	no, it calls `emit`, which is not trap-free	no, its effect set is alloc, trap
 std/symbolmap.vyrn	mapSlug	yes	no, its effect set is alloc
 std/symbolmap.vyrn	symbolMapFn	no, it calls `mapJson`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/syntax.vyrn	syntax	yes	no, its effect set is gen-only
 std/task.vyrn	task$sleep	yes	no, its effect set is waits
 std/task.vyrn	task$taskAt	yes	no, its effect set is module-state
 std/task.vyrn	task$waitAt	yes	no, its effect set is module-state

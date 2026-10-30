@@ -11,12 +11,14 @@
 //! written in itself.
 //!
 //! Entry points: [`load`] reads a grammar, [`lexer`] writes its lexical rules as
-//! Rust, and [`recognizer`] writes its syntactic rules. `vyrn.syntax` beside this
-//! file is Vyrn's grammar, and the `syntaxgate` test pins what the written recognizer
-//! says over the corpus.
+//! Rust, [`recognizer`] writes its syntactic rules, and [`parser`] writes a whole
+//! grammar as a Vyrn module. `vyrn.syntax` beside this file is Vyrn's grammar, and
+//! the `syntaxgate` test pins what the written recognizer says over the corpus.
 
 mod gen;
 mod load;
+mod lower;
+mod parser;
 mod recognizer;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -24,7 +26,27 @@ use std::rc::Rc;
 
 pub use gen::lexer;
 pub use load::load;
+pub use parser::parser;
 pub use recognizer::recognizer;
+
+/// Why a grammar does not load or does not lower: a sentence at a 1-based line and
+/// column of its file.
+#[derive(Debug)]
+pub struct Refused {
+    pub line: usize,
+    pub col: usize,
+    pub sentence: String,
+}
+
+impl Refused {
+    fn at(line: usize, col: usize, sentence: impl Into<String>) -> Self {
+        Refused {
+            line,
+            col,
+            sentence: sentence.into(),
+        }
+    }
+}
 
 /// One grammar expression.
 #[derive(Debug, Clone)]
@@ -173,6 +195,8 @@ pub struct RuleId(u32);
 #[derive(Debug)]
 struct Rule {
     name: String,
+    /// The line of the file the rule's definition starts on.
+    line: usize,
     syntactic: bool,
     body: E,
     /// Counts toward the nesting limit.
@@ -253,14 +277,21 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_stands_at_its_line_and_column() {
+        let err = load("expect ^E\n\na = 'x'\n  // a note\n\n  / ( 'y'\n").err();
+        let err = err.expect("refused");
+        assert_eq!((err.line, err.col), (6, 10), "{err:?}");
+    }
+
+    #[test]
     fn a_left_recursive_rule_does_not_load() {
         let err = load("expect ^E\nA = A 'x' / 'y'\n").err().expect("refused");
-        assert!(err.contains("left recursion"), "{err}");
+        assert!(err.sentence.contains("left recursion"), "{err:?}");
     }
 
     #[test]
     fn a_site_bound_hole_source_loads_only_at_its_site() {
         let err = load("expect ^E\na = ^R(x=inner)\n").err().expect("refused");
-        assert!(err.contains("`inner` fills no hole"), "{err}");
+        assert!(err.sentence.contains("`inner` fills no hole"), "{err:?}");
     }
 }

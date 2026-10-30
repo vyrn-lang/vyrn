@@ -1,0 +1,13 @@
+ok, 37 bytes
+ok, 23 bytes
+ok, 2 bytes
+ok, 2 bytes
+1:27: expected "]"
+1:19: expected ":"
+1:49: expected "null"
+1:5: expected Eof
+1:1: an unterminated string
+1:4: a bad escape: q
+1:1: expected "null"
+1:1: expected "null"
+3:4: expected "]"
