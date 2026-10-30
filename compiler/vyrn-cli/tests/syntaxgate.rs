@@ -11,12 +11,16 @@
 //!   parser's recovery differs after it.
 //! - Shape: a file the hand parser accepts, the recognizer accepts, and each
 //!   declaration sits at the same kind and line in both.
+//! - Pin: `tests/pins/parse-diagnostics.tsv` holds what the parser says over each root
+//!   and its mutants, as a count and a hash per root. `VYRN_PIN=write` rewrites it.
 //! - Rows: the rows the grammar names equal the lex and parse rows: the rows of
 //!   `rules.rs` that `lexer.rs`, its scanner `lexer/grammar.rs` or `parser.rs`
 //!   names outside its tests.
 //!
 //! A deep program recurses through many rule frames, so each test runs on a
 //! thread with a large stack.
+
+mod common;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -264,6 +268,60 @@ fn the_grammar_refuses_mutants_as_the_parser_does() {
             .map(|(k, (n, ex))| format!("{n} {k}\n  {ex}"))
             .collect();
         assert!(lines.is_empty(), "{}", lines.join("\n"));
+    })
+}
+
+/// An FNV-1a hash over the line, column and sentence of each diagnostic given it.
+struct Heard(u64);
+
+impl Heard {
+    fn new() -> Heard {
+        Heard(0xCBF2_9CE4_8422_2325)
+    }
+
+    fn hear(&mut self, ds: &[Diagnostic]) {
+        for d in ds {
+            let said = format!("{}:{}: {}\n", d.line, d.col, d.message);
+            for byte in said.bytes() {
+                self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn the_parser_says_what_the_pin_holds() {
+    deep(|| {
+        let rows = corpus().into_iter().map(|(name, src)| {
+            let own = match lexer::lex(&src) {
+                Err(d) => vec![d],
+                Ok(toks) => parser::parse_accum(toks).1,
+            };
+            let mut own_hash = Heard::new();
+            own_hash.hear(&own);
+            let (mut runs, mut refused, mut hash) = (0, 0, Heard::new());
+            for mutant in mutants(&src) {
+                let Ok(toks) = lexer::lex(&mutant) else {
+                    continue;
+                };
+                let said = parser::parse_accum(toks).1;
+                runs += 1;
+                refused += !said.is_empty() as usize;
+                hash.hear(&said);
+            }
+            format!(
+                "{name}\t{}\t{:016x}\t{runs}\t{refused}\t{:016x}",
+                own.len(),
+                own_hash.0,
+                hash.0
+            )
+        });
+        common::pin(
+            "parse-diagnostics",
+            "root\tsaid\thash\tmutants\trefused\thash",
+            rows,
+        );
     })
 }
 
