@@ -1,0 +1,3 @@
+release_reads_self_after_its_match.vyrn:6:0: `self` was moved here into a `match`
+line 10: ... and `self` is used again here
+  fix: `self.copy()` if both sides need a value

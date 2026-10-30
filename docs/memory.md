@@ -188,6 +188,12 @@ no bottom on a cycle, so without a declared release its values are never
 freed. The editor's hover names such a binding, "nothing releases the type
 Tree yet". `examples/binarytrees.vyrn` shows the declaration.
 
+A release takes `self` apart: `consume self.field` takes a part, and one
+`match consume self` takes an enum. Every other move of `self` is refused, and
+so is a closure that outlives its call and captures `self`, because a new owner
+would release it by calling this release. The caller frees the boxes of
+`self`'s payloads after the call.
+
 `impl MustUse for T` gives `T` an obligation: on every path a value is handed
 on by name or released with `drop`. `Stream<T>` carries the same obligation,
 discharged by `for .. in`, a return or `close(s)`. A path that never disposes

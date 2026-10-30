@@ -1176,6 +1176,12 @@ pub struct Body {
     /// What every entry guarantees: the parameters' `where` clauses over
     /// their names. Each call row checks them ([`check::Guard::Clause`]).
     pub assumes: Vec<check::Atom>,
+    /// The receiver of a declared release, `impl Owned`'s `self`. The body
+    /// owes it no release: the caller frees its payload boxes after the call.
+    /// So a new owner would release it again, and the kernel refuses every
+    /// whole take except a `match consume self`, a consuming [`St::Switch`]
+    /// that owns no boxes.
+    pub released: Option<Name>,
     /// What every return guarantees: the result's `where` clause. A check
     /// row before each return states it, and a direct caller assumes it
     /// over its arguments.

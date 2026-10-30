@@ -1,0 +1,15 @@
+// Accepted, the free audit reported a leak: module state held a copy of self.
+type R = { s: String }
+
+let mut k: Array<fn() -> Int64> = []
+
+impl Owned for R {
+    fn release(consume self) {
+        k.push(() -> { return self.s.byteLength })
+    }
+}
+
+fn main() -> Int64 {
+    let r = R { s: "a" + "b" }
+    return 0
+}

@@ -1876,9 +1876,13 @@ impl<'b> Kernel<'b> {
 
     /// Refuses a borrow captured by a closure that outlives the call it is
     /// written at, since the closure leaves the owner's frame. The
-    /// borrow is worded by its kind, or else by its alias's root.
+    /// borrow is worded by its kind, or else by its alias's root. A release's
+    /// receiver is refused too: the closure's copy releases by calling that release.
     fn escaping_capture(&self, st: &State, caps: &[Name], line: usize) -> Result<(), Refusal> {
         for c in caps {
+            if self.body.released == Some(*c) {
+                return Err(self.refuse(line, rule!(TakenReceiver, s = self.src(*c))));
+            }
             if !self.borrowed(*c) {
                 continue;
             }
@@ -1982,6 +1986,10 @@ impl<'b> Kernel<'b> {
         consume: bool,
     ) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
+            if self.body.released == Some(*n) {
+                let r = rule!(TakenReceiver, s = self.src(*n));
+                return Err(self.refuse(self.here, r));
+            }
             if !write_back {
                 if let Some(b) = self.kind_of_borrow(*n) {
                     return Err(self.param_take(*n, b));
@@ -2000,16 +2008,21 @@ impl<'b> Kernel<'b> {
                 return Ok(());
             }
             if self.owned(*n) {
-                if self.used_up(st, *n) {
-                    return Err(self.used_after(st, *n, "used", ""));
-                }
-                self.whole(st, *n)?;
+                self.held_whole(st, *n)?;
                 if self.moves(*n, consume) {
                     self.gone(st, *n);
                 }
             }
         }
         Ok(())
+    }
+
+    /// Refuses a whole take of `n` that a take or a hole already reached.
+    fn held_whole(&self, st: &State, n: Name) -> Result<(), Refusal> {
+        if self.used_up(st, n) {
+            return Err(self.used_after(st, n, "used", ""));
+        }
+        self.whole(st, n)
     }
 
     /// The indices a place reads, and the root: held, and not under a hole.
@@ -2652,7 +2665,13 @@ impl<'b> Kernel<'b> {
                 ..
             } => {
                 if *consuming {
-                    self.take(st, on)?;
+                    match on {
+                        Val::Name(n) if self.body.released == Some(*n) => {
+                            self.held_whole(st, *n)?;
+                            self.gone(st, *n);
+                        }
+                        _ => self.take(st, on)?,
+                    }
                     self.ends(st, s);
                 } else {
                     self.read(st, on)?;

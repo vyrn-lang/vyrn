@@ -1,0 +1,19 @@
+// Accepted, the free audit reported a double free.
+type Box = { s: String, n: Int64, m: Int64 }
+type E = enum { Leaf(Box), Empty }
+fn rel(e: consume E) {
+    match consume e {
+        Leaf(b) => {}
+        Empty => {}
+    }
+}
+impl Owned for E {
+    fn release(consume self) {
+        rel(consume self)
+    }
+}
+
+fn main() -> Int64 {
+    let e = Leaf(Box { s: "a" + "b", n: 1, m: 2 })
+    return 0
+}

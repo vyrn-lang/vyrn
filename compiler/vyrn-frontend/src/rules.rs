@@ -1164,6 +1164,10 @@ rules! {
     ReturnedBorrow { s, what } "`{s}` may not be returned — it is {what}, and a return is owned";
     // A take of a borrow; `may_not` names the taker.
     TakenBorrow { may_not, what } "{may_not} — it is {what}";
+    // A whole take of a declared release's receiver.
+    TakenReceiver { s }
+        "`{s}` may not be moved out of its `release` — a new owner would release it again"
+        fix "`match consume {s}` or `consume {s}.field` takes it apart";
     CopyToOwn { s } "`{s}.copy()` if the value should own it";
     CopyForCaller { s } "`{s}.copy()` if the caller needs its own value";
     CopyForJs { s } "`{s}.copy()` — an `export extern fn` owns its result";

@@ -1,0 +1,1 @@
+release_matches_self_in_a_loop.vyrn:10:0: `self` is consumed by a `match` inside a loop, so it would be used again on the next iteration

@@ -1,0 +1,2 @@
+release_puts_self_in_a_variant.vyrn:6:0: `self` may not be moved out of its `release` — a new owner would release it again
+  fix: `match consume self` or `consume self.field` takes it apart

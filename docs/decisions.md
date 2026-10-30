@@ -169,6 +169,7 @@ pull request.
 - A must-use refusal quotes the binding's resolved type (`Stream<Int64>`), not the producer's spelling. A generic body is judged per instance and refused once per binding.
 - A generic parameter does not launder an obligation: a linear value passed through `T` is owed like any other linear binding.
 - A self-referring type declares `impl Owned`. The declaration gives the structural release walk its bottom.
+- A release takes `self` apart, and nothing else may own it. A move of `self` whole out of a release is refused, not lowered, because a moved-out `self` has no meaning: a new owner would release it by calling the release it sits in.
 - Aliasing is a `Handle<T>` into a container you own (`std/slots`): slot, generation and owner in three plain words. `s[h]` traps on a dead handle and `get` returns `Option`. The library measured 2x faster than the compiler slab it replaced.
 - The run-time memory surface is `malloc`, `realloc`, `free` and `memcpy`, plus the explicit `region` arena. No engine checks a generation counter.
 - `region { ... }` is explicit, a real bump arena, routed lexically. Inference is refused: 0 of 3,758 corpus bindings qualify, and the arena costs up to 1,023x the memory. Reopen with 20 qualifying bindings and a benchmark the arena wins.
