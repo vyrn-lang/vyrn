@@ -13,8 +13,9 @@
 //! returns. A sequence that fails resets the labels bound inside it. So a partial
 //! value is always a local or an element the reset pops, and the compiler's placed
 //! release frees it at the function's exit or at the reset. A type that reaches
-//! itself holds a record on the cycle, and each such record has an `impl Owned` that
-//! takes the fields on the cycle apart.
+//! itself holds a record or a choice on the cycle. Each such record has an
+//! `impl Owned` that takes its fields apart, and each choice with no record on its
+//! cycle has one that matches its variants.
 //!
 //! A syntactic rule keeps the cursor on the first byte of a token: each token it
 //! takes also takes the trivia after it, so a failed alternative pays no second skip
@@ -754,7 +755,7 @@ impl Writer<'_> {
         head + &text
     }
 
-    /// Writes the types of `rules`, and an `impl Owned` for each record on a cycle.
+    /// Writes the types of `rules`, and an `impl Owned` for each type a cycle needs.
     fn types(&self, o: &mut String, rules: &[RuleId]) {
         let _ = writeln!(
             o,
@@ -805,6 +806,16 @@ impl Writer<'_> {
                 let _ = writeln!(o, "        let {f}Kept = consume self.{f}");
             }
             let _ = writeln!(o, "    }}\n}}\n");
+        }
+        for (name, arms) in crate::shape::recursive_choices(self.g, &self.shapes, rules) {
+            let _ = writeln!(
+                o,
+                "impl Owned for {name} {{\n    fn release(consume self) {{\n        match consume self {{"
+            );
+            for arm in arms {
+                let _ = writeln!(o, "            {arm}(kept) => {{}}");
+            }
+            let _ = writeln!(o, "        }}\n    }}\n}}\n");
         }
     }
 
@@ -1926,9 +1937,16 @@ mod tests {
     }
 
     #[test]
-    fn a_cycle_of_references_with_no_record_is_refused() {
-        let sentence = refusal("expect ^E\nA = '(' A ')' / B\nB = 'b'\n");
-        assert!(sentence.contains("no record to end at"), "{sentence}");
+    fn a_rule_that_is_its_own_one_reference_is_refused() {
+        let sentence = refusal("expect ^E\nA = '(' A ')'\n");
+        assert!(sentence.contains("has no type"), "{sentence}");
+    }
+
+    #[test]
+    fn a_cycle_of_choices_has_its_release() {
+        let g = load("expect ^E\nA = '(' A ')' / B\nB = 'b'\n").expect("it loads");
+        let written = parser(&g).expect("it lowers");
+        assert!(written.contains("impl Owned for A"), "{written}");
     }
 
     #[test]

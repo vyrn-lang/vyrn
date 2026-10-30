@@ -343,16 +343,16 @@ fn reaches(
     false
 }
 
-/// Refuses a cycle of rules with no record on it. A release can end only at a record
-/// on the cycle (see [`recursive_records`]), and a rule that is its own one reference
-/// has no type at all.
+/// Refuses a rule that reaches itself through its one reference alone: no type stands
+/// on that cycle. Any other cycle holds a record or a choice, and [`recursive_records`]
+/// and [`recursive_choices`] give it a release.
 fn refuse_endless(g: &Grammar, shapes: &[Shape], rules: &[RuleId]) -> Result<(), Refused> {
-    let no_record = |s: &Shape| matches!(s, Shape::Choice(_) | Shape::Same(_));
+    let same = |s: &Shape| matches!(s, Shape::Same(_));
     for &r in rules {
-        if no_record(&shapes[r.0 as usize]) && reaches(g, shapes, r, r, &no_record) {
+        if same(&shapes[r.0 as usize]) && reaches(g, shapes, r, r, &same) {
             let rule = g.body(r);
             let sentence = format!(
-                "rule `{}` reaches itself through references alone, so its type has no record to end at; give it a label",
+                "rule `{}` is its own one reference, so it has no type; give it a label",
                 rule.name
             );
             return Err(Refused::at(rule.line, 1, sentence));
@@ -381,6 +381,31 @@ pub(crate) fn recursive_records(
                 out.push((format!("{name}Binary"), fields));
             }
             _ => {}
+        }
+    }
+    out
+}
+
+/// Each choice that reaches itself with no record between, with its variants: the type
+/// name and the variant names, each once. A record on a cycle ends that cycle's release.
+pub(crate) fn recursive_choices(
+    g: &Grammar,
+    shapes: &[Shape],
+    rules: &[RuleId],
+) -> Vec<(String, Vec<String>)> {
+    let no_record = |s: &Shape| matches!(s, Shape::Choice(_) | Shape::Same(_) | Shape::Climb(_));
+    let mut out = Vec::new();
+    for &r in rules {
+        if let Shape::Choice(names) = &shapes[r.0 as usize] {
+            if reaches(g, shapes, r, r, &no_record) {
+                let mut arms: Vec<String> = Vec::new();
+                for (v, _) in variants(g, names, r) {
+                    if !arms.iter().any(|a| a == v) {
+                        arms.push(v.to_string());
+                    }
+                }
+                out.push((type_name(&g.body(r).name), arms));
+            }
         }
     }
     out

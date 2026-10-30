@@ -1665,6 +1665,10 @@ examples/syntaxjson.vyrn	say	yes	no, its effect set is alloc
 examples/syntaxjson.vyrn	show	yes	no, its effect set is alloc
 examples/syntaxjson.vyrn	check	no, it calls `parseDocument`, which is not trap-free	no, its effect set is alloc, write-output
 examples/syntaxjson.vyrn	main	no, it calls `check`, which is not trap-free	no, its effect set is alloc, write-output
+examples/syntaxnest.vyrn	sum	yes	no, its effect set is alloc
+examples/syntaxnest.vyrn	nest	yes	no, its effect set is alloc
+examples/syntaxnest.vyrn	run	no, it calls `parseDocument`, which is not trap-free	no, its effect set is alloc, write-output
+examples/syntaxnest.vyrn	main	no, it calls `run`, which is not trap-free	no, its effect set is alloc, write-output
 examples/tagged.vyrn	sql	yes	no, its effect set is alloc
 examples/tagged.vyrn	showValue	yes	no, its effect set is alloc
 examples/tagged.vyrn	main	yes	no, its effect set is alloc, write-output

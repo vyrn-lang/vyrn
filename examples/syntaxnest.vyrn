@@ -1,0 +1,44 @@
+// A grammar whose type reaches itself through choices alone: the release the
+// parser writes for `Nest` takes each variant, a payload with no heap included.
+
+import { syntax } from "std/syntax"
+import { parseDocument, Nest, Sum } from syntax("./syntaxnest.syntax")
+
+/// A sum as the text it came from, with no trivia.
+fn sum(s: Sum) -> String {
+    return match s {
+        SumNest(n) => nest(n),
+        SumOp(b) => sum(b.left) + b.op.text + sum(b.right),
+    }
+}
+
+fn nest(n: Nest) -> String {
+    return match n {
+        NestSum(s) => "(" + sum(s) + ")",
+        NestGroup(inner) => "[" + nest(inner) + "]",
+        NestNum(v) => v.text.text.copy(),
+        NestDot(d) => ".@\{d.start.toString()}",
+    }
+}
+
+fn run(text: String) {
+    match parseDocument(text) {
+        Ok(d) => {
+            print(sum(d.value))
+        }
+        Err(errors) => {
+            for e in errors {
+                print("refused at \{e.line.toString()}:\{e.col.toString()}")
+            }
+        }
+    }
+}
+
+fn main() -> Int64 {
+    run("((12))")
+    run("[(.)]")
+    run("[[(1 + (2 + .))]] + 3")
+    run("((")
+    run("(.]")
+    return 0
+}
