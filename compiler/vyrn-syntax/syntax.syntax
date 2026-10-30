@@ -4,13 +4,13 @@ syntax Syntax
 
 expect ^SyntaxExpected(token=token)
 
-file = (blank / note / def)* (eof / ^SyntaxStray)
+file = (blank / comment / def)* (eof / ^SyntaxStray)
 blank = [ \t\r]* '\n'
-note = '//' (!'\n' .)* ('\n' / eof)
-def = !ws (directive / rule) [ \t\r]* note? ('\n' / eof)
+comment = '//' (!'\n' .)* ('\n' / eof)
+def = !ws (directive / rule) [ \t\r]* comment? ('\n' / eof)
 
 directive = 'syntax' gap name
-          / ('keyword' / 'token') gap name gap lit
+          / ('keyword' / 'token') gap name gap string
           / 'nest' gap digit+ gap throw
           / 'expect' gap throw
           / 'row' gap name
@@ -25,22 +25,22 @@ stop = ('until' / 'sep' / 'recover' / 'fail') ![A-Za-z0-9_]
 prefix = ('&' / '!' / '@')* (name ':')? suffix
 suffix = primary ('*' / '+' / '?')*
 primary = '(' sp alt? sp ')'
-        / lit
+        / string
         / class
         / '.'
         / throw
         / '~' throw
         / ('+' / '-') name '(' sp alt sp ')'
         / '?' name
-        / 'split' gap lit
+        / 'split' gap string
         / 'many' gap prefix sp 'until' sp prefix (sp 'recover' sp ('stmt' / 'nest' / 'decl' sp prefix))?
         / 'list' gap prefix sp 'sep' sp prefix sp 'until' sp prefix
         / 'climb' gap prefix sp '{' (sp level)* sp '}'
         / 'embed' '(' sp alt sp ',' sp name (sp ',' sp ('wrap' / 'trailing') sp '=' sp throw)* sp ')'
         / !stop name
-level = ('left' / 'right') (gap lit)+ ';'?
+level = ('left' / 'right') (gap string)+ ';'?
 throw = '^' name ('(' hole (',' sp hole)* ')')? ('@' (name / '(' name ',' sp name ')'))? '!'?
-hole = name '=' (lit / '.:?' / '.' / name)
+hole = name '=' (string / '.:?' / '.' / name)
 name = [A-Za-z_] [A-Za-z0-9_.]*
-lit = '\'' ('\\' . / !'\'' .)* '\''
+string = '\'' ('\\' . / !'\'' .)* '\''
 class = '[' ('\\' . / !']' .)* ']'

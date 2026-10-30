@@ -562,8 +562,10 @@ cargo test --manifest-path compiler/vyrn-lsp/Cargo.toml
 `vyx.tmLanguage.json` colour `.vyrn` and `.vyx` files without the server;
 `.von` files have their own language id and reuse the Vyrn grammar.
 `vyrn.tmLanguage.json` and `language-configuration.json` are written from
-`vyrn.syntax` by `vyrn_syntax::textmate`. Do not edit them: a test in `vyrn-syntax`
-holds them, and `VYRN_PIN=write` rewrites them.
+`vyrn.syntax` by `vyrn_syntax::textmate`, and `syntax.tmLanguage.json` and
+`syntax-language-configuration.json` from `syntax.syntax`, which colour a `.syntax`
+file. Do not edit them: a test in `vyrn-syntax` holds them, and `VYRN_PIN=write`
+rewrites them.
 
 CodeLenses: Run and Profile over `fn main`; Run test over each `test` block
 and Run all tests over the first; the same pair for `bench` blocks; Run dev

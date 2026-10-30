@@ -35,6 +35,13 @@
         "extensions": [".von"],
         "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "syntax",
+        "aliases": ["Vyrn Syntax", "syntax"],
+        "extensions": [".syntax"],
+        "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
+        "configuration": "./syntax-language-configuration.json"
       }
     ],
     "grammars": [
@@ -55,6 +62,11 @@
         "scopeName": "source.vyx",
         "path": "./vyx.tmLanguage.json",
         "tokenTypes": { "constant.character.vyrn": "string" }
+      },
+      {
+        "language": "syntax",
+        "scopeName": "source.syntax",
+        "path": "./syntax.tmLanguage.json"
       }
     ],
     "semanticTokenScopes": [

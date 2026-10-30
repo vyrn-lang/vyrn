@@ -537,12 +537,20 @@ mod tests {
     #[test]
     fn the_editor_files_are_fresh() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for (file, naming, grammar, configuration) in [(
-            "vyrn",
-            &VYRN,
-            "vyrn.tmLanguage.json",
-            "language-configuration.json",
-        )] {
+        for (file, naming, grammar, configuration) in [
+            (
+                "vyrn",
+                &VYRN,
+                "vyrn.tmLanguage.json",
+                "language-configuration.json",
+            ),
+            (
+                "syntax",
+                &NONE,
+                "syntax.tmLanguage.json",
+                "syntax-language-configuration.json",
+            ),
+        ] {
             let path = dir.join(format!("{file}.syntax"));
             let text = std::fs::read_to_string(path).expect("the grammar reads");
             let g = crate::load(&text).expect("the grammar loads");

@@ -117,6 +117,8 @@ editor/vscode/
   vyrn.tmLanguage.json      TextMate grammar, written from vyrn.syntax
   snippets/vyrn.json        snippets (fn, main, type, protocol, impl, match, import, logging, test)
   language-configuration.json   written from vyrn.syntax
+  syntax.tmLanguage.json    TextMate grammar of .syntax files, written from syntax.syntax
+  syntax-language-configuration.json   written from syntax.syntax
   node_modules/             vscode-languageclient (gitignored)
 ```
 
