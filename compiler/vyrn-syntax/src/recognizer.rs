@@ -26,18 +26,47 @@ const TERMINALS: &[(&str, &str)] = &[
     ("plainStr", "Tok::Str(_)"),
     ("byte", "Tok::Byte(_)"),
     ("doc", "Tok::Doc(_)"),
+    ("plainOrHoled", "Tok::Str(_) | Tok::TemplateStr { .. }"),
 ];
 
-/// The rules whose matches the host records as declarations.
-const DECLS: &[&str] = &[
-    "FnDecl", "Extern", "TypeDecl", "Global", "Import", "Protocol", "Contract", "Test", "Bench",
+/// The rules with a node in the event log. The builder tells every other rule from
+/// the token or the node that comes next.
+const NODES: &[&str] = &[
+    "Expr", "Lambda", "NsStruct", "Tagged", "RefLet", "Folded", "Fallible", "TypeArgs",
 ];
 
-/// The rules whose close the host reads: the names a type reads as bound.
-const HOOKS: &[&str] = &["TName", "TypeName", "IBind", "StmtExpr", "RCap", "IMethod"];
+/// The rules whose close the host reads.
+const HOOKS: &[&str] = &[
+    "TName",
+    "TypeName",
+    "IHead",
+    "IBind",
+    "Recv",
+    "RCap",
+    "IMethod",
+    "StmtExpr",
+    "PlainStmt",
+    "AwaitTail",
+    "RefLet",
+    "CName",
+    "CLet",
+    "CFn",
+    "TypeDecl",
+    "LogHead",
+    "SkimBody",
+    "TestBody",
+    "DeclName",
+    "ImportName",
+];
+
+/// The rules the host may skip unread as they open.
+const SKIPPED: &[&str] = &["SkimBody", "TestBody"];
 
 /// The rule a file is, and the rule the host reads an `embed` island with.
 const ROOT: &str = "Module";
+
+/// The other rules the host starts a run with.
+const ENTRIES: &[&str] = &["Type", "Block"];
 
 /// Returns the Rust source of `g`'s syntactic rules, or why they do not lower.
 pub fn recognizer(g: &Grammar) -> Result<String, String> {
@@ -165,19 +194,12 @@ impl Lower<'_> {
 
     fn emit(&self, rules: &[RuleId]) -> Result<String, String> {
         let mut o = String::from(PRELUDE);
-        let mut decls: Vec<&str> = Vec::new();
-        for &r in rules {
-            let name = &*self.g.body(r).name;
-            if DECLS.contains(&name) {
-                decls.push(name);
-            }
-        }
         let _ = writeln!(
             o,
-            "/// A declaration the recognizer records.\n#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]\npub enum Decl {{"
+            "/// A rule with a node in the event log.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Kind {{"
         );
-        for d in decls {
-            let _ = writeln!(o, "    {d},");
+        for k in NODES {
+            let _ = writeln!(o, "    {k},");
         }
         o.push_str("}\n\n/// A rule whose close the host reads.\n#[derive(Clone, Copy)]\npub(super) enum Hook {\n");
         for h in HOOKS {
@@ -192,7 +214,7 @@ impl Lower<'_> {
         let _ = writeln!(
             o,
             "    /// The `expect` row for the token named `token`.
-    fn expected(&mut self, token: &str) -> R {{
+    pub(super) fn expected(&mut self, token: &str) -> R {{
         let me = self;
         {expected}
     }}\n"
@@ -246,7 +268,8 @@ impl Lower<'_> {
         let name = snake(&rule.name);
         let free = &self.free[r.0 as usize];
         let params: String = free.iter().map(|l| format!(", l_{l}: Capture")).collect();
-        let is_root = rule.name == ROOT || r == embed(self.g)?.inner;
+        let is_root =
+            rule.name == ROOT || ENTRIES.contains(&&*rule.name) || r == embed(self.g)?.inner;
         let vis = if is_root { "pub(super) " } else { "" };
         let mut scope: Scope = free.iter().cloned().collect();
         let _ = writeln!(o, "\n    {vis}fn {name}(&mut self{params}) -> R {{");
@@ -257,6 +280,13 @@ impl Lower<'_> {
             return self.climb(o, &name, operand, levels);
         }
         o.push_str("        let me = self;\n");
+        if SKIPPED.contains(&&*rule.name) {
+            let _ = writeln!(
+                o,
+                "        if let Some(r) = me.skipped(Hook::{}) {{\n            return r;\n        }}",
+                rule.name
+            );
+        }
         let leave = match (&self.g.nest_limit, rule.nest) {
             (Some((max, t)), true) => {
                 let refuse = self.throw(t, &scope)?;
@@ -268,29 +298,30 @@ impl Lower<'_> {
             }
             _ => "",
         };
-        let decl = DECLS.contains(&&*rule.name);
+        let node = NODES.contains(&&*rule.name);
         let hook = HOOKS.contains(&&*rule.name);
-        if decl || hook {
+        if node {
+            let _ = writeln!(o, "        let open = me.open(Kind::{});", rule.name);
+        } else if hook {
+            o.push_str("        let open = me.mark();\n");
+        }
+        if hook {
             o.push_str("        let start = me.cur;\n");
         }
         let mut body = self.expr(&rule.body, &mut scope, 2)?;
         // A rule's alternatives need no parentheses of their own.
-        if let E::Alt(_) = rule.body {
+        if let (E::Alt(_), true) = (&rule.body, body.starts_with('(')) {
             body = body[1..body.len() - 1].trim().to_string();
         }
         let _ = writeln!(o, "        let hit = {body};");
         o.push_str(leave);
-        if decl {
-            let _ = writeln!(
-                o,
-                "        if hit {{\n            me.decl(Decl::{}, start);\n        }}",
-                rule.name
-            );
+        if node {
+            o.push_str("        me.close(open, hit);\n");
         }
         if hook {
             let _ = writeln!(
                 o,
-                "        if hit {{\n            me.closed(Hook::{}, start);\n        }}",
+                "        if hit {{\n            me.closed(Hook::{}, open, start)?;\n        }}",
                 rule.name
             );
         }
@@ -312,23 +343,34 @@ impl Lower<'_> {
         let mut scope = Vec::new();
         let unary = self.expr(operand, &mut scope, 2)?;
         let miss = self.err(operand, &scope)?;
+        let kind = if NODES.iter().any(|k| snake(k) == name) {
+            format!(
+                "Kind::{}",
+                NODES.iter().find(|k| snake(k) == name).map_or("", |k| k)
+            )
+        } else {
+            return Err(format!("climbing rule `{name}` has no node"));
+        };
         let _ = writeln!(
             o,
             "
     fn {name}_from(&mut self, min: usize) -> R {{
         let me = self;
+        let open = me.open({kind});
         if !{unary} {{
+            me.close(open, false);
             return Ok(false);
         }}
         while let Some((level, right)) = Self::{name}_level(me.peek()) {{
             if level < min {{
                 break;
             }}
-            me.bump();
+            me.take();
             if !me.{name}_from(if right {{ level }} else {{ level + 1 }})? {{
                 {miss}?;
             }}
         }}
+        me.close(open, true);
         Ok(true)
     }}
 
@@ -382,6 +424,10 @@ impl Lower<'_> {
                     nl(ind - 1)
                 )
             }
+            E::Alt(v) if self.word_set(v).is_some() => {
+                let set = self.word_set(v).unwrap_or_default();
+                format!("me.word_if({set})")
+            }
             E::Alt(v) => {
                 let alts = (v.iter())
                     .map(|x| self.expr(x, scope, ind + 1))
@@ -400,8 +446,14 @@ impl Lower<'_> {
                 self.star(x, scope, ind)?
             ),
             E::Opt(x) => format!("({{ let _ = {}; true }})", self.expr(x, scope, ind)?),
-            E::And(x) => format!("me.look(|me| Ok({}))", self.expr(x, scope, ind)?),
-            E::Not(x) => format!("!me.look(|me| Ok({}))", self.expr(x, scope, ind)?),
+            E::And(x) => match self.token_test(x) {
+                Some(test) => test,
+                None => format!("me.look(|me| Ok({}))", self.expr(x, scope, ind)?),
+            },
+            E::Not(x) => match self.token_test(x) {
+                Some(test) => format!("!{test}"),
+                None => format!("!me.look(|me| Ok({}))", self.expr(x, scope, ind)?),
+            },
             E::Try(x) => format!("me.attempt(|me| Ok({}))", self.expr(x, scope, ind)?),
             E::Field(_, x) => self.expr(x, scope, ind)?,
             E::Throw(t) => format!("{}?", self.throw(t, scope)?),
@@ -417,15 +469,26 @@ impl Lower<'_> {
             E::Many(x, c, Recover::None) => {
                 let item = self.expr(x, scope, ind + 1)?;
                 let miss = self.err(x, scope)?;
-                let until = self.expr(c, scope, ind + 1)?;
+                let until = self.until_test(c, scope, ind + 1)?;
                 format!(
-                    "({{ loop {{ if me.look(|me| Ok({until})) {{ break; }} let p = me.cur; if !{item} {{ {miss}?; }} if me.cur == p {{ break; }} }} true }})"
+                    "({{ loop {{ if {until} {{ break; }} let p = me.cur; if !{item} {{ {miss}?; }} if me.cur == p {{ break; }} }} true }})"
+                )
+            }
+            E::Many(x, c, Recover::Nest) => {
+                let item = self.expr(x, scope, ind + 1)?;
+                let miss = self.err(x, scope)?;
+                let until = self.until_test(c, scope, ind + 1)?;
+                let (max, t) = (self.g.nest_limit.as_ref())
+                    .ok_or("`recover nest` in a grammar with no `nest` limit")?;
+                let refuse = self.throw(t, scope)?;
+                format!(
+                    "({{ let mut links = 0u32; loop {{ if {until} {{ break; }} links += 1; if me.depth.saturating_add(links) >= {max} {{ {refuse}?; }} let p = me.cur; if !{item} {{ {miss}?; }} if me.cur == p {{ break; }} }} true }})"
                 )
             }
             E::Many(x, c, rec) => {
                 let item = self.expr(x, scope, ind + 1)?;
                 let miss = self.err(x, scope)?;
-                let until = self.expr(c, scope, ind + 1)?;
+                let until = self.until_test(c, scope, ind + 1)?;
                 let start = match rec {
                     Recover::Decl(p) => format!(
                         "Some(|me: &mut Self| Ok({}))",
@@ -434,7 +497,7 @@ impl Lower<'_> {
                     _ => "None::<fn(&mut Self) -> R>".to_string(),
                 };
                 format!(
-                    "me.many_recovering({nl1}|me| Ok({until}),{nl1}|me| Ok({item}),{nl1}|me| {miss},{nl1}{start},{nl0})?",
+                    "me.many_recovering({nl1}|me| {until},{nl1}|me| Ok({item}),{nl1}|me| {miss},{nl1}{start},{nl0})?",
                     nl1 = nl(ind + 1),
                     nl0 = nl(ind),
                 )
@@ -442,10 +505,10 @@ impl Lower<'_> {
             E::List(x, sep, c) => {
                 let item = self.expr(x, scope, ind + 1)?;
                 let miss = self.err(x, scope)?;
-                let until = self.expr(c, scope, ind + 1)?;
+                let until = self.until_test(c, scope, ind + 1)?;
                 let sep = self.expr(sep, scope, ind + 1)?;
                 format!(
-                    "({{ loop {{ let p = me.cur; if me.look(|me| Ok({until})) {{ break; }} if !{item} {{ {miss}?; }} if !{sep} || me.cur == p {{ break; }} }} true }})"
+                    "({{ loop {{ let p = me.cur; if {until} {{ break; }} if !{item} {{ {miss}?; }} if !{sep} || me.cur == p {{ break; }} }} true }})"
                 )
             }
             other => {
@@ -511,6 +574,100 @@ impl Lower<'_> {
             "{term}{nl}&& {}",
             self.chain(rest, false, scope, ind)?
         ))
+    }
+
+    /// A test of whether the token here is one of the word literals `v`, or `None`
+    /// where `v` holds anything else or too few to gain from one test.
+    fn word_set(&self, v: &[E]) -> Option<String> {
+        let words = (v.iter())
+            .map(|x| match x {
+                E::Lit(l) if l.word && !self.g.reserved.contains(&*l.s) => {
+                    Some(format!("{:?}", l.s))
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (words.len() >= 3).then(|| {
+            format!(
+                "matches!(me.peek(), Tok::Ident(w) if matches!(w.as_str(), {}))",
+                words.join(" | ")
+            )
+        })
+    }
+
+    /// A predicate that reads the tokens from `k` on and moves nothing, so it needs no
+    /// catch site: a literal, a token rule, `eof`, a flag, `nonl`, a negation, a choice
+    /// or a sequence of these. Returns the test and how many tokens it reads.
+    fn fixed(&self, e: &E, k: usize) -> Option<(String, usize)> {
+        let at = match k {
+            0 => "me.peek()".to_string(),
+            _ => format!("me.ahead({k})"),
+        };
+        match e {
+            E::Lit(l) if l.word && !self.g.reserved.contains(&*l.s) => Some((
+                format!("matches!({at}, Tok::Ident(w) if w == {:?})", l.s),
+                1,
+            )),
+            E::Lit(l) => Some((
+                format!("matches!({at}, Tok::{})", self.token(&l.s).ok()?),
+                1,
+            )),
+            E::Ref(r) if !self.g.body(*r).syntactic => {
+                let name = &*self.g.body(*r).name;
+                let name = if name == "string" {
+                    "plainOrHoled"
+                } else {
+                    name
+                };
+                let (_, tok) = (TERMINALS.iter()).find(|t| t.0 == name)?;
+                Some((format!("matches!({at}, {tok})"), 1))
+            }
+            E::Builtin(Builtin::Eof) => Some((format!("matches!({at}, Tok::Eof)"), 1)),
+            E::Builtin(Builtin::NoNl) => Some((format!("me.no_newline_at({k})"), 0)),
+            E::TestFlag(f) => Some((format!("me.flags.{}", self.g.flags[*f]), 0)),
+            E::Not(x) => {
+                let (test, _) = self.fixed(x, k)?;
+                Some((format!("!{test}"), 0))
+            }
+            E::Alt(v) => {
+                if let Some(set) = self.word_set(v) {
+                    return (k == 0).then_some((set, 1));
+                }
+                let mut tests = Vec::new();
+                let mut len = None;
+                for x in v {
+                    let (test, n) = self.fixed(x, k)?;
+                    if *len.get_or_insert(n) != n {
+                        return None;
+                    }
+                    tests.push(test);
+                }
+                Some((format!("({})", tests.join(" || ")), len?))
+            }
+            E::Seq(v) => {
+                let mut tests = Vec::new();
+                let mut at = k;
+                for x in v {
+                    let (test, n) = self.fixed(x, at)?;
+                    tests.push(test);
+                    at += n;
+                }
+                Some((format!("({})", tests.join(" && ")), at - k))
+            }
+            _ => None,
+        }
+    }
+
+    fn token_test(&self, e: &E) -> Option<String> {
+        self.fixed(e, 0).map(|f| f.0)
+    }
+
+    /// The loop test of `until`: a token test, or a predicate.
+    fn until_test(&self, c: &E, scope: &mut Scope, ind: usize) -> Result<String, String> {
+        Ok(match self.token_test(c) {
+            Some(test) => test,
+            None => format!("me.look(|me| Ok({}))", self.expr(c, scope, ind)?),
+        })
     }
 
     /// `e*`: stops when `e` fails or matches empty.

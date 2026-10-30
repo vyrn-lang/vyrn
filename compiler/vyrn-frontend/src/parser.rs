@@ -1,9 +1,20 @@
-//! Recursive-descent parser with precedence climbing for expressions.
+//! The tree builder. [`crate::recognizer`] matches `vyrn.syntax`'s rules over the
+//! tokens and records what it matched as [`Event`]s; this module reads a finished
+//! run's events into the [`Program`] and states the desugars.
+//!
+//! The grammar states shape only, so meaning lives here. The builder reads what a
+//! rule matched and never decides what a token means: a token it asks about is one
+//! the recognizer consumed. Each function here is total over what the grammar lets
+//! through, so a mismatch is a defect in this file or in the grammar, and it panics.
+//! The checks of a tree a recognizer rule needs ([`store_shape`], [`await_marks`],
+//! [`push_has_place`], [`inline_where_outside_record`], [`ref_let_parts`]) are stated
+//! here, and the recognizer raises their refusals as the rule closes.
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{Hole, Tok, Token};
-use crate::rules::{refuse, rule, Rule};
+use crate::recognizer::{self, Cx, Event, HoleRun, Kind, Run, View};
+use crate::rules::{rule, Rule};
 use std::collections::HashSet;
 
 /// Whether `name` in a contract member's type is an implicit type parameter:
@@ -30,46 +41,14 @@ fn mark_member_type_params(ty: &mut Type) {
     });
 }
 
-/// Whether the cursor sits on a `contract Name {` declaration starter.
-///
-/// `contract` is contextual: `std/rpc`, `std/connect`, `std/openapi` and
-/// `std/graphql` take a parameter named `contract`.
-fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {
-    let at = |i: usize| tokens.get(i).map(|t| &t.tok);
-    matches!(at(pos), Some(Tok::Ident(n)) if n == "contract")
-        && matches!(at(pos + 1), Some(Tok::Ident(_)))
-        && matches!(at(pos + 2), Some(Tok::LBrace))
-}
-
-/// The method-form builtin spellings ([`crate::prelude::Builtin::method`]) that
-/// the module answers to itself: its top-level declarations, its imports (under
-/// the local spelling), and the methods of its protocols. A written
-/// `recv.m(..)` with `m` in this set calls the module's `m`, not the builtin.
-///
-/// The test is scope, not type: the flat namespace is program-wide unique, so
-/// one lookup answers it. A module that declares `remove` and calls
-/// `.remove(k)` on a `Map` gets a type error at the call.
-fn answered_methods(program: &Program) -> HashSet<String> {
-    let protocols = program.protocols.iter();
-    let imports = program.imports.iter().flat_map(|i| &i.names);
-    // Impl methods are absent: `impl Copy for T { fn copy(..) }` overrides `@copy`
-    // for receivers of type `T` only. Counting it here would take the builtin from
-    // every other receiver in the module.
-    (program.functions.iter().map(|f| &f.name))
-        .chain(program.type_decls.iter().map(|t| &t.name))
-        .chain(program.globals.iter().map(|g| &g.name))
-        .chain(protocols.flat_map(|p| p.methods.iter().map(|m| &m.name).chain([&p.name])))
-        .chain(imports.map(|n| n.alias.as_ref().unwrap_or(&n.original)))
-        .filter(|n| crate::prelude::method_builtin(n).is_some())
-        .cloned()
-        .collect()
-}
-
 /// Parses the grammar alone: no prelude, no module-declared method names, no
 /// `impl` flattening. [`crate::prelude::type_decls`] parses `prelude.vyrn` through
 /// this, because the prelude is what [`parse_accum`] adds.
-pub(crate) fn parse_bare(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
-    Parser::over(tokens).program_accum()
+pub(crate) fn parse_bare(mut tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
+    let answers = HashSet::new();
+    let mut run = recognizer::file(&tokens, Cx::plain(&answers));
+    let (program, _) = build(&mut tokens, &mut run, &answers, false);
+    (program, run.errors)
 }
 
 /// Parses a token stream into a [`Program`], returning the first parse error.
@@ -103,12 +82,13 @@ pub fn parse_imported(tokens: Vec<Token>, skim: bool) -> (Program, Vec<Diagnosti
 
 /// The top-level function bodies a skimming [`parse_imported`] left unparsed.
 pub struct Skimmed {
-    /// The module's tokens, as the lexer wrote them.
+    /// The module's tokens. The tree holds the payloads of those it read, and a
+    /// skimmed body's stay as the lexer wrote them.
     tokens: Vec<Token>,
     /// Each skimmed function's body, as a range of `tokens`, by the line and
     /// column of the function's name.
-    bodies: Vec<((usize, usize), std::ops::Range<usize>)>,
-    /// The module's [`answered_methods`], which a body's parse reads.
+    bodies: Vec<SkimmedBody>,
+    /// The method-form names the module answers to, which a body's parse reads.
     answers: HashSet<String>,
 }
 
@@ -131,45 +111,42 @@ impl Skimmed {
             line,
             col,
         });
-        let mut p = Parser {
-            answers: self.answers.clone(),
-            type_params: f.type_params.clone(),
-            ..Parser::over(tokens)
-        };
-        let body = p.block();
-        Some(match body {
-            Ok(b) if p.errors.is_empty() => Ok(b),
-            Ok(_) => Err(p.errors),
-            Err(d) => Err(p.errors.into_iter().chain([d]).collect()),
-        })
+        let scope: Vec<&str> = f.type_params.iter().map(String::as_str).collect();
+        Some(recognizer::block(
+            &tokens,
+            Cx::plain(&self.answers),
+            &scope,
+            |view| Build::read(view, 0, &self.answers).block(),
+        ))
     }
 }
 
 fn parse_with(
-    tokens: Vec<Token>,
+    mut tokens: Vec<Token>,
     imported: bool,
     skim: bool,
 ) -> (Program, Vec<Diagnostic>, Skimmed) {
-    // A declaration can follow its use, so the names are known only after one
-    // parse. A module that answers to a method-form name parses again, and each
-    // `recv.m(..)` and the statement desugar around it are decided once.
-    let mut p = Parser {
+    // A declaration can follow its use, so the names a module answers to are known
+    // only after one run. A module that answers to a method-form name runs again, and
+    // each `recv.m(..)` and the statement desugar around it are decided once.
+    let mut answers = HashSet::new();
+    let cx = Cx {
+        answers: &answers,
         imported,
-        skim: skim.then(Vec::new),
-        ..Parser::over(tokens)
+        skim,
     };
-    let (mut program, mut errors) = p.program_accum();
-    let answers = answered_methods(&program);
-    if !answers.is_empty() {
-        p.unsplit();
-        p = Parser {
-            answers,
+    let mut run = recognizer::file(&tokens, cx);
+    if !run.answered.is_empty() {
+        answers = std::mem::take(&mut run.answered).into_iter().collect();
+        let cx = Cx {
+            answers: &answers,
             imported,
-            skim: skim.then(Vec::new),
-            ..Parser::over(std::mem::take(&mut p.tokens))
+            skim,
         };
-        (program, errors) = p.program_accum();
+        run = recognizer::file(&tokens, cx);
     }
+    let (mut program, bodies) = build(&mut tokens, &mut run, &answers, imported);
+    let errors = run.errors;
     // The prelude: the declarations every program gets, stated in `prelude.vyrn`.
     // Only the root's parse carries them, so a linked program holds one copy.
     if !imported {
@@ -190,7 +167,7 @@ fn parse_with(
     // from the renamed ones, because the checker mangles the names it sees
     // (`Copy$json$Json$copy`, not `json$Copy$Json$copy`).
     let mut flat = Vec::new();
-    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut seen: HashSet<String> = Default::default();
     for imp in &program.impls {
         if let Some(key) = crate::types::type_key(&imp.ty) {
             for m in &imp.methods {
@@ -207,90 +184,52 @@ fn parse_with(
     }
     program.functions.extend(flat);
     program.number();
-    p.unsplit();
     let skimmed = Skimmed {
-        bodies: p.skim.take().unwrap_or_default(),
-        answers: std::mem::take(&mut p.answers),
-        tokens: p.tokens,
+        bodies,
+        answers,
+        tokens,
     };
     (program, errors, skimmed)
 }
 
-pub(crate) struct Parser {
-    tokens: Vec<Token>,
-    pos: usize,
-    /// Whether this parser reads an interpolation hole rather than the file.
-    ///
-    /// A hole is re-lexed as its own source, so its tokens count lines and columns
-    /// from the hole; [`Parser::parse_hole`] anchors every diagnostic at the
-    /// template, and a binder parsed here carries no position
-    /// ([`crate::ast::Binder`]).
-    in_hole: bool,
-    /// When true, a bare `Ident {` is not a struct literal, so `if x { .. }` parses
-    /// `x` as the condition. Reset inside `( .. )`.
-    no_struct: bool,
-    /// The current function's generic parameters; a matching type name parses as
-    /// [`Type::Param`].
-    type_params: Vec<String>,
-    /// Associated types in scope: `Output` in a `protocol` body maps to
-    /// `Type::Param("Output")`, and in an `impl` body to what its `type Output = ..`
-    /// bound. Resolving here means an impl method leaves the parser as an ordinary
-    /// generic function. The cost: a `type` member must precede the methods that
-    /// name it ([`Parser::impl_block`]).
-    type_aliases: std::collections::HashMap<String, Type>,
-    /// Inline `field: T where pred` refinements collected in a `type` declaration's
-    /// record, drained by `type_decl` into synthetic validated types named
-    /// `Decl.field`. `None` outside a type declaration, where inline `where` is a
-    /// parse error: an anonymous record has no name for the refinement.
-    field_preds: Option<Vec<(String, Expr)>>,
-    /// Extra statements from a one-statement desugar (`a[i].f = v` becomes three).
-    /// `stmt` returns the first and stashes the rest here; `block` drains them
-    /// right after. Empty outside one `stmt` call.
-    extra_stmts: Vec<Stmt>,
-    /// Diagnostics from statement recovery inside a body: [`Parser::block`]
-    /// records the error and skips to the next statement. [`Parser::program_accum`]
-    /// merges them into the program's errors in source order.
-    errors: Vec<Diagnostic>,
-    /// How many levels of nested source the parser is inside ([`Parser::MAX_NEST`]).
-    /// A stack overflow aborts with no `file:line`, so depth is counted and refused.
-    /// Bumped on the three unbounded recursive edges: [`Parser::unary`] (every
-    /// expression recursion enters it once), [`Parser::type_`] and [`Parser::block`].
-    depth: u32,
-    /// See [`answered_methods`]; empty on the first parse.
-    answers: HashSet<String>,
-    /// Each `>=` or `>>` that [`Parser::eat`] split in place, with the token it
-    /// was, so [`Parser::unsplit`] gives a second parse the lexer's tokens.
-    split: Vec<(usize, Tok)>,
-    /// An imported module's parse ([`parse_imported`]): each `test` and `bench`
-    /// block is skipped and left out of the program.
-    imported: bool,
-    /// With `Some`, each top-level function body is skipped and recorded here
-    /// ([`parse_imported`]). Only an imported module's parse skims.
-    skim: Option<Vec<((usize, usize), std::ops::Range<usize>)>>,
-}
-
 /// Returns how a binary operator is written, for a diagnostic that quotes one.
 ///
-/// Derived from [`Parser::binop`] and `lexer::punct_tok`, so the spelling is
-/// stated once. The search over 36 spellings runs only while formatting a
-/// message.
+/// Derived from [`binop`] and `lexer::punct_tok`, so the spelling is stated once.
+/// The search over 36 spellings runs only while formatting a message.
 pub fn binop_text(op: BinOp) -> &'static str {
     crate::lexer::PUNCT_SPELLINGS
         .iter()
-        .find(|s| {
-            crate::lexer::punct_tok(s)
-                .and_then(|t| Parser::binop(&t))
-                .map(|(o, _)| o)
-                == Some(op)
-        })
+        .find(|s| crate::lexer::punct_tok(s).and_then(|t| binop(&t)) == Some(op))
         .copied()
         .unwrap_or_else(|| unreachable!("every `BinOp` is spelled by one token"))
 }
 
-/// Wraps a skeleton as a function body, for the statement-list mode of a code
-/// quote. [`Parser::parses_as_stmts`] and
-/// [`Parser::skeleton_error_detail`] share it: the detail's line is the wrapped
-/// line minus the wrapper's.
+/// The operator a token spells. The grammar's `climb` table orders them.
+pub(crate) fn binop(tok: &Tok) -> Option<BinOp> {
+    Some(match tok {
+        Tok::OrOr => BinOp::Or,
+        Tok::AndAnd => BinOp::And,
+        Tok::EqEq => BinOp::Eq,
+        Tok::NotEq => BinOp::NotEq,
+        Tok::TildeMatch => BinOp::Match,
+        Tok::Lt => BinOp::Lt,
+        Tok::LtEq => BinOp::LtEq,
+        Tok::Gt => BinOp::Gt,
+        Tok::GtEq => BinOp::GtEq,
+        Tok::Pipe => BinOp::BitOr,
+        Tok::Caret => BinOp::BitXor,
+        Tok::Amp => BinOp::BitAnd,
+        Tok::Shl => BinOp::Shl,
+        Tok::Shr => BinOp::Shr,
+        Tok::Plus => BinOp::Add,
+        Tok::Minus => BinOp::Sub,
+        Tok::Star => BinOp::Mul,
+        Tok::Slash => BinOp::Div,
+        Tok::Percent => BinOp::Rem,
+        _ => return None,
+    })
+}
+
 /// `if let P = e { A } else { B }` as the statement `match e { P => { A },
 /// _ => { B } }`, which [`Expr::as_if_let`] reads back.
 fn if_let(pattern: Pattern, scrutinee: Expr, then: Block, els: Option<Block>, line: usize) -> Stmt {
@@ -415,37 +354,123 @@ fn as_fn_body(src: &str) -> String {
     format!("fn __vyrn_probe__() {{\n{src}\n}}")
 }
 
-/// The type `tokens` spell, as a refusal prints it.
-pub(crate) fn type_text(tokens: &[Token]) -> String {
-    let mut toks = tokens.to_vec();
-    toks.push(Token {
-        tok: Tok::Eof,
-        line: 0,
-        col: 0,
-    });
-    Parser::over(toks)
-        .type_()
-        .map_or_else(|_| String::new(), |t| t.to_string())
+/// Returns the refusal of a `vyrn"..."` code quote at line `line`, column `col`
+/// whose parts form no skeleton, or `None`.
+///
+/// The lexer has dropped a `vyrn"""` quote's closing indentation
+/// (`lexer::dedent`). The parts, with each hole replaced by a `__vyrn_holeN`
+/// placeholder, form a skeleton. It must parse here as declarations,
+/// statements, an expression, a type, or one item of a list
+/// ([`parses_as_item`]); a failure is a parse diagnostic at the
+/// literal. A hole alone on its line stands for a list of items of its
+/// block, so its placeholder may also be a declaration; a hole alone in
+/// its brackets stands for the whole list there, so its placeholder may
+/// also be empty, though an import list cannot; a hole after an import's
+/// `from` may also be a string literal, which the specifier needs.
+pub(crate) fn skeleton_refusal(
+    parts: &[String],
+    holes: usize,
+    (line, col): (usize, usize),
+    scope: &[&str],
+    answers: &HashSet<String>,
+) -> Option<(Rule, (usize, usize))> {
+    let skeleton = |item: bool, empty: bool, lit: bool| {
+        let mut skel = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            skel.push_str(part);
+            if i < holes {
+                let (before, after) = (&parts[i], &parts[i + 1]);
+                let placeholder = if item && alone_on_line(before, after, i == 0) {
+                    format!("let __vyrn_hole{i} = 0")
+                } else if item && alone_in_brackets(before, after) {
+                    if empty {
+                        String::new()
+                    } else {
+                        format!("__vyrn_hole{i}")
+                    }
+                } else if lit && is_specifier(before) {
+                    format!("\"__vyrn_hole{i}\"")
+                } else {
+                    format!("__vyrn_hole{i}")
+                };
+                skel.push_str(&placeholder);
+            }
+        }
+        skel
+    };
+    let probe = Probe { scope, answers };
+    let skel = skeleton(false, false, false);
+    let separator = holes == 0 && is_separator(&skel);
+    let tries = [(true, true, false), (true, true, true), (true, false, true)];
+    if separator
+        || probe.parses_any(&skel)
+        || (tries.iter()).any(|&(i, e, l)| probe.parses_any(&skeleton(i, e, l)))
+    {
+        return None;
+    }
+    let (rule, skel_line, skel_col) = probe.error_detail(&skel);
+    let rline = line + skel_line.saturating_sub(1);
+    let rcol = if skel_line <= 1 { col } else { skel_col };
+    Some((rule, (rline, rcol)))
 }
 
-/// Whether `tokens` hold an expression that a `=` after it stores into, or that
-/// the statement refuses as a store target.
-pub(crate) fn is_store_target(tokens: &[Token]) -> bool {
-    let mut toks = tokens.to_vec();
-    toks.push(Token {
-        tok: Tok::Eof,
-        line: 0,
-        col: 0,
-    });
-    let Ok(e) = Parser::over(toks).expr() else {
-        return false;
-    };
-    let mut under = &e;
-    while let Expr::Field { expr, .. } = under {
-        under = expr;
+/// A quote's skeleton parsed in each mode, with the enclosing type names, so a
+/// skeleton naming `T` in a generic `gen fn` parses.
+struct Probe<'p> {
+    scope: &'p [&'p str],
+    answers: &'p HashSet<String>,
+}
+
+impl Probe<'_> {
+    /// Statements first: most quotes are statement lists, and each mode that
+    /// fails costs a whole parse.
+    fn parses_any(&self, src: &str) -> bool {
+        self.parses_as_decls(&as_fn_body(src))
+            || self.parses_as_decls(src)
+            || self.parses_as_expr(src)
+            || self.parses_as_type(src)
+            || self.parses_as_item(src)
     }
-    store_target(&e).is_some()
-        || matches!(under, Expr::Call { name, args, .. } if name == "@at" && args.len() == 2)
+
+    /// List-item mode: `src` is one item of a record literal (`port: v`), a
+    /// `match` (`Some(x) => x`) or a parameter list (`n: Int64`), each wrapped
+    /// in the smallest unit that holds it. Its brackets must balance, so a
+    /// wrapper cannot close one the quote opened.
+    fn parses_as_item(&self, src: &str) -> bool {
+        balanced(src)
+            && (self.parses_as_expr(&format!("__vyrn_r {{ {src} }}"))
+                || self.parses_as_expr(&format!("match __vyrn_m {{ {src} }}"))
+                || self.parses_as_decls(&format!("fn __vyrn_f({src}) {{}}")))
+    }
+
+    fn parses_as_decls(&self, src: &str) -> bool {
+        (crate::lexer::lex(src).ok())
+            .is_some_and(|t| recognizer::decl_refusals(&t, self.scope, self.answers).is_empty())
+    }
+
+    fn parses_as_expr(&self, src: &str) -> bool {
+        (crate::lexer::lex(src).ok())
+            .is_some_and(|t| recognizer::whole_expr(&t, self.scope, self.answers))
+    }
+
+    fn parses_as_type(&self, src: &str) -> bool {
+        (crate::lexer::lex(src).ok())
+            .is_some_and(|t| recognizer::whole_type(&t, self.scope, self.answers))
+    }
+
+    /// The message and skeleton-relative line and column for a skeleton that parses
+    /// in no mode, preferring the statement-mode error.
+    fn error_detail(&self, skel: &str) -> (Rule, usize, usize) {
+        if let Ok(t) = crate::lexer::lex(&as_fn_body(skel)) {
+            let errs = recognizer::decl_refusals(&t, self.scope, self.answers);
+            if let Some(d) = errs.into_iter().next() {
+                let sl = d.line.saturating_sub(1).max(1); // undo the wrapper's line
+                let detail = d.message;
+                return (rule!(SkeletonDetail, detail), sl, d.col);
+            }
+        }
+        (Rule::SkeletonUnparsable {}, 1, 1)
+    }
 }
 
 /// Returns the root's id and name, the steps from the root to the place the
@@ -454,7 +479,7 @@ pub(crate) fn is_store_target(tokens: &[Token]) -> bool {
 /// for a target with no address (a call result, a literal) and for a bare name,
 /// which is no [`Stmt::Store`].
 ///
-/// Two callers: [`Parser::stmt`] for `a[i] = v` (parsed as `@at(a, i)`), and
+/// Two callers: [`Build::stmt`] for `a[i] = v` (parsed as `@at(a, i)`), and
 /// `project.rs` for the place a projection's `atSet` yields.
 pub fn store_target(e: &Expr) -> Option<(Id, String, Vec<Step>, Step)> {
     let (id, name, mut base) = place_steps(e)?;
@@ -488,197 +513,352 @@ pub fn place_steps(e: &Expr) -> Option<(Id, &str, Vec<At<'_>>)> {
     }
 }
 
-impl Parser {
-    /// A parser over `tokens` with nothing in scope. The only place the fields are
-    /// listed.
-    fn over(tokens: Vec<Token>) -> Parser {
-        Parser {
-            tokens,
-            pos: 0,
+/// What an expression before a `=` is to a statement.
+pub(crate) enum StoreShape {
+    /// A place: the `=` stores into it.
+    Place,
+    /// `f()[0] = v`: an element of something with no address.
+    OverIndex,
+    /// `f()[0].x = v`: a field of such an element.
+    OverField,
+    /// Anything else: the statement ends before the `=`.
+    Value,
+}
+
+/// Reads the expression at event `open` and returns its [`StoreShape`]. The shape
+/// is read before the value parses, so an unreachable target gets its own refusal,
+/// not an error from the right side.
+pub(crate) fn store_shape(view: View<'_>, open: usize, answers: &HashSet<String>) -> StoreShape {
+    let e = Build::read(view, open, answers).expr();
+    let (mut under, mut fields) = (&e, 0);
+    while let Expr::Field { expr, .. } = under {
+        (under, fields) = (expr, fields + 1);
+    }
+    let over_index =
+        matches!(under, Expr::Call { name, args, .. } if name == "@at" && args.len() == 2);
+    match (store_target(&e).is_some(), over_index, fields) {
+        (true, ..) => StoreShape::Place,
+        (false, true, 0) => StoreShape::OverIndex,
+        (false, true, _) => StoreShape::OverField,
+        (false, false, _) => StoreShape::Value,
+    }
+}
+
+/// Whether the call a statement names by `name` could write its array back. The
+/// recognizer asks before it builds the statement's tree.
+pub(crate) fn may_rebuild(name: &str, answers: &HashSet<String>) -> bool {
+    crate::prelude::rebuilds(name)
+        || (!answers.contains(name)
+            && crate::prelude::method_builtin(name).is_some_and(crate::prelude::rebuilds))
+}
+
+/// Whether a statement's call `e` has a place to write its array back to, or
+/// needs none. `sq.push(v)` writes to `sq`, `r.f.push(v)` to `r.f`, `a[i].push(v)`
+/// to `a[i]`. Any other receiver (a temporary, `r.a.b.push(v)`) is a refusal, not
+/// a silent write to a copy.
+pub(crate) fn push_has_place(view: View<'_>, open: usize, answers: &HashSet<String>) -> bool {
+    let e = Build::read(view, open, answers).expr();
+    let Expr::Call { name, args, .. } = &e else {
+        return true;
+    };
+    if !crate::prelude::rebuilds(name) {
+        return true;
+    }
+    let var = |e: &Expr| matches!(e, Expr::Var { .. });
+    match args.first() {
+        Some(Expr::Var { .. }) => true,
+        Some(Expr::Field { expr, .. }) => var(expr),
+        Some(Expr::Call {
+            name: at,
+            args: iargs,
+            ..
+        }) => at == "@at" && iargs.len() == 2 && var(&iargs[0]),
+        _ => false,
+    }
+}
+
+/// Whether `await` and the postfix chain at event `open` mark a call, under any
+/// `?` after it.
+pub(crate) fn await_marks(view: View<'_>, open: usize, answers: &HashSet<String>) -> bool {
+    let mut b = Build::read(view, open, answers);
+    b.at += 1;
+    let e = b.postfix();
+    let mut at = &e;
+    while let Expr::Try { expr, .. } = at {
+        at = expr;
+    }
+    matches!(at, Expr::Call { .. })
+}
+
+/// The variant, the binders and the scrutinee of the refutable `let` at event
+/// `open`.
+pub(crate) fn ref_let_parts(
+    view: View<'_>,
+    open: usize,
+    answers: &HashSet<String>,
+) -> (String, Vec<Binder>, Expr) {
+    Build::read(view, open, answers).ref_let_parts()
+}
+
+/// The type `tokens` spell, as a refusal prints it.
+pub(crate) fn type_text(tokens: &[Token], answers: &HashSet<String>) -> String {
+    let mut toks = tokens.to_vec();
+    toks.push(Token {
+        tok: Tok::Eof,
+        line: 0,
+        col: 0,
+    });
+    recognizer::read_type(&toks, answers, |view| {
+        Build::read(view, 0, answers).type_().to_string()
+    })
+    .unwrap_or_default()
+}
+
+/// The name of the `type` declaration at event `open` when a refinement it
+/// collected sits outside the one record of its base: a `&` wrapped the record in
+/// [`Type::Merge`], or an enum payload holds it, so there is no single record to
+/// hang `Decl.field` on.
+pub(crate) fn inline_where_outside_record(
+    view: View<'_>,
+    open: usize,
+    answers: &HashSet<String>,
+) -> Option<String> {
+    let t = Build::read(view, open, answers).type_decl_parts();
+    (!t.preds.is_empty() && !matches!(t.base, Type::Record(_))).then_some(t.name)
+}
+
+/// Reads a finished run into the declarations it closed. The tree takes each token's
+/// payload it reads, so a name costs no second allocation; `tokens` holds no payload
+/// of what the run read afterwards.
+fn build(
+    tokens: &mut [Token],
+    run: &mut Run,
+    answers: &HashSet<String>,
+    imported: bool,
+) -> (Program, Vec<SkimmedBody>) {
+    let mut program = Program {
+        imports: Vec::new(),
+        type_decls: Vec::new(),
+        functions: Vec::new(),
+        protocols: Vec::new(),
+        contracts: Vec::new(),
+        impls: Default::default(),
+        globals: Vec::new(),
+        tests: Vec::new(),
+        benches: Vec::new(),
+        log_level: DEFAULT_LOG_LEVEL,
+        log_sink: LogSink::Stderr,
+        // The loader fills this once every module is linked.
+        surface_shadows: std::collections::HashSet::new(),
+        host: Host::default(),
+        module_hashes: std::collections::BTreeMap::new(),
+        units: 0,
+        expansions: Default::default(),
+        spellings: Default::default(),
+        orders: Default::default(),
+        prove: None,
+        proved: Default::default(),
+        session: Default::default(),
+    };
+    let mut bodies = Vec::new();
+    let events = std::mem::take(&mut run.events);
+    let mut b = Build {
+        src: Src::Take(tokens, &mut run.holes),
+        events: &events,
+        at: 0,
+        in_hole: false,
+        answers,
+        aliases: Default::default(),
+        field_preds: None,
+        extra_stmts: Vec::new(),
+    };
+    while b.at < events.len() {
+        b.aliases.clear();
+        b.item(&mut program, &mut bodies, imported, &run.skips);
+        b.at += 1;
+    }
+    (program, bodies)
+}
+
+/// A body a skim left unread: its function's line and column, and its tokens.
+type SkimmedBody = ((usize, usize), std::ops::Range<usize>);
+
+/// Where a read gets its tokens. A check during the run reads them; the one read
+/// after the run takes their payloads.
+enum Src<'a> {
+    Read(&'a [Token], &'a [HoleRun]),
+    Take(&'a mut [Token], &'a mut [HoleRun]),
+}
+
+/// A read of [`Event`]s into the tree. The cursor is `at`.
+struct Build<'a> {
+    src: Src<'a>,
+    events: &'a [Event],
+    at: usize,
+    /// Whether this reads an interpolation hole rather than the file: a binder
+    /// parsed here carries no position ([`crate::ast::Binder`]).
+    in_hole: bool,
+    answers: &'a HashSet<String>,
+    /// What an `impl` body's `type Output = ..` bound. Resolving here means an impl
+    /// method leaves the builder as an ordinary generic function. The cost: a `type`
+    /// member must precede the methods that name it.
+    aliases: std::collections::HashMap<String, Type>,
+    /// Inline `field: T where pred` refinements collected in a `type` declaration's
+    /// record, drained into synthetic validated types named `Decl.field`. `None`
+    /// outside a type declaration.
+    field_preds: Option<Vec<(String, Expr)>>,
+    /// Extra statements from a one-statement desugar. `stmt` returns the first and
+    /// stashes the rest here; `block` drains them right after.
+    extra_stmts: Vec<Stmt>,
+}
+
+/// What [`Build::peek`] returns where the next event holds no token.
+static NO_TOKEN: Tok = Tok::Eof;
+/// What a split leaves of a `>=`.
+static REST_EQ: Tok = Tok::Eq;
+/// What a split leaves of a `>>`.
+static REST_GT: Tok = Tok::Gt;
+
+/// The parts of a `type` declaration, before its refinements become types.
+struct TypeParts {
+    line: usize,
+    name: String,
+    type_params: Vec<String>,
+    base: Type,
+    predicate: Option<Expr>,
+    preds: Vec<(String, Expr)>,
+}
+
+impl<'a> Build<'a> {
+    /// A read of `view` from event `at`, for a check during the run.
+    fn read(view: View<'a>, at: usize, answers: &'a HashSet<String>) -> Build<'a> {
+        Build {
+            src: Src::Read(view.toks, view.holes),
+            events: view.events,
+            at,
             in_hole: false,
-            no_struct: false,
-            type_params: Vec::new(),
-            type_aliases: Default::default(),
+            answers,
+            aliases: Default::default(),
             field_preds: None,
             extra_stmts: Vec::new(),
-            errors: Vec::new(),
-            depth: 0,
-            answers: HashSet::new(),
-            split: Vec::new(),
-            imported: false,
-            skim: None,
         }
     }
 
-    /// A sub-parser over `tokens` that inherits the enclosing generic parameters
-    /// and type aliases, so a re-lexed hole or quote skeleton that names `T`
-    /// parses. The desugar queue, errors and depth stay the sub-parse's own.
-    fn sub(&self, tokens: Vec<Token>) -> Parser {
-        Parser {
-            type_params: self.type_params.clone(),
-            type_aliases: self.type_aliases.clone(),
-            answers: self.answers.clone(),
-            in_hole: true,
-            ..Parser::over(tokens)
+    // The event cursor.
+
+    /// The next event; a `Close` past the end, as a finished run has nothing after it.
+    #[inline]
+    fn event(&self) -> Event {
+        self.events.get(self.at).copied().unwrap_or(Event::Close(0))
+    }
+
+    #[inline]
+    fn toks(&self) -> &[Token] {
+        match &self.src {
+            Src::Read(toks, _) => toks,
+            Src::Take(toks, _) => toks,
         }
     }
 
-    // Token cursor.
+    /// The next event's first token.
+    #[inline]
+    fn token(&self) -> &Token {
+        match self.event() {
+            Event::Token(i)
+            | Event::Rest(i)
+            | Event::Word(i)
+            | Event::Bound(i)
+            | Event::Open(_, i) => &self.toks()[i as usize],
+            other => unreachable!("no token at {other:?}"),
+        }
+    }
 
+    /// The token the next event consumed, or none where it opens a rule or closes.
+    #[inline]
     fn peek(&self) -> &Tok {
-        &self.tokens[self.pos].tok
+        match self.event() {
+            Event::Token(i) | Event::Word(i) | Event::Bound(i) => &self.toks()[i as usize].tok,
+            Event::Rest(i) => match self.toks()[i as usize].tok {
+                Tok::GtEq => &REST_EQ,
+                _ => &REST_GT,
+            },
+            _ => &NO_TOKEN,
+        }
     }
 
-    /// The token `n` places along; the `Eof` terminator past the end.
-    fn tok_at(&self, n: usize) -> &Tok {
-        &self.tokens[n.min(self.tokens.len() - 1)].tok
+    /// Consumes the next event's token with its payload.
+    #[inline]
+    fn advance(&mut self) -> Tok {
+        let (Event::Token(i) | Event::Word(i) | Event::Bound(i)) = self.event() else {
+            unreachable!("no token to take at {:?}", self.event())
+        };
+        self.at += 1;
+        match &mut self.src {
+            Src::Read(toks, _) => toks[i as usize].tok.clone(),
+            Src::Take(toks, _) => std::mem::replace(&mut toks[i as usize].tok, Tok::Eof),
+        }
+    }
+
+    #[inline]
+    fn eat(&mut self, want: &Tok) -> bool {
+        let hit = std::mem::discriminant(self.peek()) == std::mem::discriminant(want);
+        self.at += hit as usize;
+        hit
+    }
+
+    fn eat_semi(&mut self) {
+        self.eat(&Tok::Semi);
+    }
+
+    /// Takes the `>` that closes a generic list, which may be half a `>>` or `>=`.
+    fn eat_close(&mut self) -> bool {
+        let hit = matches!(self.peek(), Tok::Gt | Tok::Shr | Tok::GtEq);
+        self.at += hit as usize;
+        hit
+    }
+
+    #[inline]
+    fn at_rule(&self, kind: Kind) -> bool {
+        matches!(self.event(), Event::Open(k, _) if k == kind)
+    }
+
+    /// Whether a rule consumed the next token as the word `word`.
+    #[inline]
+    fn at_word(&self, word: &str) -> bool {
+        matches!(self.event(), Event::Word(_)) && matches!(self.peek(), Tok::Ident(w) if w == word)
+    }
+
+    /// Takes the word `word`, if a rule consumed it as one.
+    fn eat_word(&mut self, word: &str) -> bool {
+        let hit = self.at_word(word);
+        self.at += hit as usize;
+        hit
     }
 
     fn line(&self) -> usize {
-        self.tokens[self.pos].line
-    }
-
-    /// Consumes an optional `;`. Without one, a statement ends where the greedy
-    /// expression grammar cannot extend.
-    fn eat_semi(&mut self) {
-        if *self.peek() == Tok::Semi {
-            self.advance();
-        }
-    }
-
-    /// Consumes consecutive `///` tokens and returns them joined by newlines, or
-    /// `None`. Callers inside bodies discard the result.
-    fn take_docs(&mut self) -> Option<String> {
-        let mut lines: Vec<String> = Vec::new();
-        let mut last_line = 0usize;
-        loop {
-            let line = self.tokens[self.pos].line;
-            match self.peek() {
-                Tok::Doc(t) => {
-                    // A blank line detaches an earlier block (a file header, say): discard it.
-                    if !lines.is_empty() && line > last_line + 1 {
-                        lines.clear();
-                    }
-                    lines.push(t.clone());
-                    last_line = line;
-                    self.advance();
-                }
-                _ => {
-                    // The surviving block must sit directly above the declaration.
-                    if !lines.is_empty() && line > last_line + 1 {
-                        lines.clear();
-                    }
-                    break;
-                }
-            }
-        }
-        if lines.is_empty() {
-            None
-        } else {
-            Some(lines.join("\n"))
-        }
+        self.token().line
     }
 
     fn col(&self) -> usize {
-        self.tokens[self.pos].col
+        self.token().col
     }
 
-    fn advance(&mut self) -> Tok {
-        let t = self.tokens[self.pos].tok.clone();
-        if self.pos + 1 < self.tokens.len() {
-            self.pos += 1;
-        }
-        t
-    }
-
-    /// Restores every token [`Parser::eat`] split, latest first.
-    fn unsplit(&mut self) {
-        while let Some((at, tok)) = self.split.pop() {
-            self.tokens[at].tok = tok;
-            self.tokens[at].col -= 1;
+    fn ident(&mut self) -> String {
+        match self.advance() {
+            Tok::Ident(name) => name,
+            other => unreachable!("the grammar's name is {other:?}"),
         }
     }
 
-    /// Moves past one `{ .. }` group without parsing it.
-    fn skip_braces(&mut self) -> Result<(), Diagnostic> {
-        self.eat(&Tok::LBrace)?;
-        let mut depth = 1usize;
-        while depth > 0 {
-            match self.peek() {
-                Tok::LBrace => depth += 1,
-                Tok::RBrace => depth -= 1,
-                // The refusal an unclosed block's parse states.
-                Tok::Eof => return self.eat(&Tok::RBrace),
-                _ => {}
-            }
-            self.pos += 1;
-        }
-        Ok(())
-    }
-
-    /// The body of a top-level function: parsed, or with [`Parser::skim`]
-    /// skipped and recorded under `at`, the line and column of the function's
-    /// name.
-    fn top_block(&mut self, at: (usize, usize)) -> Result<Block, Diagnostic> {
-        if self.skim.is_none() {
-            return self.block();
-        }
-        let start = self.pos;
-        self.skip_braces()?;
-        if let Some(skipped) = self.skim.as_mut() {
-            skipped.push((at, start..self.pos));
-        }
-        Ok(Block {
-            id: Id::NEW,
-            stmts: Vec::new(),
-        })
-    }
-
-    fn eat(&mut self, expected: &Tok) -> Result<(), Diagnostic> {
-        if self.peek() == expected {
-            self.advance();
-            Ok(())
-        } else if *expected == Tok::Gt && *self.peek() == Tok::GtEq {
-            // `Array<Int>= []`: the lexer max-munches `>=`; closing a generic argument
-            // list takes the `>` and leaves an `=`.
-            self.split.push((self.pos, Tok::GtEq));
-            self.tokens[self.pos].tok = Tok::Eq;
-            self.tokens[self.pos].col += 1;
-            Ok(())
-        } else if *expected == Tok::Gt && *self.peek() == Tok::Shr {
-            // `Array<Array<T>>`: the lexer max-munches `>>`. Closing a generic list takes
-            // one `>` and leaves one for the enclosing list, so a shift survives only
-            // where the expression parser consumes it.
-            self.split.push((self.pos, Tok::Shr));
-            self.tokens[self.pos].tok = Tok::Gt;
-            self.tokens[self.pos].col += 1;
-            Ok(())
-        } else {
-            Err(refuse!(
-                "parse",
-                self.line(),
-                self.col(),
-                Expected,
-                pty = format!("{:?}", expected),
-                aty = format!("{:?}", self.peek())
-            ))
+    fn plain_str(&mut self) -> String {
+        match self.advance() {
+            Tok::Str(s) => s,
+            other => unreachable!("the grammar's plain string is {other:?}"),
         }
     }
 
-    /// The root name of an assignment target: an identifier, or `self`.
-    ///
-    /// `primary` already parses `self` as a variable; only `self = ..` and
-    /// `self.n = ..`, which read the root off the token, need this.
-    fn place_root(&mut self) -> Result<String, Diagnostic> {
-        if *self.peek() == Tok::Vself {
-            self.advance();
-            return Ok("self".to_string());
-        }
-        self.expect_ident()
-    }
-
-    /// Where the token under the cursor is spelled in the file, or `(0, 0)` inside
-    /// a hole ([`Parser::in_hole`]). Every binder's position comes from here.
+    /// Where the token here is spelled in the file, or `(0, 0)` inside a hole
+    /// ([`Build::in_hole`]). Every binder's position comes from here.
     fn binder_pos(&self) -> (usize, usize) {
         if self.in_hole {
             (0, 0)
@@ -687,8 +867,8 @@ impl Parser {
         }
     }
 
-    /// The slot of a node that spells the name under the cursor: its column,
-    /// or none inside a hole, as [`Parser::binder_pos`] places a binder.
+    /// The slot of a node that spells the name here: its column, or none inside a
+    /// hole, as [`Build::binder_pos`] places a binder.
     fn spelled(&self) -> Id {
         match self.in_hole {
             true => Id::NEW,
@@ -696,490 +876,204 @@ impl Parser {
         }
     }
 
-    fn expect_binder(&mut self) -> Result<Binder, Diagnostic> {
+    fn binder(&mut self) -> Binder {
         let (line, col) = self.binder_pos();
-        let name = self.expect_ident()?;
-        Ok(Binder {
+        let name = self.ident();
+        Binder {
             id: Id::NEW,
             name,
             line,
             col,
-        })
+        }
     }
 
-    /// The paths of an `export to "a", "b"` clause, read after `export`; empty
-    /// without one. `to` is contextual: a word only before a path.
-    fn export_to(&mut self) -> Vec<String> {
+    /// `( a, b, .. )`, the opening parenthesis consumed, each item read by `item`.
+    fn list_to(&mut self, close: &Tok, mut item: impl FnMut(&mut Self)) {
+        while !self.eat(close) {
+            item(self);
+            self.eat(&Tok::Comma);
+        }
+    }
+
+    fn binders_to_paren(&mut self) -> Vec<Binder> {
         let mut out = Vec::new();
-        let at_path = |p: &Self, at: usize| matches!(p.tokens[at].tok, Tok::Str(_));
-        if !(matches!(self.peek(), Tok::Ident(w) if w == "to") && at_path(self, self.pos + 1)) {
-            return out;
-        }
-        self.advance();
-        while let Tok::Str(path) = self.peek().clone() {
-            self.advance();
-            out.push(path);
-            if *self.peek() != Tok::Comma || !at_path(self, self.pos + 1) {
-                break;
-            }
-            self.advance();
-        }
+        self.list_to(&Tok::RParen, |b| out.push(b.binder()));
         out
     }
 
-    fn expect_ident(&mut self) -> Result<String, Diagnostic> {
-        let (line, col) = (self.line(), self.col());
-        match self.advance() {
-            Tok::Ident(name) => Ok(name),
-            other => Err(refuse!(
-                "parse",
-                line,
-                col,
-                ExpectedIdent,
-                found = format!("{:?}", other)
-            )),
+    fn exprs_to_paren(&mut self, out: &mut Vec<Expr>) {
+        self.list_to(&Tok::RParen, |b| out.push(b.expr()));
+    }
+
+    /// Consumes consecutive `///` tokens and returns them joined by newlines, or
+    /// `None`. A blank line detaches an earlier block, and the block that survives
+    /// sits directly above the declaration.
+    fn take_docs(&mut self) -> Option<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut last_line = 0usize;
+        while matches!(self.peek(), Tok::Doc(_)) {
+            let line = self.line();
+            if !lines.is_empty() && line > last_line + 1 {
+                lines.clear();
+            }
+            if let Tok::Doc(t) = self.advance() {
+                lines.push(t);
+            }
+            last_line = line;
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        // The token after the last doc, which no event may record: a refused
+        // declaration's first token, or `Eof`.
+        let next = self.toks()[self.doc_end()].line;
+        if next > last_line + 1 {
+            return None;
+        }
+        Some(lines.join("\n"))
+    }
+
+    /// The index of the token after the doc event just read.
+    fn doc_end(&self) -> usize {
+        match self.events[self.at - 1] {
+            Event::Token(i) => i as usize + 1,
+            other => unreachable!("a doc is a token, not {other:?}"),
         }
     }
 
-    // Grammar.
+    // Declarations.
 
-    /// Parses every top-level declaration with recovery: a failed declaration
-    /// records its diagnostic and the cursor skips to the next starter.
-    fn program_accum(&mut self) -> (Program, Vec<Diagnostic>) {
-        let mut imports = Vec::new();
-        let mut type_decls = Vec::new();
-        let mut functions = Vec::new();
-        let mut protocols = Vec::new();
-        let mut contracts = Vec::new();
-        let mut impls = Vec::new();
-        let mut globals = Vec::new();
-        let mut tests = Vec::new();
-        let mut benches = Vec::new();
-        let mut log_level = DEFAULT_LOG_LEVEL;
-        let mut log_sink = LogSink::Stderr;
-        let mut saw_logging = false;
-        let mut errors = Vec::new();
-        while *self.peek() != Tok::Eof {
-            // A failed `fn f<T>` clears its generic params only on success; reset them so
-            // a `T` cannot parse as `Type::Param` in the next declaration.
-            self.type_params.clear();
-            let doc = self.take_docs();
-            if *self.peek() == Tok::Eof {
-                break;
+    /// Reads one item of the file: its docs, `export`, and the declaration.
+    fn item(
+        &mut self,
+        program: &mut Program,
+        bodies: &mut Vec<SkimmedBody>,
+        imported: bool,
+        skips: &[std::ops::Range<usize>],
+    ) {
+        let doc = self.take_docs();
+        let exported = self.eat(&Tok::Export);
+        let export_to = self.export_to();
+        let is_gen = self.eat_word("gen");
+        let is_mut = self.eat(&Tok::Mut);
+        match self.peek() {
+            Tok::Fn => {
+                let mut f = self.function(is_gen, skips, bodies);
+                f.doc = doc;
+                f.exported = exported;
+                f.export_to = export_to;
+                f.is_mut = is_mut;
+                program.functions.push(f);
             }
-            // `export` marks the following declaration importable.
-            let mut export_to = Vec::new();
-            let exported = if *self.peek() == Tok::Export {
-                self.advance();
-                export_to = self.export_to();
-                // `export extern fn`: `extern` is contextual, a starter only before `fn`.
-                let is_export_extern = matches!(self.peek(), Tok::Ident(n) if n == "extern")
-                    && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
-                // `export gen fn`: `gen` is contextual too.
-                let is_export_gen = matches!(self.peek(), Tok::Ident(n) if n == "gen")
-                    && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
-                let is_export_contract = at_contract_decl(&self.tokens, self.pos);
-                // `export mut fn`: `export` is outermost, as in `export gen fn`.
-                let is_export_mut =
-                    *self.peek() == Tok::Mut && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
-                if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol)
-                    && !is_export_extern
-                    && !is_export_gen
-                    && !is_export_contract
-                    && !is_export_mut
-                {
-                    // Module state is legal in any module but never exported.
-                    let rule = if *self.peek() == Tok::Let {
-                        Rule::ModuleStateExport {}
-                    } else {
-                        Rule::ExportNeedsDecl {}
+            Tok::Import => program.imports.push(self.import_decl()),
+            Tok::Type => {
+                let mut ds = self.type_decl();
+                ds[0].doc = doc;
+                ds[0].exported = exported;
+                ds[0].export_to = export_to;
+                program.type_decls.extend(ds);
+            }
+            Tok::Protocol => {
+                let mut p = self.protocol_decl();
+                p.doc = doc;
+                p.exported = exported;
+                p.export_to = export_to;
+                program.protocols.push(p);
+            }
+            Tok::Impl => program.impls.push(self.impl_block()),
+            Tok::Let => {
+                let mut g = self.global_decl();
+                g.doc = doc;
+                program.globals.push(g);
+            }
+            _ if self.at_word("contract") => {
+                let mut c = self.contract_decl();
+                c.doc = doc;
+                c.exported = exported;
+                c.export_to = export_to;
+                program.contracts.push(c);
+            }
+            _ if self.at_word("extern") => {
+                let mut f = self.extern_function(exported);
+                f.doc = doc;
+                program.functions.push(f);
+            }
+            _ if self.at_word("logging") => self.logging_config(program),
+            _ if self.at_word("test") || self.at_word("bench") => {
+                let line = self.line();
+                let test = self.at_word("test");
+                self.at += 1;
+                let name = self.plain_str();
+                if !imported {
+                    let block = NamedBlock {
+                        name,
+                        body: self.block(),
+                        doc,
+                        line,
                     };
-                    errors.push(Diagnostic::refusal(self.line(), self.col(), "parse", rule));
-                    self.sync_to_decl();
-                    continue;
-                }
-                if is_export_extern && !export_to.is_empty() {
-                    errors.push(refuse!("parse", self.line(), self.col(), ExportToExtern));
-                    self.sync_to_decl();
-                    continue;
-                }
-                true
-            } else {
-                false
-            };
-            match self.peek() {
-                Tok::Import => match self.import_decl() {
-                    Ok(i) => imports.push(i),
-                    Err(d) => {
-                        errors.push(d);
-                        self.sync_to_decl();
+                    match test {
+                        true => program.tests.push(block),
+                        false => program.benches.push(block),
                     }
-                },
-                Tok::Type => match self.type_decl() {
-                    Ok(mut ds) => {
-                        ds[0].doc = doc;
-                        ds[0].exported = exported;
-                        ds[0].export_to = export_to;
-                        type_decls.extend(ds);
-                    }
-                    Err(d) => {
-                        errors.push(d);
-                        self.sync_to_decl();
-                    }
-                },
-                Tok::Fn => match self.function(false) {
-                    Ok(mut f) => {
-                        f.doc = doc;
-                        f.exported = exported;
-                        f.export_to = export_to;
-                        functions.push(f);
-                    }
-                    Err(d) => {
-                        errors.push(d);
-                        self.sync_to_decl();
-                    }
-                },
-                // `gen fn`: a compile-time module generator. `gen` is contextual,
-                // a starter only before `fn`.
-                Tok::Ident(name)
-                    if name == "gen" && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
-                {
-                    self.advance();
-                    match self.function(true) {
-                        Ok(mut f) => {
-                            f.doc = doc;
-                            f.exported = exported;
-                            f.export_to = export_to;
-                            functions.push(f);
-                        }
-                        Err(d) => {
-                            errors.push(d);
-                            self.sync_to_decl();
-                        }
-                    }
-                }
-                // `mut fn`: a procedure that changes state. `mut` is already a
-                // keyword, so this reserves nothing.
-                Tok::Mut if matches!(self.tokens[self.pos + 1].tok, Tok::Fn) => {
-                    self.advance();
-                    match self.function(false) {
-                        Ok(mut f) => {
-                            f.doc = doc;
-                            f.exported = exported;
-                            f.export_to = export_to;
-                            f.is_mut = true;
-                            functions.push(f);
-                        }
-                        Err(d) => {
-                            errors.push(d);
-                            self.sync_to_decl();
-                        }
-                    }
-                }
-                Tok::Protocol => match self.protocol_decl() {
-                    Ok(mut p) => {
-                        p.doc = doc;
-                        p.exported = exported;
-                        p.export_to = export_to;
-                        protocols.push(p);
-                    }
-                    Err(d) => {
-                        errors.push(d);
-                        self.sync_to_decl();
-                    }
-                },
-                // `contract Name { .. }`, contextual: only `contract <Ident> {`
-                // starts one.
-                Tok::Ident(_) if at_contract_decl(&self.tokens, self.pos) => {
-                    match self.contract_decl() {
-                        Ok(mut c) => {
-                            c.doc = doc;
-                            c.exported = exported;
-                            c.export_to = export_to;
-                            contracts.push(c);
-                        }
-                        Err(d) => {
-                            errors.push(d);
-                            self.sync_to_decl();
-                        }
-                    }
-                }
-                Tok::Impl => match self.impl_block() {
-                    Ok(i) => impls.push(i),
-                    Err(d) => {
-                        errors.push(d);
-                        self.sync_to_decl();
-                    }
-                },
-                // Top-level `let [mut] name [: Type] = init`: module state.
-                Tok::Let => match self.global_decl() {
-                    Ok(mut g) => {
-                        g.doc = doc;
-                        globals.push(g);
-                    }
-                    Err(d) => {
-                        errors.push(d);
-                        self.sync_to_decl();
-                    }
-                },
-                // `extern fn`: a JS import, contextual like `gen`.
-                Tok::Ident(name)
-                    if name == "extern" && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
-                {
-                    // Without `export`, `extern fn` is a body-less JS import; `export extern fn`
-                    // with a body is a Vyrn function exported to JS.
-                    match self.extern_function(exported) {
-                        Ok(mut f) => {
-                            f.doc = doc;
-                            functions.push(f);
-                        }
-                        Err(d) => {
-                            errors.push(d);
-                            self.sync_to_decl();
-                        }
-                    }
-                }
-                // `test "name" { body }`: `test` is a starter only before a string
-                // literal.
-                Tok::Ident(word)
-                    if word == "test"
-                        && let Tok::Str(name) = &self.tokens[self.pos + 1].tok =>
-                {
-                    match self.named_block(name.clone()) {
-                        Ok(Some(mut t)) => {
-                            t.doc = doc;
-                            tests.push(t);
-                        }
-                        Ok(None) => {}
-                        Err(d) => {
-                            errors.push(d);
-                            self.sync_to_decl();
-                        }
-                    }
-                }
-                // `bench "name" { body }`, contextual like `test`.
-                Tok::Ident(word)
-                    if word == "bench"
-                        && let Tok::Str(name) = &self.tokens[self.pos + 1].tok =>
-                {
-                    match self.named_block(name.clone()) {
-                        Ok(Some(mut b)) => {
-                            b.doc = doc;
-                            benches.push(b);
-                        }
-                        Ok(None) => {}
-                        Err(d) => {
-                            errors.push(d);
-                            self.sync_to_decl();
-                        }
-                    }
-                }
-                Tok::Ident(name) if name == "logging" => {
-                    let line = self.line();
-                    let col = self.col();
-                    if saw_logging {
-                        errors.push(refuse!("parse", line, col, DuplicateLogging));
-                        self.sync_to_decl();
-                        continue;
-                    }
-                    saw_logging = true;
-                    match self.logging_config() {
-                        Ok((lvl, sink)) => {
-                            log_level = lvl;
-                            log_sink = sink;
-                        }
-                        Err(d) => {
-                            errors.push(d);
-                            self.sync_to_decl();
-                        }
-                    }
-                }
-                other => {
-                    errors.push(refuse!(
-                        "parse",
-                        self.line(),
-                        self.col(),
-                        TopLevelExpected,
-                        found = format!("{other:?}")
-                    ));
-                    self.advance(); // Consume the stray token so the loop makes progress.
                 }
             }
+            // `~^TopLevelExpected` consumed the stray token and recorded nothing.
+            _ => {}
         }
-        // Merge the in-body recovery diagnostics and sort every error by position.
-        let mut errors = errors;
-        errors.append(&mut self.errors);
-        errors.sort_by_key(|d| (d.line, d.col));
-        (
-            Program {
-                imports,
-                type_decls,
-                functions,
-                protocols,
-                contracts,
-                impls: impls.into(),
-                globals,
-                tests,
-                benches,
-                log_level,
-                log_sink,
-                // The loader fills this once every module is linked.
-                surface_shadows: std::collections::HashSet::new(),
-                host: Host::default(),
-                module_hashes: std::collections::BTreeMap::new(),
-                units: 0,
-                expansions: Default::default(),
-                spellings: Default::default(),
-                orders: Default::default(),
-                prove: None,
-                proved: Default::default(),
-                session: Default::default(),
-            },
-            errors,
-        )
     }
 
-    /// Advances to a top-level declaration starter at brace depth 0, or `Eof`.
-    /// Brace depth keeps a stray `fn` inside an unbalanced body from resuming
-    /// mid-declaration.
-    fn sync_to_decl(&mut self) {
-        // Skip the failing token first: it belongs to the bad declaration, and for a
-        // duplicate `logging` it is the unconsumed starter, so this ensures progress.
-        self.advance();
-        let mut depth = 0i32;
-        while *self.peek() != Tok::Eof {
-            match self.peek() {
-                Tok::LBrace => {
-                    depth += 1;
-                    self.advance();
-                }
-                Tok::RBrace => {
-                    if depth > 0 {
-                        depth -= 1;
-                    }
-                    self.advance();
-                }
-                Tok::Fn
-                | Tok::Type
-                | Tok::Protocol
-                | Tok::Impl
-                | Tok::Import
-                | Tok::Export
-                | Tok::Let
-                    if depth == 0 =>
-                {
-                    return
-                }
-                Tok::Ident(name) if depth == 0 && name == "logging" => return,
-                Tok::Mut if depth == 0 && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) => {
-                    return
-                }
-                Tok::Ident(name)
-                    if depth == 0
-                        && (name == "extern" || name == "gen")
-                        && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
-                {
-                    return
-                }
-                Tok::Ident(name)
-                    if depth == 0
-                        && (name == "test" || name == "bench")
-                        && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
-                {
-                    return
-                }
-                Tok::Ident(_) if depth == 0 && at_contract_decl(&self.tokens, self.pos) => return,
-                _ => {
-                    self.advance();
-                }
+    /// The paths of an `export to "a", "b"` clause; empty without one.
+    fn export_to(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.eat_word("to") {
+            out.push(self.plain_str());
+            while self.eat(&Tok::Comma) {
+                out.push(self.plain_str());
             }
         }
+        out
     }
 
     /// `protocol Name { type A  fn m(self, p: T, ..) -> R; .. }`: method
     /// signatures and associated types. The `self` receiver is required
     /// and dropped from the stored parameters. An associated type parses as
     /// [`Type::Param`] and must precede the signatures that name it.
-    fn protocol_decl(&mut self) -> Result<ProtocolDecl, Diagnostic> {
-        // Restore the associated-type aliases on every exit path: after a `?` failure
-        // recovery moves on, and a stale alias would rewrite the next declaration's
-        // type names (`program_accum` resets `type_params` but not these).
-        let outer_aliases = std::mem::take(&mut self.type_aliases);
-        let r = self.protocol_decl_inner();
-        self.type_aliases = outer_aliases;
-        r
-    }
-
-    fn protocol_decl_inner(&mut self) -> Result<ProtocolDecl, Diagnostic> {
+    fn protocol_decl(&mut self) -> ProtocolDecl {
         let line = self.line();
-        self.eat(&Tok::Protocol)?;
-        let name = self.expect_ident()?;
-        self.eat(&Tok::LBrace)?;
+        self.at += 1;
+        let name = self.ident();
+        self.eat(&Tok::LBrace);
         let mut methods = Vec::new();
         let mut assoc: Vec<String> = Vec::new();
-        while *self.peek() != Tok::RBrace {
+        loop {
             let doc = self.take_docs();
-            if *self.peek() == Tok::RBrace {
+            if self.eat(&Tok::RBrace) {
                 break;
             }
-            if *self.peek() == Tok::Type {
-                let (tline, col) = (self.line(), self.col());
-                self.advance();
-                let aname = self.expect_ident()?;
-                if *self.peek() == Tok::Eq {
-                    return Err(refuse!("parse", tline, col, AssocTypeRhs, aname));
-                }
-                if !methods.is_empty() {
-                    return Err(refuse!(
-                        "parse",
-                        tline,
-                        col,
-                        AssocTypeAfterMethods,
-                        aname,
-                        name
-                    ));
-                }
-                assoc.push(aname.clone());
-                self.type_aliases.insert(aname.clone(), Type::Param(aname));
+            if self.eat(&Tok::Type) {
+                assoc.push(self.ident());
                 self.eat_semi();
                 continue;
             }
             let mline = self.line();
-            self.eat(&Tok::Fn)?;
-            let mname = self.expect_ident()?;
-            self.eat(&Tok::LParen)?;
-            let recv = self.parse_self_capability();
-            self.eat(&Tok::Vself)?;
+            self.at += 1;
+            let mname = self.ident();
+            self.eat(&Tok::LParen);
+            let recv = self.capability();
+            self.eat(&Tok::Vself);
             let mut params = Vec::new();
             let mut param_caps = Vec::new();
-            while *self.peek() == Tok::Comma {
-                self.advance();
-                let _pname = self.expect_ident()?;
-                self.eat(&Tok::Colon)?;
-                param_caps.push(self.parse_capability());
-                params.push(self.type_()?);
+            while self.eat(&Tok::Comma) {
+                self.at += 1; // The parameter's name is not kept.
+                self.eat(&Tok::Colon);
+                param_caps.push(self.capability());
+                params.push(self.type_());
             }
-            self.eat(&Tok::RParen)?;
+            self.eat(&Tok::RParen);
             let mut result_cap = None;
-            let ret = if *self.peek() == Tok::Arrow {
-                self.advance();
-                let (rline, rcol) = (self.line(), self.col());
-                result_cap = self.parse_result_capability()?;
-                // A protocol may declare a projection under the rule an impl member follows.
-                if let Some(rc) = result_cap {
-                    if recv != rc {
-                        let want = rc.word();
-                        return Err(refuse!(
-                            "parse",
-                            rline,
-                            rcol,
-                            ProjectionReceiver,
-                            name = mname,
-                            want
-                        ));
-                    }
-                }
-                self.type_()?
+            let ret = if self.eat(&Tok::Arrow) {
+                result_cap = self.result_capability();
+                self.type_()
             } else {
                 Type::Unit
             };
@@ -1195,8 +1089,7 @@ impl Parser {
                 line: mline,
             });
         }
-        self.eat(&Tok::RBrace)?;
-        Ok(ProtocolDecl {
+        ProtocolDecl {
             exported: false,
             export_to: Vec::new(),
             module: None,
@@ -1205,7 +1098,7 @@ impl Parser {
             assoc,
             methods,
             line,
-        })
+        }
     }
 
     /// `contract Name { let m: T = d  fn m(a: T) -> R  fn *(a: T) -> R }`: a module
@@ -1214,80 +1107,24 @@ impl Parser {
     /// It differs from [`Self::protocol_decl`] in two ways: member `///` docs are
     /// kept for the LSP, and member type parameters are implicit, recognized by
     /// spelling ([`is_member_type_param`]).
-    fn contract_decl(&mut self) -> Result<ContractDecl, Diagnostic> {
+    fn contract_decl(&mut self) -> ContractDecl {
         let line = self.line();
-        self.advance();
-        let name = self.expect_ident()?;
-        self.eat(&Tok::LBrace)?;
+        self.at += 1;
+        let name = self.ident();
+        self.eat(&Tok::LBrace);
         let mut members: Vec<ContractMember> = Vec::new();
-        while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
+        loop {
             let doc = self.take_docs();
-            if *self.peek() == Tok::RBrace {
+            if self.eat(&Tok::RBrace) {
                 break;
             }
             let mline = self.line();
-            let member = match self.peek() {
-                Tok::Let => self.contract_value_member(doc, mline)?,
-                Tok::Fn => self.contract_fn_member(doc, mline)?,
-                other => {
-                    return Err(refuse!(
-                        "parse",
-                        self.line(),
-                        self.col(),
-                        ContractMemberExpected,
-                        name,
-                        found = format!("{other:?}")
-                    ))
-                }
-            };
-            // A name may repeat: the repeats are alternative signatures, and a module
-            // matches any one (a page's `head` varies). Refused: a second open rule, and
-            // one name as both a `let` and a `fn` member.
-            if let Some(prev) = members.iter().find(|m| m.name == member.name) {
-                if member.is_open_rule() {
-                    return Err(refuse!(
-                        "parse",
-                        member.line,
-                        self.col(),
-                        ContractOpenRuleTwice,
-                        name,
-                        line = prev.line
-                    ));
-                }
-                let same_form = matches!(
-                    (&prev.kind, &member.kind),
-                    (
-                        ContractMemberKind::Value { .. },
-                        ContractMemberKind::Value { .. }
-                    ) | (ContractMemberKind::Fn { .. }, ContractMemberKind::Fn { .. })
-                );
-                if !same_form {
-                    return Err(refuse!(
-                        "parse",
-                        member.line,
-                        self.col(),
-                        ContractMemberFormChange,
-                        name,
-                        member = member.name,
-                        line = prev.line
-                    ));
-                }
-                if matches!(member.kind, ContractMemberKind::Value { .. }) {
-                    return Err(refuse!(
-                        "parse",
-                        member.line,
-                        self.col(),
-                        ContractMemberTwice,
-                        name,
-                        member = member.name,
-                        line = prev.line
-                    ));
-                }
-            }
-            members.push(member);
+            members.push(match self.eat(&Tok::Let) {
+                true => self.contract_value_member(doc, mline),
+                false => self.contract_fn_member(doc, mline),
+            });
         }
-        self.eat(&Tok::RBrace)?;
-        Ok(ContractDecl {
+        ContractDecl {
             name,
             exported: false,
             export_to: Vec::new(),
@@ -1295,112 +1132,54 @@ impl Parser {
             doc: None,
             members,
             line,
-        })
+        }
     }
 
     /// `let name: Type [= default]` in a contract. A default makes the member
     /// optional.
-    fn contract_value_member(
-        &mut self,
-        doc: Option<String>,
-        line: usize,
-    ) -> Result<ContractMember, Diagnostic> {
-        self.eat(&Tok::Let)?;
-        let name = self.expect_ident()?;
-        if *self.peek() != Tok::Colon {
-            return Err(refuse!(
-                "parse",
-                self.line(),
-                self.col(),
-                ContractMemberNeedsType,
-                name
-            ));
-        }
-        self.eat(&Tok::Colon)?;
-        let ty = self.contract_member_type()?;
-        let default = if *self.peek() == Tok::Eq {
-            self.advance();
-            Some(Box::new(self.expr()?))
-        } else {
-            None
-        };
+    fn contract_value_member(&mut self, doc: Option<String>, line: usize) -> ContractMember {
+        let name = self.ident();
+        self.eat(&Tok::Colon);
+        let ty = self.contract_member_type();
+        let default = self.eat(&Tok::Eq).then(|| Box::new(self.expr()));
         self.eat_semi();
-        Ok(ContractMember {
+        ContractMember {
             name,
             doc,
             kind: ContractMemberKind::Value { ty, default },
             line,
-        })
+        }
     }
 
     /// `fn name(a: T, ..) -> R [= default]`, or the open rule `fn *(a: T, ..) -> R`,
     /// in a contract. Parameter names are not kept: a contract constrains arity and
     /// types. The default is an expression of the return type and makes the member
     /// optional.
-    fn contract_fn_member(
-        &mut self,
-        doc: Option<String>,
-        line: usize,
-    ) -> Result<ContractMember, Diagnostic> {
-        self.eat(&Tok::Fn)?;
-        let name = if *self.peek() == Tok::Star {
-            self.advance();
-            OPEN_RULE_NAME.to_string()
-        } else {
-            self.expect_ident()?
+    fn contract_fn_member(&mut self, doc: Option<String>, line: usize) -> ContractMember {
+        self.at += 1;
+        let name = match self.eat(&Tok::Star) {
+            true => OPEN_RULE_NAME.to_string(),
+            false => self.ident(),
         };
-        self.eat(&Tok::LParen)?;
+        self.eat(&Tok::LParen);
         // `fn *(..) -> R` constrains the return type only. `..` is two `.` tokens.
-        let variadic = *self.peek() == Tok::Dot
-            && self.tokens.get(self.pos + 1).map(|t| &t.tok) == Some(&Tok::Dot);
+        let variadic = self.eat(&Tok::Dot);
         if variadic {
-            if name != OPEN_RULE_NAME {
-                return Err(refuse!(
-                    "parse",
-                    self.line(),
-                    self.col(),
-                    ContractMemberParams,
-                    name
-                ));
-            }
-            self.advance();
-            self.advance();
+            self.at += 1;
         }
         let mut params = Vec::new();
-        while !variadic && *self.peek() != Tok::RParen {
-            let _pname = self.expect_ident()?;
-            self.eat(&Tok::Colon)?;
-            params.push(self.contract_member_type()?);
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        self.eat(&Tok::RParen)?;
-        let ret = if *self.peek() == Tok::Arrow {
-            self.advance();
-            self.contract_member_type()?
-        } else {
-            Type::Unit
+        self.list_to(&Tok::RParen, |b| {
+            b.at += 1;
+            b.eat(&Tok::Colon);
+            params.push(b.contract_member_type());
+        });
+        let ret = match self.eat(&Tok::Arrow) {
+            true => self.contract_member_type(),
+            false => Type::Unit,
         };
-        let default = if *self.peek() == Tok::Eq {
-            if name == OPEN_RULE_NAME {
-                // The open rule has no name whose absence a default could stand in for.
-                return Err(refuse!(
-                    "parse",
-                    self.line(),
-                    self.col(),
-                    ContractOpenRuleDefault
-                ));
-            }
-            self.advance();
-            Some(Box::new(self.expr()?))
-        } else {
-            None
-        };
+        let default = self.eat(&Tok::Eq).then(|| Box::new(self.expr()));
         self.eat_semi();
-        Ok(ContractMember {
+        ContractMember {
             name,
             doc,
             kind: ContractMemberKind::Fn {
@@ -1410,15 +1189,15 @@ impl Parser {
                 variadic,
             },
             line,
-        })
+        }
     }
 
     /// A type in a contract member, with its implicit type parameters rewritten to
     /// [`Type::Param`] by spelling ([`is_member_type_param`]).
-    fn contract_member_type(&mut self) -> Result<Type, Diagnostic> {
-        let mut ty = self.type_()?;
+    fn contract_member_type(&mut self) -> Type {
+        let mut ty = self.type_();
         mark_member_type_params(&mut ty);
-        Ok(ty)
+        ty
     }
 
     /// `impl P for T { fn m(self, ..) -> R { .. } .. }`: a type's methods for a
@@ -1426,67 +1205,37 @@ impl Parser {
     ///
     /// `impl<T> P for C<T>` binds type variables for the target and every method.
     /// `type Output = T` binds an associated type, substituted as the methods
-    /// parse, so a method returning `Output` leaves here returning `T`.
+    /// read, so a method returning `Output` leaves here returning `T`.
     ///
     /// A `type` member must come before the methods that name it. Deferring would
     /// need a substitution pass over every body, where a missed `Type::Param`
     /// lowers to `void` silently; one ordering rule with a diagnostic is cheaper.
-    fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
-        // As in [`Parser::protocol_decl`], the aliases are restored around the whole
-        // body, so no `?` exit leaves a stale alias behind.
-        let outer_aliases = std::mem::take(&mut self.type_aliases);
-        let r = self.impl_block_inner();
-        self.type_aliases = outer_aliases;
-        r
-    }
-
-    fn impl_block_inner(&mut self) -> Result<ImplBlock, Diagnostic> {
+    fn impl_block(&mut self) -> ImplBlock {
         let (line, col) = (self.line(), self.col());
-        self.eat(&Tok::Impl)?;
-        let (type_params, type_bounds) = self.type_param_binder()?;
-        self.type_params = type_params.clone();
-        let protocol = self.expect_ident()?;
-        self.eat(&Tok::For)?;
-        let ty = self.type_()?;
-        self.eat(&Tok::LBrace)?;
+        self.at += 1;
+        let (type_params, type_bounds) = self.type_param_binder();
+        let protocol = self.ident();
+        self.eat(&Tok::For);
+        let ty = self.type_();
+        self.eat(&Tok::LBrace);
         let mut methods = Vec::new();
         let mut places = Vec::new();
         let mut assoc: Vec<String> = Vec::new();
-        while *self.peek() != Tok::RBrace {
+        loop {
             self.take_docs(); // Method-level docs are discarded.
-            if *self.peek() == Tok::RBrace {
+            if self.eat(&Tok::RBrace) {
                 break;
             }
-            if *self.peek() == Tok::Type {
-                let (tline, col) = (self.line(), self.col());
-                self.advance();
-                let aname = self.expect_ident()?;
-                // Both bail-outs clear the impl's type parameters; [`Parser::impl_block`]
-                // restores the aliases.
-                if !methods.is_empty() {
-                    self.type_params.clear();
-                    return Err(refuse!(
-                        "parse",
-                        tline,
-                        col,
-                        ImplAssocTypeOrder,
-                        aname,
-                        protocol,
-                        ty
-                    ));
-                }
-                if type_params.contains(&aname) {
-                    self.type_params.clear();
-                    return Err(refuse!("parse", tline, col, ImplAssocTypeClash, aname));
-                }
-                self.eat(&Tok::Eq)?;
-                let bound = self.type_()?;
+            if self.eat(&Tok::Type) {
+                let aname = self.ident();
+                self.eat(&Tok::Eq);
+                let bound = self.type_();
                 assoc.push(aname.clone());
-                self.type_aliases.insert(aname, bound);
+                self.aliases.insert(aname, bound);
                 self.eat_semi();
                 continue;
             }
-            let (mut m, place_cap) = self.impl_method(&ty)?;
+            let (mut m, place_cap) = self.impl_method(&ty);
             m.type_params = type_params.clone();
             m.type_bounds = type_bounds.clone();
             // A capability result makes a member a projection: it goes in
@@ -1497,9 +1246,7 @@ impl Parser {
                 methods.push(m);
             }
         }
-        self.eat(&Tok::RBrace)?;
-        self.type_params.clear();
-        Ok(ImplBlock {
+        ImplBlock {
             protocol,
             type_params,
             type_bounds,
@@ -1509,66 +1256,45 @@ impl Parser {
             places,
             line,
             col,
-        })
+        }
     }
 
-    /// Parses `read self` / `modify self` / `consume self`; a bare `self` is `read`.
-    fn parse_self_capability(&mut self) -> Capability {
-        if let Tok::Ident(id) = self.peek() {
+    /// The word a rule consumed before a type or `self`: `read self`, `consume T`;
+    /// [`Capability::Read`] without one. `Array` and the other constructors are words
+    /// too, and name no capability.
+    fn capability(&mut self) -> Capability {
+        if let (Event::Word(_), Tok::Ident(id)) = (self.event(), self.peek()) {
             if let Some(c) = Capability::from_word(id) {
-                if self.tokens[self.pos + 1].tok == Tok::Vself {
-                    self.advance();
-                    return c;
-                }
+                self.at += 1;
+                return c;
             }
         }
         Capability::Read
     }
 
-    /// Parses the contextual `read` / `modify` a result may carry:
-    /// access to a place the receiver keeps. Neither means an owned value, so
-    /// `-> consume T` is refused as a second spelling of the default.
-    ///
-    /// Every signature position calls this; one that cannot carry a capability
-    /// refuses a `Some` in its own words, rather than an unknown-type error for
-    /// `read` later.
-    fn parse_result_capability(&mut self) -> Result<Option<Capability>, Diagnostic> {
-        let Tok::Ident(id) = self.peek() else {
-            return Ok(None);
-        };
-        let Some(cap) = Capability::from_word(id) else {
-            return Ok(None);
-        };
-        // The word counts only when a type follows. After `-> read {` the brace is the
-        // body and `read` is a type name.
-        if !matches!(
-            self.tokens[self.pos + 1].tok,
-            Tok::Ident(_) | Tok::LParen | Tok::Fn
-        ) {
-            return Ok(None);
+    /// The `read` / `modify` a result may carry: access to a place the receiver
+    /// keeps.
+    fn result_capability(&mut self) -> Option<Capability> {
+        if let (Event::Word(_), Tok::Ident(id)) = (self.event(), self.peek()) {
+            let c = Capability::from_word(id);
+            self.at += c.is_some() as usize;
+            return c;
         }
-        if cap == Capability::Consume {
-            return Err(refuse!("parse", self.line(), self.col(), ConsumeResult));
-        }
-        self.advance();
-        Ok(Some(cap))
+        None
     }
 
     /// One `fn m(read|modify|consume self, ..) -> R { .. }` in an `impl`: a
     /// [`Function`] whose first parameter is `self`, typed to the implementing type
     /// and carrying the receiver's capability. A bare `self` is `read`.
-    fn impl_method(
-        &mut self,
-        self_ty: &Type,
-    ) -> Result<(Function, Option<Capability>), Diagnostic> {
+    fn impl_method(&mut self, self_ty: &Type) -> (Function, Option<Capability>) {
         let line = self.line();
-        self.eat(&Tok::Fn)?;
+        self.at += 1;
         let col = self.col();
-        let name = self.expect_ident()?;
-        self.eat(&Tok::LParen)?;
-        let capability = self.parse_self_capability();
+        let name = self.ident();
+        self.eat(&Tok::LParen);
+        let capability = self.capability();
         let (self_line, self_col) = self.binder_pos();
-        self.eat(&Tok::Vself)?;
+        self.eat(&Tok::Vself);
         let mut params = vec![Param {
             id: Id::NEW,
             name: "self".to_string(),
@@ -1578,13 +1304,12 @@ impl Parser {
             col: self_col,
             clause: None,
         }];
-        while *self.peek() == Tok::Comma {
-            self.advance();
+        while self.eat(&Tok::Comma) {
             let (line, col) = self.binder_pos();
-            let pname = self.expect_ident()?;
-            self.eat(&Tok::Colon)?;
-            let capability = self.parse_capability();
-            let ty = self.type_()?;
+            let pname = self.ident();
+            self.eat(&Tok::Colon);
+            let capability = self.capability();
+            let ty = self.type_();
             params.push(Param {
                 id: Id::NEW,
                 name: pname,
@@ -1595,33 +1320,15 @@ impl Parser {
                 clause: None,
             });
         }
-        self.eat(&Tok::RParen)?;
-        let (ret, result_cap) = if *self.peek() == Tok::Arrow {
-            self.advance();
-            let (rline, rcol) = (self.line(), self.col());
-            let rc = self.parse_result_capability()?;
-            // A projection's capabilities must agree: `-> read T` needs `read self` and
-            // `-> modify T` needs `modify self`. `consume self` pairs with neither,
-            // because the receiver must outlive the access.
-            if let Some(rc) = rc {
-                if capability != rc {
-                    let want = rc.word();
-                    return Err(refuse!(
-                        "parse",
-                        rline,
-                        rcol,
-                        ProjectionReceiver,
-                        name,
-                        want
-                    ));
-                }
-            }
-            (self.type_()?, rc)
+        self.eat(&Tok::RParen);
+        let (ret, result_cap) = if self.eat(&Tok::Arrow) {
+            let rc = self.result_capability();
+            (self.type_(), rc)
         } else {
             (Type::Unit, None)
         };
-        let body = self.block()?;
-        Ok((
+        let body = self.block();
+        (
             Function {
                 exported: false,
                 export_to: Vec::new(),
@@ -1642,258 +1349,105 @@ impl Parser {
                 is_mut: false,
             },
             result_cap,
-        ))
+        )
     }
 
-    /// `logging { level: <name>, sink: <dest> }`, each field optional. Returns the
-    /// threshold ordinal and the sink.
-    fn logging_config(&mut self) -> Result<(usize, LogSink), Diagnostic> {
-        self.advance();
-        self.eat(&Tok::LBrace)?;
-        let mut level = DEFAULT_LOG_LEVEL;
-        let mut sink = LogSink::Stderr;
-        while *self.peek() != Tok::RBrace {
-            let line = self.line();
-            let col = self.col();
-            let key = self.expect_ident()?;
-            self.eat(&Tok::Colon)?;
+    /// `logging { level: <name>, sink: <dest> }`, each field optional.
+    fn logging_config(&mut self, program: &mut Program) {
+        self.at += 1;
+        self.eat(&Tok::LBrace);
+        while !self.eat(&Tok::RBrace) {
+            let key = self.ident();
+            self.eat(&Tok::Colon);
             match key.as_str() {
                 "level" => {
-                    let name = self.expect_ident()?;
-                    level = log_level_ordinal(&name)
-                        .ok_or_else(|| refuse!("parse", line, col, UnknownLogLevel, name))?;
+                    let name = self.ident();
+                    program.log_level = log_level_ordinal(&name)
+                        .unwrap_or_else(|| unreachable!("the grammar names each level"));
                 }
-                "sink" => sink = self.log_sink()?,
-                other => return Err(refuse!("parse", line, col, UnknownLoggingField, other)),
+                _ => program.log_sink = self.log_sink(),
             }
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
-            }
+            self.eat(&Tok::Comma);
         }
-        self.eat(&Tok::RBrace)?;
-        Ok((level, sink))
     }
 
-    fn log_sink(&mut self) -> Result<LogSink, Diagnostic> {
-        let line = self.line();
-        let col = self.col();
-        let name = self.expect_ident()?;
+    fn log_sink(&mut self) -> LogSink {
+        let name = self.ident();
         match name.as_str() {
-            "stderr" => Ok(LogSink::Stderr),
-            "stdout" => Ok(LogSink::Stdout),
-            "file" => {
-                self.eat(&Tok::LParen)?;
-                let path = match self.advance() {
-                    Tok::Str(s) => s,
-                    other => {
-                        return Err(refuse!(
-                            "parse",
-                            line,
-                            col,
-                            FileSinkPath,
-                            found = format!("{other:?}")
-                        ))
-                    }
-                };
-                self.eat(&Tok::RParen)?;
-                Ok(LogSink::File(path))
+            "stderr" => LogSink::Stderr,
+            "stdout" => LogSink::Stdout,
+            _ => {
+                self.eat(&Tok::LParen);
+                let path = self.plain_str();
+                self.eat(&Tok::RParen);
+                LogSink::File(path)
             }
-            other => Err(refuse!("parse", line, col, UnknownSink, other)),
         }
     }
 
     /// `import { a, b } from "path"`; `from` is contextual. `import type { .. }`
     /// marks a JSON Schema import; the loader dispatches on the path's extension.
-    fn import_decl(&mut self) -> Result<ImportDecl, Diagnostic> {
+    /// `import * as ns from <source>` binds one name and adds none of the target's
+    /// exports to the flat namespace.
+    fn import_decl(&mut self) -> ImportDecl {
         let (line, col) = (self.line(), self.col());
-        self.eat(&Tok::Import)?;
-        // `import * as ns from <source>` binds one name and adds none of
-        // the target's exports to the flat namespace.
-        if *self.peek() == Tok::Star {
-            self.advance();
-            let at = self.col();
-            match self.advance() {
-                Tok::Ident(kw) if kw == "as" => {}
-                other => {
-                    return Err(refuse!(
-                        "parse",
-                        line,
-                        at,
-                        ImportStarAs,
-                        found = format!("{other:?}")
-                    ))
-                }
-            }
-            let ns = self.expect_ident()?;
-            let at = self.col();
-            match self.advance() {
-                Tok::Ident(kw) if kw == "from" => {}
-                other => {
-                    return Err(refuse!(
-                        "parse",
-                        line,
-                        at,
-                        ImportStarFrom,
-                        ns,
-                        found = format!("{other:?}")
-                    ))
-                }
-            }
-            let source_at = (self.line(), self.col());
-            let source = self.import_source(line)?;
-            self.eat_semi();
-            return Ok(ImportDecl {
-                names: Vec::new(),
-                namespace: Some(ns),
-                source,
-                line,
-                col,
-                source_at,
+        self.at += 1;
+        let mut names = Vec::new();
+        let mut namespace = None;
+        if self.eat(&Tok::Star) {
+            self.at += 1;
+            namespace = Some(self.ident());
+        } else {
+            self.eat(&Tok::Type);
+            self.eat(&Tok::LBrace);
+            self.list_to(&Tok::RBrace, |b| {
+                let original = b.ident();
+                // `as` is contextual: only between an import name and its `,` or `}`.
+                let alias = b.eat_word("as").then(|| b.ident());
+                names.push(ImportName { original, alias });
             });
         }
-        if *self.peek() == Tok::Type {
-            self.advance();
-        }
-        self.eat(&Tok::LBrace)?;
-        let mut names = Vec::new();
-        while *self.peek() != Tok::RBrace {
-            let original = self.expect_ident()?;
-            // `as` is contextual: only between an import name and its `,` or `}`.
-            let alias = if matches!(self.peek(), Tok::Ident(kw) if kw == "as") {
-                self.advance();
-                Some(self.expect_ident()?)
-            } else {
-                None
-            };
-            names.push(ImportName { original, alias });
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        self.eat(&Tok::RBrace)?;
-        if names.is_empty() {
-            return Err(refuse!("parse", line, self.col(), ImportEmpty));
-        }
-        let at = self.col();
-        match self.advance() {
-            Tok::Ident(kw) if kw == "from" => {}
-            other => {
-                return Err(refuse!(
-                    "parse",
-                    line,
-                    at,
-                    ImportFrom,
-                    found = format!("{other:?}")
-                ))
-            }
-        }
+        self.at += 1;
         let source_at = (self.line(), self.col());
-        let source = self.import_source(line)?;
+        let source = self.import_source();
         self.eat_semi();
-        Ok(ImportDecl {
+        ImportDecl {
             names,
-            namespace: None,
+            namespace,
             source,
             line,
             col,
             source_at,
-        })
+        }
     }
 
     /// The source after `from`: a module path string, or a generator call
     /// `gen(args...)` run at compile time.
-    fn import_source(&mut self, line: usize) -> Result<ImportSource, Diagnostic> {
-        match self.peek().clone() {
-            Tok::Str(p) => {
-                self.advance();
-                Ok(ImportSource::Path(p))
-            }
-            Tok::Ident(gen_name) if matches!(self.tokens[self.pos + 1].tok, Tok::LParen) => {
-                let call_line = self.line();
-                self.advance();
-                self.eat(&Tok::LParen)?;
-                let mut args = Vec::new();
-                while *self.peek() != Tok::RParen {
-                    args.push(self.expr()?);
-                    if *self.peek() == Tok::Comma {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-                self.eat(&Tok::RParen)?;
-                Ok(ImportSource::Generator {
-                    name: gen_name,
-                    args,
-                    line: call_line,
-                })
-            }
-            other => Err(refuse!(
-                "parse",
-                line,
-                self.col(),
-                ImportPathExpected,
-                found = format!("{other:?}")
-            )),
+    fn import_source(&mut self) -> ImportSource {
+        if matches!(self.peek(), Tok::Str(_)) {
+            return ImportSource::Path(self.plain_str());
         }
+        let line = self.line();
+        let name = self.ident();
+        self.eat(&Tok::LParen);
+        let mut args = Vec::new();
+        self.exprs_to_paren(&mut args);
+        ImportSource::Generator { name, args, line }
     }
 
-    fn type_decl(&mut self) -> Result<Vec<TypeDecl>, Diagnostic> {
-        let (line, col) = (self.line(), self.col());
-        self.eat(&Tok::Type)?;
-        let name = self.expect_ident()?;
-
-        let mut type_params = Vec::new();
-        if *self.peek() == Tok::Lt {
-            self.advance();
-            while *self.peek() != Tok::Gt {
-                type_params.push(self.expect_ident()?);
-                if *self.peek() == Tok::Comma {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.eat(&Tok::Gt)?;
-        }
-        self.type_params = type_params.clone();
-
-        self.eat(&Tok::Eq)?;
-        // Collect inline field refinements while the base parses; the collector is
-        // what makes `where` legal in field position.
-        self.field_preds = Some(Vec::new());
-        let base = if *self.peek() == Tok::Enum {
-            self.enum_type()?
-        } else {
-            self.type_()?
-        };
-        let field_preds = self.field_preds.take().unwrap_or_default();
-        let predicate = if *self.peek() == Tok::Where {
-            self.advance();
-            Some(self.expr()?)
-        } else {
-            None
-        };
-        self.eat_semi();
-        self.type_params.clear();
-
+    fn type_decl(&mut self) -> Vec<TypeDecl> {
+        let t = self.type_decl_parts();
+        let (name, line) = (t.name, t.line);
         // Each inline refinement becomes a synthetic validated type named
         // `Decl.field`; the `.` keeps it out of the user namespace. The field's type is
         // rewritten to it, so validation applies unchanged.
-        let mut base = base;
-        let mut decls = Vec::with_capacity(1 + field_preds.len());
-        if !field_preds.is_empty() {
+        let mut base = t.base;
+        let mut decls = Vec::with_capacity(1 + t.preds.len());
+        if !t.preds.is_empty() {
             let Type::Record(fields) = &mut base else {
-                // A refinement was collected but the outer `{ .. }` is not the whole base: a
-                // `&` wrapped it in [`Type::Merge`], or an enum payload holds it. There is no
-                // single record to hang `Decl.field` on.
-                return Err(refuse!("parse", line, col, InlineWhereBase, name));
+                unreachable!("InlineWhereBase refused this declaration")
             };
-            for (fname, pred) in field_preds {
+            for (fname, pred) in t.preds {
                 let synthetic = format!("{name}.{fname}");
                 let field = fields
                     .iter_mut()
@@ -1921,227 +1475,130 @@ impl Parser {
                 export_to: Vec::new(),
                 module: None,
                 doc: None,
-                type_params,
+                type_params: t.type_params,
                 base,
-                predicate,
+                predicate: t.predicate,
                 members: Vec::new(),
                 line,
             },
         );
-        Ok(decls)
+        decls
     }
 
-    /// Parses an optional capability keyword (`read`/`modify`/`consume`/`share`)
-    /// before a parameter's type. Contextual: the word counts only when the next
-    /// token starts a type, `Tok::Fn` included (`run: consume fn() -> T`). A call
-    /// `consume(..)` stays a call, because `LParen` does not start a type.
-    fn parse_capability(&mut self) -> Capability {
-        if let Tok::Ident(id) = self.peek() {
-            if let Some(c) = Capability::from_word(id) {
-                if matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_) | Tok::Fn) {
-                    self.advance();
-                    return c;
-                }
+    fn type_decl_parts(&mut self) -> TypeParts {
+        let line = self.line();
+        self.at += 1;
+        let name = self.ident();
+        let mut type_params = Vec::new();
+        if self.eat(&Tok::Lt) {
+            while !self.eat_close() {
+                type_params.push(self.ident());
+                self.eat(&Tok::Comma);
             }
         }
-        Capability::Read
+        self.eat(&Tok::Eq);
+        // The collector is what makes `where` legal in field position.
+        self.field_preds = Some(Vec::new());
+        let base = match self.eat(&Tok::Enum) {
+            true => self.enum_type(),
+            false => self.type_(),
+        };
+        let preds = self.field_preds.take().unwrap_or_default();
+        let predicate = self.eat(&Tok::Where).then(|| self.expr());
+        self.eat_semi();
+        TypeParts {
+            line,
+            name,
+            type_params,
+            base,
+            predicate,
+            preds,
+        }
     }
 
     /// `enum { Variant(Type), Variant, ... }`: an enum. A trailing comma is allowed,
     /// as in a record; the checker refuses an enum with no variant.
-    fn enum_type(&mut self) -> Result<Type, Diagnostic> {
-        self.eat(&Tok::Enum)?;
-        self.eat(&Tok::LBrace)?;
+    fn enum_type(&mut self) -> Type {
+        self.eat(&Tok::LBrace);
         let mut variants = Vec::new();
-        while *self.peek() != Tok::RBrace {
-            let name = self.expect_ident()?;
+        self.list_to(&Tok::RBrace, |b| {
+            let name = b.ident();
             let mut payload = Vec::new();
-            if *self.peek() == Tok::LParen {
-                self.advance();
-                while *self.peek() != Tok::RParen {
-                    payload.push(self.type_()?);
-                    if *self.peek() == Tok::Comma {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-                self.eat(&Tok::RParen)?;
+            if b.eat(&Tok::LParen) {
+                b.list_to(&Tok::RParen, |b| payload.push(b.type_()));
             }
             variants.push(EnumVariant { name, payload });
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        self.eat(&Tok::RBrace)?;
-        Ok(Type::Enum(variants))
+        });
+        Type::Enum(variants)
     }
 
-    /// `{ field: Type, ... }`: a record type. In a `type` declaration a field may
-    /// carry an inline refinement (`age: Int64 where value >= 18`); the trailing
-    /// `where` after `}` states the cross-field invariant.
-    fn record_type(&mut self) -> Result<Type, Diagnostic> {
-        self.eat(&Tok::LBrace)?;
+    /// `{ field: Type, ... }`, the brace consumed: a record type. In a `type`
+    /// declaration a field may carry an inline refinement
+    /// (`age: Int64 where value >= 18`); the trailing `where` after `}` states the
+    /// cross-field invariant.
+    fn record_type(&mut self) -> Type {
         // Only the outermost record of a `type` declaration collects refinements:
         // `take()` hides the collector from nested, anonymous records.
         let outer = self.field_preds.take();
-        let collecting = outer.is_some();
         let mut local: Vec<(String, Expr)> = Vec::new();
-        let mut parse = || -> Result<Vec<Field>, Diagnostic> {
-            let mut fields = Vec::new();
-            while *self.peek() != Tok::RBrace {
-                let name = self.expect_ident()?;
-                self.eat(&Tok::Colon)?;
-                // `field: lazy T`. `lazy` is contextual: read only where a field's
-                // type begins, a position no call occupies, so `std/ui`'s `lazy(..)` keeps its
-                // name.
-                let lazy = matches!(self.peek(), Tok::Ident(w) if w == "lazy");
-                if lazy {
-                    let line = self.line();
-                    let col = self.col();
-                    self.advance();
-                    // Named record types only: the deferral is a fact about a declared field, and
-                    // an anonymous record has no declaration to stamp on a value.
-                    if !collecting {
-                        return Err(refuse!("parse", line, col, LazyAnonymous));
-                    }
-                }
-                let ty = self.type_()?;
-                let ty = if lazy { Type::Lazy(Box::new(ty)) } else { ty };
-                if *self.peek() == Tok::Where {
-                    let line = self.line();
-                    let col = self.col();
-                    self.advance();
-                    let pred = self.expr()?;
-                    if !collecting {
-                        return Err(refuse!("parse", line, col, WhereAnonymous));
-                    }
-                    // An inline `where` would move the field into a synthetic type and hide the
-                    // `lazy` marker, so the read would stop being forced.
-                    if lazy {
-                        return Err(refuse!("parse", line, col, LazyWhere));
-                    }
-                    local.push((name.clone(), pred));
-                }
-                fields.push(Field { name, ty });
-                if *self.peek() == Tok::Comma {
-                    self.advance();
-                } else {
-                    break;
-                }
+        let mut fields = Vec::new();
+        self.list_to(&Tok::RBrace, |b| {
+            let name = b.ident();
+            b.eat(&Tok::Colon);
+            // `field: lazy T`. `lazy` is contextual: read only where a field's
+            // type begins, a position no call occupies, so `std/ui`'s `lazy(..)` keeps its
+            // name.
+            let lazy = b.eat_word("lazy");
+            let ty = b.type_();
+            let ty = if lazy { Type::Lazy(Box::new(ty)) } else { ty };
+            if b.eat(&Tok::Where) {
+                local.push((name.clone(), b.expr()));
             }
-            self.eat(&Tok::RBrace)?;
-            Ok(fields)
-        };
-        let result = parse();
-        // Restore and extend the collector on the error path too, for `type_decl`'s
-        // recovery.
+            fields.push(Field { name, ty });
+        });
         if let Some(mut prev) = outer {
             prev.extend(local);
             self.field_preds = Some(prev);
         }
-        Ok(Type::Record(result?))
+        Type::Record(fields)
     }
 
     /// An optional `<T: Bound + Other, U>` binder, empty when no `<` follows.
     /// Shared by `fn` and `impl<..>`, so an impl keeps its bounds.
-    #[allow(clippy::type_complexity)]
-    /// The explicit type arguments of a call (`fromJson<Shape>(s)`), or an empty
-    /// list.
-    ///
-    /// `<` after a callee is also less-than, so this parse is speculative: it
-    /// accepts a comma-separated type list closed by `>` with `(` right after.
-    /// Anything else rewinds the cursor and records no diagnostic. The one program
-    /// this reads differently is `a < b > (c)`, which compares a `Bool` with a
-    /// value and has no meaning.
-    fn call_type_args(&mut self) -> Vec<Type> {
-        if *self.peek() != Tok::Lt {
-            return Vec::new();
-        }
-        let saved = self.pos;
-        self.advance();
-        let mut out = Vec::new();
-        loop {
-            match self.type_() {
-                Ok(t) => out.push(t),
-                Err(_) => {
-                    self.pos = saved;
-                    return Vec::new();
-                }
-            }
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        let closes = *self.peek() == Tok::Gt
-            && matches!(
-                self.tokens.get(self.pos + 1).map(|t| &t.tok),
-                Some(Tok::LParen)
-            );
-        if closes && !out.is_empty() {
-            self.advance();
-            return out;
-        }
-        self.pos = saved;
-        Vec::new()
-    }
-
     fn type_param_binder(
         &mut self,
-    ) -> Result<(Vec<String>, std::collections::HashMap<String, Vec<String>>), Diagnostic> {
+    ) -> (Vec<String>, std::collections::HashMap<String, Vec<String>>) {
         let mut type_params = Vec::new();
         let mut type_bounds: std::collections::HashMap<String, Vec<String>> = Default::default();
-        if *self.peek() == Tok::Lt {
-            self.advance();
-            while *self.peek() != Tok::Gt {
-                let tp = self.expect_ident()?;
-                if *self.peek() == Tok::Colon {
-                    self.advance();
-                    let mut bounds = Vec::new();
-                    loop {
-                        bounds.push(self.expect_ident()?);
-                        if *self.peek() == Tok::Plus {
-                            self.advance();
-                        } else {
-                            break;
-                        }
+        if self.eat(&Tok::Lt) {
+            while !self.eat_close() {
+                let tp = self.ident();
+                if self.eat(&Tok::Colon) {
+                    let mut bounds = vec![self.ident()];
+                    while self.eat(&Tok::Plus) {
+                        bounds.push(self.ident());
                     }
                     type_bounds.insert(tp.clone(), bounds);
                 }
                 type_params.push(tp);
-                if *self.peek() == Tok::Comma {
-                    self.advance();
-                } else {
-                    break;
-                }
+                self.eat(&Tok::Comma);
             }
-            self.eat(&Tok::Gt)?;
         }
-        Ok((type_params, type_bounds))
+        (type_params, type_bounds)
     }
 
     /// `(name: [capability] Type [where clause], ..)`: a function's
     /// parameter list, parentheses included.
-    fn params(&mut self) -> Result<Vec<Param>, Diagnostic> {
-        self.eat(&Tok::LParen)?;
+    fn params(&mut self) -> Vec<Param> {
+        self.eat(&Tok::LParen);
         let mut params = Vec::new();
-        while *self.peek() != Tok::RParen {
-            let (line, col) = self.binder_pos();
-            let name = self.expect_ident()?;
-            self.eat(&Tok::Colon)?;
-            let capability = self.parse_capability();
-            let ty = self.type_()?;
-            let clause = match self.peek() {
-                Tok::Where => {
-                    self.advance();
-                    Some(self.expr()?)
-                }
-                _ => None,
-            };
+        self.list_to(&Tok::RParen, |b| {
+            let (line, col) = b.binder_pos();
+            let name = b.ident();
+            b.eat(&Tok::Colon);
+            let capability = b.capability();
+            let ty = b.type_();
+            let clause = b.eat(&Tok::Where).then(|| b.expr());
             params.push(Param {
                 id: Id::NEW,
                 name,
@@ -2151,51 +1608,42 @@ impl Parser {
                 col,
                 clause,
             });
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        self.eat(&Tok::RParen)?;
-        Ok(params)
+        });
+        params
     }
 
     /// `[gen] fn name<...>(params) -> Ret { body }`. `is_gen` says a contextual
-    /// `gen` preceded `fn`.
-    fn function(&mut self, is_gen: bool) -> Result<Function, Diagnostic> {
+    /// `gen` preceded `fn`. With `skipped`, the recognizer skimmed the body.
+    fn function(
+        &mut self,
+        is_gen: bool,
+        skips: &[std::ops::Range<usize>],
+        bodies: &mut Vec<SkimmedBody>,
+    ) -> Function {
         let line = self.line();
-        self.eat(&Tok::Fn)?;
+        self.at += 1;
         let col = self.col();
-        let name = self.expect_ident()?;
-
-        let (type_params, type_bounds) = self.type_param_binder()?;
-        self.type_params = type_params.clone();
-
-        let params = self.params()?;
-
+        let name = self.ident();
+        let (type_params, type_bounds) = self.type_param_binder();
+        let params = self.params();
         // No `-> Type` means Unit.
-        let ret = if *self.peek() == Tok::Arrow {
-            self.advance();
-            let (rline, rcol) = (self.line(), self.col());
-            if self.parse_result_capability()?.is_some() {
-                return Err(refuse!("parse", rline, rcol, FreeFnCapability, name));
-            }
-            self.type_()?
-        } else {
-            Type::Unit
+        let ret = match self.eat(&Tok::Arrow) {
+            true => self.type_(),
+            false => Type::Unit,
         };
-        let ret_clause = match self.peek() {
-            Tok::Where => {
-                self.advance();
-                Some(self.cond_expr()?)
+        let ret_clause = self.eat(&Tok::Where).then(|| self.expr());
+        let body = match self.event() {
+            Event::Skipped(k) => {
+                self.at += 1;
+                bodies.push(((line, col), skips[k as usize].clone()));
+                Block {
+                    id: Id::NEW,
+                    stmts: Vec::new(),
+                }
             }
-            _ => None,
+            _ => self.block(),
         };
-
-        let body = self.top_block((line, col))?;
-        self.type_params.clear();
-        Ok(Function {
+        Function {
             name,
             exported: false,
             export_to: Vec::new(),
@@ -2214,94 +1662,38 @@ impl Parser {
             is_gen,
             // The caller sets this when `mut` preceded `fn`.
             is_mut: false,
-        })
-    }
-
-    /// `test "name" { body }` and `bench "name" { body }`: one declaration, at the
-    /// word, whose string the caller read as `name`. The checker allows
-    /// `assert`/`assertEq` in a test and `blackBox` in a bench. `None` for an
-    /// imported module's block, skipped unparsed.
-    fn named_block(&mut self, name: String) -> Result<Option<NamedBlock>, Diagnostic> {
-        let line = self.line();
-        // Past the word and the string, without copying them; `Eof` follows the string.
-        self.pos += 2;
-        if self.imported {
-            self.skip_braces()?;
-            return Ok(None);
         }
-        // A test and a bench are monomorphic.
-        self.type_params.clear();
-        let body = self.block()?;
-        self.type_params.clear();
-        Ok(Some(NamedBlock {
-            name,
-            body,
-            doc: None,
-            line,
-        }))
     }
 
-    /// `extern fn name(params) -> Ret`; `exported` says `export`
-    /// preceded it.
+    /// `extern fn name(params) -> Ret`; `exported` says `export` preceded it.
     ///
-    /// - `extern fn f(..)` is a JS import: the host supplies the body, so a body is
-    ///   an error.
-    /// - `export extern fn f(..) { .. }` is a Vyrn function exported to JS and must
-    ///   have a body. The checker enforces the ABI type domain.
-    fn extern_function(&mut self, exported: bool) -> Result<Function, Diagnostic> {
+    /// - `extern fn f(..)` is a JS import: the host supplies the body.
+    /// - `export extern fn f(..) { .. }` is a Vyrn function exported to JS. The checker
+    ///   enforces the ABI type domain.
+    fn extern_function(&mut self, exported: bool) -> Function {
         let line = self.line();
-        self.advance();
-        self.eat(&Tok::Fn)?;
+        self.at += 2;
         let col = self.col();
-        let name = self.expect_ident()?;
+        let name = self.ident();
         // An extern has no generic parameters: the ABI is monomorphic.
-        let params = self.params()?;
-        let ret = if *self.peek() == Tok::Arrow {
-            self.advance();
-            self.type_()?
-        } else {
-            Type::Unit
+        let params = self.params();
+        let ret = match self.eat(&Tok::Arrow) {
+            true => self.type_(),
+            false => Type::Unit,
         };
-        let has_body = *self.peek() == Tok::LBrace;
-        if exported {
-            if !has_body {
-                return Err(refuse!(
-                    "parse",
-                    self.line(),
-                    self.col(),
-                    ExportedExternBody
-                ));
+        let body = match exported {
+            true => self.block(),
+            false => {
+                self.eat_semi();
+                Block {
+                    id: Id::NEW,
+                    stmts: Vec::new(),
+                }
             }
-            self.type_params.clear();
-            let body = self.block()?;
-            self.type_params.clear();
-            return Ok(Function {
-                name,
-                exported: true,
-                export_to: Vec::new(),
-                module: None,
-                doc: None,
-                type_params: Vec::new(),
-                type_bounds: Default::default(),
-                params,
-                ret,
-                ret_clause: None,
-                body,
-                line,
-                col,
-                is_extern: false,
-                is_export_extern: true,
-                is_gen: false,
-                is_mut: false,
-            });
-        }
-        if has_body {
-            return Err(refuse!("parse", self.line(), self.col(), ExternBody));
-        }
-        self.eat_semi();
-        Ok(Function {
+        };
+        Function {
             name,
-            exported: false,
+            exported,
             export_to: Vec::new(),
             module: None,
             doc: None,
@@ -2310,149 +1702,129 @@ impl Parser {
             params,
             ret,
             ret_clause: None,
-            body: Block {
-                id: Id::NEW,
-                stmts: Vec::new(),
-            },
+            body,
             line,
             col,
-            is_extern: true,
-            is_export_extern: false,
+            is_extern: !exported,
+            is_export_extern: exported,
             is_gen: false,
             is_mut: false,
-        })
+        }
     }
+
+    // Types.
 
     /// A type, possibly a union `A | B | ...` of intersections. `|` binds
     /// loosest, so `fn() -> A | B` returns the union.
-    fn type_(&mut self) -> Result<Type, Diagnostic> {
-        let first = self.intersection()?;
-        if *self.peek() != Tok::Pipe {
-            return Ok(first);
+    fn type_(&mut self) -> Type {
+        let first = self.intersection();
+        if !matches!(self.peek(), Tok::Pipe) {
+            return first;
         }
         let mut members = vec![first];
-        while *self.peek() == Tok::Pipe {
-            self.advance();
-            members.push(self.intersection()?);
+        while self.eat(&Tok::Pipe) {
+            members.push(self.intersection());
         }
-        Ok(Type::Union(members))
+        Type::Union(members)
     }
 
     /// A type, possibly an intersection `A & B & ...` (left-associative
     /// `Merge<A, B>`).
-    fn intersection(&mut self) -> Result<Type, Diagnostic> {
-        let mut t = self.type_atom()?;
-        while *self.peek() == Tok::Amp {
-            self.advance();
-            let rhs = self.type_atom()?;
+    fn intersection(&mut self) -> Type {
+        let mut t = self.type_atom();
+        while self.eat(&Tok::Amp) {
+            let rhs = self.type_atom();
             t = Type::Merge(Box::new(t), Box::new(rhs));
         }
-        Ok(t)
+        t
     }
 
-    /// Every nested type argument enters here once, so a type's nesting is counted
-    /// here ([`Parser::MAX_NEST`]).
-    fn type_atom(&mut self) -> Result<Type, Diagnostic> {
-        self.nest_enter()?;
-        let r = self.type_atom_inner();
-        self.depth -= 1;
-        r
-    }
-
-    fn type_atom_inner(&mut self) -> Result<Type, Diagnostic> {
-        if *self.peek() == Tok::LBrace {
+    fn type_atom(&mut self) -> Type {
+        // A name the recognizer found bound: an associated type, or a parameter.
+        if let Event::Bound(_) = self.event() {
+            let name = self.ident();
+            return match self.aliases.get(&name) {
+                Some(bound) => bound.clone(),
+                None => Type::Param(name),
+            };
+        }
+        if self.eat(&Tok::LBrace) {
             return self.record_type();
         }
         // `fn(T, U) -> R`, or `fn(T)` for a Unit return. The checker
         // restricts it to a parameter position.
-        if *self.peek() == Tok::Fn {
-            self.advance();
-            self.eat(&Tok::LParen)?;
+        if self.eat(&Tok::Fn) {
+            self.eat(&Tok::LParen);
             let mut params = Vec::new();
-            while *self.peek() != Tok::RParen {
-                params.push(self.type_()?);
-                if *self.peek() == Tok::Comma {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.eat(&Tok::RParen)?;
-            let ret = if *self.peek() == Tok::Arrow {
-                self.advance();
-                self.type_()?
-            } else {
-                Type::Unit
+            self.list_to(&Tok::RParen, |b| params.push(b.type_()));
+            let ret = match self.eat(&Tok::Arrow) {
+                true => self.type_(),
+                false => Type::Unit,
             };
-            return Ok(Type::Fn(params, Box::new(ret)));
+            return Type::Fn(params, Box::new(ret));
         }
         // An integer literal type argument, the `8` in
         // `SmallArray<Int64, 8>`. Any other constructor carrying one is refused by the
         // checker, not here.
-        if let Tok::Int(n) = self.peek() {
-            if *n >= 0 {
-                let v = *n as u64;
-                self.advance();
-                return Ok(Type::ConstInt(v));
-            }
+        if let Tok::Int(n) = *self.peek() {
+            self.at += 1;
+            return Type::ConstInt(n as u64);
         }
-        let name = self.expect_ident()?;
+        let word = matches!(self.event(), Event::Word(_));
+        let name = self.ident();
+        if word {
+            return self.named_type(&name);
+        }
         // `ns.User` / `ns.Box<T>`: the loader checks `ns` and rewrites the
         // dotted name to the resolved declaration, so no later pass sees a dot.
-        if *self.peek() == Tok::Dot {
-            let mut full = name;
-            while *self.peek() == Tok::Dot {
-                self.advance();
-                full = format!("{full}.{}", self.expect_ident()?);
-            }
-            if *self.peek() == Tok::Lt {
-                self.advance();
-                let mut args = Vec::new();
-                while *self.peek() != Tok::Gt {
-                    args.push(self.type_()?);
-                    if *self.peek() == Tok::Comma {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-                self.eat(&Tok::Gt)?;
-                return Ok(Type::App(full, args));
-            }
-            return Ok(Type::Named(full));
+        let mut full = name;
+        while self.eat(&Tok::Dot) {
+            full = format!("{full}.{}", self.ident());
         }
-        Ok(match name.as_str() {
+        if self.eat(&Tok::Lt) {
+            let args = self.types_to_close();
+            return Type::App(full, args);
+        }
+        Type::Named(full)
+    }
+
+    fn types_to_close(&mut self) -> Vec<Type> {
+        let mut args = Vec::new();
+        while !self.eat_close() {
+            args.push(self.type_());
+            self.eat(&Tok::Comma);
+        }
+        args
+    }
+
+    /// The type a constructor or primitive word spells, the word consumed.
+    fn named_type(&mut self, name: &str) -> Type {
+        let one = |b: &mut Self| {
+            b.eat(&Tok::Lt);
+            let inner = b.type_();
+            b.eat_close();
+            inner
+        };
+        let two = |b: &mut Self| {
+            b.eat(&Tok::Lt);
+            let a = b.type_();
+            b.eat(&Tok::Comma);
+            let c = b.type_();
+            b.eat_close();
+            (a, c)
+        };
+        let int = |bits, signed| Type::IntN { bits, signed };
+        match name {
             // `Int64` is the default integer, but always written: there is no unsized
             // `Int`.
             "Int64" => Type::Int,
-            "Int8" => Type::IntN {
-                bits: 8,
-                signed: true,
-            },
-            "Int16" => Type::IntN {
-                bits: 16,
-                signed: true,
-            },
-            "Int32" => Type::IntN {
-                bits: 32,
-                signed: true,
-            },
-            "UInt8" => Type::IntN {
-                bits: 8,
-                signed: false,
-            },
-            "UInt16" => Type::IntN {
-                bits: 16,
-                signed: false,
-            },
-            "UInt32" => Type::IntN {
-                bits: 32,
-                signed: false,
-            },
-            "UInt64" => Type::IntN {
-                bits: 64,
-                signed: false,
-            },
+            "Int8" => int(8, true),
+            "Int16" => int(16, true),
+            "Int32" => int(32, true),
+            "UInt8" => int(8, false),
+            "UInt16" => int(16, false),
+            "UInt32" => int(32, false),
+            "UInt64" => int(64, false),
             "Float64" => Type::Float,
             "Float32" => Type::Float32,
             // One `Bool` mask type for both four-lane widths: an `I32x4` and an `F32x4`
@@ -2468,283 +1840,107 @@ impl Parser {
             "Unit" => Type::Unit,
             "Logger" => Type::Logger,
             // `Stream<T>`: linear, disposed exactly once; movecheck checks it.
-            "Stream" => {
-                self.eat(&Tok::Lt)?;
-                let inner = self.type_()?;
-                self.eat(&Tok::Gt)?;
-                Type::Stream(Box::new(inner))
-            }
+            "Stream" => Type::Stream(Box::new(one(self))),
             "Array" => {
-                self.eat(&Tok::Lt)?;
-                let inner = self.type_()?;
-                if *self.peek() == Tok::Comma {
-                    self.advance();
-                    let n = match self.peek() {
-                        Tok::Int(n) if *n >= 0 => *n as usize,
-                        _ => return Err(refuse!("parse", self.line(), self.col(), ArraySize)),
-                    };
-                    self.advance();
-                    self.eat(&Tok::Gt)?;
-                    Type::ArrayN(Box::new(inner), n)
-                } else {
-                    self.eat(&Tok::Gt)?;
-                    Type::Array(Box::new(inner))
+                self.eat(&Tok::Lt);
+                let inner = Box::new(self.type_());
+                let size = self.eat(&Tok::Comma).then(|| self.size());
+                self.eat_close();
+                match size {
+                    Some(n) => Type::ArrayN(inner, n),
+                    None => Type::Array(inner),
                 }
             }
             // `SmallArray<T, N>`: `N` inline elements, spilling to the heap
             // past `N`. The checker enforces `1 <= N <= 64`.
             "SmallArray" => {
-                self.eat(&Tok::Lt)?;
-                let inner = self.type_()?;
-                if *self.peek() != Tok::Comma {
-                    return Err(refuse!(
-                        "parse",
-                        self.line(),
-                        self.col(),
-                        SmallArrayNeedsCapacity
-                    ));
-                }
-                self.advance();
-                let n = match self.peek() {
-                    Tok::Int(n) if *n >= 0 => *n as usize,
-                    _ => {
-                        return Err(refuse!(
-                            "parse",
-                            self.line(),
-                            self.col(),
-                            SmallArrayCapacityType
-                        ))
-                    }
-                };
-                self.advance();
-                self.eat(&Tok::Gt)?;
-                Type::SmallArray(Box::new(inner), n)
+                self.eat(&Tok::Lt);
+                let inner = Box::new(self.type_());
+                self.eat(&Tok::Comma);
+                let n = self.size();
+                self.eat_close();
+                Type::SmallArray(inner, n)
             }
             // `Map<K, V>`: insertion-ordered. The checker enforces the key
             // rule, because a validated string type resolves to `String` only there.
             "Map" => {
-                self.eat(&Tok::Lt)?;
-                let key = self.type_()?;
-                self.eat(&Tok::Comma)?;
-                let val = self.type_()?;
-                self.eat(&Tok::Gt)?;
+                let (key, val) = two(self);
                 Type::Map(Box::new(key), Box::new(val))
             }
-            "Option" => {
-                self.eat(&Tok::Lt)?;
-                let inner = self.type_()?;
-                self.eat(&Tok::Gt)?;
-                Type::option(inner)
-            }
+            "Option" => Type::option(one(self)),
             "Result" => {
-                self.eat(&Tok::Lt)?;
-                let ok = self.type_()?;
-                self.eat(&Tok::Comma)?;
-                let err = self.type_()?;
-                self.eat(&Tok::Gt)?;
+                let (ok, err) = two(self);
                 Type::result(ok, err)
             }
             // Compile-time transformers.
             "Omit" | "Pick" => {
-                self.eat(&Tok::Lt)?;
-                let base = self.type_()?;
+                self.eat(&Tok::Lt);
+                let base = Box::new(self.type_());
                 let mut keys = Vec::new();
-                while *self.peek() == Tok::Comma {
-                    self.advance();
-                    keys.push(self.expect_ident()?);
+                while self.eat(&Tok::Comma) {
+                    keys.push(self.ident());
                 }
-                self.eat(&Tok::Gt)?;
-                if keys.is_empty() {
-                    return Err(refuse!("parse", self.line(), self.col(), NeedsField, name));
-                }
+                self.eat_close();
                 if name == "Omit" {
-                    Type::Omit(Box::new(base), keys)
+                    Type::Omit(base, keys)
                 } else {
-                    Type::Pick(Box::new(base), keys)
+                    Type::Pick(base, keys)
                 }
             }
             "Merge" => {
-                self.eat(&Tok::Lt)?;
-                let a = self.type_()?;
-                self.eat(&Tok::Comma)?;
-                let b = self.type_()?;
-                self.eat(&Tok::Gt)?;
+                let (a, b) = two(self);
                 Type::Merge(Box::new(a), Box::new(b))
             }
-            "Partial" => {
-                self.eat(&Tok::Lt)?;
-                let inner = self.type_()?;
-                self.eat(&Tok::Gt)?;
-                Type::Partial(Box::new(inner))
-            }
+            "Partial" => Type::Partial(Box::new(one(self))),
             // Records are immutable, so `Readonly<T>` is `T`.
-            "Readonly" => {
-                self.eat(&Tok::Lt)?;
-                let inner = self.type_()?;
-                self.eat(&Tok::Gt)?;
-                inner
-            }
-            // An associated type. An impl may not declare an alias named like
-            // its own binder, so the two sets are disjoint and the order only picks which
-            // diagnostic a bug produces.
-            other if self.type_aliases.contains_key(other) => self.type_aliases[other].clone(),
-            other if self.type_params.iter().any(|p| p == other) => Type::Param(other.to_string()),
-            other if *self.peek() == Tok::Lt => {
-                self.advance();
-                let mut args = Vec::new();
-                while *self.peek() != Tok::Gt {
-                    args.push(self.type_()?);
-                    if *self.peek() == Tok::Comma {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-                self.eat(&Tok::Gt)?;
-                Type::App(other.to_string(), args)
-            }
-            // Any other identifier is a named type; the checker resolves it.
-            other => Type::Named(other.to_string()),
-        })
-    }
-
-    /// The most levels of nested source the parser accepts. One parenthesis, one
-    /// prefix operator, one type argument and one block are one level each.
-    ///
-    /// The source may be a fetched module the user did not write. 1024 is far
-    /// above any written or generated Vyrn (the corpus peaks in the tens) and far
-    /// below what later passes need on their stack.
-    const MAX_NEST: u32 = 1024;
-
-    /// Enters one level of nesting, or refuses. Every caller decrements on the way
-    /// out, the error path included: recovery starts the next declaration at the
-    /// depth this one left.
-    fn nest_enter(&mut self) -> Result<(), Diagnostic> {
-        if self.depth >= Self::MAX_NEST {
-            return Err(refuse!(
-                "parse",
-                self.line(),
-                self.col(),
-                NestingTooDeep,
-                max = Self::MAX_NEST
-            ));
+            "Readonly" => one(self),
+            other => unreachable!("the grammar's type word is `{other}`"),
         }
-        self.depth += 1;
-        Ok(())
     }
 
-    fn block(&mut self) -> Result<Block, Diagnostic> {
-        self.nest_enter()?;
-        let r = self.block_inner();
-        self.depth -= 1;
-        r
+    fn size(&mut self) -> usize {
+        match self.advance() {
+            Tok::Int(n) => n as usize,
+            other => unreachable!("the grammar's size is {other:?}"),
+        }
     }
 
-    fn block_inner(&mut self) -> Result<Block, Diagnostic> {
-        self.eat(&Tok::LBrace)?;
+    // Statements.
+
+    fn block(&mut self) -> Block {
+        self.eat(&Tok::LBrace);
         let mut stmts = Vec::new();
-        while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
-            self.take_docs(); // discard any stray `///` inside a body
-                              // Semicolons are optional separators: a stray one is skipped.
-            if *self.peek() == Tok::Semi {
-                self.advance();
-                continue;
-            }
-            if *self.peek() == Tok::RBrace || *self.peek() == Tok::Eof {
-                break;
-            }
-            // Statement-level recovery: a bad statement is recorded and
-            // dropped, and parsing resumes at the next statement boundary, so each bad
-            // statement gets its own diagnostic. A missing brace still propagates.
-            let start = self.pos;
-            match self.stmt() {
-                Ok(s) => {
-                    stmts.push(s);
+        loop {
+            match self.peek() {
+                Tok::RBrace => {
+                    self.at += 1;
+                    break;
+                }
+                // A stray `///` inside a body is discarded, and a semicolon is an optional
+                // separator.
+                Tok::Doc(_) | Tok::Semi => self.at += 1,
+                _ => {
+                    stmts.push(self.stmt());
                     // Splice in a desugar's follow-on statements (`a[i].f = v`), in order.
                     stmts.append(&mut self.extra_stmts);
                 }
-                Err(d) => {
-                    self.errors.push(d);
-                    self.extra_stmts.clear(); // drop any partial desugar
-                                              // Force progress: a parser that failed
-                                              // without consuming would re-error
-                                              // forever. One that advanced needs no
-                                              // skip, which could eat the `}`.
-                    if self.pos == start {
-                        self.advance();
-                    }
-                    self.sync_to_stmt();
-                }
             }
         }
-        self.eat(&Tok::RBrace)?;
-        Ok(Block { id: Id::NEW, stmts })
-    }
-
-    /// Skips a failed statement's tokens to the next statement boundary: a token on
-    /// a new line at this block's brace depth, a `;` at that depth, the block's
-    /// `}`, or `Eof`. Consumes nothing at a boundary; [`Parser::block`] ensures
-    /// progress.
-    fn sync_to_stmt(&mut self) {
-        let mut depth = 0i32;
-        while *self.peek() != Tok::Eof {
-            match self.peek() {
-                Tok::LBrace => {
-                    depth += 1;
-                    self.advance();
-                }
-                Tok::RBrace => {
-                    if depth == 0 {
-                        return;
-                    }
-                    depth -= 1;
-                    self.advance();
-                }
-                Tok::Semi if depth == 0 => {
-                    self.advance();
-                    return;
-                }
-                _ if depth == 0 && self.line() > self.tokens[self.pos - 1].line => {
-                    return;
-                }
-                _ => {
-                    self.advance();
-                }
-            }
-        }
+        Block { id: Id::NEW, stmts }
     }
 
     /// Top-level module state: `let [mut] name [: Type] = init`. The
     /// initializer is required: module state has no default value.
-    fn global_decl(&mut self) -> Result<GlobalDecl, Diagnostic> {
+    fn global_decl(&mut self) -> GlobalDecl {
         let line = self.line();
-        self.eat(&Tok::Let)?;
-        let mutable = if *self.peek() == Tok::Mut {
-            self.advance();
-            true
-        } else {
-            false
-        };
-        let name = self.expect_ident()?;
-        let ty = if *self.peek() == Tok::Colon {
-            self.advance();
-            Some(self.type_()?)
-        } else {
-            None
-        };
-        if *self.peek() != Tok::Eq {
-            return Err(refuse!(
-                "parse",
-                self.line(),
-                self.col(),
-                GlobalNeedsInit,
-                name
-            ));
-        }
-        self.eat(&Tok::Eq)?;
-        let init = self.expr()?;
+        self.at += 1;
+        let mutable = self.eat(&Tok::Mut);
+        let name = self.ident();
+        let ty = self.eat(&Tok::Colon).then(|| self.type_());
+        self.eat(&Tok::Eq);
+        let init = self.expr();
         self.eat_semi();
-        Ok(GlobalDecl {
+        GlobalDecl {
             name,
             mutable,
             ty,
@@ -2752,113 +1948,81 @@ impl Parser {
             doc: None,
             module: None,
             line,
-        })
+        }
     }
 
-    /// Parses an `if` whose token is current. `else if` nests the
+    /// Reads an `if` whose token is current. `else if` nests the
     /// chained `if` as the only statement of an else-block, with its own line.
-    fn if_stmt(&mut self, line: usize) -> Result<Stmt, Diagnostic> {
-        self.advance(); // `if`
-                        // `if let PAT = e { .. }`: the pattern-binding form.
-        if *self.peek() == Tok::Let {
+    fn if_stmt(&mut self, line: usize) -> Stmt {
+        self.at += 1;
+        // `if let PAT = e { .. }`: the pattern-binding form.
+        if self.eat(&Tok::Let) {
             return self.if_let_stmt(line);
         }
-        let cond = self.cond_expr()?;
-        let then_block = self.block()?;
-        let else_block = self.else_tail()?;
-        Ok(Stmt::If {
+        let cond = self.expr();
+        let then_block = self.block();
+        let else_block = self.else_tail();
+        Stmt::If {
             id: Id::NEW,
             cond,
             then_block,
             else_block,
             line,
+        }
+    }
+
+    /// The optional `else` tail of `if` and `if let`: `else if`, `else if let`, or
+    /// `else { .. }`.
+    fn else_tail(&mut self) -> Option<Block> {
+        if !self.eat(&Tok::Else) {
+            return None;
+        }
+        if !matches!(self.peek(), Tok::If) {
+            return Some(self.block());
+        }
+        let nested = self.if_stmt(self.line());
+        Some(Block {
+            id: Id::NEW,
+            stmts: vec![nested],
         })
     }
 
-    /// Parses the optional `else` tail of `if` and `if let`: `else if`,
-    /// `else if let`, or `else { .. }`.
-    fn else_tail(&mut self) -> Result<Option<Block>, Diagnostic> {
-        if *self.peek() != Tok::Else {
-            return Ok(None);
-        }
-        self.advance();
-        if *self.peek() == Tok::If {
-            let else_line = self.line();
-            self.advance(); // `if`
-                            // `else if let` chains the pattern form; `else if` the ordinary one.
-            let nested = if *self.peek() == Tok::Let {
-                self.if_let_stmt(else_line)?
-            } else {
-                let cond = self.cond_expr()?;
-                let then_block = self.block()?;
-                let else_block = self.else_tail()?;
-                Stmt::If {
-                    id: Id::NEW,
-                    cond,
-                    then_block,
-                    else_block,
-                    line: else_line,
-                }
-            };
-            Ok(Some(Block {
-                id: Id::NEW,
-                stmts: vec![nested],
-            }))
-        } else {
-            Ok(Some(self.block()?))
-        }
-    }
-
-    /// Parses `if let PAT = e { .. } [else ..]`; the caller consumed `if`.
-    fn if_let_stmt(&mut self, line: usize) -> Result<Stmt, Diagnostic> {
-        self.eat(&Tok::Let)?;
-        let pattern = self.pattern()?;
-        self.eat(&Tok::Eq)?;
-        // No-struct context, so a bare `{` opens the body.
-        let scrutinee = self.cond_expr()?;
-        let then_block = self.block()?;
-        let else_block = self.else_tail()?;
-        Ok(if_let(pattern, scrutinee, then_block, else_block, line))
+    /// `if let PAT = e { .. } [else ..]`; `if let` consumed.
+    fn if_let_stmt(&mut self, line: usize) -> Stmt {
+        let pattern = self.pattern();
+        self.eat(&Tok::Eq);
+        let scrutinee = self.expr();
+        let then_block = self.block();
+        let else_block = self.else_tail();
+        if_let(pattern, scrutinee, then_block, else_block, line)
     }
 
     /// Returns a desugar's first statement and queues the rest in
-    /// [`Parser::extra_stmts`] for [`Parser::block`] to splice in.
+    /// [`Build::extra_stmts`] for [`Build::block`] to splice in.
     fn spliced(&mut self, mut stmts: Vec<Stmt>) -> Stmt {
         let head = stmts.remove(0);
         self.extra_stmts.extend(stmts);
         head
     }
 
+    fn ref_let_parts(&mut self) -> (String, Vec<Binder>, Expr) {
+        self.at += 1;
+        let variant = self.ident();
+        self.eat(&Tok::LParen);
+        let binds = self.binders_to_paren();
+        self.eat(&Tok::Eq);
+        let scrut = self.expr();
+        self.eat_semi();
+        (variant, binds, scrut)
+    }
+
     /// `let Variant(a, b) = v`: binds the payloads in the enclosing
     /// scope, or traps. Each binder is a `let` of a `match` whose default arm
     /// ([`Pattern::Other`]) panics with the canonical wording; unused positions get
     /// unspellable `@` binders.
-    fn refutable_let(&mut self, line: usize, mutable: bool) -> Result<Stmt, Diagnostic> {
-        let col = self.col();
-        let variant = self.expect_ident()?;
-        if mutable {
-            return Err(refuse!("parse", line, col, LetMutPattern, variant));
-        }
-        self.eat(&Tok::LParen)?;
-        let mut binds: Vec<Binder> = Vec::new();
-        while *self.peek() != Tok::RParen {
-            binds.push(self.expect_binder()?);
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        self.eat(&Tok::RParen)?;
-        self.eat(&Tok::Eq)?;
-        let scrut = self.expr()?;
-        self.eat_semi();
-        if !matches!(scrut, Expr::Var { .. }) {
-            return Err(refuse!("parse", line, col, LetPatternScrutinee, variant));
-        }
-        if binds.is_empty() {
-            return Err(refuse!("parse", line, col, LetEmptyVariant, variant));
-        }
+    fn refutable_let(&mut self, line: usize) -> Stmt {
+        let (variant, binds, scrut) = self.ref_let_parts();
+        self.at += 1;
         let msg = format!("let `{variant}(..)` did not match");
         let mut stmts = Vec::new();
         for (j, b) in binds.iter().enumerate() {
@@ -2904,45 +2068,26 @@ impl Parser {
                 col: b.col,
             });
         }
-        Ok(self.spliced(stmts))
+        self.spliced(stmts)
     }
 
-    fn stmt(&mut self) -> Result<Stmt, Diagnostic> {
+    fn stmt(&mut self) -> Stmt {
         let line = self.line();
         match self.peek() {
             Tok::Let => {
-                self.advance();
-                let mutable = if *self.peek() == Tok::Mut {
-                    self.advance();
-                    true
-                } else {
-                    false
-                };
-                // `let Variant(a, b) = v`: an ordinary `let`'s name is never followed by `(`.
-                if matches!(self.peek(), Tok::Ident(_))
-                    && self.tokens[self.pos + 1].tok == Tok::LParen
-                {
-                    return self.refutable_let(line, mutable);
+                self.at += 1;
+                if self.at_rule(Kind::RefLet) {
+                    return self.refutable_let(line);
                 }
+                let mutable = self.eat(&Tok::Mut);
                 let col = self.binder_pos().1;
-                let name = self.expect_ident()?;
-                let ty = if *self.peek() == Tok::Colon {
-                    self.advance();
-                    Some(self.type_()?)
-                } else {
-                    None
-                };
-                let clause = match (&ty, self.peek()) {
-                    (Some(_), Tok::Where) => {
-                        self.advance();
-                        Some(self.expr()?)
-                    }
-                    _ => None,
-                };
-                self.eat(&Tok::Eq)?;
-                let value = self.expr()?;
+                let name = self.ident();
+                let ty = self.eat(&Tok::Colon).then(|| self.type_());
+                let clause = (ty.is_some() && self.eat(&Tok::Where)).then(|| self.expr());
+                self.eat(&Tok::Eq);
+                let value = self.expr();
                 self.eat_semi();
-                Ok(Stmt::Let {
+                Stmt::Let {
                     id: Id::NEW,
                     name,
                     mutable,
@@ -2951,49 +2096,44 @@ impl Parser {
                     value,
                     line,
                     col,
-                })
+                }
             }
             Tok::Return => {
-                self.advance();
+                self.at += 1;
                 // No value at `;`, `}` or EOF: a bare `return`.
-                let value = if matches!(self.peek(), Tok::Semi | Tok::RBrace | Tok::Eof) {
-                    None
-                } else {
-                    Some(self.expr()?)
-                };
+                let value = self.at_rule(Kind::Expr).then(|| self.expr());
                 self.eat_semi();
-                Ok(Stmt::Return {
+                Stmt::Return {
                     id: Id::NEW,
                     value,
                     line,
-                })
+                }
             }
             Tok::Break => {
-                self.advance();
+                self.at += 1;
                 self.eat_semi();
-                Ok(Stmt::Break { id: Id::NEW, line })
+                Stmt::Break { id: Id::NEW, line }
             }
             Tok::Continue => {
-                self.advance();
+                self.at += 1;
                 self.eat_semi();
-                Ok(Stmt::Continue { id: Id::NEW, line })
+                Stmt::Continue { id: Id::NEW, line }
             }
             Tok::If => self.if_stmt(line),
             Tok::While => {
-                self.advance();
+                self.at += 1;
                 // `while let PAT = e { body }` desugars to
                 // `while true { if let PAT = e { body } else { break } }`.
-                if *self.peek() == Tok::Let {
-                    self.eat(&Tok::Let)?;
-                    let pattern = self.pattern()?;
-                    self.eat(&Tok::Eq)?;
-                    let scrutinee = self.cond_expr()?;
-                    let body = self.block()?;
+                if self.eat(&Tok::Let) {
+                    let pattern = self.pattern();
+                    self.eat(&Tok::Eq);
+                    let scrutinee = self.expr();
+                    let body = self.block();
                     let brk = Block {
                         id: Id::NEW,
                         stmts: vec![Stmt::Break { id: Id::NEW, line }],
                     };
-                    return Ok(Stmt::While {
+                    return Stmt::While {
                         id: Id::NEW,
                         cond: Expr::Bool(true, Id::NEW),
                         body: Block {
@@ -3001,33 +2141,28 @@ impl Parser {
                             stmts: vec![if_let(pattern, scrutinee, body, Some(brk), line)],
                         },
                         line,
-                    });
+                    };
                 }
-                let cond = self.cond_expr()?;
-                let body = self.block()?;
-                Ok(Stmt::While {
+                let cond = self.expr();
+                let body = self.block();
+                Stmt::While {
                     id: Id::NEW,
                     cond,
                     body,
                     line,
-                })
+                }
             }
             Tok::For => {
-                self.advance();
+                self.at += 1;
                 let col = self.binder_pos().1;
-                let var = self.expect_ident()?;
-                self.eat(&Tok::In)?;
-                // No-struct context, so a bare `{` opens the loop body.
+                let var = self.ident();
+                self.eat(&Tok::In);
                 // `for x in consume xs`: `consume` counts only when an identifier
                 // follows, so `for x in consume(y)` stays a call.
-                let consuming = matches!(self.peek(), Tok::Ident(id) if id == "consume")
-                    && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_));
-                if consuming {
-                    self.advance();
-                }
-                let iter = self.cond_expr()?;
-                let body = self.block()?;
-                Ok(Stmt::ForIn {
+                let consuming = self.eat_word("consume");
+                let iter = self.expr();
+                let body = self.block();
+                Stmt::ForIn {
                     id: Id::NEW,
                     var,
                     iter,
@@ -3035,235 +2170,141 @@ impl Parser {
                     line,
                     consuming,
                     col,
-                })
+                }
             }
             Tok::Region => {
-                self.advance();
-                let body = self.block()?;
-                Ok(Stmt::Region {
+                self.at += 1;
+                let body = self.block();
+                Stmt::Region {
                     id: Id::NEW,
                     body,
                     line,
-                })
+                }
             }
             // `drop name`: reclaim a heap value explicitly. It consumes `name`.
             Tok::Drop => {
-                self.advance();
+                self.at += 1;
                 let id = self.spelled();
-                let name = self.expect_ident()?;
+                let name = self.ident();
                 self.eat_semi();
-                Ok(Stmt::Drop { id, name, line })
+                Stmt::Drop { id, name, line }
             }
-            Tok::Ident(_) | Tok::Vself if self.tokens[self.pos + 1].tok == Tok::Eq => {
+            Tok::Ident(_) | Tok::Vself => {
                 let id = self.spelled();
-                let name = self.place_root()?;
-                self.eat(&Tok::Eq)?;
-                let value = self.expr()?;
+                let name = match self.advance() {
+                    Tok::Ident(name) => name,
+                    _ => "self".to_string(),
+                };
+                self.eat(&Tok::Eq);
+                let value = self.expr();
                 self.eat_semi();
-                Ok(Stmt::Assign {
+                Stmt::Assign {
                     id,
                     name,
                     value,
                     line,
-                })
+                }
             }
-            _ => {
-                let e = self.expr()?;
-                // `a.f = v`, `a[i] = v`, `a.b[i].f = v`: `postfix` parsed `a[i]` as
-                // `@at(a, i)`; a trailing `=` makes the place a store target. The shape is
-                // checked before the value parses, so an unreachable target gets its own
-                // refusal, not an error from the right side.
-                if *self.peek() == Tok::Eq {
-                    let (mut under, mut fields) = (&e, 0);
-                    while let Expr::Field { expr, .. } = under {
-                        (under, fields) = (expr, fields + 1);
-                    }
-                    let over_index = matches!(under, Expr::Call { name, args, .. }
-                        if name == "@at" && args.len() == 2);
-                    // `f().x = v` is no store here: it falls through to a parse error.
-                    match store_target(&e) {
-                        Some((id, name, base, leaf)) => {
-                            self.advance();
-                            let value = self.expr()?;
-                            self.eat_semi();
-                            let id = if base.is_empty() { id } else { Id::NEW };
-                            return Ok(Stmt::Store {
-                                id,
-                                name,
-                                base,
-                                leaf,
-                                value,
-                                line,
-                            });
-                        }
-                        None if over_index && fields == 0 => {
-                            return Err(refuse!("parse", line, self.col(), IndexAssignTarget));
-                        }
-                        None if over_index => {
-                            return Err(refuse!("parse", line, self.col(), FieldAssignTarget));
-                        }
-                        None => {}
-                    }
-                }
-                self.eat_semi();
-                // A statement `x.push(v)` writes the grown array back to wherever `x` lives,
-                // or the push lands on a copy:
-                //   `sq.push(v)`   -> `sq = @push(sq, v)`
-                //   `r.f.push(v)`  -> `r.f = @push(r.f, v)`
-                //   `a[i].push(v)` -> `a[i] = @push(a[i], v)`
-                // Any other receiver (a temporary, `r.a.b.push(v)`) is a parse error, not a
-                // silent no-op. `pop`/`swapRemove`/`remove` return a value and mutate, so
-                // they stay calls over their place.
-                if let Expr::Call { name, args, .. } = &e {
-                    if crate::prelude::rebuilds(name) {
-                        match args.first() {
-                            Some(Expr::Var { name: recv, .. }) => {
-                                return Ok(Stmt::Assign {
-                                    id: Id::NEW,
-                                    name: recv.clone(),
-                                    value: e,
-                                    line,
-                                });
-                            }
-                            // Writes back as a field store, under the rules of `r.f = ..`.
-                            Some(Expr::Field {
-                                expr: base, field, ..
-                            }) if matches!(base.as_ref(), Expr::Var { .. }) => {
-                                let Expr::Var { name: recv, .. } = base.as_ref() else {
-                                    unreachable!()
-                                };
-                                return Ok(Stmt::store(
-                                    recv.clone(),
-                                    Step::Field(field.clone()),
-                                    e,
-                                    line,
-                                ));
-                            }
-                            // Writes back as an element store; the index is evaluated
-                            // on both the read and the store.
-                            Some(Expr::Call {
-                                name: at,
-                                args: iargs,
-                                ..
-                            }) if at == "@at"
-                                && iargs.len() == 2
-                                && matches!(&iargs[0], Expr::Var { .. }) =>
-                            {
-                                let Expr::Var { name: recv, .. } = &iargs[0] else {
-                                    unreachable!()
-                                };
-                                let recv = recv.clone();
-                                let index = iargs[1].clone();
-                                return Ok(Stmt::store(recv, Step::Index(index), e, line));
-                            }
-                            _ => {
-                                return Err(refuse!("parse", line, self.col(), PushNoPlace));
-                            }
-                        }
-                    }
-                }
-                // Statement position: only a `match` here may have block arms. The
-                // parser marks the node and the checker reads it.
-                let mut e = e;
-                if let Expr::Match { stmt_pos, .. } = &mut e {
-                    *stmt_pos = true;
-                }
-                Ok(Stmt::expr(e))
-            }
+            _ => self.expr_stmt(line),
         }
     }
 
-    // Expressions, by precedence climbing.
-
-    fn expr(&mut self) -> Result<Expr, Diagnostic> {
-        self.binary(0)
-    }
-
-    /// Parses an expression followed by a `{ .. }` block (a condition or a `match`
-    /// scrutinee), where `Name {` is a value and then a block, not a struct literal.
-    fn cond_expr(&mut self) -> Result<Expr, Diagnostic> {
-        let saved = self.no_struct;
-        self.no_struct = true;
+    /// `a.f = v`, `a[i] = v`, `a.b[i].f = v`: `postfix` read `a[i]` as `@at(a, i)`; a
+    /// `=` the grammar let through makes the place a store target. Otherwise a
+    /// statement `x.push(v)` writes the grown array back to wherever `x` lives, or the
+    /// push lands on a copy: `sq.push(v)` is `sq = @push(sq, v)`, `r.f.push(v)` is
+    /// `r.f = @push(r.f, v)`, `a[i].push(v)` is `a[i] = @push(a[i], v)`. `pop`,
+    /// `swapRemove` and `remove` return a value and mutate, so they stay calls over
+    /// their place.
+    fn expr_stmt(&mut self, line: usize) -> Stmt {
         let e = self.expr();
-        self.no_struct = saved;
-        e
-    }
-
-    /// Binding powers: higher binds tighter.
-    ///
-    /// The bitwise family sits between comparison and arithmetic, so
-    /// `x & mask == 0` is `(x & mask) == 0` and `a + b << c` is `(a + b) << c`.
-    /// Within it, tightest first: `~` (in [`unary`]), `<< >>`, `&`, `^`, `|`.
-    pub(crate) fn binop(tok: &Tok) -> Option<(BinOp, u8)> {
-        Some(match tok {
-            Tok::OrOr => (BinOp::Or, 1),
-            Tok::AndAnd => (BinOp::And, 2),
-            Tok::EqEq => (BinOp::Eq, 3),
-            Tok::NotEq => (BinOp::NotEq, 3),
-            Tok::TildeMatch => (BinOp::Match, 3),
-            Tok::Lt => (BinOp::Lt, 4),
-            Tok::LtEq => (BinOp::LtEq, 4),
-            Tok::Gt => (BinOp::Gt, 4),
-            Tok::GtEq => (BinOp::GtEq, 4),
-            // 5 is `??` (`NULLISH_BP`, not a `BinOp`); the tiers below are shifted up to
-            // leave it that slot.
-            Tok::Pipe => (BinOp::BitOr, 6),
-            Tok::Caret => (BinOp::BitXor, 7),
-            Tok::Amp => (BinOp::BitAnd, 8),
-            Tok::Shl => (BinOp::Shl, 9),
-            Tok::Shr => (BinOp::Shr, 9),
-            Tok::Plus => (BinOp::Add, 10),
-            Tok::Minus => (BinOp::Sub, 10),
-            Tok::Star => (BinOp::Mul, 11),
-            Tok::Slash => (BinOp::Div, 11),
-            Tok::Percent => (BinOp::Rem, 11),
-            _ => return None,
-        })
-    }
-
-    /// `??`'s binding power: tighter than comparison, looser than bitwise and
-    /// arithmetic, as in Swift.
-    ///
-    /// Looser than arithmetic, so `opt ?? x + 1` is `opt ?? (x + 1)`. Tighter than
-    /// comparison, so `flag ?? b == c` is `(flag ?? b) == c`: with
-    /// `flag: Option<Bool>` and `b`, `c` both `Bool`, both readings typecheck and
-    /// disagree, so a tie would parse wrong silently.
-    ///
-    /// `??` is parsed by hand in [`binary`] and recurses at its own power for right
-    /// associativity. Sharing 6 with `BitOr` would bind asymmetrically against `|`,
-    /// because the table's left-associative arm recurses at `bp + 1`.
-    const NULLISH_BP: u8 = 5;
-
-    fn binary(&mut self, min_bp: u8) -> Result<Expr, Diagnostic> {
-        let mut lhs = self.unary()?;
-        loop {
-            if *self.peek() == Tok::QuestionQuestion && Self::NULLISH_BP >= min_bp {
-                let line = self.line();
-                self.advance();
-                // Right-associative: `a ?? b ?? c` is `a ?? (b ?? c)`. The left reading cannot
-                // typecheck, because `a ?? b` yields an unwrapped `T`.
-                let rhs = self.binary(Self::NULLISH_BP)?;
-                lhs = Self::nullish(lhs, rhs, line);
-                continue;
-            }
-            let Some((op, bp)) = Self::binop(self.peek()) else {
-                break;
+        if self.eat(&Tok::Eq) {
+            let Some((id, name, base, leaf)) = store_target(&e) else {
+                unreachable!("the recognizer lets `=` through after a place")
             };
-            if bp < min_bp {
-                break;
-            }
-            let line = self.line();
-            self.advance();
-            let rhs = self.binary(bp + 1)?;
-            lhs = Expr::Binary {
-                id: Id::NEW,
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            let value = self.expr();
+            self.eat_semi();
+            let id = if base.is_empty() { id } else { Id::NEW };
+            return Stmt::Store {
+                id,
+                name,
+                base,
+                leaf,
+                value,
                 line,
             };
         }
-        Ok(lhs)
+        self.eat_semi();
+        if let Expr::Call { name, args, .. } = &e {
+            if crate::prelude::rebuilds(name) {
+                match args.first() {
+                    Some(Expr::Var { name: recv, .. }) => {
+                        return Stmt::Assign {
+                            id: Id::NEW,
+                            name: recv.clone(),
+                            value: e,
+                            line,
+                        };
+                    }
+                    // Writes back as a field store, under the rules of `r.f = ..`.
+                    Some(Expr::Field {
+                        expr: base, field, ..
+                    }) => {
+                        let Expr::Var { name: recv, .. } = base.as_ref() else {
+                            unreachable!("PushNoPlace refused this statement")
+                        };
+                        return Stmt::store(recv.clone(), Step::Field(field.clone()), e, line);
+                    }
+                    // Writes back as an element store; the index is evaluated
+                    // on both the read and the store.
+                    Some(Expr::Call { args: iargs, .. }) => {
+                        let Expr::Var { name: recv, .. } = &iargs[0] else {
+                            unreachable!("PushNoPlace refused this statement")
+                        };
+                        let recv = recv.clone();
+                        let index = iargs[1].clone();
+                        return Stmt::store(recv, Step::Index(index), e, line);
+                    }
+                    _ => unreachable!("PushNoPlace refused this statement"),
+                }
+            }
+        }
+        // Statement position: only a `match` here may have block arms. The
+        // parser marks the node and the checker reads it.
+        let mut e = e;
+        if let Expr::Match { stmt_pos, .. } = &mut e {
+            *stmt_pos = true;
+        }
+        Stmt::expr(e)
+    }
+
+    // Expressions.
+
+    /// One level of the grammar's `climb`: an operand, then each operator at that
+    /// level or tighter with its right side. `a ?? b ?? c` is `a ?? (b ?? c)`,
+    /// because the climb recurses at `??`'s own level; the left reading cannot
+    /// typecheck, because `a ?? b` yields an unwrapped `T`.
+    fn expr(&mut self) -> Expr {
+        self.at += 1;
+        let mut lhs = self.unary();
+        while !matches!(self.event(), Event::Close(_)) {
+            let line = self.line();
+            let op = binop(self.peek());
+            self.at += 1;
+            let rhs = self.expr();
+            lhs = match op {
+                Some(op) => Expr::Binary {
+                    id: Id::NEW,
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    line,
+                },
+                None => Self::nullish(lhs, rhs, line),
+            };
+        }
+        self.at += 1;
+        lhs
     }
 
     /// Desugars `a ?? b` to a `match` on the two type-agnostic patterns,
@@ -3288,240 +2329,149 @@ impl Parser {
         }
     }
 
-    /// Every expression recursion enters here once (`binary` calls it first, a
-    /// prefix operator calls it again, `( .. )` returns through `primary`), so an
-    /// expression's nesting is counted here ([`Parser::MAX_NEST`]).
-    fn unary(&mut self) -> Result<Expr, Diagnostic> {
-        self.nest_enter()?;
-        let r = self.unary_inner();
-        self.depth -= 1;
-        r
-    }
-
-    fn unary_inner(&mut self) -> Result<Expr, Diagnostic> {
+    fn unary(&mut self) -> Expr {
         let line = self.line();
-        match self.peek() {
-            Tok::Minus => {
-                self.advance();
-                Ok(Expr::Unary {
-                    id: Id::NEW,
-                    op: UnOp::Neg,
-                    expr: Box::new(self.unary()?),
-                    line,
-                })
-            }
-            Tok::Bang => {
-                self.advance();
-                Ok(Expr::Unary {
-                    id: Id::NEW,
-                    op: UnOp::Not,
-                    expr: Box::new(self.unary()?),
-                    line,
-                })
-            }
-            // `~x` binds like the other unary prefixes.
-            Tok::Tilde => {
-                self.advance();
-                Ok(Expr::Unary {
-                    id: Id::NEW,
-                    op: UnOp::BitNot,
-                    expr: Box::new(self.unary()?),
-                    line,
-                })
-            }
-            // `consume place`: the take. `consume` counts only when an
-            // identifier or `self` follows, so `consume(y)` stays a call. `self` lexes as
-            // its own keyword, and `std/slots`' `release(consume self)` needs
-            // `consume self.vals`.
-            Tok::Ident(id)
-                if id == "consume"
-                    && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_) | Tok::Vself) =>
-            {
+        // `consume place`: the take. `await f(..)` marks a waiting call, and it marks
+        // the call under any `?` after it: `await f(x)?` is `(await f(x))?`.
+        if let Event::Word(_) = self.event() {
+            if self.at_word("consume") {
                 let id = self.spelled();
-                self.advance();
-                Ok(Expr::Consume {
+                self.at += 1;
+                return Expr::Consume {
                     id,
-                    place: Box::new(self.postfix()?),
+                    place: Box::new(self.postfix()),
                     line,
-                })
+                };
             }
-            // `await f(..)` marks a waiting call. `await` counts only when a name
-            // follows, so `await(x)` stays a call, and it marks the call under
-            // any `?` after it: `await f(x)?` is `(await f(x))?`.
-            Tok::Ident(id)
-                if id == "await"
-                    && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_) | Tok::Vself) =>
-            {
-                let col = self.col();
-                self.advance();
-                let mut e = self.postfix()?;
+            if self.at_word("await") {
+                self.at += 1;
+                let mut e = self.postfix();
                 let mut at = &mut e;
                 while let Expr::Try { expr, .. } = at {
                     at = &mut **expr;
                 }
-                match at {
-                    Expr::Call { awaits, .. } => *awaits = true,
-                    _ => return Err(refuse!("parse", line, col, AwaitNotCall)),
+                if let Expr::Call { awaits, .. } = at {
+                    *awaits = true;
                 }
-                Ok(e)
+                return e;
             }
-            _ => self.postfix(),
+        }
+        let op = match self.peek() {
+            Tok::Minus => UnOp::Neg,
+            Tok::Bang => UnOp::Not,
+            Tok::Tilde => UnOp::BitNot,
+            _ => return self.postfix(),
+        };
+        self.at += 1;
+        Expr::Unary {
+            id: Id::NEW,
+            op,
+            expr: Box::new(self.unary()),
+            line,
         }
     }
 
     /// Postfix `?`, `.field`, `.name(..)` and `[i]`, binding tighter than unary and
     /// binary operators.
-    ///
-    /// The chain loop is iterative, but every link adds a node the later walks
-    /// recurse into, so each link counts toward [`Parser::MAX_NEST`]; otherwise
-    /// `a.b.b...b` grows an unbounded tree and a walk aborts the process.
-    fn postfix(&mut self) -> Result<Expr, Diagnostic> {
-        // `nest_enter`/leave per link would balance to zero, so count the links
-        // locally against the ambient depth; `self.depth` stays untouched for
-        // recovery.
-        let mut links: u32 = 0;
-        let mut e = self.primary()?;
-        while matches!(self.peek(), Tok::Question | Tok::Dot | Tok::LBracket) {
-            links += 1;
-            if self.depth.saturating_add(links) >= Self::MAX_NEST {
-                return Err(refuse!(
-                    "parse",
-                    self.line(),
-                    self.col(),
-                    NestingTooDeep,
-                    max = Self::MAX_NEST
-                ));
-            }
-            let r = self.postfix_step(e);
-            e = r?;
+    fn postfix(&mut self) -> Expr {
+        let mut e = self.primary();
+        loop {
+            let line = match self.peek() {
+                Tok::Question | Tok::Dot | Tok::LBracket => self.line(),
+                _ => return e,
+            };
+            e = self.postfix_step(e, line);
         }
-        Ok(e)
     }
 
-    /// One postfix link over `e`. The caller checked that a postfix token follows
-    /// and counted the level this link adds.
-    fn postfix_step(&mut self, e: Expr) -> Result<Expr, Diagnostic> {
-        let line = self.line();
-        match self.peek() {
-            Tok::Question => {
-                self.advance();
-                return Ok(Expr::Try {
-                    id: Id::NEW,
-                    expr: Box::new(e),
-                    line,
-                });
-            }
+    /// One postfix link over `e`, its token here, on line `line`.
+    fn postfix_step(&mut self, e: Expr, line: usize) -> Expr {
+        match self.advance() {
+            Tok::Question => Expr::Try {
+                id: Id::NEW,
+                expr: Box::new(e),
+                line,
+            },
             Tok::Dot => {
-                self.advance();
                 // A name on another line than its dot has no column a fix can use.
                 let id = match self.line() == line {
                     true => self.spelled(),
                     false => Id::NEW,
                 };
-                let name = self.expect_ident()?;
-                if *self.peek() == Tok::LParen {
-                    // `recv.name(args)` is sugar for `name(recv, args)`.
-                    self.advance();
-                    let saved = self.no_struct;
-                    self.no_struct = false;
-                    let mut args = vec![e];
-                    while *self.peek() != Tok::RParen {
-                        args.push(self.expr()?);
-                        if *self.peek() == Tok::Comma {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.no_struct = saved;
-                    self.eat(&Tok::RParen)?;
-                    // A method-form builtin ([`crate::prelude::Builtin::method`]) maps to its
-                    // internal name unless the module answers to the spelling. Only a call
-                    // written `recv.m(..)` asks: a node the sugar makes (`a[i]` is `@at`, a hole
-                    // is `@str`) is the builtin in every module.
-                    //
-                    // `wrote` keeps the written name for the type-name arm below, so
-                    // `F32x4.anyTrue(m)` reports what the program wrote, not `@anyTrue`.
-                    let wrote = name.clone();
-                    let name = match crate::prelude::method_builtin(&name) {
-                        Some(internal) if !self.answers.contains(&name) => internal.to_string(),
-                        _ => name,
-                    };
-                    // `F32x4.splat(x)`, `F32x4.load(xs, i)`, `F32x4.min(a, b)`: the receiver is a
-                    // type name, dropped here, so no later pass sees a bare `F32x4` variable.
-                    //
-                    // These live on the type name because a value-receiver method name is a
-                    // global rename in the table above, and `min`, `max` and `abs` are `std/math`
-                    // exports: `math.min(a, b)` arrives here in the same shape. One arm covers
-                    // every width.
-                    let mut args = args;
-                    let n = args.len() - 1;
-                    let name = match args.first() {
-                        // One internal prefix per width, assigned here.
-                        Some(Expr::Var { name: ty, .. })
-                            if ty == "F32x4" || ty == "I32x4" || ty == "F64x2" =>
-                        {
-                            let pre = match ty.as_str() {
-                                "F32x4" => "@f32x4",
-                                "I32x4" => "@i32x4",
-                                _ => "@f64x2",
-                            };
-                            let mut it = wrote.chars();
-                            let m = match it.next() {
-                                Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),
-                                None => name.clone(),
-                            };
-                            args.remove(0);
-                            format!("{pre}{m}")
-                        }
-                        _ => name,
-                    };
-                    // Method form takes no explicit type arguments: the receiver is the first one
-                    // and it is always concrete.
-                    return Ok(Expr::Call {
-                        id: Id::NEW,
-                        dot: args.len() > n,
-                        awaits: false,
-                        name,
-                        args,
-                        type_args: Vec::new(),
-                        line,
-                    });
-                } else if *self.peek() == Tok::LBrace
-                    && !self.no_struct
-                    && matches!(&e, Expr::Var { .. })
-                {
-                    // `ns.Type { .. }`: a `Field` followed by `{` has no other reading,
-                    // so the head must be a bare namespace identifier. The name rides as
-                    // `"ns.Type"`; the loader checks `ns` and rewrites it to the resolved
-                    // declaration.
-                    let Expr::Var { name: ns, .. } = e else {
-                        unreachable!()
-                    };
-                    return self.struct_lit(format!("{ns}.{name}"), line);
-                } else {
-                    return Ok(Expr::Field {
+                let name = self.ident();
+                if !self.eat(&Tok::LParen) {
+                    return Expr::Field {
                         id,
                         expr: Box::new(e),
                         field: name,
                         line,
-                    });
+                    };
+                }
+                // `recv.name(args)` is sugar for `name(recv, args)`.
+                let mut args = vec![e];
+                self.exprs_to_paren(&mut args);
+                // A method-form builtin ([`crate::prelude::Builtin::method`]) maps to its
+                // internal name unless the module answers to the spelling. Only a call
+                // written `recv.m(..)` asks: a node the sugar makes (`a[i]` is `@at`, a hole
+                // is `@str`) is the builtin in every module.
+                //
+                // `wrote` keeps the written name for the type-name arm below, so
+                // `F32x4.anyTrue(m)` reports what the program wrote, not `@anyTrue`.
+                let wrote = name.clone();
+                let name = match crate::prelude::method_builtin(&name) {
+                    Some(internal) if !self.answers.contains(&name) => internal.to_string(),
+                    _ => name,
+                };
+                // `F32x4.splat(x)`, `F32x4.load(xs, i)`, `F32x4.min(a, b)`: the receiver is a
+                // type name, dropped here, so no later pass sees a bare `F32x4` variable.
+                //
+                // These live on the type name because a value-receiver method name is a
+                // global rename in the table above, and `min`, `max` and `abs` are `std/math`
+                // exports: `math.min(a, b)` arrives here in the same shape. One arm covers
+                // every width.
+                let n = args.len() - 1;
+                let name = match args.first() {
+                    // One internal prefix per width, assigned here.
+                    Some(Expr::Var { name: ty, .. })
+                        if ty == "F32x4" || ty == "I32x4" || ty == "F64x2" =>
+                    {
+                        let pre = match ty.as_str() {
+                            "F32x4" => "@f32x4",
+                            "I32x4" => "@i32x4",
+                            _ => "@f64x2",
+                        };
+                        let mut it = wrote.chars();
+                        let m = match it.next() {
+                            Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),
+                            None => name.clone(),
+                        };
+                        args.remove(0);
+                        format!("{pre}{m}")
+                    }
+                    _ => name,
+                };
+                // Method form takes no explicit type arguments: the receiver is the first one
+                // and it is always concrete.
+                Expr::Call {
+                    id: Id::NEW,
+                    dot: args.len() > n,
+                    awaits: false,
+                    name,
+                    args,
+                    type_args: Vec::new(),
+                    line,
                 }
             }
-            Tok::LBracket => {
+            _ => {
                 // `recv[i]` is sugar for the bounds-checked `@at(recv, i)`.
-                self.advance();
-                let saved = self.no_struct;
-                self.no_struct = false;
-                let idx = self.expr()?;
-                self.no_struct = saved;
+                let idx = self.expr();
                 // The `]`'s column: a `.copy()` fix lands after it.
                 let id = match self.line() == line {
                     true => self.spelled(),
                     false => Id::NEW,
                 };
-                self.eat(&Tok::RBracket)?;
-                return Ok(Expr::Call {
+                self.at += 1;
+                Expr::Call {
                     name: "@at".to_string(),
                     args: vec![e, idx],
                     dot: false,
@@ -3529,390 +2479,292 @@ impl Parser {
                     type_args: Vec::new(),
                     line,
                     id,
-                });
+                }
             }
-            _ => Ok(e),
         }
     }
 
-    /// Whether an expression starts here with a lambda's parameters: `x -> body`,
-    /// `(x, y) -> body` or `() -> body`. The arrow decides; `(x)` alone stays a
-    /// parenthesised expression.
-    ///
-    /// A parameter list holds only names and commas, so the scan stops at the
-    /// first other token and a `(` never walks to the end of the stream.
-    fn at_lambda(&self) -> bool {
-        match self.peek() {
-            Tok::Ident(_) => matches!(self.tok_at(self.pos + 1), Tok::Arrow),
-            Tok::LParen => {
-                let mut k = self.pos + 1;
-                if matches!(self.tok_at(k), Tok::RParen) {
-                    return matches!(self.tok_at(k + 1), Tok::Arrow);
-                }
-                loop {
-                    if !matches!(self.tok_at(k), Tok::Ident(_)) {
-                        return false;
-                    }
-                    k += 1;
-                    match self.tok_at(k) {
-                        Tok::Comma => k += 1,
-                        Tok::RParen => return matches!(self.tok_at(k + 1), Tok::Arrow),
-                        _ => return false,
-                    }
-                }
-            }
-            _ => false,
-        }
-    }
-
-    fn lambda(&mut self, line: usize) -> Result<Expr, Diagnostic> {
+    fn lambda(&mut self, line: usize) -> Expr {
+        self.at += 1;
         let col = self.col();
-        let mut params = Vec::new();
-        if *self.peek() == Tok::LParen {
-            self.advance();
-            while *self.peek() != Tok::RParen {
-                params.push(self.expect_binder()?);
-                if *self.peek() == Tok::Comma {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.eat(&Tok::RParen)?;
-        } else {
-            params.push(self.expect_binder()?);
-        }
-        self.eat(&Tok::Arrow)?;
-        let body = if *self.peek() == Tok::LBrace {
-            LambdaBody::Block(self.block()?)
-        } else {
-            // A struct literal is legal again inside a lambda's expression body.
-            let saved = self.no_struct;
-            self.no_struct = false;
-            let e = self.expr();
-            self.no_struct = saved;
-            LambdaBody::Expr(Box::new(e?))
+        let params = match self.eat(&Tok::LParen) {
+            true => self.binders_to_paren(),
+            false => vec![self.binder()],
         };
-        Ok(Expr::Lambda {
+        self.eat(&Tok::Arrow);
+        let body = match self.peek() {
+            Tok::LBrace => LambdaBody::Block(self.block()),
+            _ => LambdaBody::Expr(Box::new(self.expr())),
+        };
+        self.at += 1;
+        Expr::Lambda {
             id: Id::NEW,
             params,
             body,
             line,
             col,
-        })
+        }
     }
 
-    fn primary(&mut self) -> Result<Expr, Diagnostic> {
-        let line = self.line();
-        let col = self.col();
-        let spelled = self.spelled();
-        if self.at_lambda() {
-            return self.lambda(line);
+    fn primary(&mut self) -> Expr {
+        let first = self.token();
+        let (line, col) = (first.line, first.col);
+        let spelled = match self.in_hole {
+            true => Id::NEW,
+            false => Id::at(col),
+        };
+        match self.event() {
+            Event::Open(Kind::Lambda, _) => return self.lambda(line),
+            // `ns.Type { .. }`: a `Field` followed by `{` has no other reading, so the head
+            // is a bare namespace identifier. The name rides as `"ns.Type"`; the loader
+            // checks `ns` and rewrites it to the resolved declaration.
+            Event::Open(Kind::NsStruct, _) => {
+                self.at += 1;
+                while self.eat(&Tok::LParen) {}
+                let ns = match self.advance() {
+                    Tok::Ident(name) => name,
+                    _ => "self".to_string(),
+                };
+                while self.eat(&Tok::RParen) {}
+                let dot = self.line();
+                self.at += 1;
+                let name = self.ident();
+                let e = self.struct_lit(format!("{ns}.{name}"), dot);
+                self.at += 1;
+                return e;
+            }
+            Event::Open(Kind::Tagged, _) => {
+                self.at += 1;
+                let tag = self.ident();
+                let Tok::TemplateStr { parts, exprs } = self.advance() else {
+                    unreachable!("a plain string after a tag is TemplateNoHole")
+                };
+                let e = self.tagged_template(tag, parts, &exprs, line);
+                self.at += 1;
+                return e;
+            }
+            _ => {}
         }
-        // The `|x| e` spelling gets a named refusal: a `|` is infix-only, so it cannot
-        // start an expression.
-        if matches!(self.peek(), Tok::Pipe | Tok::OrOr) {
-            let (form, fix) = match self.peek() {
-                Tok::OrOr => ("||", "`() -> ...`"),
-                _ => ("|x|", "`x -> ...`, or `(x, y) -> ...` for more than one"),
-            };
-            return Err(refuse!("parse", line, col, LambdaNotHere, form, fix));
-        }
+        let word = matches!(self.event(), Event::Word(_));
         match self.advance() {
-            Tok::Int(v) => Ok(Expr::int(v)),
-            Tok::Byte(v) => Ok(Expr::Byte(v, Id::NEW)),
-            Tok::Float(v) => Ok(Expr::Float(v, Id::NEW)),
-            Tok::Str(s) => Ok(Expr::str(s)),
-            Tok::Vself => Ok(Expr::var("self", line)),
-            Tok::TemplateStr { parts, exprs } => self.template(parts, exprs, line, col),
-            Tok::True => Ok(Expr::Bool(true, Id::NEW)),
-            Tok::False => Ok(Expr::Bool(false, Id::NEW)),
+            Tok::Int(v) => Expr::int(v),
+            Tok::Byte(v) => Expr::Byte(v, Id::NEW),
+            Tok::Float(v) => Expr::Float(v, Id::NEW),
+            Tok::Str(s) => Expr::str(s),
+            Tok::Vself => Expr::var("self", line),
+            Tok::TemplateStr { parts, exprs } => self.template(parts, &exprs, line),
+            Tok::True => Expr::Bool(true, Id::NEW),
+            Tok::False => Expr::Bool(false, Id::NEW),
             Tok::LParen => {
-                let saved = self.no_struct;
-                self.no_struct = false;
-                let e = self.expr()?;
-                self.no_struct = saved;
-                self.eat(&Tok::RParen)?;
-                Ok(e)
+                let e = self.expr();
+                self.at += 1;
+                e
             }
-            // An array literal `[a, b, c]`, or a map literal `[:]` / `["k": v]`:
-            // a `:` after the first element marks a map.
-            Tok::LBracket => {
-                let saved = self.no_struct;
-                self.no_struct = false;
-                // `[:]`: the empty map; its value type comes from the expected `Map` type.
-                if *self.peek() == Tok::Colon {
-                    self.advance();
-                    self.no_struct = saved;
-                    self.eat(&Tok::RBracket)?;
-                    return Ok(Expr::MapLit {
-                        id: Id::NEW,
-                        entries: Vec::new(),
-                        line,
-                    });
-                }
-                if *self.peek() == Tok::RBracket {
-                    self.no_struct = saved;
-                    self.advance();
-                    return Ok(Expr::ArrayLit {
-                        id: Id::NEW,
-                        elems: Vec::new(),
-                        line,
-                    });
-                }
-                let first = self.expr()?;
-                if *self.peek() == Tok::Colon {
-                    self.advance();
-                    let first_val = self.expr()?;
-                    let mut entries = vec![(first, first_val)];
-                    while *self.peek() == Tok::Comma {
-                        self.advance();
-                        if *self.peek() == Tok::RBracket {
-                            break;
-                        }
-                        let k = self.expr()?;
-                        self.eat(&Tok::Colon)?;
-                        let v = self.expr()?;
-                        entries.push((k, v));
-                    }
-                    self.no_struct = saved;
-                    self.eat(&Tok::RBracket)?;
-                    return Ok(Expr::MapLit {
-                        id: Id::NEW,
-                        entries,
-                        line,
-                    });
-                }
-                let mut elems = vec![first];
-                if *self.peek() == Tok::Comma {
-                    self.advance();
-                    while *self.peek() != Tok::RBracket {
-                        elems.push(self.expr()?);
-                        if *self.peek() == Tok::Comma {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                self.no_struct = saved;
-                self.eat(&Tok::RBracket)?;
-                Ok(Expr::ArrayLit {
-                    id: Id::NEW,
-                    elems,
-                    line,
-                })
-            }
+            Tok::LBracket => self.array_literal(line),
             Tok::Match => self.match_expr(line),
-            // An `if` in expression position; `stmt` dispatches the statement
-            // form earlier. The `if` token is consumed.
+            // An `if` in expression position; `stmt` reads the statement form earlier.
             Tok::If => self.if_expr(line),
-            Tok::Ident(mut name) => {
-                // Tagged template `tag"...\{e}..."`: an identifier followed on the
-                // same line by an interpolated string. The same-line rule keeps a statement
-                // ending in a variable from taking the next statement's string literal.
-                let string_adjacent = self.tokens[self.pos].line == line;
-                if string_adjacent && matches!(self.peek(), Tok::TemplateStr { .. }) {
-                    if let Tok::TemplateStr { parts, exprs } = self.advance() {
-                        return self.tagged_template(name, parts, exprs, line, col);
+            Tok::Ident(_) if word => match self.advance() {
+                Tok::Str(s) => self.code_quote(&[s], &[], line, col),
+                Tok::TemplateStr { parts, exprs } => self.code_quote(&parts, &exprs, line, col),
+                other => unreachable!("a tag's string is {other:?}"),
+            },
+            Tok::Ident(name) => self.ident_expr(name, line, spelled),
+            other => unreachable!("the grammar's primary is {other:?}"),
+        }
+    }
+
+    /// An array literal `[a, b, c]`, or a map literal `[:]` / `["k": v]`, the
+    /// bracket consumed. A `:` after the first element marks a map.
+    fn array_literal(&mut self, line: usize) -> Expr {
+        // `[:]`: the empty map; its value type comes from the expected `Map` type.
+        if self.eat(&Tok::Colon) {
+            self.at += 1;
+            return Expr::MapLit {
+                id: Id::NEW,
+                entries: Vec::new(),
+                line,
+            };
+        }
+        let mut elems = Vec::new();
+        if !self.eat(&Tok::RBracket) {
+            let first = self.expr();
+            if self.eat(&Tok::Colon) {
+                let first_val = self.expr();
+                let mut entries = vec![(first, first_val)];
+                while !self.eat(&Tok::RBracket) {
+                    self.eat(&Tok::Comma);
+                    if self.eat(&Tok::RBracket) {
+                        break;
                     }
+                    let k = self.expr();
+                    self.eat(&Tok::Colon);
+                    let v = self.expr();
+                    entries.push((k, v));
                 }
-                if string_adjacent && matches!(self.peek(), Tok::Str(_)) {
-                    // `vyrn` is the one tag whose hole-less form is meaningful:
-                    // `vyrn"type Query {}"` is a whole skeleton. Any other tag needs a hole.
-                    if name == "vyrn" {
-                        if let Tok::Str(s) = self.advance() {
-                            return self.code_quote(vec![s], Vec::new(), line, col);
-                        }
-                    }
-                    return Err(refuse!("parse", line, col, TemplateNoHole, name));
-                }
-                // `Name?(args)`, and `ns.Name?(args)`, whose dotted path folds into `name`
-                // like a dotted type. Only a path that continues `?(` folds;
-                // field reads and method calls keep their shapes.
-                while *self.peek() == Tok::Dot
-                    && matches!(
-                        self.tokens.get(self.pos + 1).map(|t| &t.tok),
-                        Some(Tok::Ident(_))
-                    )
-                    && matches!(
-                        self.tokens.get(self.pos + 2).map(|t| &t.tok),
-                        Some(Tok::Question)
-                    )
-                    && matches!(
-                        self.tokens.get(self.pos + 3).map(|t| &t.tok),
-                        Some(Tok::LParen)
-                    )
-                {
-                    self.advance();
-                    name = format!(
-                        "{name}.{}",
-                        match self.advance() {
-                            Tok::Ident(seg) => seg,
-                            _ => unreachable!("looked ahead"),
-                        }
-                    );
-                }
-                let fallible =
-                    *self.peek() == Tok::Question && self.tokens[self.pos + 1].tok == Tok::LParen;
-                if fallible {
-                    self.advance();
-                }
-                let type_args = self.call_type_args();
-                if *self.peek() == Tok::LParen {
-                    self.advance();
-                    let saved = self.no_struct;
-                    self.no_struct = false;
-                    let mut args = Vec::new();
-                    while *self.peek() != Tok::RParen {
-                        args.push(self.expr()?);
-                        if *self.peek() == Tok::Comma {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.no_struct = saved;
-                    self.eat(&Tok::RParen)?;
-                    if !fallible {
-                        if let Some(e) = Self::storage_desugar(&name, &args, line) {
-                            return Ok(e);
-                        }
-                    }
-                    Ok(if fallible {
-                        Expr::TryConstruct {
-                            id: Id::NEW,
-                            name,
-                            args,
-                            line,
-                        }
-                    } else {
-                        Expr::Call {
-                            id: spelled,
-                            dot: false,
-                            awaits: false,
-                            name,
-                            args,
-                            type_args,
-                            line,
-                        }
-                    })
-                } else if *self.peek() == Tok::LBrace && !self.no_struct {
-                    self.struct_lit(name, line)
-                } else {
-                    Ok(Expr::Var {
-                        id: spelled,
-                        name,
-                        line,
-                    })
+                return Expr::MapLit {
+                    id: Id::NEW,
+                    entries,
+                    line,
+                };
+            }
+            elems.push(first);
+            self.eat(&Tok::Comma);
+            self.list_to(&Tok::RBracket, |b| elems.push(b.expr()));
+        }
+        Expr::ArrayLit {
+            id: Id::NEW,
+            elems,
+            line,
+        }
+    }
+
+    /// A name and what the grammar matched after it: a `?(`-path, type arguments,
+    /// a call, or a struct literal.
+    fn ident_expr(&mut self, mut name: String, line: usize, spelled: Id) -> Expr {
+        // `Name?(args)`, and `ns.Name?(args)`, whose dotted path folds into `name`
+        // like a dotted type.
+        while self.at_rule(Kind::Folded) {
+            self.at += 2;
+            name = format!("{name}.{}", self.ident());
+            self.at += 1;
+        }
+        let fallible = self.at_rule(Kind::Fallible);
+        if fallible {
+            self.at += 3;
+        }
+        let mut type_args = Vec::new();
+        if self.at_rule(Kind::TypeArgs) {
+            self.at += 2;
+            loop {
+                type_args.push(self.type_());
+                if !self.eat(&Tok::Comma) {
+                    break;
                 }
             }
-            other => Err(refuse!(
-                "parse",
-                line,
-                col,
-                UnexpectedToken,
-                found = format!("{other:?}")
-            )),
+            self.at += 2;
         }
+        if self.eat(&Tok::LParen) {
+            let mut args = Vec::new();
+            self.exprs_to_paren(&mut args);
+            if !fallible {
+                if let Some(e) = Self::storage_desugar(&name, &args, line) {
+                    return e;
+                }
+            }
+            return if fallible {
+                Expr::TryConstruct {
+                    id: Id::NEW,
+                    name,
+                    args,
+                    line,
+                }
+            } else {
+                Expr::Call {
+                    id: spelled,
+                    dot: false,
+                    awaits: false,
+                    name,
+                    args,
+                    type_args,
+                    line,
+                }
+            };
+        }
+        if matches!(self.peek(), Tok::LBrace) {
+            return self.struct_lit(name, line);
+        }
+        Expr::Var {
+            id: spelled,
+            name,
+            line,
+        }
+    }
+
+    /// Reads the next hole: the run the recognizer kept for it, as a hole of this
+    /// read. The aliases carry into it, as a hole names the enclosing type names.
+    fn hole(&mut self) -> Expr {
+        let Event::Hole(k) = self.event() else {
+            unreachable!("a hole's run follows its string")
+        };
+        self.at += 1;
+        let k = k as usize;
+        match &mut self.src {
+            Src::Read(_, holes) => {
+                let run = &holes[k];
+                let src = Src::Read(&run.toks, &run.holes);
+                self.hole_expr(src, &run.events)
+            }
+            Src::Take(_, holes) => {
+                let mut run = std::mem::take(&mut holes[k]);
+                let src = Src::Take(&mut run.toks, &mut run.holes);
+                self.hole_expr(src, &run.events)
+            }
+        }
+    }
+
+    fn hole_expr(&mut self, src: Src<'_>, events: &[Event]) -> Expr {
+        let mut sub = Build {
+            src,
+            events,
+            at: 0,
+            in_hole: true,
+            answers: self.answers,
+            aliases: std::mem::take(&mut self.aliases),
+            field_preds: None,
+            extra_stmts: Vec::new(),
+        };
+        let e = sub.expr();
+        self.aliases = sub.aliases;
+        e
     }
 
     /// Desugars an untagged interpolated string `"a\{e}b"` into a
-    /// `@concat`/`@str` chain. Each hole is re-lexed and parsed as an expression.
-    /// `parts.len() == exprs.len() + 1`.
-    fn template(
-        &mut self,
-        parts: Vec<String>,
-        exprs: Vec<Hole>,
-        line: usize,
-        col: usize,
-    ) -> Result<Expr, Diagnostic> {
+    /// `@concat`/`@str` chain. `parts.len() == exprs.len() + 1`.
+    fn template(&mut self, mut parts: Vec<String>, exprs: &[Hole], line: usize) -> Expr {
         let mut pieces: Vec<Expr> = Vec::new();
         if !parts[0].is_empty() {
-            pieces.push(Expr::str(parts[0].clone()));
+            pieces.push(Expr::str(std::mem::take(&mut parts[0])));
         }
-        for (k, src) in exprs.iter().enumerate() {
-            let e = self.parse_hole(src, line, col)?;
+        for k in 0..exprs.len() {
+            let e = self.hole();
             // `@str` and `@concat` are unlexable, so a user call to `str` or `concat`
             // gets the migration hint. The loader's `mentions_runtime` reads a
             // template as a mention of `@str`.
             pieces.push(Expr::call("@str", vec![e], line));
             if !parts[k + 1].is_empty() {
-                pieces.push(Expr::str(parts[k + 1].clone()));
+                pieces.push(Expr::str(std::mem::take(&mut parts[k + 1])));
             }
         }
         // There is at least one hole, so `pieces` is non-empty; a lone piece is
         // already a `String`.
         let mut iter = pieces.into_iter();
-        let mut acc = iter.next().unwrap();
+        let first = iter.next();
+        let mut acc = first.unwrap_or_else(|| unreachable!("a template has a hole"));
         for p in iter {
             acc = Expr::call("@concat", vec![acc, p], line);
         }
-        Ok(acc)
-    }
-
-    /// Re-lexes and parses one interpolation hole as an expression, with the
-    /// enclosing function's generic parameters.
-    fn parse_hole(&self, hole: &Hole, line: usize, col: usize) -> Result<Expr, Diagnostic> {
-        let src = hole.src.as_str();
-        let toks = crate::lexer::lex(src)
-            .map_err(|e| refuse!("parse", line, col, InInterpolation, detail = e.render()))?;
-        // The hole's tokens count from its own line 1, column 1; move them to where
-        // the hole stands, so a node's line and a lambda's key are its own.
-        let toks = toks
-            .into_iter()
-            .map(|t| Token {
-                line: hole.line + t.line - 1,
-                col: if t.line == 1 {
-                    hole.col + t.col - 1
-                } else {
-                    t.col
-                },
-                ..t
-            })
-            .collect();
-        let mut sub = self.sub(toks);
-        // A sub-parser diagnostic's line is relative to the hole: anchor it at the
-        // template and embed the detail.
-        let e = sub
-            .expr()
-            .map_err(|d| refuse!("parse", line, col, InInterpolation, detail = d.message))?;
-        if *sub.peek() != Tok::Eof {
-            return Err(refuse!(
-                "parse",
-                line,
-                col,
-                InterpolationTrailing,
-                src = src.trim()
-            ));
-        }
-        Ok(e)
+        acc
     }
 
     /// Desugars a tagged template `tag"a\{e}b"` into
     /// `tag(list([parts..]), list([value(e)..]))`, each value boxed in the built-in
     /// `Value` enum. Needs at least one hole.
     fn tagged_template(
-        &self,
+        &mut self,
         tag: String,
         parts: Vec<String>,
-        exprs: Vec<Hole>,
+        exprs: &[Hole],
         line: usize,
-        col: usize,
-    ) -> Result<Expr, Diagnostic> {
-        // `vyrn"..."` is a code quote: the parts are a skeleton validated
-        // here, and the holes are structural splices, not boxed `Value`s.
-        if tag == "vyrn" {
-            return self.code_quote(parts, exprs, line, col);
-        }
+    ) -> Expr {
         let parts_lit = Expr::ArrayLit {
             id: Id::NEW,
             elems: parts.into_iter().map(Expr::str).collect(),
             line,
         };
         let mut values = Vec::new();
-        for src in &exprs {
-            let e = self.parse_hole(src, line, col)?;
+        for _ in exprs {
+            let e = self.hole();
             values.push(Expr::call("value", vec![e], line));
         }
         let values_lit = Expr::ArrayLit {
@@ -3925,7 +2777,7 @@ impl Parser {
         // The built-in `template` tag yields the `Template` record; any other tag is a
         // call `tag(parts, values)`.
         if tag == "template" {
-            return Ok(Expr::StructLit {
+            return Expr::StructLit {
                 id: Id::NEW,
                 name: "Template".to_string(),
                 fields: vec![
@@ -3933,72 +2785,16 @@ impl Parser {
                     ("values".to_string(), wrap(values_lit)),
                 ],
                 line,
-            });
+            };
         }
-        Ok(Expr::call(
-            tag,
-            vec![wrap(parts_lit), wrap(values_lit)],
-            line,
-        ))
+        Expr::call(tag, vec![wrap(parts_lit), wrap(values_lit)], line)
     }
 
-    /// Desugars a `vyrn"..."` code quote into a `Code` expression.
-    ///
-    /// The lexer has dropped a `vyrn"""` quote's closing indentation
-    /// (`lexer::dedent`). The parts, with each hole replaced by a `__vyrn_holeN`
-    /// placeholder, form a skeleton. It must parse here as declarations,
-    /// statements, an expression, a type, or one item of a list
-    /// ([`Self::parses_as_item`]); a failure is a parse diagnostic at the
-    /// literal. A hole alone on its line stands for a list of items of its
-    /// block, so its placeholder may also be a declaration; a hole alone in
-    /// its brackets stands for the whole list there, so its placeholder may
-    /// also be empty, though an import list cannot; a hole after an import's
-    /// `from` may also be a string literal, which the specifier needs. The
-    /// quote lowers to one call, [`crate::ast::QUOTE`].
-    fn code_quote(
-        &self,
-        parts: Vec<String>,
-        exprs: Vec<Hole>,
-        line: usize,
-        col: usize,
-    ) -> Result<Expr, Diagnostic> {
+    /// Desugars a `vyrn"..."` code quote into a `Code` expression: one call,
+    /// [`crate::ast::QUOTE`]. The parts are a skeleton the recognizer validated, and
+    /// the holes are structural splices, not boxed `Value`s.
+    fn code_quote(&mut self, parts: &[String], exprs: &[Hole], line: usize, col: usize) -> Expr {
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-        let skeleton = |item: bool, empty: bool, lit: bool| {
-            let mut skel = String::new();
-            for (i, part) in parts.iter().enumerate() {
-                skel.push_str(part);
-                if i < exprs.len() {
-                    let (before, after) = (&parts[i], &parts[i + 1]);
-                    let placeholder = if item && alone_on_line(before, after, i == 0) {
-                        format!("let __vyrn_hole{i} = 0")
-                    } else if item && alone_in_brackets(before, after) {
-                        if empty {
-                            String::new()
-                        } else {
-                            format!("__vyrn_hole{i}")
-                        }
-                    } else if lit && is_specifier(before) {
-                        format!("\"__vyrn_hole{i}\"")
-                    } else {
-                        format!("__vyrn_hole{i}")
-                    };
-                    skel.push_str(&placeholder);
-                }
-            }
-            skel
-        };
-        let skel = skeleton(false, false, false);
-        let separator = exprs.is_empty() && is_separator(&skel);
-        let tries = [(true, true, false), (true, true, true), (true, false, true)];
-        if !separator
-            && !self.skeleton_parses_any(&skel)
-            && !(tries.iter()).any(|&(i, e, l)| self.skeleton_parses_any(&skeleton(i, e, l)))
-        {
-            let (rule, skel_line, skel_col) = self.skeleton_error_detail(&skel);
-            let rline = line + skel_line.saturating_sub(1);
-            let rcol = if skel_line <= 1 { col } else { skel_col };
-            return Err(Diagnostic::refusal(rline, rcol, "parse", rule));
-        }
         // Every part, empty ones too, with where it starts in this file; the
         // loader adds the module's key, the parts' author. The first part
         // starts after `vyrn"`, so a triple quote's first column is two short;
@@ -4018,7 +2814,7 @@ impl Parser {
             if let Some(hole) = exprs.get(i) {
                 let before = part.chars().next_back().is_some_and(word);
                 let after = parts[i + 1].chars().next().is_some_and(word);
-                let value = self.parse_hole(hole, line, col)?;
+                let value = self.hole();
                 // `\{` before the hole's source and `}` after it, for a refusal.
                 let len = hole.src.chars().count();
                 args.extend([
@@ -4040,109 +2836,33 @@ impl Parser {
                 so_far.push('x');
             }
         }
-        Ok(Expr::call(crate::ast::QUOTE, args, line))
+        Expr::call(crate::ast::QUOTE, args, line)
     }
 
-    /// A sub-parser over `src` with the enclosing generic parameters, so a skeleton
-    /// naming `T` in a generic `gen fn` parses.
-    fn sub_parser(&self, src: &str) -> Option<Parser> {
-        Some(self.sub(crate::lexer::lex(src).ok()?))
-    }
-
-    /// Statements first: most quotes are statement lists, and each mode that
-    /// fails costs a whole parse.
-    fn skeleton_parses_any(&self, src: &str) -> bool {
-        self.parses_as_stmts(src)
-            || self.parses_as_decls(src)
-            || self.parses_as_expr(src)
-            || self.parses_as_type(src)
-            || self.parses_as_item(src)
-    }
-
-    /// List-item mode: `src` is one item of a record literal (`port: v`), a
-    /// `match` (`Some(x) => x`) or a parameter list (`n: Int64`), each wrapped
-    /// in the smallest unit that holds it. Its brackets must balance, so a
-    /// wrapper cannot close one the quote opened.
-    fn parses_as_item(&self, src: &str) -> bool {
-        balanced(src)
-            && (self.parses_as_expr(&format!("__vyrn_r {{ {src} }}"))
-                || self.parses_as_expr(&format!("match __vyrn_m {{ {src} }}"))
-                || self.parses_as_decls(&format!("fn __vyrn_f({src}) {{}}")))
-    }
-
-    fn parses_as_decls(&self, src: &str) -> bool {
-        let Some(mut p) = self.sub_parser(src) else {
-            return false;
-        };
-        let (_prog, errs) = p.program_accum();
-        errs.is_empty() && *p.peek() == Tok::Eof
-    }
-
-    /// Statement-list mode: `src` is a function body, wrapped for `program_accum`.
-    fn parses_as_stmts(&self, src: &str) -> bool {
-        self.parses_as_decls(&as_fn_body(src))
-    }
-
-    fn parses_as_expr(&self, src: &str) -> bool {
-        let Some(mut p) = self.sub_parser(src) else {
-            return false;
-        };
-        p.expr().is_ok() && *p.peek() == Tok::Eof
-    }
-
-    fn parses_as_type(&self, src: &str) -> bool {
-        let Some(mut p) = self.sub_parser(src) else {
-            return false;
-        };
-        p.type_().is_ok() && *p.peek() == Tok::Eof
-    }
-
-    /// The message and skeleton-relative line and column for a skeleton that parses
-    /// in no mode, preferring the statement-mode error.
-    fn skeleton_error_detail(&self, skel: &str) -> (Rule, usize, usize) {
-        if let Some(mut p) = self.sub_parser(&as_fn_body(skel)) {
-            let (_prog, errs) = p.program_accum();
-            if let Some(d) = errs.into_iter().next() {
-                let sl = d.line.saturating_sub(1).max(1); // undo the wrapper's line
-                let detail = d.message;
-                return (rule!(SkeletonDetail, detail), sl, d.col);
-            }
-        }
-        (Rule::SkeletonUnparsable {}, 1, 1)
-    }
-
-    /// `match scrutinee { pattern => expr, ... }`; the caller consumed `match`.
-    fn match_expr(&mut self, line: usize) -> Result<Expr, Diagnostic> {
-        let scrutinee = self.cond_expr()?;
-        self.eat(&Tok::LBrace)?;
+    /// `match scrutinee { pattern => expr, ... }`; `match` consumed.
+    fn match_expr(&mut self, line: usize) -> Expr {
+        let scrutinee = self.expr();
+        self.eat(&Tok::LBrace);
         let mut arms = Vec::new();
-        while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
-            let pattern = self.pattern()?;
-            self.eat(&Tok::FatArrow)?;
+        self.list_to(&Tok::RBrace, |b| {
+            let pattern = b.pattern();
+            b.eat(&Tok::FatArrow);
             // `pat => { stmts }` is a block arm: a bare `{` starts no
             // expression, so the brace decides. The checker allows one only in statement
             // position. A block arm needs no comma.
-            let body = if *self.peek() == Tok::LBrace {
-                ArmBody::Block(self.block()?)
-            } else {
-                ArmBody::Expr(self.expr()?)
+            let body = match b.peek() {
+                Tok::LBrace => ArmBody::Block(b.block()),
+                _ => ArmBody::Expr(b.expr()),
             };
-            let block_arm = matches!(body, ArmBody::Block(_));
             arms.push(MatchArm { pattern, body });
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else if !block_arm {
-                break;
-            }
-        }
-        self.eat(&Tok::RBrace)?;
-        Ok(Expr::Match {
+        });
+        Expr::Match {
             id: Id::NEW,
             scrutinee: Box::new(scrutinee),
             arms,
             stmt_pos: false,
             line,
-        })
+        }
     }
 
     /// Desugars the `std/storage` helpers at the call site, where the
@@ -4268,140 +2988,69 @@ impl Parser {
         }
     }
 
-    /// `if cond { expr } else { expr }` in expression position; the
-    /// caller consumed `if`. Each branch is one expression, and `else if` nests as
-    /// `else_branch`. A missing `else` is `None`, which the checker refuses by the
-    /// totality rule.
-    fn if_expr(&mut self, line: usize) -> Result<Expr, Diagnostic> {
-        // `if let` is a statement only; the refusal suggests `match`.
-        if *self.peek() == Tok::Let {
-            return Err(refuse!("parse", line, self.col(), IfLetExpr));
-        }
-        let cond = self.cond_expr()?;
-        let then_branch = self.if_branch()?;
-        let else_branch = if *self.peek() == Tok::Else {
-            self.advance();
-            if *self.peek() == Tok::If {
-                // `else if` nests an expression-`if` with its own line, as in `if_stmt`.
-                let else_line = self.line();
-                self.advance(); // `if`
-                Some(Box::new(self.if_expr(else_line)?))
-            } else {
-                Some(Box::new(self.if_branch()?))
-            }
-        } else {
-            None
-        };
-        Ok(Expr::IfExpr {
+    /// `if cond { expr } else { expr }` in expression position; `if` consumed. Each
+    /// branch is one expression, and `else if` nests as `else_branch`. A missing
+    /// `else` is `None`, which the checker refuses by the totality rule.
+    fn if_expr(&mut self, line: usize) -> Expr {
+        let cond = self.expr();
+        let then_branch = self.if_branch();
+        let else_branch = self.eat(&Tok::Else).then(|| {
+            // `else if` nests an expression-`if` with its own line, as in `if_stmt`.
+            Box::new(match self.peek() {
+                Tok::If => {
+                    let else_line = self.line();
+                    self.at += 1;
+                    self.if_expr(else_line)
+                }
+                _ => self.if_branch(),
+            })
+        });
+        Expr::IfExpr {
             id: Id::NEW,
             cond: Box::new(cond),
             then_branch: Box::new(then_branch),
             else_branch,
             line,
-        })
+        }
     }
 
-    /// Parses one `{ expr }` branch of an expression-`if`: exactly one expression.
-    /// A statement keyword or leftover tokens are refused; a nested `if` is an
-    /// expression and allowed.
-    fn if_branch(&mut self) -> Result<Expr, Diagnostic> {
-        let line = self.line();
-        self.eat(&Tok::LBrace)?;
-        // A leading statement keyword gets the targeted message before `expr()` gives
-        // a generic one.
-        if matches!(
-            self.peek(),
-            Tok::Let
-                | Tok::Return
-                | Tok::While
-                | Tok::For
-                | Tok::Region
-                | Tok::Drop
-                | Tok::Break
-                | Tok::Continue
-        ) {
-            return Err(refuse!("parse", self.line(), self.col(), IfExprStatements));
-        }
-        // Braces delimit, so a bare `Name { .. }` is a struct literal again.
-        let saved = self.no_struct;
-        self.no_struct = false;
-        let e = self.expr()?;
-        self.no_struct = saved;
-        if *self.peek() != Tok::RBrace {
-            return Err(refuse!("parse", line, self.col(), IfExprStatements));
-        }
-        self.eat(&Tok::RBrace)?;
-        Ok(e)
+    /// One `{ expr }` branch of an expression-`if`: exactly one expression.
+    fn if_branch(&mut self) -> Expr {
+        self.at += 1;
+        let e = self.expr();
+        self.at += 1;
+        e
     }
 
-    /// `Name { field: expr, ... }`; the caller consumed the name.
-    fn struct_lit(&mut self, name: String, line: usize) -> Result<Expr, Diagnostic> {
-        self.eat(&Tok::LBrace)?;
-        let saved = self.no_struct;
-        self.no_struct = false;
+    /// `Name { field: expr, ... }`; the name consumed.
+    fn struct_lit(&mut self, name: String, line: usize) -> Expr {
+        self.eat(&Tok::LBrace);
         let mut fields = Vec::new();
-        while *self.peek() != Tok::RBrace {
-            let fname = self.expect_ident()?;
-            self.eat(&Tok::Colon)?;
-            let value = self.expr()?;
-            fields.push((fname, value));
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        self.no_struct = saved;
-        self.eat(&Tok::RBrace)?;
-        Ok(Expr::StructLit {
+        self.list_to(&Tok::RBrace, |b| {
+            let fname = b.ident();
+            b.eat(&Tok::Colon);
+            fields.push((fname, b.expr()));
+        });
+        Expr::StructLit {
             id: Id::NEW,
             name,
             fields,
             line,
-        })
+        }
     }
 
-    fn pattern(&mut self) -> Result<Pattern, Diagnostic> {
-        let line = self.line();
-        let mut name = self.expect_ident()?;
-        // `ns.Color.Red`: the loader checks `ns` and reduces the path to
-        // the variant name.
-        if *self.peek() == Tok::Dot {
-            while *self.peek() == Tok::Dot {
-                self.advance();
-                name = format!("{name}.{}", self.expect_ident()?);
-            }
-            let mut binds = Vec::new();
-            if *self.peek() == Tok::LParen {
-                self.advance();
-                while *self.peek() != Tok::RParen {
-                    binds.push(self.expect_binder()?);
-                    if *self.peek() == Tok::Comma {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-                self.eat(&Tok::RParen)?;
-            }
-            return Ok(Pattern::Variant(name, binds));
+    /// Every identifier is a variant name, `Some`, `None`, `Ok` and `Err` included.
+    /// `ns.Color.Red`: the loader checks `ns` and reduces the path to the variant name.
+    fn pattern(&mut self) -> Pattern {
+        let mut name = self.ident();
+        while self.eat(&Tok::Dot) {
+            name = format!("{name}.{}", self.ident());
         }
-        // Every identifier is a variant name, `Some`, `None`, `Ok` and `Err` included.
-        let _ = line;
-        let mut binds = Vec::new();
-        if *self.peek() == Tok::LParen {
-            self.advance();
-            while *self.peek() != Tok::RParen {
-                binds.push(self.expect_binder()?);
-                if *self.peek() == Tok::Comma {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.eat(&Tok::RParen)?;
-        }
-        Ok(Pattern::Variant(name, binds))
+        let binds = match self.eat(&Tok::LParen) {
+            true => self.binders_to_paren(),
+            false => Vec::new(),
+        };
+        Pattern::Variant(name, binds)
     }
 }
 
@@ -5153,8 +3802,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
                    fn ok(x: T) -> T { return x } \
                    fn main() -> Int64 { return ok(1) }";
         let toks = lex(src).unwrap();
-        let mut p = Parser::over(toks);
-        let (prog, errors) = p.program_accum();
+        let (prog, errors) = parse_bare(toks);
         assert!(!errors.is_empty(), "the broken decl must actually fail");
         let ok = prog
             .functions
@@ -5917,7 +4565,7 @@ impl Unwrap for Int64 { fn get(self) -> Output { return self }  type Output = In
 
     // Refinements under `&`, postfix chains, associated-type alias leaks.
 
-    /// Each postfix link counts toward [`Parser::MAX_NEST`], so a long `a.b.b...b`
+    /// Each postfix link counts toward the grammar's `nest` limit, so a long `a.b.b...b`
     /// chain is refused instead of aborting in a later walk.
     #[test]
     fn a_deep_postfix_chain_hits_the_nest_guard_not_the_stack() {

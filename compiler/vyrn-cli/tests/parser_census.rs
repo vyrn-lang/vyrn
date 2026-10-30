@@ -1,9 +1,9 @@
-//! The structural census of `parser.rs` and `lexer.rs`, by the method of
-//! `refusals.rs`. A section is an anchor line, from its doc comment, up to the next
+//! The structural census of `parser.rs`, the tree builder, and `lexer.rs`, by the method
+//! of `refusals.rs`. A section is an anchor line, from its doc comment, up to the next
 //! anchor's, so the sections tile the file. Each has a kind that answers "is the parser
 //! the right home for this?", and a count of the `Diagnostic::` sites it holds, because
 //! a rule that leaves a file moves both numbers. An anchor is usually an item; one is
-//! the `impl` flattening that ends `parse_accum`, because a section is what a reader would
+//! the `impl` flattening in `parse_with`, because a section is what a reader would
 //! delete. `ast.rs` and `fmt.rs` are not tiled: `surface.rs` and `forms.rs` price the
 //! AST a constructor at a time, and `fmt.rs` names no form and no keyword.
 
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// What a section is.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Kind {
-    /// A production: only the parser sees a token. A production that also rewrites
+    /// A production's tree: only the builder reads its events. One that also rewrites
     /// is `Grammar`.
     Grammar,
     /// A section that exists only to state a rewrite. The parser is the wrong home
@@ -23,7 +23,7 @@ enum Kind {
     Desugar,
     /// A table stated a second time: a deletion candidate.
     Twice,
-    /// Error recovery and the diagnostic sentences.
+    /// The checks behind a row the recognizer raises.
     Recovery,
     /// Shared machinery: the cursor, the state, the entry points.
     Shared,
@@ -34,10 +34,10 @@ enum Kind {
 impl Kind {
     fn label(self) -> &'static str {
         match self {
-            Kind::Grammar => "the grammar's own arm",
+            Kind::Grammar => "the tree of a form",
             Kind::Desugar => "a desugar the parser states",
             Kind::Twice => "a table stated a second time",
-            Kind::Recovery => "recovery and the diagnostic sentences",
+            Kind::Recovery => "the checks behind a row",
             Kind::Shared => "shared machinery",
             Kind::Tests => "tests",
         }
@@ -60,68 +60,28 @@ fn parser_sections() -> Vec<Section> {
     vec![
         sec("fn is_member_type_param", Grammar),
         sec("fn mark_member_type_params", Desugar),
-        sec("fn at_contract_decl", Grammar),
-        sec("fn answered_methods", Desugar),
         sec("fn parse_bare", Shared),
         sec("    let mut flat = Vec::new();", Desugar),
-        sec("struct Parser", Shared),
+        sec("fn binop_text", Shared),
         sec("fn if_let(", Desugar),
+        sec("fn is_separator", Recovery),
         sec("fn as_fn_body", Desugar),
+        sec("fn skeleton_refusal", Recovery),
         sec("fn store_target", Grammar),
-        sec("impl Parser", Shared),
-        sec("fn peek", Shared),
+        sec("fn build(", Shared),
         sec("fn take_docs", Grammar),
-        sec("fn col", Shared),
-        sec("fn eat", Recovery),
-        sec("fn place_root", Grammar),
-        sec("fn expect_ident", Recovery),
-        sec("fn program_accum", Grammar),
-        sec("fn sync_to_decl", Recovery),
-        sec("fn protocol_decl", Grammar),
-        sec("fn contract_decl", Grammar),
-        sec("fn contract_member_type", Grammar),
-        sec("fn impl_block", Grammar),
-        sec("fn parse_self_capability", Grammar),
-        sec("fn parse_result_capability", Grammar),
-        sec("fn impl_method", Grammar),
-        sec("fn logging_config", Grammar),
-        sec("fn import_decl", Grammar),
-        sec("fn type_decl", Grammar),
-        sec("fn parse_capability", Grammar),
-        sec("fn enum_type", Grammar),
-        sec("fn record_type", Grammar),
-        sec("fn type_param_binder", Grammar),
-        sec("fn function", Grammar),
-        sec("fn named_block", Grammar),
-        sec("fn extern_function", Grammar),
-        sec("fn type_", Grammar),
-        sec("const MAX_NEST", Shared),
-        sec("fn block", Grammar),
-        sec("fn sync_to_stmt", Recovery),
-        sec("fn global_decl", Grammar),
-        sec("fn if_stmt", Grammar),
         sec("fn else_tail", Desugar),
         sec("fn if_let_stmt", Grammar),
         sec("fn spliced", Desugar),
+        sec("fn ref_let_parts", Grammar),
         sec("fn refutable_let", Desugar),
         sec("fn stmt", Grammar),
-        sec("fn expr", Grammar),
-        sec("fn binop", Grammar),
-        sec("const NULLISH_BP", Grammar),
         sec("fn nullish", Desugar),
         sec("fn unary", Grammar),
-        sec("fn postfix", Grammar),
-        sec("fn at_lambda", Grammar),
-        sec("fn primary", Grammar),
         sec("fn template", Desugar),
-        sec("fn tagged_template", Desugar),
-        sec("fn code_quote", Desugar),
-        sec("fn skeleton_error_detail", Recovery),
         sec("fn match_expr", Grammar),
         sec("fn storage_desugar", Desugar),
         sec("fn if_expr", Grammar),
-        sec("fn struct_lit", Grammar),
-        sec("fn pattern", Grammar),
         sec("mod tests", Tests),
     ]
 }

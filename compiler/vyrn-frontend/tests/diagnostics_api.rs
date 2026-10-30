@@ -51,7 +51,7 @@ fn check_shim_matches_first_rendered() {
     );
 }
 
-/// `program_accum` records a parse diagnostic, synchronizes to the next
+/// The recognizer records a parse diagnostic, synchronizes to the next
 /// top-level starter, and continues.
 #[test]
 fn parse_recovers_across_declarations() {

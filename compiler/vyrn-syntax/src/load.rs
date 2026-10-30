@@ -720,6 +720,7 @@ impl<'a> Meta<'a> {
                 let rec = match self.word_is("recover") {
                     false => Recover::None,
                     true if self.word_is("stmt") => Recover::Stmt,
+                    true if self.word_is("nest") => Recover::Nest,
                     true if self.word_is("decl") => Recover::Decl(Box::new(self.prefix()?)),
                     true => return Err("recover stmt | recover decl P".into()),
                 };
