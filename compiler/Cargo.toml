@@ -4,8 +4,9 @@
 #   - vyrn-lower    : the lowered form — the checker's answers, written down
 #   - vyrn-codegen  : emits wasm directly; a native build runs it through wasm2c
 #   - vyrn-cli      : the `vyrn` driver
-#   - vyrn-syntax   : the grammar engine and `vyrn.syntax`, Vyrn's grammar; only
-#                     the `syntaxgate` test reads it, so `vyrn` does not link it
+#   - vyrn-syntax   : `vyrn.syntax`, Vyrn's grammar, and the generator that writes
+#                     the lexer and the recognizer from it; only tests read it,
+#                     so `vyrn` does not link it
 #
 # THE PROPERTY WORTH DEFENDING: `cargo build` and `cargo test` work on a machine
 # with no LLVM, no clang and no wasi sysroot, beyond the linker toolchain that

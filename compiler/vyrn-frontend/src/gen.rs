@@ -398,6 +398,29 @@ pub fn gen_lex_tokens_lit(source: &str) -> Expr {
     }
 }
 
+/// Returns the `codeRuns` list as an `Array<CodeRun>` record literal, which the
+/// wasm generation engine encodes for the guest. A source that does not lex has
+/// no runs, so it shows with no colour.
+pub fn gen_code_runs_lit(source: &str) -> Expr {
+    let runs = crate::classify::code_runs(source).unwrap_or_default();
+    Expr::ArrayLit {
+        id: Id::NEW,
+        elems: (runs.into_iter())
+            .map(|r| Expr::StructLit {
+                id: Id::NEW,
+                name: "CodeRun".to_string(),
+                fields: vec![
+                    ("start".to_string(), Expr::int(r.start as i64)),
+                    ("stop".to_string(), Expr::int(r.stop as i64)),
+                    ("class".to_string(), Expr::str(r.class.css())),
+                ],
+                line: 0,
+            })
+            .collect(),
+        line: 0,
+    }
+}
+
 /// Runs the lexer over `source` as `(kind, text, line, col)` rows: the one
 /// place the `lex` builtin's token list is decided.
 pub(crate) fn lexed(source: &str) -> Vec<(String, String, i64, i64)> {

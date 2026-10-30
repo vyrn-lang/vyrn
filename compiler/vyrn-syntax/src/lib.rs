@@ -1,29 +1,30 @@
-//! A grammar engine: reads a `.syntax` file and interprets it over a source text.
+//! A grammar reader and the generator that writes Vyrn's lexer and recognizer.
 //!
 //! A grammar states shape only: a token table, rules and the rows it refuses
 //! with. Lexical rules (lower-case names) match characters with full PEG
-//! backtracking and skip no trivia. Syntactic rules (upper-case names) skip the
-//! `trivia` rule before each terminal and commit as Parsec does: once a sequence
-//! has consumed input, a later element that fails is an error at that element,
-//! not a backtrack. `@e` backtracks over a committed failure; `&e` and `!e`
-//! never commit. A refusal is `^Row(hole=source)@anchor`: it names a row and
-//! fills its holes, and the host renders the sentence. `compiler/vyrn-syntax/
-//! syntax.syntax` is the file format, written in itself.
+//! backtracking and skip no trivia. Syntactic rules (upper-case names) read tokens
+//! and commit as Parsec does: once a sequence has consumed input, a later element
+//! that fails is an error at that element, not a backtrack. `@e` backtracks over a
+//! committed failure; `&e` and `!e` never commit. A refusal is
+//! `^Row(hole=source)@anchor`: it names a row and fills its holes, and the host
+//! renders the sentence. `compiler/vyrn-syntax/syntax.syntax` is the file format,
+//! written in itself.
 //!
-//! Entry points: [`load`] reads a grammar, [`parse`] runs one of its rules over a
-//! text, and [`lexer`] writes a grammar's lexical rules as Rust. `vyrn.syntax` beside this file is Vyrn's grammar, and the `syntaxgate`
-//! test holds the hand lexer and parser equal to it.
+//! Entry points: [`load`] reads a grammar, [`lexer`] writes its lexical rules as
+//! Rust, and [`recognizer`] writes its syntactic rules. `vyrn.syntax` beside this
+//! file is Vyrn's grammar, and the `syntaxgate` test holds the hand parser equal to
+//! the written recognizer.
 
 mod gen;
 mod load;
-mod run;
+mod recognizer;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 pub use gen::lexer;
 pub use load::load;
-pub use run::{parse, Diag, HoleValue, Node, NodeKind, Parse, Stage};
+pub use recognizer::recognizer;
 
 /// One grammar expression.
 #[derive(Debug, Clone)]
@@ -67,14 +68,12 @@ enum E {
 /// A set of bytes, one bit each.
 type ByteSet = [u64; 4];
 
-/// A literal. In a syntactic rule a word literal needs a non-word character
-/// after it, and a punctuation literal yields to a longer token spelling.
+/// A literal. In a syntactic rule a word literal is one token: a keyword, or an
+/// identifier of that spelling. A punctuation literal is one token.
 #[derive(Debug, Clone)]
 struct Lit {
     s: Rc<str>,
     word: bool,
-    /// The token spellings that start with this one and are longer.
-    longer: Rc<[Rc<str>]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -185,8 +184,6 @@ pub struct Grammar {
     tokens: Vec<(String, String, bool)>,
     reserved: HashSet<String>,
     flags: Vec<String>,
-    trivia: Option<RuleId>,
-    token_rule: Option<RuleId>,
     scan_rule: Option<RuleId>,
     nest_limit: Option<(u32, Rc<Throw>)>,
     /// The row a committed literal that fails states.
@@ -233,30 +230,21 @@ fn is_word(c: char) -> bool {
 mod tests {
     use super::*;
 
-    fn grammar(file: &str) -> (Grammar, String) {
+    fn text(file: &str) -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
-        let text = std::fs::read_to_string(path).expect("the grammar reads");
-        (load(&text).expect("the grammar loads"), text)
-    }
-
-    fn accepts(meta: &Grammar, text: &str) -> Vec<Diag> {
-        let file = meta.rule("file").expect("syntax.syntax names a file rule");
-        parse(meta, file, text, &|_: &str| String::new()).errors
+        std::fs::read_to_string(path).expect("the grammar reads")
     }
 
     #[test]
-    fn the_meta_grammar_reads_itself_and_vyrn() {
-        let (meta, own) = grammar("syntax.syntax");
-        let (_, vyrn) = grammar("vyrn.syntax");
-        assert!(accepts(&meta, &own).is_empty());
-        assert!(accepts(&meta, &vyrn).is_empty());
+    fn the_loader_reads_the_format_grammar_and_vyrn() {
+        assert!(load(&text("syntax.syntax")).is_ok());
+        assert!(load(&text("vyrn.syntax")).is_ok());
     }
 
     #[test]
-    fn the_meta_grammar_refuses_an_unclosed_group() {
-        let (meta, _) = grammar("syntax.syntax");
-        assert!(!accepts(&meta, "a = ( 'x'\n").is_empty());
-        assert!(!accepts(&meta, "a = ^\n").is_empty());
+    fn the_loader_refuses_an_unclosed_group() {
+        assert!(load("expect ^E\na = ( 'x'\n").is_err());
+        assert!(load("expect ^E\na = ^\n").is_err());
     }
 
     #[test]

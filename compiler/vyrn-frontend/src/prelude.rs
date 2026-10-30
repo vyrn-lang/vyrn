@@ -1239,6 +1239,11 @@ fn table() -> Vec<Builtin> {
             .effect(GenOnly)
             .takes(&[1], takes_one)
             .typed(vec![Str], arr(Type::Named("Token".to_string())), None),
+        b("codeRuns")
+            .spec(Spec::Routes(crate::checker::GEN_ENTRY_CODE_RUNS))
+            .effect(GenOnly)
+            .takes(&[1], takes_one)
+            .typed(vec![Str], arr(Type::Named("CodeRun".to_string())), None),
         b("render")
             .spec(Spec::Host)
             .effect(GenOnly)
@@ -1487,7 +1492,7 @@ mod tests {
     /// reordered prelude moves every declaration index. Anything but a type
     /// or a protocol here would enter every program.
     #[test]
-    fn the_prelude_declares_twenty_three_types_five_protocols_and_nothing_else() {
+    fn the_prelude_declares_twenty_four_types_five_protocols_and_nothing_else() {
         let names: Vec<&str> = type_decls().iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1515,6 +1520,7 @@ mod tests {
                 "TypeMember",
                 "TypeArg",
                 "TypeArgNode",
+                "CodeRun",
             ]
         );
         assert!(

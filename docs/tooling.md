@@ -604,7 +604,7 @@ a dependency.
 
 `compiler/vyrn-play` compiles the front end and the wasm emitter to a
 `wasm32-unknown-unknown` module for the website. It exports `play_tokens`
-(highlighting with the real lexer), `play_check` (diagnostics from the real
+(highlighting with the compiler's classifier), `play_check` (diagnostics from the real
 loader), `play_compile` (the bytes `vyrn build --target wasm` writes), and
 `play_complete`, `play_hover` and `play_signature`, which answer the editor
 from the analysis `vyrn-lsp` serves. In a buffer that does not parse, no

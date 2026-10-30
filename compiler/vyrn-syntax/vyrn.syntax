@@ -70,8 +70,6 @@ token Amp '&'
 token Caret '^'
 token Tilde '~'
 
-opener '//'
-
 nest 1024 ^NestingTooDeep(max='1024')
 
 // A literal that fails after its rule committed.

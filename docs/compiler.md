@@ -48,7 +48,7 @@ sysroot. A crate is judged on what it costs, not on a rule against crates.
 | `vyrn-genwasm` | runs a `gen fn` as compiled wasm inside a load; without its `host` feature, builds the module a host runs (`run_pure`) | `vyrn-frontend`, `vyrn-codegen`, `wasmtime` (feature `host`) |
 | `vyrn-lsp` | the language server, an adapter over `vyrn-frontend` | `vyrn-frontend`, `vyrn-lower`, `vyrn-genwasm` |
 | `vyrn-play` | the playground: the front end and the emitter compiled to `wasm32-unknown-unknown` | `vyrn-frontend`, `vyrn-codegen`, `vyrn-lower`, `vyrn-genwasm` without `host` |
-| `vyrn-syntax` | the grammar engine, `vyrn.syntax` (Vyrn's grammar) and `syntax.syntax` (the file format), and `lexer`, which writes the lexer's scanner from a grammar; the `syntaxgate` test and the scanner's freshness test read it | nothing |
+| `vyrn-syntax` | `vyrn.syntax` (Vyrn's grammar) and `syntax.syntax` (the file format), and `lexer` and `recognizer`, which write the lexer's scanner and the recognizer from a grammar; the `syntaxgate` test and the two freshness tests read it | nothing |
 
 `vyrn-lsp`, `vyrn-genwasm` and `vyrn-play` are excluded from the workspace.
 Test and format the first two with `--manifest-path`. Build `vyrn-play` from
@@ -91,6 +91,13 @@ row: a `^Row` where the grammar states the mistake, and a `row` line for each
 row the parser raises from a token's value or a check over its tree. A change
 to the parser changes the grammar in the same commit, and the `syntaxgate`
 test holds the two equal. A change to the lexer is a change to the grammar.
+
+`recognizer/rules.rs` is the grammar's syntactic rules written as Rust by
+`vyrn_syntax::recognizer`, one method per rule, and `recognizer.rs` is the
+cursor it runs on. It reads the lexer's tokens, builds no tree, and records the
+declarations and the contextual words a rule consumed. The parser still builds
+the tree. `syntaxgate` compares the parser with it, and `classify::code_runs`
+reads it to colour source for the playground and the `codeRuns` builtin.
 
 `loader::load_with_origins` builds one `ast::Program` from a root file. All
 I/O goes through a `ModuleResolver`, so the editor serves unsaved buffers and
@@ -650,11 +657,11 @@ The output of programs:
   differs. `VYRN_WASM_MANIFEST=write` rewrites the manifest; read every moved
   row with `wasm2wat` before committing it.
 - `reproducible.rs`: one source builds to one artifact in every process.
-- `syntaxgate.rs`: over every corpus root, `vyrn.syntax` gives the lexer and
-  parser's diagnostics, line, column and sentence, and each file the
-  parser accepts has its declarations at the same kind and line in the
-  grammar's tree. Every lex and parse row is named by the grammar and
-  refused by some root.
+- `syntaxgate.rs`: over every corpus root, the recognizer written from
+  `vyrn.syntax` gives the parser's diagnostics, line, column and sentence, and
+  each file the parser accepts has its declarations at the same kind and line
+  in the recognizer's marks. Every lex and parse row is named by the grammar
+  and refused by some root.
 
 The refusals:
 

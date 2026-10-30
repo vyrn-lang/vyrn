@@ -11,7 +11,7 @@ export gen fn demoCode(path: String) -> Code {
     let mut hits: Array<Code> = []
     for step in stepsOf(raw) {
         if looksLikeSource(step[1]) {
-            let hl = highlightSrc(step[1], lex(step[1]))
+            let hl = highlightSrc(step[1])
             hits.push(branch("id", step[0], vyrn"\{hl}"))
         }
     }

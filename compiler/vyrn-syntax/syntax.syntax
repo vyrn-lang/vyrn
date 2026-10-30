@@ -11,7 +11,6 @@ def = !ws (directive / rule) [ \t\r]* note? ('\n' / eof)
 
 directive = 'syntax' gap name
           / ('keyword' / 'token') gap name gap lit
-          / 'opener' (gap lit)+
           / 'nest' gap digit+ gap throw
           / 'expect' gap throw
           / 'row' gap name

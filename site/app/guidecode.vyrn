@@ -112,7 +112,7 @@ export gen fn guideCode(dir: String) -> Code {
     for b in blocks {
         ids.push(b.id.copy())
         srcs.push(branch("id", b.id, vyrn"\{b.src}"))
-        lines.push(branch("id", b.id, quotedList(highlightRows(b.src, lex(b.src)))))
+        lines.push(branch("id", b.id, quotedList(highlightRows(b.src))))
         names.push(branch("id", b.id, quotedList(b.names)))
         playable.push(branch("id", b.id, vyrn"\{b.playable}"))
     }

@@ -297,15 +297,17 @@ pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
 };
 
 /// The `reflect` import's kinds: which builtin the host answers. The argument
-/// is the module path, the contract name, or the source to lex.
+/// is the module path, the contract name, or the source to lex or classify.
 pub const REFLECT_MODULE_INTERFACE: i64 = 0;
 pub const REFLECT_CONTRACT_OF: i64 = 1;
 pub const REFLECT_LEX: i64 = 2;
 pub const REFLECT_TYPE_ARG: i64 = 3;
 pub const REFLECT_MODULE_CODE: i64 = 4;
+pub const REFLECT_CODE_RUNS: i64 = 5;
 
 pub use vyrn_frontend::checker::{
-    GEN_ENTRY_LEX, GEN_ENTRY_MODULE_CODE, GEN_ENTRY_MODULE_INTERFACE, GEN_ENTRY_TYPE_ARG,
+    GEN_ENTRY_CODE_RUNS, GEN_ENTRY_LEX, GEN_ENTRY_MODULE_CODE, GEN_ENTRY_MODULE_INTERFACE,
+    GEN_ENTRY_TYPE_ARG,
 };
 
 /// The atom-stream primitives the synthesized decoders call. The checker

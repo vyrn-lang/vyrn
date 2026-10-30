@@ -74,7 +74,7 @@ const CONTEXTUAL_COLUMNS: &[(&str, &[&str])] = &[
 ];
 
 /// The words the lexer hands back as identifiers and the parser reads by
-/// position. The playground's `CONTEXTUAL` list must be a subset.
+/// position.
 const CONTEXTUAL_WORDS: &[&str] = &[
     "read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as", "extern", "lazy",
     "logging", "contract", "to", "await",
@@ -296,23 +296,6 @@ fn the_keyword_census_matches_its_pin() {
 
 #[test]
 fn the_contextual_words_match_their_pin() {
-    // `tests/contextual_words.rs` holds the playground's list to the grammar's; a
-    // word added to it without a row here is invisible to the census.
-    let play = std::fs::read_to_string(repo_root().join("compiler/vyrn-play/src/lib.rs"))
-        .expect("the playground crate");
-    let anchor = "const CONTEXTUAL: &[&str] = &[";
-    let at = play
-        .find(anchor)
-        .expect("the playground's CONTEXTUAL list is gone — this test needs a new anchor");
-    let body = &play[at + anchor.len()..];
-    let body = &body[..body.find(']').expect("the list's bracket")];
-    for word in body.split('"').skip(1).step_by(2) {
-        assert!(
-            CONTEXTUAL_WORDS.contains(&word),
-            "the playground colours `{word}` and the census has no row for it"
-        );
-    }
-
     let labels: Vec<(String, String)> = CONTEXTUAL_WORDS
         .iter()
         .map(|w| (w.to_string(), format!("\"{w}\"")))
