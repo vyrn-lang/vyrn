@@ -1,4 +1,7 @@
-//! Hand-written lexer: [`scan`] reads the source once, and [`lex`] and the formatter read the scan.
+//! The lexer: [`scan`] reads the source once, and [`lex`] and the formatter read the scan.
+
+#[rustfmt::skip]
+mod grammar;
 
 use crate::diagnostics::Diagnostic;
 use crate::rules::{refuse, Rule};
@@ -150,32 +153,11 @@ macro_rules! tokens {
             Eof,
         }
 
-        fn keyword_or_ident(text: &str) -> Tok {
-            match text {
-                $($w => Tok::$t,)*
-                _ => Tok::Ident(text.to_string()),
-            }
-        }
-
         fn keyword_text(tok: &Tok) -> Option<&'static str> {
             Some(match tok {
                 $(Tok::$t => $w,)*
                 _ => return None,
             })
-        }
-
-        fn two_char_op(a: char, b: char) -> Option<Tok> {
-            match (a, b) {
-                $(($a, $b) => Some(Tok::$tt),)*
-                _ => None,
-            }
-        }
-
-        fn single_char_op(c: char) -> Option<Tok> {
-            match c {
-                $($c => Some(Tok::$ot),)*
-                _ => None,
-            }
         }
 
         /// Returns the spelling of a punctuation token, or `None`.
@@ -298,492 +280,298 @@ tokens! {
 
 /// Scans `src` once into every lexical item and the end position.
 ///
-/// This is the one statement of the lexical grammar. [`lex`] and the formatter
-/// both read it, so `vyrn fmt` formats only files `vyrn check` lexes. A literal's
-/// payload is decoded here and its raw text kept beside it, so neither reader
-/// scans again.
+/// The rules are `vyrn.syntax`'s, as [`grammar`] states them; this module builds
+/// the items and decodes each literal's value. [`lex`] and the formatter both
+/// read the scan, so `vyrn fmt` formats only files `vyrn check` lexes. A
+/// literal's payload is decoded here and its raw text kept beside it, so
+/// neither reader scans again.
 pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
-    let chars: Vec<char> = src.chars().collect();
-    // The byte offset of each char index, and of the end.
-    let at: Vec<usize> = (src.char_indices().map(|(b, _)| b))
-        .chain([src.len()])
-        .collect();
-    let span = |from: usize, to: usize| at[from]..at[to];
-    let mut i = 0usize;
-    let mut line = 1usize;
-    // Index of the current line's first character; a column is `i - line_start + 1`.
-    let mut line_start = 0usize;
-    let mut out: Vec<Triv> = Vec::new();
-    // The file start counts as space before the first token.
-    let mut space_before = true;
+    let items = Items {
+        src,
+        items: Vec::new(),
+        escapes: Vec::new(),
+        lines: LineCol::START,
+        end: 0,
+    };
+    let mut scanner = grammar::Scanner::new(src, items);
+    scanner.scan().map_err(|d| *d)?;
+    let mut items = scanner.hooks;
+    let (end_line, end_col) = items.lines.of(src, src.len());
+    Ok(Scan {
+        items: items.items,
+        end_line,
+        end_col,
+    })
+}
 
-    while i < chars.len() {
-        let c = chars[i];
-        let col = i - line_start + 1;
+/// The 1-based line and character column of a byte offset, counted on from
+/// the offset asked before.
+#[derive(Clone, Copy)]
+struct LineCol {
+    at: usize,
+    line: usize,
+    col: usize,
+}
 
-        if c == '\n' {
-            line += 1;
-            i += 1;
-            line_start = i;
-            space_before = true;
-            continue;
+impl LineCol {
+    const START: LineCol = LineCol {
+        at: 0,
+        line: 1,
+        col: 1,
+    };
+
+    /// Returns the line and column of byte `to` of `src`, a character boundary.
+    /// An offset before the last one asked recounts from the start.
+    fn of(&mut self, src: &str, to: usize) -> (usize, usize) {
+        if to < self.at {
+            *self = LineCol::START;
         }
-        if c.is_whitespace() {
-            i += 1;
-            space_before = true;
-            continue;
+        // A character starts at every byte but a UTF-8 continuation byte.
+        let chars = |b: &[u8]| b.iter().filter(|&&b| b & 0xC0 != 0x80).count();
+        let seg = &src.as_bytes()[self.at..to];
+        // Most segments are a blank and a token: ASCII on one line.
+        if seg.iter().all(|&b| b != b'\n' && b < 0x80) {
+            self.col += seg.len();
+        } else if let Some(nl) = seg.iter().rposition(|&b| b == b'\n') {
+            self.line += seg[..=nl].iter().filter(|&&b| b == b'\n').count();
+            self.col = 1 + chars(&seg[nl + 1..]);
+        } else {
+            self.col += chars(seg);
         }
+        self.at = to;
+        (self.line, self.col)
+    }
+}
 
-        let start = i;
-        let start_line = line;
+/// What an escape of a string literal decodes to.
+enum Escape {
+    Char(char),
+    /// A `\{ expr }` hole.
+    Hole,
+}
 
-        // A `//` comment, or a `///` doc line; `////+` is a plain comment.
-        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-            let is_doc = i + 2 < chars.len()
-                && chars[i + 2] == '/'
-                && !(i + 3 < chars.len() && chars[i + 3] == '/');
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            let kind = if is_doc {
-                let text = &src[span(start + 3, i)];
-                // A CRLF file leaves a trailing `\r`; strip it so it never reaches markdown.
-                let text = text.strip_suffix('\r').unwrap_or(text);
-                TrivKind::Doc(text.strip_prefix(' ').unwrap_or(text).to_string())
-            } else {
-                TrivKind::Comment
-            };
-            // A printed comment carries no trailing CR or blank. A doc's payload
-            // comes from the untrimmed line.
-            let mut end = i;
-            while matches!(chars[end - 1], '\r' | ' ' | '\t') {
-                end -= 1;
-            }
-            out.push(Triv {
-                kind,
-                span: span(start, end),
-                start_line,
-                col,
-                end_line: start_line,
-                space_before,
-            });
-            space_before = true;
-            continue;
-        }
+/// The items of one scan, built as the scanner reports its rules.
+struct Items<'s> {
+    src: &'s str,
+    items: Vec<Triv>,
+    /// The escapes of the string literal being scanned, each with its byte
+    /// range from the backslash; the `string` hook empties it.
+    escapes: Vec<(std::ops::Range<usize>, Escape)>,
+    lines: LineCol,
+    /// The end of the last item, so the next knows whether space precedes it.
+    end: usize,
+}
 
-        // A string literal with escapes and `\{ expr }` holes. Only `\{` opens a hole;
-        // a bare `{` is text.
-        if c == '"' {
-            let start_col = col; // column of the opening quote
-                                 // In a `"""..."""` string a lone `"` or `""` is text,
-                                 // so emitted code needs no `\"`. Only the terminator differs from
-                                 // a plain string.
-            let triple = i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"';
-            i += if triple { 3 } else { 1 }; // opening quote(s)
-                                             // A String is NUL-terminated natively, so it cannot
-                                             // hold a NUL. Refuse one at both entrances: a raw NUL
-                                             // byte and `\u{0}` (there is no `\0` escape).
-            let nul = || refuse!("lex", start_line, start_col, NulInString);
-            let mut parts: Vec<String> = Vec::new();
-            let mut exprs: Vec<Hole> = Vec::new();
-            let mut cur = String::new();
-            loop {
-                if i >= chars.len() {
-                    return Err(refuse!("lex", start_line, start_col, UnterminatedString));
-                }
-                let ch = chars[i];
-                if ch == '\0' {
-                    return Err(nul());
-                }
-                if ch == '"' {
-                    if triple {
-                        // Only a run of three closes a triple-quoted string; a lone
-                        // `"` or `""` is literal text.
-                        if i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"' {
-                            i += 3; // closing `"""`
-                            break;
-                        }
-                        cur.push('"');
-                        i += 1;
-                        continue;
-                    }
-                    i += 1; // closing quote
-                    break;
-                }
-                // Normalize CRLF to LF inside a literal, so a multi-line string has the same
-                // bytes on every checkout. The raw text keeps the CR for the formatter.
-                if ch == '\r' && i + 1 < chars.len() && chars[i + 1] == '\n' {
-                    i += 1; // drop the CR; the LF is handled next iteration
-                    continue;
-                }
-                // A raw newline is part of the string; keep counting lines.
-                if ch == '\n' {
-                    line += 1;
-                    i += 1;
-                    line_start = i;
-                    cur.push('\n');
-                    continue;
-                }
-                if ch == '\\' {
-                    if i + 1 >= chars.len() {
-                        return Err(refuse!("lex", start_line, start_col, UnterminatedEscape));
-                    }
-                    // `\{` opens a hole: scan its raw source to the matching `}`.
-                    if chars[i + 1] == '{' {
-                        parts.push(std::mem::take(&mut cur));
-                        i += 2; // skip `\{`
-                        let hole = i;
-                        let (hole_line, hole_col) = (line, i - line_start + 1);
-                        let mut depth = 1usize;
-                        while i < chars.len() && depth > 0 {
-                            match chars[i] {
-                                '\n' => {
-                                    // A hole may span lines too; keep counting.
-                                    line += 1;
-                                    i += 1;
-                                    line_start = i;
-                                }
-                                '"' => {
-                                    // Skip a nested string and its escapes. Its raw newlines count
-                                    // lines as the `\n` arm does.
-                                    i += 1;
-                                    while i < chars.len() && chars[i] != '"' {
-                                        if chars[i] == '\n' {
-                                            line += 1;
-                                            i += 1;
-                                            line_start = i;
-                                        } else {
-                                            i += if chars[i] == '\\' { 2 } else { 1 };
-                                        }
-                                    }
-                                    if i >= chars.len() {
-                                        return Err(refuse!(
-                                            "lex",
-                                            start_line,
-                                            start_col,
-                                            UnterminatedInterpString
-                                        ));
-                                    }
-                                    i += 1; // closing nested quote
-                                }
-                                // A `}` in a nested byte literal (`'}'`) does not close the hole.
-                                '\'' => {
-                                    i += 1;
-                                    while i < chars.len() && chars[i] != '\'' && chars[i] != '\n' {
-                                        i += if chars[i] == '\\' { 2 } else { 1 };
-                                    }
-                                    if i >= chars.len() || chars[i] == '\n' {
-                                        return Err(refuse!(
-                                            "lex",
-                                            start_line,
-                                            start_col,
-                                            UnterminatedInterpChar
-                                        ));
-                                    }
-                                    i += 1; // closing nested quote
-                                }
-                                // A `}` in a `//` comment is text. The `\n` stays for the newline
-                                // arm.
-                                '/' if i + 1 < chars.len() && chars[i + 1] == '/' => {
-                                    while i < chars.len() && chars[i] != '\n' {
-                                        i += 1;
-                                    }
-                                }
-                                '{' => {
-                                    depth += 1;
-                                    i += 1;
-                                }
-                                '}' => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
-                                    }
-                                    i += 1;
-                                }
-                                _ => i += 1,
-                            }
-                        }
-                        if depth != 0 {
-                            return Err(refuse!("lex", start_line, start_col, UnterminatedInterp));
-                        }
-                        let hole_src: String = chars[hole..i].iter().collect();
-                        if hole_src.trim().is_empty() {
-                            return Err(refuse!("lex", start_line, start_col, EmptyInterp));
-                        }
-                        exprs.push(Hole {
-                            src: hole_src,
-                            line: hole_line,
-                            col: hole_col,
-                        });
-                        i += 1; // skip closing `}`
-                        continue;
-                    }
-                    // `\u{XXXX}`: a Unicode scalar by hex code point.
-                    if chars[i + 1] == 'u' {
-                        let (ch, next) = parse_unicode_escape(&chars, i, start_line, start_col)?;
-                        // `\u{0}` is the same NUL spelled another way.
-                        if ch == '\0' {
-                            return Err(nul());
-                        }
-                        cur.push(ch);
-                        i = next;
-                        continue;
-                    }
-                    let esc = match chars[i + 1] {
-                        'n' => '\n',
-                        't' => '\t',
-                        'r' => '\r',
-                        '\\' => '\\',
-                        '"' => '"',
-                        other => {
-                            return Err(refuse!("lex", start_line, start_col, UnknownEscape, other))
-                        }
-                    };
-                    cur.push(esc);
-                    i += 2;
-                    continue;
-                }
-                cur.push(ch);
-                i += 1;
-            }
-            // A `vyrn"""` code quote, its tag the item before it on its line as the
-            // parser reads it, drops its closing indentation. Only here are the raw
-            // delimiters known: `vyrn"\n"` is no multi-line quote.
-            let quote = triple
-                && out.last().is_some_and(|t| {
-                    t.end_line == start_line
-                        && matches!(&t.kind, TrivKind::Tok(Tok::Ident(n)) if n == "vyrn")
-                });
-            // Anchor the token at the opening quote, so a diagnostic on a multi-line
-            // string points where it starts.
-            let tok = if exprs.is_empty() {
-                if quote {
-                    dedent(std::slice::from_mut(&mut cur));
-                }
-                Tok::Str(cur)
-            } else {
-                parts.push(cur); // the trailing fragment after the last hole
-                if quote {
-                    dedent(&mut parts);
-                }
-                Tok::TemplateStr { parts, exprs }
-            };
-            out.push(Triv {
-                kind: TrivKind::Tok(tok),
-                span: span(start, i),
-                start_line,
-                col: start_col,
-                end_line: line,
-                space_before,
-            });
-            space_before = false;
-            continue;
-        }
-
-        // A byte literal: one ASCII byte, an integer literal that defaults to `UInt8`.
-        // Vyrn has no char type.
-        if c == '\'' {
-            let (val, next) = lex_byte_literal(&chars, i, line, col)?;
-            i = next; // past the closing quote
-            out.push(Triv {
-                kind: TrivKind::Tok(Tok::Byte(val)),
-                span: span(start, next),
-                start_line,
-                col,
-                end_line: line,
-                space_before,
-            });
-            space_before = false;
-            continue;
-        }
-
-        if c.is_ascii_digit() {
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-            // A `.` followed by a digit makes this a float literal (`1.5`); a `.`
-            // followed by anything else is field/method access (`x.foo`, `1.max`).
-            let is_float = i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit();
-            if is_float {
-                i += 1; // consume the `.`
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            let text = &src[span(start, i)];
-            let tok = if is_float {
-                // Every `digits.digits` text is in f64::from_str's grammar, which rounds a
-                // text too large to infinity, so the parse never fails.
-                Tok::Float(text.parse().expect("digits.digits parses as f64"))
-            } else {
-                // A literal above `i64::MAX`, reachable only for `UInt64`, keeps its `u64` bit
-                // pattern.
-                let value: i64 = match text.parse::<i64>() {
-                    Ok(v) => v,
-                    Err(_) => text
-                        .parse::<u64>()
-                        .map(|u| u as i64)
-                        .map_err(|_| refuse!("lex", line, col, IntOutOfRange, text))?,
-                };
-                Tok::Int(value)
-            };
-            out.push(Triv {
-                kind: TrivKind::Tok(tok),
-                span: span(start, i),
-                start_line,
-                col,
-                end_line: line,
-                space_before,
-            });
-            space_before = false;
-            continue;
-        }
-
-        if c.is_alphabetic() || c == '_' {
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                i += 1;
-            }
-            let tok = keyword_or_ident(&src[span(start, i)]);
-            out.push(Triv {
-                kind: TrivKind::Tok(tok),
-                span: span(start, i),
-                start_line,
-                col,
-                end_line: line,
-                space_before,
-            });
-            space_before = false;
-            continue;
-        }
-
-        // Two-character operators first: maximal munch.
-        let two = i
-            .checked_add(1)
-            .filter(|&j| j < chars.len())
-            .and_then(|j| two_char_op(c, chars[j]));
-        let (tok, width) = match two {
-            Some(tok) => (tok, 2usize),
-            None => match single_char_op(c) {
-                Some(tok) => (tok, 1usize),
-                None => {
-                    return Err(refuse!(
-                        "lex",
-                        line,
-                        col,
-                        UnexpectedChar,
-                        c = format!("{c:?}")
-                    ))
-                }
-            },
-        };
-        i += width;
-        out.push(Triv {
-            kind: TrivKind::Tok(tok),
-            span: span(start, i),
-            start_line,
-            col,
-            end_line: line,
+impl Items<'_> {
+    /// Pushes an item that starts at `at`, a line and column, and ends on
+    /// `end_line`. `span` is its printed text, and its rule matched up to `end`.
+    fn push(
+        &mut self,
+        kind: TrivKind,
+        at: (usize, usize),
+        end_line: usize,
+        span: std::ops::Range<usize>,
+        end: usize,
+    ) {
+        let space_before = self.items.is_empty() || self.end < span.start;
+        self.items.push(Triv {
+            kind,
+            span,
+            start_line: at.0,
+            col: at.1,
+            end_line,
             space_before,
         });
-        space_before = false;
+        self.end = end;
     }
 
-    Ok(Scan {
-        items: out,
-        end_line: line,
-        end_col: i - line_start + 1,
-    })
+    /// Pushes a line comment or doc line; its printed text drops trailing
+    /// blanks and the CR of a CRLF line.
+    fn push_line(&mut self, kind: TrivKind, start: usize, end: usize) {
+        let at = self.lines.of(self.src, start);
+        let text = self.src[start..end].trim_end_matches(['\r', ' ', '\t']);
+        self.push(kind, at, at.0, start..start + text.len(), end);
+    }
+}
+
+impl grammar::Hooks for Items<'_> {
+    fn refuse(&mut self, at: usize, rule: Rule) -> Box<Diagnostic> {
+        let (line, col) = self.lines.of(self.src, at);
+        Box::new(Diagnostic::refusal(line, col, "lex", rule))
+    }
+
+    fn punct(&mut self, start: usize, end: usize, tok: Tok) -> Result<(), Box<Diagnostic>> {
+        let at = self.lines.of(self.src, start);
+        self.push(TrivKind::Tok(tok), at, at.0, start..end, end);
+        Ok(())
+    }
+
+    fn comment(&mut self, start: usize, end: usize) -> Result<(), Box<Diagnostic>> {
+        self.push_line(TrivKind::Comment, start, end);
+        Ok(())
+    }
+
+    fn doc(&mut self, start: usize, end: usize) -> Result<(), Box<Diagnostic>> {
+        // A CRLF file leaves a trailing `\r`; strip it so it never reaches markdown.
+        let text = &self.src[start + 3..end];
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        let text = text.strip_prefix(' ').unwrap_or(text).to_string();
+        self.push_line(TrivKind::Doc(text), start, end);
+        Ok(())
+    }
+
+    fn word(&mut self, start: usize, end: usize) -> Result<(), Box<Diagnostic>> {
+        let at = self.lines.of(self.src, start);
+        let text = &self.src[start..end];
+        let tok = grammar::keyword(text).unwrap_or_else(|| Tok::Ident(text.to_string()));
+        self.push(TrivKind::Tok(tok), at, at.0, start..end, end);
+        Ok(())
+    }
+
+    fn number(&mut self, start: usize, end: usize) -> Result<(), Box<Diagnostic>> {
+        let at = self.lines.of(self.src, start);
+        let text = &self.src[start..end];
+        let tok = if text.contains('.') {
+            // Every `digits.digits` text is in f64::from_str's grammar, which rounds a
+            // text too large to infinity, so the parse never fails.
+            Tok::Float(text.parse().expect("digits.digits parses as f64"))
+        } else {
+            // A literal above `i64::MAX`, reachable only for `UInt64`, keeps its `u64` bit
+            // pattern.
+            match text.parse::<i64>() {
+                Ok(v) => Tok::Int(v),
+                Err(_) => Tok::Int(
+                    text.parse::<u64>()
+                        .map_err(|_| refuse!("lex", at.0, at.1, IntOutOfRange, text))?
+                        as i64,
+                ),
+            }
+        };
+        self.push(TrivKind::Tok(tok), at, at.0, start..end, end);
+        Ok(())
+    }
+
+    fn byte(&mut self, start: usize, end: usize) -> Result<(), Box<Diagnostic>> {
+        let at = self.lines.of(self.src, start);
+        let value = match &self.src.as_bytes()[start + 1..end - 1] {
+            [b'\\', b'n'] => Some(b'\n'),
+            [b'\\', b't'] => Some(b'\t'),
+            [b'\\', b'r'] => Some(b'\r'),
+            [b'\\', b'0'] => Some(0),
+            [b'\\', b'x', ..] => u8::from_str_radix(&self.src[start + 3..end - 1], 16).ok(),
+            [b'\\', c @ (b'\\' | b'\'')] | [c] => Some(*c),
+            _ => None,
+        };
+        let value = value.expect("vyrn.syntax's byteBody admits one byte or one escape");
+        self.push(TrivKind::Tok(Tok::Byte(value)), at, at.0, start..end, end);
+        Ok(())
+    }
+
+    /// An escape after its backslash, at `start`; `q` is its string's opening quote.
+    fn esc(&mut self, start: usize, end: usize, q: usize) -> Result<(), Box<Diagnostic>> {
+        let src = self.src;
+        let value = match src.as_bytes()[start] {
+            b'n' => Escape::Char('\n'),
+            b't' => Escape::Char('\t'),
+            b'r' => Escape::Char('\r'),
+            c @ (b'\\' | b'"') => Escape::Char(c as char),
+            b'{' => Escape::Hole,
+            // `\u{XXXX}`: a Unicode scalar by hex code point.
+            b'u' => {
+                let hex = src[start + 2..end - 1].trim();
+                let c = u32::from_str_radix(hex, 16)
+                    .map_err(|_| self.refuse(q, Rule::UnicodeEscapeDigits {}))?;
+                let c = char::from_u32(c)
+                    .ok_or_else(|| self.refuse(q, Rule::UnicodeEscapeScalar {}))?;
+                // A String is NUL-terminated natively, so it cannot hold `\u{0}`.
+                if c == '\0' {
+                    return Err(self.refuse(q, Rule::NulInString {}));
+                }
+                Escape::Char(c)
+            }
+            other => unreachable!("vyrn.syntax's esc rule admits no {:?}", other as char),
+        };
+        self.escapes.push((start - 1..end, value));
+        Ok(())
+    }
+
+    fn string(&mut self, start: usize, end: usize) -> Result<(), Box<Diagnostic>> {
+        let src = self.src;
+        let at = self.lines.of(src, start);
+        // In a `"""` string a lone `"` or `""` is text; only the delimiters differ.
+        let quotes = if src[start..].starts_with("\"\"\"") {
+            3
+        } else {
+            1
+        };
+        let mut escapes = std::mem::take(&mut self.escapes);
+        let mut parts: Vec<String> = Vec::new();
+        let mut exprs: Vec<Hole> = Vec::new();
+        let mut cur = String::new();
+        let mut from = start + quotes;
+        for (range, value) in escapes.drain(..) {
+            push_text(&mut cur, &src[from..range.start]);
+            match value {
+                Escape::Char(c) => cur.push(c),
+                Escape::Hole => {
+                    parts.push(std::mem::take(&mut cur));
+                    let inner = range.start + 2..range.end - 1;
+                    let (line, col) = self.lines.of(src, inner.start);
+                    exprs.push(Hole {
+                        src: src[inner].to_string(),
+                        line,
+                        col,
+                    });
+                }
+            }
+            from = range.end;
+        }
+        self.escapes = escapes;
+        push_text(&mut cur, &src[from..end - quotes]);
+        // A `vyrn"""` code quote, its tag the item before it on its line as the
+        // parser reads it, drops its closing indentation. Only here are the raw
+        // delimiters known: `vyrn"\n"` is no multi-line quote.
+        let quote = quotes == 3
+            && self.items.last().is_some_and(|t| {
+                t.end_line == at.0 && matches!(&t.kind, TrivKind::Tok(Tok::Ident(n)) if n == "vyrn")
+            });
+        let tok = if exprs.is_empty() {
+            if quote {
+                dedent(std::slice::from_mut(&mut cur));
+            }
+            Tok::Str(cur)
+        } else {
+            parts.push(cur); // the trailing fragment after the last hole
+            if quote {
+                dedent(&mut parts);
+            }
+            Tok::TemplateStr { parts, exprs }
+        };
+        // The token sits at the opening quote, so a diagnostic on a multi-line
+        // string points where it starts. Only a string spans lines.
+        let (end_line, _) = self.lines.of(src, end);
+        self.push(TrivKind::Tok(tok), at, end_line, start..end, end);
+        Ok(())
+    }
+}
+
+/// Appends the raw text of a string literal with each CRLF as LF, so a
+/// multi-line string has the same bytes on every checkout. The raw text keeps
+/// the CR for the formatter.
+fn push_text(cur: &mut String, raw: &str) {
+    let mut lines = raw.split("\r\n");
+    if let Some(first) = lines.next() {
+        cur.push_str(first);
+    }
+    for line in lines {
+        cur.push('\n');
+        cur.push_str(line);
+    }
 }
 
 /// Returns every item [`scan`] finds, comments included, for the formatter.
 pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
     Ok(scan(src)?.items)
-}
-
-/// Parses a `\u{HEX}` escape whose backslash is `chars[at]`. Returns the
-/// character and the index past the closing `}`.
-fn parse_unicode_escape(
-    chars: &[char],
-    at: usize,
-    line: usize,
-    col: usize,
-) -> Result<(char, usize), Diagnostic> {
-    let err = |rule: Rule| Diagnostic::refusal(line, col, "lex", rule);
-    if at + 2 >= chars.len() || chars[at + 2] != '{' {
-        return Err(err(Rule::UnicodeEscapeBrace {}));
-    }
-    let mut j = at + 3;
-    let mut hex = String::new();
-    while j < chars.len() && chars[j] != '}' {
-        hex.push(chars[j]);
-        j += 1;
-    }
-    if j >= chars.len() {
-        return Err(err(Rule::UnterminatedUnicodeEscape {}));
-    }
-    let cp = u32::from_str_radix(hex.trim(), 16).map_err(|_| err(Rule::UnicodeEscapeDigits {}))?;
-    let ch = char::from_u32(cp).ok_or_else(|| err(Rule::UnicodeEscapeScalar {}))?;
-    Ok((ch, j + 1)) // past the closing `}`
-}
-
-/// Lexes a byte literal whose opening quote is `chars[start]`. Returns the byte
-/// and the index past the closing quote.
-///
-/// The content is one printable ASCII character (`0x20..=0x7E`; `'` and `\`
-/// escaped) or one of the escapes `\n \t \r \' \\ \0 \xNN`.
-fn lex_byte_literal(
-    chars: &[char],
-    start: usize,
-    line: usize,
-    col: usize,
-) -> Result<(u8, usize), Diagnostic> {
-    let err = |rule: Rule| Diagnostic::refusal(line, col, "lex", rule);
-    let i = start + 1; // first char of the content (past the opening `'`)
-    if i >= chars.len() {
-        return Err(err(Rule::UnterminatedByte {}));
-    }
-    let (val, after): (u8, usize) = if chars[i] == '\'' {
-        return Err(err(Rule::EmptyByte {}));
-    } else if chars[i] == '\\' {
-        if i + 1 >= chars.len() {
-            return Err(err(Rule::UnterminatedByteEscape {}));
-        }
-        match chars[i + 1] {
-            'n' => (0x0A, i + 2),
-            't' => (0x09, i + 2),
-            'r' => (0x0D, i + 2),
-            '0' => (0x00, i + 2),
-            '\\' => (0x5C, i + 2),
-            '\'' => (0x27, i + 2),
-            'x' => {
-                if i + 3 >= chars.len() {
-                    return Err(err(Rule::ByteHexDigits {}));
-                }
-                match (chars[i + 2].to_digit(16), chars[i + 3].to_digit(16)) {
-                    (Some(h), Some(l)) => ((h * 16 + l) as u8, i + 4),
-                    _ => return Err(err(Rule::ByteHexDigits {})),
-                }
-            }
-            other => return Err(err(crate::rules::rule!(UnknownByteEscape, other))),
-        }
-    } else {
-        let ch = chars[i];
-        if ch == '\n' {
-            return Err(err(Rule::ByteNewline {}));
-        }
-        let cp = ch as u32;
-        if !(0x20..=0x7E).contains(&cp) {
-            return Err(err(Rule::ByteNotAscii {}));
-        }
-        (cp as u8, i + 1)
-    };
-    if after >= chars.len() {
-        return Err(err(Rule::UnterminatedByte {}));
-    }
-    if chars[after] != '\'' {
-        return Err(err(Rule::SingleQuotedString {}));
-    }
-    Ok((val, after + 1))
 }
 
 /// Tokenizes `src`: [`scan`]'s items without comments, closed by `Eof`. Returns

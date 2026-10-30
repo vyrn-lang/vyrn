@@ -100,7 +100,7 @@ row SkeletonUnparsable
 trivia = (ws / comment)*
 comment = '//' !('/' !'/') (!'\n' .)*
 doc = '//' '/' !'/' (!'\n' .)*
-scan = (trivia token)* trivia (eof / ^UnexpectedChar(c=.:?))
+scan = trivia (token trivia)* (eof / ^UnexpectedChar(c=.:?))
 token = string / byte / number / word / doc / punct
 
 word = (alpha / '_') (alnum / '_')*
@@ -115,7 +115,7 @@ esc = eof ^UnterminatedEscape@q / '{' hole / 'u' uni / [ntr\\"] / ^UnknownEscape
 uni = ('{' / ^UnicodeEscapeBrace@q) (!'}' .)* ('}' / ^UnterminatedUnicodeEscape@q)
 hole = ws* &'}' ^EmptyInterp@q
      / embed(holeText, Expr, wrap=^InInterpolation(detail=inner)@q, trailing=^InterpolationTrailing(src=extent)@q) ('}' / ^UnterminatedInterp@q)
-holeText = (!'}' holeItem)*
+nest holeText = (!'}' holeItem)*
 holeItem = '"' (!'"' ('\\' . / .))* ('"' / ^UnterminatedInterpString@q)
          / '\'' (![\'\n] ('\\' . / .))* ('\'' / ^UnterminatedInterpChar@q)
          / '//' (!'\n' .)*

@@ -1,6 +1,8 @@
-//! The grammar gate: `compiler/vyrn-syntax/vyrn.syntax` specifies the hand lexer
-//! and parser, and these tests hold the two equal over every corpus root, the
-//! `.vyrn` files under `examples/`, `std/`, `site/` and `compiler/vyrn-cli/tests/`.
+//! The grammar gate: `compiler/vyrn-syntax/vyrn.syntax` specifies the lexer and
+//! the hand parser, and these tests hold them equal to the grammar's interpreter
+//! over every corpus root, the `.vyrn` files under `examples/`, `std/`, `site/`
+//! and `compiler/vyrn-cli/tests/`. The lexer's scanner is written from the
+//! grammar, so its decoder and the generator are what the lexer side compares.
 //!
 //! - Diagnostics: the grammar's list equals the hand list, line, column and
 //!   sentence. A hand list that holds a builder row (a `row` line of the grammar)
@@ -9,7 +11,8 @@
 //! - Shape: a file the hand parser accepts, the grammar accepts, and each
 //!   declaration sits at the same kind and line in both.
 //! - Rows: the rows the grammar names equal the lex and parse rows: the rows of
-//!   `rules.rs` that `lexer.rs` or `parser.rs` names outside its tests.
+//!   `rules.rs` that `lexer.rs`, its scanner `lexer/grammar.rs` or `parser.rs`
+//!   names outside its tests.
 //!
 //! A deep program recurses through many rule frames, so each test runs on a
 //! thread with a large stack.
@@ -293,6 +296,7 @@ fn rows_named_in(file: &str) -> BTreeSet<&'static str> {
 fn the_grammar_names_every_lex_and_parse_row() {
     let g = grammar();
     let mut rows = rows_named_in("lexer.rs");
+    rows.extend(rows_named_in("lexer/grammar.rs"));
     rows.extend(rows_named_in("parser.rs"));
     let named: BTreeSet<&str> = g.stated_rows().chain(g.builder_rows()).collect();
     let rows: BTreeSet<&str> = rows.into_iter().collect();

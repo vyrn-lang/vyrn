@@ -134,8 +134,7 @@ fn lexer_sections() -> Vec<Section> {
         sec("fn token_name_and_text", Shared),
         sec("struct Triv", Shared),
         sec("macro_rules! tokens", Grammar),
-        sec("fn scan", Grammar),
-        sec("fn parse_unicode_escape", Shared),
+        sec("fn scan", Shared),
         sec("fn lex", Shared),
         sec("mod tests", Tests),
     ]
