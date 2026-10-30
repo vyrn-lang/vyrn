@@ -1,0 +1,17 @@
+// Accepted and clean only because the function took every field. A function that takes none recurses.
+type R = { s: String }
+
+fn rel(r: consume R) {
+    let s = consume r.s
+}
+
+impl Owned for R {
+    fn release(consume self) {
+        rel(consume self)
+    }
+}
+
+fn main() -> Int64 {
+    let r = R { s: "a" + "b" }
+    return 0
+}

@@ -527,6 +527,12 @@ fn census() -> Vec<Row> {
             "cannot splice an `Option<Code>` into a code quote",
             Kernel::Elsewhere,
         ),
+        row(
+            "r76_release_moves_self.vyrn",
+            "a release takes `self` apart, and nothing else may own it",
+            "`self` may not be moved out of its `release` — a new owner would release it again",
+            Kernel::Its,
+        ),
     ]
 }
 

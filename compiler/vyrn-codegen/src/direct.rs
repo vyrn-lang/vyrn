@@ -3863,7 +3863,7 @@ impl<'p> Fn_<'_, 'p> {
         for (tag, var) in vs.iter().enumerate() {
             let mut boxed = Vec::new();
             for (j, pty) in var.payload.clone().iter().enumerate() {
-                if self.owns_heap(pty) && matches!(self.word2(pty)?, Word::Boxed) {
+                if matches!(self.word2(pty)?, Word::Boxed) {
                     boxed.push(self.cx.payload_slot(&var.payload, j));
                 }
             }

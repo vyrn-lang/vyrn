@@ -1166,7 +1166,7 @@ fn seeded<'a>(
                 let owned = p.capability == Capability::Consume && b.owns(&pty) && !is_release;
                 let n = b.name(&p.name, pty, owned, f.line);
                 if is_release {
-                    b.frame.released = Some(n);
+                    b.body.released = Some(n);
                     b.body.names[n.index()].borrow = false;
                 }
                 // A `read` or `modify` parameter is never taken; the
@@ -1434,9 +1434,6 @@ struct Frame {
     /// `None` of. `None` for module state, an outside block and an untyped
     /// lambda.
     ret: Option<Type>,
-    /// The receiver of a declared release, which the frame does not own
-    /// ([`Builder::owns_boxes`]).
-    released: Option<Name>,
 }
 
 impl<'a> Builder<'a> {
@@ -1529,6 +1526,7 @@ impl<'a> Builder<'a> {
                 names: Vec::new(),
                 params: Vec::new(),
                 assumes: Vec::new(),
+                released: None,
                 ensures: None,
                 promises: Vec::new(),
                 stmts: Vec::new(),
@@ -4582,9 +4580,8 @@ impl<'a> Builder<'a> {
             Expr::Var { name, .. } => Some(name),
             _ => None,
         };
-        let released = receiver.is_some_and(|r| {
-            self.frame.released.is_some() && self.lookup(r) == self.frame.released
-        });
+        let released = receiver
+            .is_some_and(|r| self.body.released.is_some() && self.lookup(r) == self.body.released);
         !released && (consuming || self.made_scrutinee(e))
     }
 
@@ -4641,6 +4638,11 @@ impl<'a> Builder<'a> {
                         }
                         return Ok((v, false));
                     };
+                    // The one whole take of a release's receiver: the switch
+                    // takes it itself, and any other take of it is refused.
+                    if self.body.released == Some(n) {
+                        return Ok((Val::Name(n), true));
+                    }
                     let t = self.temp(self.body.names[n.index()].ty.clone(), *line);
                     out.push(St::Let(t, Rhs::Val(Val::Name(n))));
                     self.keyed(t, construct);
@@ -4834,7 +4836,7 @@ impl<'a> Builder<'a> {
             // the first build takes nothing, so the second build's rows need
             // a name to land on; [`Builder::drops_at`] skips a borrowed one.
             self.keyed(n, key);
-            if !owned {
+            if !owned && !consuming {
                 if let Some(m) = from {
                     if let Some(k) = self.body.names[m.index()].borrow_kind.clone() {
                         self.body.names[n.index()].borrow_kind = Some(k);
@@ -5467,6 +5469,7 @@ impl<'a> Builder<'a> {
                 names: Vec::new(),
                 params: Vec::new(),
                 assumes: Vec::new(),
+                released: None,
                 ensures: None,
                 promises: Vec::new(),
                 stmts: Vec::new(),

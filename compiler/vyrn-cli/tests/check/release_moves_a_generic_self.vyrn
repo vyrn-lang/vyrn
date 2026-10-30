@@ -1,0 +1,18 @@
+// Accepted, the free audit reported a double free. A generic release is judged as any other.
+type W<T> = { a: T, b: Int64, c: Int64 }
+type G<T> = enum { Gv(W<T>), Gd }
+
+impl<T> Owned for G<T> {
+    fn release(consume self) {
+        let t = consume self
+        match t {
+            Gv(w) => {}
+            Gd => {}
+        }
+    }
+}
+
+fn main() -> Int64 {
+    let e = Gv(W { a: "a" + "b", b: 1, c: 2 })
+    return 0
+}

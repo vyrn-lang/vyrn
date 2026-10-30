@@ -1,0 +1,14 @@
+// Accepted, the call stack was exhausted: the closure's copy of self released by calling this release.
+type R = { s: String }
+
+impl Owned for R {
+    fn release(consume self) {
+        let f: fn() -> Int64 = () -> { return self.s.byteLength }
+        print(f())
+    }
+}
+
+fn main() -> Int64 {
+    let r = R { s: "a" + "b" }
+    return 0
+}

@@ -1,0 +1,18 @@
+// A lambda that cannot outlive its call reads self, and no second owner stands.
+type R = { s: String }
+
+fn run(f: fn() -> Int64) -> Int64 {
+    return f()
+}
+
+impl Owned for R {
+    fn release(consume self) {
+        print(run(() -> { return self.s.byteLength }))
+        let s = consume self.s
+    }
+}
+
+fn main() -> Int64 {
+    let r = R { s: "a" + "b" }
+    return 0
+}

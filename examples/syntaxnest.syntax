@@ -1,0 +1,17 @@
+// Brackets and sums as a grammar: a cycle of choices with no record on it, through
+// a rule that is its one reference and through a climb's operand, which
+// examples/syntaxnest.vyrn reads with std/syntax.
+syntax Nest
+
+expect ^Expected(token=token)
+
+trivia = [ \t\r\n]*
+
+Document = value:Sum
+Sum = climb Nest { left '+' }
+Nest = '(' Sum ')' / Group / Num / Dot
+Group = '[' Nest ']'
+Num = text:number
+Dot = '.'
+
+number = [0-9]+
