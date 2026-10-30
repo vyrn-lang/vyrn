@@ -448,13 +448,15 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                                     // lines as the `\n` arm does.
                                     i += 1;
                                     while i < chars.len() && chars[i] != '"' {
+                                        // An escape takes the next character, a newline too.
+                                        if chars[i] == '\\' && i + 1 < chars.len() {
+                                            i += 1;
+                                        }
                                         if chars[i] == '\n' {
                                             line += 1;
-                                            i += 1;
-                                            line_start = i;
-                                        } else {
-                                            i += if chars[i] == '\\' { 2 } else { 1 };
+                                            line_start = i + 1;
                                         }
+                                        i += 1;
                                     }
                                     if i >= chars.len() {
                                         return Err(refuse!(
@@ -470,7 +472,14 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                                 '\'' => {
                                     i += 1;
                                     while i < chars.len() && chars[i] != '\'' && chars[i] != '\n' {
-                                        i += if chars[i] == '\\' { 2 } else { 1 };
+                                        if chars[i] == '\\' && i + 1 < chars.len() {
+                                            i += 1;
+                                            if chars[i] == '\n' {
+                                                line += 1;
+                                                line_start = i + 1;
+                                            }
+                                        }
+                                        i += 1;
                                     }
                                     if i >= chars.len() || chars[i] == '\n' {
                                         return Err(refuse!(

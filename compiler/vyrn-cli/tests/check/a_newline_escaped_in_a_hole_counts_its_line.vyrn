@@ -1,0 +1,7 @@
+fn main() -> Int64 {
+    let s = "a\{ f("x\
+y") } b"
+    let b = "a\{ f('\
+') } b"
+    return $
+}
