@@ -12,6 +12,11 @@
 /// `t(key)`, and `transKey(s)`, which checks a runtime `String` against the
 /// key set.
 ///
+/// `catalogue(dir)` reads the same files and writes only one exported function per
+/// key and locale, `tCartItems__En`. It holds no `Locale` and no module state, so a
+/// generator can call it at generation, naming its locale, and two catalogues link in
+/// one program, where two `En` variants would clash.
+///
 /// The ICU subset: plain text; `{name}` (String); `{n, plural, ...}` (Int64,
 /// `#` is the number, `other` required); `{k, select, ...}` (a finite string
 /// type of the branch names). `''` is a literal apostrophe, `'{'` and `'}'`
@@ -902,6 +907,18 @@ gen fn keyCollisionErrors(base: LocaleData) -> Array<String> {
 /// Read every `<locale>.json` under `dir`, check the locales, and return the
 /// translation module.
 export gen fn i18n(dir: String) -> Code {
+    return checkedLocales(dir, false)
+}
+
+/// Read every `<locale>.json` under `dir`, check the locales, and return one exported
+/// function per key and locale, each of which reads no module state.
+export gen fn catalogue(dir: String) -> Code {
+    return checkedLocales(dir, true)
+}
+
+/// The module of the locales under `dir`, or why they do not agree: the functions
+/// alone for a `catalogue`.
+gen fn checkedLocales(dir: String, functionsOnly: Bool) -> Code {
     let files = match listDir(dir) {
         Ok(ns) => ns,
         Err(err) => [],
@@ -1071,7 +1088,20 @@ export gen fn i18n(dir: String) -> Code {
         ki = ki + 1
     }
 
-    return buildModule(tags, datas)
+    return if functionsOnly { buildCatalogue(tags, datas) } else { buildModule(tags, datas) }
+}
+
+/// What a `catalogue` writes.
+gen fn buildCatalogue(tags: Array<String>, datas: Array<LocaleData>) -> Code {
+    let mut decls: Array<Code> = [buildSelectTypes(datas[0])]
+    for e in datas[0].entries {
+        let mut li = 0
+        while li < tags.length {
+            decls.push(vyrn"export " + buildLocaleFn(e.key, tags[li], datas[li], scanArgs(e.value)))
+            li = li + 1
+        }
+    }
+    return join(decls, vyrn"\n") + vyrn"\n"
 }
 
 /// The whole generated module.
@@ -1096,6 +1126,18 @@ gen fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> Code {
         export fn locale() -> Locale { return currentLocale }
         export type TransKey = String where value =~ \{keySet}
         """)
+    decls.push(buildSelectTypes(base))
+    for e in base.entries {
+        decls.push(buildKeyFns(e.key, e.value, tags, datas))
+    }
+    decls.push(buildT(tags, datas))
+    decls.push(buildTransKey(base))
+    return join(decls, vyrn"\n") + vyrn"\n"
+}
+
+/// One finite string type per `select` argument of a key in `base`.
+gen fn buildSelectTypes(base: LocaleData) -> Code {
+    let mut decls: Array<Code> = []
     for e in base.entries {
         let sc = scanArgs(e.value)
         let mut ai = 0
@@ -1111,12 +1153,7 @@ gen fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> Code {
             ai = ai + 1
         }
     }
-    for e in base.entries {
-        decls.push(buildKeyFns(e.key, e.value, tags, datas))
-    }
-    decls.push(buildT(tags, datas))
-    decls.push(buildTransKey(base))
-    return join(decls, vyrn"\n") + vyrn"\n"
+    return join(decls, vyrn"\n")
 }
 
 /// Emits `transKey(s)`: `Some(s)` when `s` is a key, else `None`, as an if
@@ -1206,16 +1243,8 @@ gen fn buildKeyFns(key: String, baseVal: String, tags: Array<String>, datas: Arr
     let mut arms: Array<Code> = []
     let mut li = 0
     while li < tags.length {
-        let d = datas[li]
         let helper = name(keyFnName(key) + "__" + upperFirst(tags[li]))
-        let body = compileBody(d.entries[entryIndex(d, key)].value, tags[li], "")
-        helpers.push(vyrn"""
-            fn \{helper}(\{params}) -> String {
-                let mut __acc = ""
-                \{body}
-                return __acc
-            }
-            """)
+        helpers.push(buildLocaleFn(key, tags[li], datas[li], sc))
         arms.push(vyrn"\{name(upperFirst(tags[li]))} => \{helper}(\{args})")
         li = li + 1
     }
@@ -1231,6 +1260,20 @@ gen fn buildKeyFns(key: String, baseVal: String, tags: Array<String>, datas: Arr
         /// \{doc}
         export fn \{plain}(\{params}) -> String {
             return \{f}(\{args})
+        }
+        """
+}
+
+/// The function of `key` in the locale `tag`, whose data is `d`.
+gen fn buildLocaleFn(key: String, tag: String, d: LocaleData, sc: ArgScan) -> Code {
+    let helper = name(keyFnName(key) + "__" + upperFirst(tag))
+    let params = paramList(key, sc)
+    let body = compileBody(d.entries[entryIndex(d, key)].value, tag, "")
+    return vyrn"""
+        fn \{helper}(\{params}) -> String {
+            let mut __acc = ""
+            \{body}
+            return __acc
         }
         """
 }

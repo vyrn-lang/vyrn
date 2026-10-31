@@ -426,3 +426,31 @@ fn demo_tests_run_green() {
         "expected 4 green tests:\n{combined}"
     );
 }
+
+/// A `catalogue` writes no `Locale`, so it links beside a program's own `i18n`, and its
+/// function reads no module state.
+#[test]
+fn a_catalogue_links_beside_a_program_s_own_i18n() {
+    let dir = scratch("catalogue");
+    write(&dir.join("locales/en.json"), "{ \"hi\": \"hello\" }");
+    std::fs::create_dir_all(dir.join("errors")).unwrap();
+    write(&dir.join("errors/en.json"), "{ \"bad\": \"bad {what}\" }");
+    write(
+        &dir.join("app.vyrn"),
+        "import { i18n, catalogue } from \"std/i18n\"\n\
+         import * as t from i18n(\"./locales\")\n\
+         import * as say from catalogue(\"./errors\")\n\
+         fn main() -> Int64 { print(t.tHi()) print(say.tBad__En(\"row\")) return 0 }\n",
+    );
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello\nbad row\n");
+}
