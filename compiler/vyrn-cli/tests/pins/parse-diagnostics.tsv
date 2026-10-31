@@ -1422,7 +1422,7 @@ std/contract.vyrn	0	cbf29ce484222325	20	16	da456f2304b2e45c
 std/diag.vyrn	0	cbf29ce484222325	20	16	97d44fb0f1eecd29
 std/fallible.vyrn	0	cbf29ce484222325	20	11	d00e84cb964cccd6
 std/fetch.vyrn	0	cbf29ce484222325	20	18	7d4ece66beaeb2f0
-std/graphql.vyrn	0	cbf29ce484222325	20	19	7e3296041e6017ec
+std/graphql.vyrn	0	cbf29ce484222325	20	18	1545c3d4db2666a9
 std/hash.vyrn	0	cbf29ce484222325	20	19	7d00c4bc9c0ac6b4
 std/hints.vyrn	0	cbf29ce484222325	20	18	ff404a8bd2a62e4e
 std/html.vyrn	0	cbf29ce484222325	20	18	1afbb1136f293870
@@ -1463,8 +1463,8 @@ std/time.vyrn	0	cbf29ce484222325	20	18	77e2dc8f51b92b34
 std/tw.editor.vyrn	0	cbf29ce484222325	20	15	b2ab3f941e75c17c
 std/tw.vyrn	0	cbf29ce484222325	20	18	f2fad103d0167ca2
 std/ui.editor.vyrn	0	cbf29ce484222325	20	16	165d157576480128
-std/ui.vyrn	0	cbf29ce484222325	20	19	fd29f6c6e8c7db47
+std/ui.vyrn	0	cbf29ce484222325	20	17	d5ce3b597c242cb1
 std/von.vyrn	0	cbf29ce484222325	20	18	d4a7b318a4c1ac9b
 std/vyx-hints.vyrn	0	cbf29ce484222325	20	17	419bbcaf8cbfa78e
 std/vyx.editor.vyrn	0	cbf29ce484222325	20	16	f6b42596395b523d
-std/vyx.vyrn	0	cbf29ce484222325	20	18	bed9b8c2a668a303
+std/vyx.vyrn	0	cbf29ce484222325	20	16	fd55eb12632d37f6

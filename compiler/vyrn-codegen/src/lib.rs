@@ -306,10 +306,12 @@ pub const REFLECT_LEX: i64 = 2;
 pub const REFLECT_TYPE_ARG: i64 = 3;
 pub const REFLECT_MODULE_CODE: i64 = 4;
 pub const REFLECT_CODE_RUNS: i64 = 5;
+pub const REFLECT_VYRN_MODULE: i64 = 6;
+pub const REFLECT_VYRN_TYPE: i64 = 7;
 
 pub use vyrn_frontend::checker::{
     GEN_ENTRY_CODE_RUNS, GEN_ENTRY_LEX, GEN_ENTRY_MODULE_CODE, GEN_ENTRY_MODULE_INTERFACE,
-    GEN_ENTRY_TYPE_ARG,
+    GEN_ENTRY_TYPE_ARG, GEN_ENTRY_VYRN_MODULE, GEN_ENTRY_VYRN_TYPE,
 };
 
 /// The atom-stream primitives the synthesized decoders call. The checker

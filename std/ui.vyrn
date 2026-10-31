@@ -561,68 +561,15 @@ gen fn uiParamType(spelling: String) -> Code {
 
 type UiFields = { names: Array<String>, types: Array<String> }
 
-gen fn uiRecordBody(source: String) -> String {
-    let ba = bytes(source)
-    let mut open = 0 - 1
-    let mut close = 0 - 1
-    let mut i = 0
-    while i < ba.length {
-        if ba[i] == '{' && open < 0 {
-            open = i
-        }
-        if ba[i] == '}' {
-            close = i
-        }
-        i = i + 1
-    }
-    if open < 0 || close <= open {
-        return ""
-    }
-    return uiSliceStr(ba, open + 1, close)
-}
-
-/// Splits on commas at `<>` and `{}` depth 0, so `Array<A, B>` stays whole.
-gen fn uiSplitFields(body: String) -> Array<String> {
-    let ba = bytes(body)
-    let mut parts: Array<String> = []
-    let mut depth = 0
-    let mut start = 0
-    let mut i = 0
-    while i < ba.length {
-        let b = ba[i]
-        if b == '<' || b == '{' {
-            depth = depth + 1
-        } else if b == '>' || b == '}' {
-            depth = depth - 1
-        } else if b == ',' && depth == 0 {
-            parts.push(uiSliceStr(ba, start, i))
-            start = i + 1
-        }
-        i = i + 1
-    }
-    parts.push(uiSliceStr(ba, start, ba.length))
-    return parts
-}
-
-gen fn uiParseFields(source: String) -> UiFields {
-    let body = uiRecordBody(source)
+/// The fields of the record type `name` that `iface` reflects, each type as it spells.
+gen fn uiFieldsOf(iface: ModuleInterface, name: String) -> UiFields {
     let mut names: Array<String> = []
     let mut types: Array<String> = []
-    for part in uiSplitFields(body) {
-        let trimmed = trim(part)
-        if trimmed.byteLength > 0 {
-            let pb = bytes(trimmed)
-            let mut colon = 0 - 1
-            let mut i = 0
-            while i < pb.length && colon < 0 {
-                if pb[i] == ':' {
-                    colon = i
-                }
-                i = i + 1
-            }
-            if colon >= 0 {
-                names.push(trim(uiSliceStr(pb, 0, colon)))
-                types.push(trim(uiSliceStr(pb, colon + 1, pb.length)))
+    for t in iface.types {
+        if t.name == name && t.shape[0].kind == "record" {
+            for m in t.shape[0].members {
+                names.push(m.name.copy())
+                types.push(t.shape[m.args[0]].spelling.copy())
             }
         }
     }
@@ -691,15 +638,6 @@ gen fn uiHasType(iface: ModuleInterface, name: String) -> Bool {
         }
     }
     return false
-}
-
-gen fn uiTypeSource(iface: ModuleInterface, name: String) -> String {
-    for t in iface.types {
-        if t.name == name {
-            return t.source.copy()
-        }
-    }
-    return ""
 }
 
 /// The module that declares type `name`, `""` when absent. It may be one the
@@ -845,7 +783,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
                 "route `\{uiUrlPatternOf(segs)}` binds parameters, and this page declares no `Params` type — declare `type Params = { … }` with one field per dynamic segment",
             ))
         } else {
-            let f = uiParseFields(uiTypeSource(iface, "Params"))
+            let f = uiFieldsOf(iface, "Params")
             for d in dyns {
                 if includes(f.names, d) == false {
                     errs.push(uiPageErrAt(
@@ -2493,14 +2431,6 @@ test "String param types are supported and shape their segment regex" {
     assertEq(uiSegRegex("Int64"), "(0|-?[1-9][0-9]*)")
 }
 
-test "uiSplitFields is brace-aware for nested-record field types" {
-    let f = uiParseFields("type Params = { id: String, meta: { x: Int64, y: Int64 } }")
-    assertEq(f.names.length, 2)
-    assertEq(f.names[0], "id")
-    assertEq(f.names[1], "meta")
-    assertEq(f.types[1], "{ x: Int64, y: Int64 }")
-}
-
 test "typed-URL helper names and bodies" {
     assertEq(uiStaticHelperName([]), "rootPath")
     assertEq(uiStaticHelperName(["items"]), "itemsPath")
@@ -2532,13 +2462,7 @@ test "two slugs may reach one helper name — that is the collision to report" {
     assertEq(uiStaticHelperName(["about-us"]), uiStaticHelperName(["aboutUs"]))
 }
 
-test "record-field parsing pulls names and types" {
-    let f = uiParseFields("export type Params = { id: Int64, slug: String }")
-    assertEq(f.names.length, 2)
-    assertEq(f.names[0], "id")
-    assertEq(f.types[0], "Int64")
-    assertEq(f.names[1], "slug")
-    assertEq(f.types[1], "String")
+test "a dynamic segment takes Int64 or String" {
     assert(uiSupportedParamType("Int64"))
     assert(uiSupportedParamType("String"))
     assertEq(uiSupportedParamType("Float64"), false)

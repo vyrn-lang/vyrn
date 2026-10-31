@@ -69,132 +69,20 @@ fn gqlStripBang(s: String) -> String {
     return s.copy()
 }
 
-/// The text between the first `<` and the last `>` (`Array<Tag>` => `Tag`); ""
-/// when there is none.
-fn gqlBetweenAngles(s: String) -> String {
-    let ba = bytes(s)
-    let mut lo = -1
-    let mut hi = -1
-    let mut i = 0
-    while i < ba.length {
-        if ba[i] == '<' && lo < 0 {
-            lo = i
-        }
-        if ba[i] == '>' {
-            hi = i
-        }
-        i = i + 1
-    }
-    if lo < 0 || hi < 0 || hi <= lo {
-        return ""
-    }
-    return gqlSlice(ba, lo + 1, hi)
+/// Whether `t` declares a record, which needs an `Input` twin in input position. An
+/// `Omit`, `Pick`, `Merge` or `Partial` of one spells as its fields.
+fn gqlDeclaresRecord(t: TypeInfo) -> Bool {
+    return t.shape[0].kind == "record"
 }
 
-/// `s` split at the top-level `sep` bytes, trimmed, empty parts dropped. Brackets
-/// nest, and a `"..."` literal (with `\"` escapes) is opaque, so a separator in
-/// `Map<String, V>` or a `where` regex does not split. Depth clamps at 0 on a
-/// stray closer.
-fn gqlSplitTop(s: String, sep: UInt8) -> Array<String> {
-    let ba = bytes(s)
-    let mut out: Array<String> = []
-    let mut depth = 0
-    let mut start = 0
-    let mut inStr = false
-    let mut i = 0
-    while i < ba.length {
-        let b = ba[i]
-        if inStr {
-            if b == '\\' {
-                i = i + 2
-            } else {
-                if b == '"' {
-                    inStr = false
-                }
-                i = i + 1
-            }
-        } else if b == '"' {
-            inStr = true
-            i = i + 1
-        } else if b == '<' || b == '(' || b == '[' || b == '{' {
-            depth = depth + 1
-            i = i + 1
-        } else if b == '>' || b == ')' || b == ']' || b == '}' {
-            if depth > 0 {
-                depth = depth - 1
-            }
-            i = i + 1
-        } else if b == sep && depth == 0 {
-            let part = trim(gqlSlice(ba, start, i))
-            if part.byteLength > 0 {
-                out.push(part)
-            }
-            start = i + 1
-            i = i + 1
-        } else {
-            i = i + 1
-        }
-    }
-    let last = trim(gqlSlice(ba, start, ba.length))
-    if last.byteLength > 0 {
-        out.push(last)
-    }
-    return out
-}
-
-/// The index of the first `needle` at or after `from`, or -1.
-fn gqlIndexOf(ba: Array<UInt8>, needle: UInt8, from: Int64) -> Int64 {
-    let mut i = from
-    while i < ba.length {
-        if ba[i] == needle {
-            return i
-        }
-        i = i + 1
-    }
-    return -1
-}
-
-// Type declarations. `TypeInfo.source` is canonical: `export type Name = <rhs>`.
-
-type GqlDecl = { name: String, rhs: String }
-
-/// `export type Name = RHS` split into name and RHS. A generic `Name<..>` keeps
-/// only `Name`; downstream it maps to a scalar.
-fn gqlSplitDecl(source: String) -> GqlDecl {
-    let s = trim(source)
-    let ba = bytes(s)
-    let mut i = 0
-    if s.startsWith("export ") {
-        i = 7
-    }
-    i = i + 5
-    let eq = gqlIndexOf(ba, '=', i)
-    if eq < 0 {
-        return GqlDecl { name: trim(gqlSlice(ba, i, ba.length)), rhs: "" }
-    }
-    let head = trim(gqlSlice(ba, i, eq))
-    let lt = gqlIndexOf(bytes(head), '<', 0)
-    let name = if lt < 0 { head } else { gqlSlice(bytes(head), 0, lt) }
-    let rhs = trim(gqlSlice(ba, eq + 1, ba.length))
-    return GqlDecl { name: name, rhs: rhs }
-}
-
-fn gqlSourceOf(name: String, iface: ModuleInterface) -> String {
+/// Whether the named type is a record.
+fn gqlIsRecord(name: String, iface: ModuleInterface) -> Bool {
     for t in iface.types {
         if t.name == name {
-            return t.source.copy()
+            return gqlDeclaresRecord(t)
         }
     }
-    return ""
-}
-
-/// Whether the named type is a record, which needs an `Input` twin in input position.
-fn gqlIsRecord(name: String, iface: ModuleInterface) -> Bool {
-    let src = gqlSourceOf(name, iface)
-    if src == "" {
-        return false
-    }
-    return gqlSplitDecl(src).rhs.startsWith("{")
+    return false
 }
 
 /// The GraphQL scalar for a Vyrn primitive, or "".
@@ -215,20 +103,28 @@ fn gqlPrim(spelling: String) -> String {
     return ""
 }
 
-/// A GraphQL type reference, with `!` markers, in output or input position.
-/// `Option<T>` is the one nullable form.
-fn gqlRef(spelling: String, inputCtx: Bool, iface: ModuleInterface) -> String {
-    let s = trim(spelling)
+/// A GraphQL type reference, with `!` markers, in output or input position, of the
+/// type `spelling` reads as. A `where` after it does not matter.
+gen fn gqlRef(spelling: String, inputCtx: Bool, iface: ModuleInterface) -> String {
+    let nodes = vyrnType(spelling)
+    if nodes.length == 0 {
+        return spelling + "!"
+    }
+    return gqlNodeRef(spelling, nodes, nodes.length - 1, inputCtx, iface)
+}
+
+/// [`gqlRef`] of node `i` of `nodes`, read from `src`. `Option<T>` is the one nullable
+/// form.
+gen fn gqlNodeRef(src: String, nodes: Array<VyrnNode>, i: Int64, inputCtx: Bool, iface: ModuleInterface) -> String {
+    let n = nodes[i]
+    let s = slice(src, n.start, n.stop) ?? ""
     if s.startsWith("Option<") {
-        return gqlStripBang(gqlRef(gqlBetweenAngles(s), inputCtx, iface))
+        return gqlStripBang(gqlNodeRef(src, nodes, n.kids[0], inputCtx, iface))
     }
     if s.startsWith("Array<") {
-        return "[" + gqlRef(gqlBetweenAngles(s), inputCtx, iface) + "]!"
+        return "[" + gqlNodeRef(src, nodes, n.kids[0], inputCtx, iface) + "]!"
     }
-    if s.startsWith("Map<") {
-        return "JSON!"
-    }
-    if s.startsWith("Result<") {
+    if s.startsWith("Map<") || s.startsWith("Result<") {
         return "JSON!"
     }
     let p = gqlPrim(s)
@@ -319,83 +215,44 @@ type GqlMember = { name: String, ref: String, inputRef: String }
 /// alias, a `Map`, a nullary `enum`). The SDL and the executor's type graph both
 /// read members only here: a record's fields, a payload enum's variants, or a
 /// `Result<A, B>` alias's `Ok` and `Err`.
-fn gqlMembers(decl: GqlDecl, iface: ModuleInterface) -> Array<GqlMember> {
-    let rhs = trim(decl.rhs)
-    if rhs.startsWith("{") {
-        return gqlRecordMembers(rhs, iface)
-    }
-    if rhs.startsWith("enum ") {
-        return gqlVariantMembers(rhs, iface)
-    }
-    if rhs.startsWith("Result<") {
-        let parts = gqlSplitTop(gqlBetweenAngles(rhs), 44)
-        let okT = if parts.length >= 1 { parts[0] } else { "Bool" }
-        let errT = if parts.length >= 2 { parts[1] } else { "String" }
-        return [gqlNullableMember("Ok", okT, iface), gqlNullableMember("Err", errT, iface)]
-    }
-    return []
-}
-
-/// A tagged union's arm: nullable, since one arm is non-null at a time.
-fn gqlNullableMember(name: String, spelling: String, iface: ModuleInterface) -> GqlMember {
-    return GqlMember {
-        name: name.copy(),
-        ref: gqlStripBang(gqlRef(spelling, false, iface)),
-        inputRef: gqlStripBang(gqlRef(spelling, true, iface)),
-    }
-}
-
-/// A record's fields. An inline ` where ` refinement is stripped; its base maps.
-fn gqlRecordMembers(rhs: String, iface: ModuleInterface) -> Array<GqlMember> {
+gen fn gqlMembers(t: TypeInfo, iface: ModuleInterface) -> Array<GqlMember> {
+    let root = t.shape[0]
     let mut out: Array<GqlMember> = []
-    for f in gqlSplitTop(gqlBetweenBraces(rhs), 44) {
-        let colon = gqlIndexOf(bytes(f), ':', 0)
-        if colon >= 0 {
-            let fname = trim(gqlSlice(bytes(f), 0, colon))
-            let ftypeRaw = trim(gqlSlice(bytes(f), colon + 1, bytes(f).length))
-            let ftype = gqlStripWhere(ftypeRaw)
-            out.push(GqlMember {
-                name: fname,
-                ref: gqlRef(ftype, false, iface),
-                inputRef: gqlRef(ftype, true, iface),
-            })
+    if root.kind == "result" {
+        out.push(gqlNullableMember("Ok", t.shape[root.args[0]].spelling, iface))
+        out.push(gqlNullableMember("Err", t.shape[root.args[1]].spelling, iface))
+    }
+    if root.kind == "record" {
+        for m in root.members {
+            let ty = t.shape[m.args[0]].spelling
+            out.push(GqlMember { name: m.name.copy(), ref: gqlRef(ty, false, iface), inputRef: gqlRef(ty, true, iface) })
         }
     }
-    return out
-}
-
-/// A payload enum's variants as members; none when every variant is nullary.
-fn gqlVariantMembers(rhs: String, iface: ModuleInterface) -> Array<GqlMember> {
-    let variants = gqlVariantsOf(rhs)
     let mut anyPayload = false
-    for v in variants {
-        if v.contains("(") {
-            anyPayload = true
-        }
+    for m in root.members {
+        anyPayload = anyPayload || m.args.length > 0
     }
-    if anyPayload == false {
-        return []
-    }
-    let mut out: Array<GqlMember> = []
-    for v in variants {
-        let paren = gqlIndexOf(bytes(v), '(', 0)
-        if paren < 0 {
-            out.push(GqlMember { name: trim(v), ref: "Boolean", inputRef: "Boolean" })
-        } else {
-            let vname = trim(gqlSlice(bytes(v), 0, paren))
-            let parts = gqlSplitTop(gqlBetweenParens(v), 44)
-            if parts.length == 1 {
-                out.push(gqlNullableMember(vname, parts[0], iface))
+    if root.kind == "enum" && anyPayload {
+        for m in root.members {
+            if m.args.length == 0 {
+                out.push(GqlMember { name: m.name.copy(), ref: "Boolean", inputRef: "Boolean" })
+            } else if m.args.length == 1 {
+                out.push(gqlNullableMember(m.name, t.shape[m.args[0]].spelling, iface))
             } else {
-                out.push(GqlMember { name: vname, ref: "JSON", inputRef: "JSON" })
+                out.push(GqlMember { name: m.name.copy(), ref: "JSON", inputRef: "JSON" })
             }
         }
     }
     return out
 }
 
-fn gqlVariantsOf(rhs: String) -> Array<String> {
-    return gqlSplitTop(gqlBetweenBraces(rhs), 44)
+/// A tagged union's arm: nullable, since one arm is non-null at a time.
+gen fn gqlNullableMember(name: String, spelling: String, iface: ModuleInterface) -> GqlMember {
+    return GqlMember {
+        name: name.copy(),
+        ref: gqlStripBang(gqlRef(spelling, false, iface)),
+        inputRef: gqlStripBang(gqlRef(spelling, true, iface)),
+    }
 }
 
 /// The `{ ... }` body of an object or input definition. GraphQL refuses an empty
@@ -417,102 +274,47 @@ fn gqlObjectSdl(name: String, doc: String, ms: Array<GqlMember>) -> String {
 }
 
 /// A record's `type Name` and `input NameInput`, from one member list.
-fn gqlRecord(decl: GqlDecl, doc: String, ms: Array<GqlMember>) -> String {
+fn gqlRecord(name: String, doc: String, ms: Array<GqlMember>) -> String {
     let mut fields = ""
     for m in ms {
         fields = fields + "  " + m.name + ": " + m.inputRef + "\n"
     }
-    return gqlObjectSdl(decl.name, doc, ms) + "input " + decl.name + "Input " + gqlBlock(fields)
-}
-
-fn gqlBetweenBraces(s: String) -> String {
-    let ba = bytes(s)
-    let mut lo = -1
-    let mut hi = -1
-    let mut i = 0
-    while i < ba.length {
-        if ba[i] == '{' && lo < 0 {
-            lo = i
-        }
-        if ba[i] == '}' {
-            hi = i
-        }
-        i = i + 1
-    }
-    if lo < 0 || hi <= lo {
-        return ""
-    }
-    return gqlSlice(ba, lo + 1, hi)
-}
-
-fn gqlStripWhere(s: String) -> String {
-    if s.contains(" where ") {
-        let ba = bytes(s)
-        let mut i = 0
-        while i + 7 <= ba.length {
-            if gqlSlice(ba, i, i + 7) == " where " {
-                return trim(gqlSlice(ba, 0, i))
-            }
-            i = i + 1
-        }
-    }
-    return s.copy()
+    return gqlObjectSdl(name, doc, ms) + "input " + name + "Input " + gqlBlock(fields)
 }
 
 /// A nullary enum as a GraphQL `enum`; a payload enum is an object (`gqlMembers`).
-fn gqlEnum(decl: GqlDecl, doc: String) -> String {
-    let mut out = doc + "enum " + decl.name + " {\n"
-    for v in gqlVariantsOf(decl.rhs) {
-        out = out + "  " + trim(v) + "\n"
+fn gqlEnum(t: TypeInfo, doc: String) -> String {
+    let mut out = doc + "enum " + t.name + " {\n"
+    for m in t.shape[0].members {
+        out = out + "  " + m.name + "\n"
     }
     return out + "}\n"
 }
 
-fn gqlBetweenParens(s: String) -> String {
-    let ba = bytes(s)
-    let mut lo = -1
-    let mut hi = -1
-    let mut i = 0
-    while i < ba.length {
-        if ba[i] == '(' && lo < 0 {
-            lo = i
-        }
-        if ba[i] == ')' {
-            hi = i
-        }
-        i = i + 1
-    }
-    if lo < 0 || hi <= lo {
-        return ""
-    }
-    return gqlSlice(ba, lo + 1, hi)
-}
-
 /// A leaf declaration (a `Map<..>` alias, a validated scalar, a primitive alias)
 /// as a custom `scalar` whose description carries the doc and the base.
-fn gqlScalar(decl: GqlDecl, iface: ModuleInterface) -> String {
-    let raw = gqlRawDoc(decl.name, iface)
-    let folded = gqlFoldWs(trim(decl.rhs))
+fn gqlScalar(t: TypeInfo, iface: ModuleInterface) -> String {
+    let raw = gqlRawDoc(t.name, iface)
+    let folded = gqlFoldWs(t.shape[0].spelling)
     let body = if raw != "" { raw + " — " + folded } else { folded }
-    return gqlDescBlock(body) + "scalar " + decl.name + "\n"
+    return gqlDescBlock(body) + "scalar " + t.name + "\n"
 }
 
 /// The SDL for one declaration: a record, an object (a payload enum or `Result`
 /// alias), a nullary `enum`, or a leaf `scalar`.
-fn gqlTypeSdl(t: TypeInfo, iface: ModuleInterface) -> String {
-    let decl = gqlSplitDecl(t.source)
-    let doc = gqlDocOf(decl.name, iface)
-    let ms = gqlMembers(decl, iface)
-    if decl.rhs.startsWith("{") {
-        return gqlRecord(decl, doc, ms)
+gen fn gqlTypeSdl(t: TypeInfo, iface: ModuleInterface) -> String {
+    let doc = gqlDocOf(t.name, iface)
+    let ms = gqlMembers(t, iface)
+    if gqlDeclaresRecord(t) {
+        return gqlRecord(t.name, doc, ms)
     }
     if ms.length > 0 {
-        return gqlObjectSdl(decl.name, doc, ms)
+        return gqlObjectSdl(t.name, doc, ms)
     }
-    if decl.rhs.startsWith("enum ") {
-        return gqlEnum(decl, doc)
+    if t.shape[0].kind == "enum" {
+        return gqlEnum(t, doc)
     }
-    return gqlScalar(decl, iface)
+    return gqlScalar(t, iface)
 }
 
 /// One name the document defines, and the route that defined it, for a collision message.
@@ -521,11 +323,10 @@ type GqlDef = { name: String, from: String }
 /// The names a declaration defines: its own, and a record's `Input` twin, by the
 /// same test `gqlTypeSdl` uses.
 fn gqlDeclNames(t: TypeInfo) -> Array<String> {
-    let decl = gqlSplitDecl(t.source)
-    if decl.rhs.startsWith("{") {
-        return [decl.name.copy(), decl.name + "Input"]
+    if gqlDeclaresRecord(t) {
+        return [t.name.copy(), t.name + "Input"]
     }
-    return [decl.name.copy()]
+    return [t.name.copy()]
 }
 
 /// The route already holding `name`, or `""`.
@@ -583,7 +384,7 @@ export to "./graphql" fn gqlRootType(root: String) -> String {
 
 /// One root field: `name(input: <Req>Input): <Ret>`, or no arguments. A `Unit`
 /// return maps to `Boolean`; the resolver answers `true` (`gqlResolverTable`).
-fn gqlRootField(f: FnInfo, iface: ModuleInterface) -> String {
+gen fn gqlRootField(f: FnInfo, iface: ModuleInterface) -> String {
     let ret = if f.ret == "" { "Boolean" } else { gqlStripBang(gqlRef(f.ret, false, iface)) }
     if f.params.length == 1 {
         let arg = gqlRef(f.params[0].spelling, true, iface)
@@ -605,7 +406,7 @@ fn gqlNamed(r: String) -> String {
 }
 
 /// A root type's members, split by `gqlRootOf` as `gqlRootField` is.
-fn gqlRootMembers(iface: ModuleInterface, root: String) -> Array<GqlMember> {
+gen fn gqlRootMembers(iface: ModuleInterface, root: String) -> Array<GqlMember> {
     let mut out: Array<GqlMember> = []
     for f in iface.functions {
         if gqlRootOf(f) == root {
@@ -640,7 +441,7 @@ export gen fn sdl(contract: String) -> Code {
 
     for t in iface.types {
         doc = doc + gqlTypeSdl(t, iface)
-        let dname = gqlSplitDecl(t.source).name
+        let dname = t.name
         diags = diags + gqlReservedName(dname)
         for n in gqlDeclNames(t) {
             let from = if n == dname {
@@ -1652,15 +1453,14 @@ gen fn gqlSchemaTable(iface: ModuleInterface) -> Code {
     }
     let mut body = gqlSchemaArm("Query", queries) + gqlSchemaArm("Mutation", gqlRootMembers(iface, "mutation"))
     for t in iface.types {
-        let decl = gqlSplitDecl(t.source)
-        let ms = gqlMembers(decl, iface)
+        let ms = gqlMembers(t, iface)
         // A zero-field record is an object (its body is `_placeholder`); a leaf has no arm.
-        if ms.length > 0 || decl.rhs.startsWith("{") {
+        if ms.length > 0 || gqlDeclaresRecord(t) {
             let mut members = ms
             if members.length == 0 {
                 members.push(gqlPlaceholderMember())
             }
-            body = body + gqlSchemaArm(decl.name, members)
+            body = body + gqlSchemaArm(t.name, members)
         }
     }
     body = body + vyrn"""
@@ -1747,37 +1547,6 @@ test "gqlPrim maps the honest scalar table" {
     assertEq(gqlPrim("String"), "String")
     assertEq(gqlPrim("Bool"), "Boolean")
     assertEq(gqlPrim("Book"), "")
-}
-
-test "gqlSplitDecl splits name and rhs" {
-    let d = gqlSplitDecl("export type BookId = Int64 where value >= 0")
-    assertEq(d.name, "BookId")
-    assertEq(d.rhs, "Int64 where value >= 0")
-}
-
-test "gqlBetweenAngles and gqlStripWhere" {
-    assertEq(gqlBetweenAngles("Array<Tag>"), "Tag")
-    assertEq(gqlBetweenAngles("Map<String, Int64>"), "String, Int64")
-    assertEq(gqlStripWhere("String where value.byteLength >= 1"), "String")
-}
-
-test "gqlSplitTop respects angle and paren nesting" {
-    let parts = gqlSplitTop("id: BookId, tags: Array<Tag>, m: Map<String, Int64>", 44)
-    assertEq(parts.length, 3)
-    assertEq(parts[2], "m: Map<String, Int64>")
-}
-
-test "gqlSplitTop is string-literal aware — a predicate string never splits" {
-    // A comma, a brace and an escaped quote inside a regex string stay one field.
-    let parts = gqlSplitTop("a: String, b: String where value =~ \"x,y}z\\\"w\"", 44)
-    assertEq(parts.length, 2)
-    assertEq(parts[0], "a: String")
-    assertEq(parts[1], "b: String where value =~ \"x,y}z\\\"w\"")
-}
-
-test "gqlSplitTop clamps bracket depth at zero" {
-    let parts = gqlSplitTop("a}, b", 44)
-    assertEq(parts.length, 2)
 }
 
 test "gqlEscTripleQuote escapes only triple quotes" {

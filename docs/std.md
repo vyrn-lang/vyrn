@@ -58,6 +58,7 @@ The compiler injects these declarations into every program, so a file names them
 | `Value`, `Template` | Tagged-template holes and `template"..."`. |
 | `Schema` | What `schemaOf<T>()` answers. |
 | `ModuleInterface`, `FnInfo`, `ParamInfo`, `TypeInfo`, `Origin`, `TypeNode`, `TypeMember` | What `moduleInterface(path)` answers in a generator. `TypeInfo.shape` is the declaration as a tree of nodes. |
+| `VyrnNode` | What `vyrnModule(src)` and `vyrnType(src)` answer in a generator: a grammar rule, its byte range and its kids. Only generation names one, and it has no declaration, as `Token` has none. |
 | `ModuleCode`, `FnCode`, `ParamCode`, `TypeCode` | What `moduleCode(path)` answers in a generator: the `ModuleInterface`, with each parameter type, return type (`None` for `Unit`), type declaration and shape node paired with itself as `Code`; `TypeCode.nodes[i]` is `info.shape[i]` as a `TypeArgNode`. |
 | `TypeArg`, `TypeArgNode` | What a `derive` generator receives: the checked types its call sites need, as one graph of nodes, each a `TypeNode` paired with its type as `Code`. |
 | `ContractInfo`, `MemberInfo` | What `contractOf(Name)` answers in a generator. |

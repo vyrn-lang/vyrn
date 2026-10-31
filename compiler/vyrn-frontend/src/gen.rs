@@ -408,7 +408,7 @@ pub fn gen_lex_tokens_lit(source: &str) -> Expr {
         id: Id::NEW,
         elems: lexed(source)
             .into_iter()
-            .map(|(kind, text, line, col)| Expr::StructLit {
+            .map(|(kind, text, line, col, start)| Expr::StructLit {
                 id: Id::NEW,
                 name: "Token".to_string(),
                 fields: vec![
@@ -416,6 +416,7 @@ pub fn gen_lex_tokens_lit(source: &str) -> Expr {
                     ("text".to_string(), Expr::str(text)),
                     ("line".to_string(), Expr::int(line)),
                     ("col".to_string(), Expr::int(col)),
+                    ("start".to_string(), Expr::int(start)),
                 ],
                 line: 0,
             })
@@ -447,23 +448,50 @@ pub fn gen_code_runs_lit(source: &str) -> Expr {
     }
 }
 
-/// Runs the lexer over `source` as `(kind, text, line, col)` rows: the one
-/// place the `lex` builtin's token list is decided.
-pub(crate) fn lexed(source: &str) -> Vec<(String, String, i64, i64)> {
-    match crate::lexer::lex(source) {
-        Ok(toks) => toks
-            .iter()
-            .filter(|t| !matches!(t.tok, crate::lexer::Tok::Eof))
-            .map(|t| {
-                let (kind, text) = crate::lexer::token_name_and_text(&t.tok);
-                (kind, text, t.line as i64, t.col as i64)
+/// Returns the `vyrnModule` or `vyrnType` answer as an `Array<VyrnNode>` record
+/// literal, which the wasm generation engine encodes for the guest.
+pub fn gen_vyrn_nodes_lit(source: &str, start: crate::recognizer::Start) -> Expr {
+    let ints = |ix: Vec<usize>| Expr::ArrayLit {
+        id: Id::NEW,
+        elems: ix.into_iter().map(|i| Expr::int(i as i64)).collect(),
+        line: 0,
+    };
+    Expr::ArrayLit {
+        id: Id::NEW,
+        elems: (crate::reader::read(source, start).into_iter())
+            .map(|n| Expr::StructLit {
+                id: Id::NEW,
+                name: "VyrnNode".to_string(),
+                fields: vec![
+                    ("rule".to_string(), Expr::str(n.rule)),
+                    ("start".to_string(), Expr::int(n.start as i64)),
+                    ("stop".to_string(), Expr::int(n.stop as i64)),
+                    ("kids".to_string(), ints(n.kids)),
+                ],
+                line: 0,
             })
             .collect(),
-        Err(d) => {
-            // Unlexable input is one `error` token at the diagnostic's position.
-            vec![("error".to_string(), d.message, d.line as i64, d.col as i64)]
-        }
+        line: 0,
     }
+}
+
+/// Runs the lexer over `source` as `(kind, text, line, col, byte start)` rows: the one
+/// place the `lex` builtin's token list is decided.
+pub(crate) fn lexed(source: &str) -> Vec<(String, String, i64, i64, i64)> {
+    let Ok(scan) = crate::lexer::scan(source) else {
+        return Vec::new();
+    };
+    let starts: Vec<usize> = (scan.items.iter())
+        .filter(|i| !matches!(i.kind, crate::lexer::TrivKind::Comment))
+        .map(|i| i.span.start)
+        .collect();
+    (crate::lexer::tokens(scan).iter().zip(starts))
+        .filter(|(t, _)| !matches!(t.tok, crate::lexer::Tok::Eof))
+        .map(|(t, start)| {
+            let (kind, text) = crate::lexer::token_name_and_text(&t.tok);
+            (kind, text, t.line as i64, t.col as i64, start as i64)
+        })
+        .collect()
 }
 
 impl Span {

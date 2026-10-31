@@ -575,6 +575,29 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
             &mut dec,
         )?;
     }
+    for (builtin, entry_name, kind) in [
+        (
+            "vyrnModule",
+            vyrn_codegen::GEN_ENTRY_VYRN_MODULE,
+            vyrn_codegen::REFLECT_VYRN_MODULE,
+        ),
+        (
+            "vyrnType",
+            vyrn_codegen::GEN_ENTRY_VYRN_TYPE,
+            vyrn_codegen::REFLECT_VYRN_TYPE,
+        ),
+    ] {
+        if reaches(builtin) && !p.functions.iter().any(|f| f.name == builtin) {
+            entry(
+                entry_name.to_string(),
+                vec![str_param("src")],
+                Type::Array(Box::new(named("VyrnNode"))),
+                kind,
+                Expr::var("src", 0),
+                &mut dec,
+            )?;
+        }
+    }
     if reaches("codeRuns") && !p.functions.iter().any(|f| f.name == "codeRuns") {
         entry(
             vyrn_codegen::GEN_ENTRY_CODE_RUNS.to_string(),
@@ -1442,6 +1465,16 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                 vyrn_codegen::REFLECT_LEX => {
                     let lit = vyrn_frontend::gen::gen_lex_tokens_lit(&arg);
                     streams.stream(&Type::Array(Box::new(Type::Named("Token".into()))), &lit)
+                }
+                vyrn_codegen::REFLECT_VYRN_MODULE | vyrn_codegen::REFLECT_VYRN_TYPE => {
+                    let start = match kind {
+                        vyrn_codegen::REFLECT_VYRN_MODULE => {
+                            vyrn_frontend::recognizer::Start::Module
+                        }
+                        _ => vyrn_frontend::recognizer::Start::Type,
+                    };
+                    let lit = vyrn_frontend::gen::gen_vyrn_nodes_lit(&arg, start);
+                    streams.stream(&Type::Array(Box::new(Type::Named("VyrnNode".into()))), &lit)
                 }
                 vyrn_codegen::REFLECT_CODE_RUNS => {
                     let lit = vyrn_frontend::gen::gen_code_runs_lit(&arg);

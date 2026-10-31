@@ -1239,6 +1239,16 @@ fn table() -> Vec<Builtin> {
             .effect(GenOnly)
             .takes(&[1], takes_one)
             .typed(vec![Str], arr(Type::Named("Token".to_string())), None),
+        b("vyrnModule")
+            .spec(Spec::Routes(crate::checker::GEN_ENTRY_VYRN_MODULE))
+            .effect(GenOnly)
+            .takes(&[1], takes_one)
+            .typed(vec![Str], arr(Type::Named("VyrnNode".to_string())), None),
+        b("vyrnType")
+            .spec(Spec::Routes(crate::checker::GEN_ENTRY_VYRN_TYPE))
+            .effect(GenOnly)
+            .takes(&[1], takes_one)
+            .typed(vec![Str], arr(Type::Named("VyrnNode".to_string())), None),
         b("codeRuns")
             .spec(Spec::Routes(crate::checker::GEN_ENTRY_CODE_RUNS))
             .effect(GenOnly)
