@@ -122,7 +122,7 @@ export to "./vyx.editor" fn vyxSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> St
 }
 
 /// True for an ASCII space, tab, CR, or LF.
-export to "./vyx.editor" fn vyxIsWs(b: UInt8) -> Bool {
+fn vyxIsWs(b: UInt8) -> Bool {
     return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
 

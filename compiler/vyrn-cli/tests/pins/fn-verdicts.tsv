@@ -3654,10 +3654,8 @@ std/vyx.editor.vyrn	vyxOffsetAt	yes	yes, emulated Int64
 std/vyx.editor.vyrn	vyxCharColAt	no, it keeps an index check	no, it is not trap-free
 std/vyx.editor.vyrn	vyxInScript	no, it calls `vyxOutlineOf`, which is not trap-free	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxClosedScript	no, it calls `vyxOutlineOf`, which is not trap-free	no, its effect set is alloc
-std/vyx.editor.vyrn	vyxInMustache	no, it keeps an index check	no, it is not trap-free
-std/vyx.editor.vyrn	vyxEnclosingOpenTag	no, it keeps an index check	no, it is not trap-free
-std/vyx.editor.vyrn	vyxCursorInTag	no, it keeps an index check	no, its effect set is alloc
-std/vyx.editor.vyrn	vyxCursorAt	no, it calls `vyxInMustache`, which is not trap-free	no, its effect set is alloc
+std/vyx.editor.vyrn	vyxCursorAt	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc
+std/vyx.editor.vyrn	vyxCursorIn	no, it keeps an index check	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxDirectives	yes	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxElementNames	yes	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxGlobalAttrs	yes	no, its effect set is alloc

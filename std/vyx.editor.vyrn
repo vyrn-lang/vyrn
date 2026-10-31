@@ -3,7 +3,7 @@
 /// No program links this module, so a program that uses `std/vyx` pays
 /// nothing for it. A tool finds it beside `std/vyx` by its name.
 
-import { vyxOutlineOf, vyxIsWs, vyxIsIdent, vyxIsIdentifier, vyxCharStart, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt, vyxLowerFirst, vyxLineAt, vyxColAt } from "std/vyx"
+import { vyxOutlineOf, vyxIsIdent, vyxIsIdentifier, vyxCharStart, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt, vyxLowerFirst, vyxLineAt, vyxColAt } from "std/vyx"
 import { join } from "std/code"
 import { syntax } from "std/syntax"
 import * as vx from syntax("std/vyx.syntax")
@@ -85,118 +85,34 @@ gen fn vyxClosedScript(src: String) -> Option<vx.VyxScriptPart> {
     return None
 }
 
-/// Whether byte `at` is inside a `{{ ... }}` interpolation.
-gen fn vyxInMustache(ba: Array<UInt8>, at: Int64) -> Bool {
-    let mut open = 0 - 1
-    let mut close = 0 - 1
-    let mut i = 0
-    while i + 1 < at {
-        if ba[i] == '{' && ba[i + 1] == '{' {
-            open = i
-        } else if ba[i] == '}' && ba[i + 1] == '}' {
-            close = i
-        }
-        i = i + 1
-    }
-    return open >= 0 && open > close
-}
-
-/// The `<` of the element open tag that encloses byte `at`, or -1 in text, a
-/// close tag or a comment. A `>` inside a quoted value closes nothing, and an
-/// HTML comment is skipped whole, so `don't` in one opens no quote.
-gen fn vyxEnclosingOpenTag(ba: Array<UInt8>, at: Int64) -> Int64 {
-    let mut inTag = 0 - 1
-    let mut isOpen = false
-    let mut quote: UInt8 = '\0'
-    let mut i = 0
-    while i < at {
-        let c = ba[i]
-        if inTag < 0 {
-            if c == '<' {
-                if i + 3 < ba.length && ba[i + 1] == '!' && ba[i + 2] == '-' && ba[i + 3] == '-' {
-                    let mut j = i + 4
-                    while j + 2 < at && (ba[j] == '-' && ba[j + 1] == '-' && ba[j + 2] == '>') == false {
-                        j = j + 1
-                    }
-                    i = if j + 2 < at { j + 3 } else { at }
-                    continue
-                }
-                let next = if i + 1 < ba.length { ba[i + 1] } else { '\0' }
-                isOpen = next != '/' && next != '!'
-                inTag = i
-            }
-        } else if quote != '\0' {
-            if c == quote {
-                quote = '\0'
-            }
-        } else if c == '"' || c == '\'' {
-            quote = c
-        } else if c == '>' {
-            inTag = 0 - 1
-        }
-        i = i + 1
-    }
-    return if inTag >= 0 && isOpen { inTag } else { 0 - 1 }
-}
-
-/// Classifies a cursor inside the open tag whose `<` is at `lt`.
-gen fn vyxCursorInTag(ba: Array<UInt8>, lt: Int64, at: Int64) -> VyxCursor {
-    let nameStart = lt + 1
-    let mut i = nameStart
-    while i < at && vyxIsWs(ba[i]) == false && ba[i] != '/' && ba[i] != '>' {
-        i = i + 1
-    }
-    let tag = vyxSlice(ba, nameStart, i)
-    if i >= at {
-        return VyxCursor { kind: "tag", tag: "", prefix: tag, from: vyxCharColAt(ba, nameStart) }
-    }
-    let mut quote: UInt8 = '\0'
-    // A word ends at whitespace, `=` or `/`; a quoted value is no word. Just
-    // past a closed value (`class="x"|`) no name completes: its edit would
-    // delete the value.
-    let mut wordStart = i
-    let mut closedValue = false
-    let mut j = i
-    while j < at {
-        let c = ba[j]
-        if quote != '\0' {
-            if c == quote {
-                quote = '\0'
-                closedValue = true
-            }
-        } else {
-            closedValue = false
-            if c == '"' || c == '\'' {
-                quote = c
-                wordStart = j + 1
-            } else if vyxIsWs(c) || c == '=' || c == '/' {
-                wordStart = j + 1
-            } else if wordStart > j {
-                wordStart = j
-            }
-        }
-        j = j + 1
-    }
-    if quote != '\0' || closedValue {
-        return vyxNoCursor()
-    }
-    let prefix = vyxSlice(ba, wordStart, at)
-    let kind = if prefix.startsWith("@") { "event" } else { "attr" }
-    return VyxCursor { kind: kind, tag: tag, prefix: prefix, from: vyxCharColAt(ba, wordStart) }
-}
-
 /// Classifies the cursor at 1-based `line` and `col` of `.vyx` source `src`.
 gen fn vyxCursorAt(src: String, line: Int64, col: Int64) -> VyxCursor {
     let ba = bytes(src)
     let at = vyxOffsetAt(ba, line, col)
-    if at < 0 || vyxInScript(src, at) || vyxInMustache(ba, at) {
+    if at < 0 || vyxInScript(src, at) {
         return vyxNoCursor()
     }
-    let lt = vyxEnclosingOpenTag(ba, at)
-    if lt < 0 {
-        return vyxNoCursor()
+    return match vx.parseVyxPrefix(vyxSlice(ba, 0, at)) {
+        Ok(p) => vyxCursorIn(p.open, ba, at),
+        Err(errors) => vyxNoCursor(),
     }
-    return vyxCursorInTag(ba, lt, at)
+}
+
+/// The cursor at byte `at` of `ba`, in the tag `open` that the text before it leaves
+/// open. Past a closed value no name completes: its edit would delete the value.
+gen fn vyxCursorIn(open: Option<vx.VyxOpenTag>, ba: Array<UInt8>, at: Int64) -> VyxCursor {
+    if let Some(o) = open {
+        if let Some(w) = o.word {
+            let kind = if w.text.startsWith("@") { "event" } else { "attr" }
+            return VyxCursor { kind: kind, tag: o.tag.text.copy(), prefix: w.text.copy(), from: vyxCharColAt(ba, w.start) }
+        }
+        // A `<` the cursor splits from `/` or `!` opens a close tag or a comment.
+        let split = o.tag.start == at && at < ba.length && (ba[at] == '/' || ba[at] == '!')
+        if o.tag.end == at && split == false {
+            return VyxCursor { kind: "tag", tag: "", prefix: o.tag.text.copy(), from: vyxCharColAt(ba, o.tag.start) }
+        }
+    }
+    return vyxNoCursor()
 }
 
 /// The template directives, each with its editor detail.
@@ -484,6 +400,14 @@ test "an apostrophe inside an HTML comment opens no quote" {
     let c = vyxCursorAt("<!-- don't panic -->\n<div ", 2, 6)
     assertEq(c.kind, "attr")
     assertEq(c.tag, "div")
+}
+
+test "a cursor inside a close tag or past a closed interpolation" {
+    assertEq(vyxCursorAt("<a></a>", 1, 5).kind, "")
+    assertEq(vyxCursorAt("<a></a", 1, 7).kind, "")
+    assertEq(vyxCursorAt("{{ x", 1, 5).kind, "")
+    assertEq(vyxCursorAt("{{ x }}<", 1, 9).kind, "tag")
+    assertEq(vyxCursorAt("<!-- {{ -->\n<a ", 2, 4).kind, "attr")
 }
 
 test "a tag name, an event and the script classify apart" {

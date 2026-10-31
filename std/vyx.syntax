@@ -73,3 +73,15 @@ closeName = [A-Za-z0-9_-]*
 closeRest = [^>]* '>'?
 attrName = [A-Za-z0-9_-]+
 attrValue = '"' ('\\' . / [^"])* ('"' / eof) / '\'' ('\\' . / [^'])* ('\'' / eof)
+
+// What the text before a cursor leaves open: the tag a cursor completes in, and the word
+// typed there. It refuses nothing, because text being typed is broken.
+VyxPrefix = passed open:VyxOpenTag? rest
+VyxOpenTag = !'</' !'<!' '<' tag:openName (openSep openSteps word:openWord eof)?
+passed = ('<!--' (!'-->' .)* '-->' / '{{' (!'}}' .)* '}}' / tagDone / !'{{' [^<])*
+tagDone = !'<!--' '<' (closedQuote / [^>"'])* '>'
+closedQuote = '"' [^"]* '"' / '\'' [^']* '\''
+openName = [^ \t\r\n/>"']*
+openSep = [ \t\r\n=/]
+openSteps = (openWord openSep / openWord closedQuote &.)*
+openWord = [^ \t\r\n=/"']*
