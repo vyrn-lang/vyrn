@@ -1,0 +1,23 @@
+{
+  "attrName": "an attribute name is expected here — a name is letters, digits, `_` or `-`, optionally led by `@` or `:`",
+  "attrUnquoted": "an attribute value is not quoted — write `name=\"value\"`",
+  "elemUnclosed": "`<{tag}>` is never closed — add `</{tag}>`",
+  "elseIfOrphan": "this `v-else-if` follows no `v-if` — the two must be siblings, with nothing between them",
+  "elseOrphan": "this `v-else` follows no `v-if` — the two must be siblings, with nothing between them",
+  "expected": "a `.vyx` file is expected to hold {token} here",
+  "interpEmpty": "an interpolation is empty — `'{{ }}'` needs an expression between the braces",
+  "interpUnclosed": "an interpolation is not closed — `'{{'` needs a matching `'}}'`",
+  "manyRoots": "this component's `<template>` holds more than one root element — wrap them in one element",
+  "noElement": "this component's `<template>` holds no element — a component's view is exactly one root element",
+  "noTag": "a `<` starts no tag — a tag name follows it immediately",
+  "noTemplate": "this component has no `<template>` section — a component's view is the one element inside it",
+  "scriptUnclosed": "the `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`",
+  "strayClose": "`</{tag}>` closes no element — the text after it would be lost",
+  "tagMismatch": "`<{tag}>` is closed by `</{close}>` — a tag closes under its own name",
+  "tagUnclosed": "a tag is not closed — the `<` opened here has no matching `>`",
+  "templateUnclosed": "the `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`",
+  "vforEmpty": "a `v-for` header reads `item in items`, and this one leaves one of the two empty",
+  "vforNoIn": "a `v-for` header reads `item in items`, and this one has no `in`",
+  "vforNoKey": "this `v-for` has no `:key` — the host differ reuses a row by its key, so give one that is stable per item",
+  "vforRunsIn": "a `v-for` header reads `item in items`, and this one runs `in` into the next word"
+}

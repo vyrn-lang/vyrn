@@ -3,4 +3,4 @@
 // the caller frees the payload boxes after it
 // returns. No program of `examples/` drops a `Von` or a `VyxNode`
 // whole, so none runs those two releases.
-import { Von } from "std/von"          import { VyxNode } from "std/vyx"          fn von(k: Int64) -> Int64 { let v = VArray([VStr("a" + k.toString()), VRecord("r", [])]) let w = VStr("b") return k }          fn vyx(k: Int64) -> Int64 { let n = VNElem("div", false, [], [VNText("t" + k.toString())], k) return k }          fn vyrnTestMain() -> Int64 { return von(1) * 10 + vyx(2) }
+import { Von } from "std/von"          import { syntax } from "std/syntax" import * as vx from syntax("std/vyx.syntax")          fn von(k: Int64) -> Int64 { let v = VArray([VStr("a" + k.toString()), VRecord("r", [])]) let w = VStr("b") return k }          fn vyx(k: Int64) -> Int64 { let n = VyxNodeVyxText(vx.VyxText { value: vx.Lexeme { text: "t" + k.toString(), start: 0, end: 0 }, start: 0, end: 0 }) return k }          fn vyrnTestMain() -> Int64 { return von(1) * 10 + vyx(2) }

@@ -32,7 +32,9 @@ fn run_as_stream(src: &str) -> Result<(), String> {
     for e in std::fs::read_dir(repo_std).expect("read std") {
         let e = e.expect("a std entry").path();
         let name = e.file_name().expect("a std file name");
-        std::fs::copy(&e, std_dir.join(name)).expect("copy a std file");
+        if e.is_file() {
+            std::fs::copy(&e, std_dir.join(name)).expect("copy a std file");
+        }
     }
     let path = std_dir.join("stream.vyrn");
     std::fs::write(&path, src).expect("write the program");

@@ -691,7 +691,12 @@ impl<'a> Judged<'a> {
 /// that byte's line in the author's file; `None` for a module without a span
 /// table. A position past the text is the last span's.
 fn author_at(m: &Module, line: usize, col: usize) -> Option<(&Author, usize)> {
-    author_in(m.spans.as_deref()?, m.gen_source.as_deref()?, line, col)
+    author_in(
+        m.spans.as_deref()?,
+        &m.generated.as_ref()?.source,
+        line,
+        col,
+    )
 }
 
 /// [`author_at`] over a span table `rows` of `text`.
@@ -755,7 +760,8 @@ fn author_of(m: &Module, line: usize, col: usize) -> Judged<'_> {
 /// a span of the call site's whose text is `name`. False for a hand-written
 /// module.
 fn call_site_wrote(m: &Module, name: &str, line: usize) -> bool {
-    let (Some(rows), Some(text)) = (m.spans.as_deref(), m.gen_source.as_deref()) else {
+    let (Some(rows), Some(text)) = (m.spans.as_deref(), m.generated.as_ref().map(|g| &*g.source))
+    else {
         return false;
     };
     let (mut at, mut counted) = (1, 0);
@@ -925,10 +931,10 @@ struct Module {
     program: Program,
     /// The resolved key each import points at, in `program.imports` order.
     import_targets: Vec<String>,
-    /// The generated source text, for `vyrn emit-gen`; `None` for a
-    /// module read from disk.
-    gen_source: Option<String>,
-    /// A generated module's span table, by offset in `gen_source`; `None` for a
+    /// The generated module, for `vyrn emit-gen` and a generator that holds it;
+    /// `None` for a module read from disk.
+    generated: Option<GenModule>,
+    /// A generated module's span table, by offset in its source; `None` for a
     /// module read from disk.
     spans: Option<Rc<[SpanRow]>>,
     /// `Some(prefix)` when a builtin injected this module and nothing imported
@@ -1393,7 +1399,7 @@ pub fn generated_modules(
     let (graph, _) = module_graph(root_source, root_path, opts, resolver, engine);
     Ok(graph?
         .into_iter()
-        .filter_map(|(key, _, gen)| gen.map(|s| (key, s)))
+        .filter_map(|(key, _, gen)| gen.map(|g| (key, g.source)))
         .collect())
 }
 
@@ -1508,8 +1514,21 @@ fn load_with_origins_inner(
     }
 }
 
-/// `(module key, resolved import targets, synthesized source)` per loaded module.
-pub type ModuleGraph = Vec<(String, Vec<String>, Option<String>)>;
+/// `(module key, resolved import targets, generated module)` per loaded module.
+pub type ModuleGraph = Vec<(String, Vec<String>, Option<GenModule>)>;
+
+/// A generated module: its text, and what that text depends on, which stands for the
+/// file its banner key does not have.
+#[derive(Debug, Clone)]
+pub struct GenModule {
+    pub source: String,
+    pub inputs: GenDeps,
+}
+
+/// What a generation's output depends on: each input its run read and each source of
+/// its generator, with the content's hash ([`ABSENT`] for an input that was absent).
+/// It is flat: a generated module in the generator's closure gives its own.
+pub type GenDeps = Rc<[(String, String)]>;
 
 /// The floor's [`crate::floor::Graph`] for a linked load: every module the
 /// artifact contains, including a generator's output and the runtime
@@ -1549,13 +1568,7 @@ pub fn capability_graph(
 fn graph_of(modules: &[Module]) -> ModuleGraph {
     modules
         .iter()
-        .map(|m| {
-            (
-                m.key.clone(),
-                m.import_targets.clone(),
-                m.gen_source.clone(),
-            )
-        })
+        .map(|m| (m.key.clone(), m.import_targets.clone(), m.generated.clone()))
         .collect()
 }
 
@@ -1614,7 +1627,7 @@ fn load_modules(
     fn visit(
         key: &str,
         source: Option<&str>,
-        written: Option<&Written>,
+        generated: Option<&Generated>,
         opts: &LoadOptions,
         resolver: &dyn ModuleResolver,
         engine: Option<&crate::gen::GenEngine>,
@@ -1658,12 +1671,14 @@ fn load_modules(
             }
             format!("{h:x}:{}", text.len())
         };
-        // An imported std module's top-level bodies are parsed when a root
-        // reaches them ([`parse_reached`]). The floor reads every body's
-        // carriers at load, so a load that declares artifacts parses them all.
+        // An imported std module's top-level bodies, and those of a module a std
+        // module's generator import wrote, are parsed when a root reaches them
+        // ([`parse_reached`]). The floor reads every body's carriers at load, so a
+        // load that declares artifacts parses them all.
+        let owner = generated_importer(key).unwrap_or(key);
         let skim = !is_root
             && opts.artifacts.is_none()
-            && import_specifier("", key, opts.std_root.as_deref()).starts_with("std/");
+            && import_specifier("", owner, opts.std_root.as_deref()).starts_with("std/");
         // The root parses its `test` and `bench` blocks, an imported module skips
         // them, so one text loaded as both parses twice.
         let cache_key = match (is_root, skim) {
@@ -1673,6 +1688,7 @@ fn load_modules(
         };
         let parsed = PARSE_CACHE.with(|c| c.borrow().get(&cache_key).cloned());
 
+        let written = generated.map(|g| &g.written);
         // A generated module's errors show where its span table says, and its
         // reports are diagnostics at the generator's severity.
         if let Some(g) = written {
@@ -1755,7 +1771,7 @@ fn load_modules(
                     session: Default::default(),
                 },
                 import_targets: Vec::new(),
-                gen_source: None,
+                generated: None,
                 spans: None,
                 injected: None,
                 hash: None,
@@ -1933,7 +1949,7 @@ fn load_modules(
         // not re-run.
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Generator { name, args, line } = &imp.source {
-                let (gen_key, written) = run_generator(
+                let (gen_key, generated) = run_generator(
                     key,
                     name,
                     args,
@@ -1954,10 +1970,10 @@ fn load_modules(
                 if let Some(d) = audience_objection(key, &gen_key, *line, opts) {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
-                if let Some(g) = written {
+                if let Some(g) = generated {
                     visit(
                         &gen_key,
-                        Some(&g.source),
+                        Some(&g.written.source),
                         Some(&g),
                         opts,
                         resolver,
@@ -1976,13 +1992,14 @@ fn load_modules(
 
         w.stack.pop();
         w.states.insert(key.to_string(), true);
-        // A generated module keeps its source text for `vyrn emit-gen`.
-        let gen_source = written.map(|_| text.clone());
         w.modules.push(Module {
             key: key.to_string(),
             program,
             import_targets,
-            gen_source,
+            generated: generated.map(|g| GenModule {
+                source: text.clone(),
+                inputs: g.inputs.clone(),
+            }),
             spans: written.map(|g| Rc::from(g.spans.as_slice())),
             injected: None,
             hash: Some(hash),
@@ -2152,7 +2169,20 @@ thread_local! {
 }
 
 /// A generator cache entry: its recorded `(input, hash)` pairs and its output.
-type CacheEntry = (Vec<(String, String)>, Written);
+type CacheEntry = (GenDeps, Written);
+
+/// A generation's output and what it depends on.
+pub(crate) struct Generated {
+    pub(crate) written: Written,
+    inputs: GenDeps,
+}
+
+/// The key of a generator's path argument under `std/`, which names a file beside
+/// std's modules, as an import does.
+fn std_input(arg: &str, opts: &LoadOptions) -> Option<String> {
+    let rest = arg.strip_prefix("std/")?;
+    Some(normalize(&format!("{}/{rest}", opts.std_root.as_deref()?)))
+}
 
 /// Runs a generator-call import target and returns the generated
 /// module's key, with what the generator wrote, or `None` when it is already
@@ -2175,7 +2205,7 @@ fn run_generator(
     identities: &mut HashMap<String, String>,
     read: &mut HashMap<String, Option<String>>,
     root_key: &str,
-) -> Result<(String, Option<Written>), Vec<Diagnostic>> {
+) -> Result<(String, Option<Generated>), Vec<Diagnostic>> {
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
 
     // Arguments must be compile-time constants.
@@ -2197,9 +2227,10 @@ fn run_generator(
     let mut ident = format!("{name}\u{0}");
     for c in &consts {
         match c {
-            crate::consteval::ConstVal::Str(s) => {
-                ident.push_str(&join_importer_dir(importer, s));
-            }
+            crate::consteval::ConstVal::Str(s) => match std_input(s, opts) {
+                Some(key) => ident.push_str(&key),
+                None => ident.push_str(&join_importer_dir(importer, s)),
+            },
             other => ident.push_str(&other.to_string()),
         }
         ident.push('\u{0}');
@@ -2243,7 +2274,7 @@ fn run_generator(
     if gen_fn.ret != Type::Named("Code".into()) {
         return Err(err(rule!(GenImportNotCode, name, ret = &gen_fn.ret)));
     }
-    let written = run_resolved(
+    let generated = run_resolved(
         importer,
         name,
         &consts,
@@ -2255,7 +2286,7 @@ fn run_generator(
         engine,
         read,
     )?;
-    Ok((gen_key, Some(written)))
+    Ok((gen_key, Some(generated)))
 }
 
 /// The constants of a generator call as its banner spells them.
@@ -2331,7 +2362,7 @@ pub fn call_generator(
         root_key: importer,
     };
     let mut read = HashMap::new();
-    let written = run_resolved(
+    let generated = run_resolved(
         importer,
         &name,
         args,
@@ -2343,7 +2374,7 @@ pub fn call_generator(
         engine,
         &mut read,
     );
-    Some(written.map(|w| w.source))
+    Some(generated.map(|g| g.written.source))
 }
 
 /// What [`gen_export`] answered: the companion and the function, or none, and
@@ -2422,7 +2453,7 @@ fn run_resolved(
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
     read: &mut HashMap<String, Option<String>>,
-) -> Result<Written, Vec<Diagnostic>> {
+) -> Result<Generated, Vec<Diagnostic>> {
     let Site { line, root_key } = site;
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
     let arg_repr = args_repr(consts);
@@ -2450,6 +2481,10 @@ fn run_resolved(
                     allowed.push(key.clone());
                     aliased.push((s.clone(), key));
                 }
+            }
+            if let Some(key) = std_input(s, opts) {
+                allowed.push(key.clone());
+                aliased.push((s.clone(), key));
             }
         }
     }
@@ -2541,7 +2576,7 @@ pub(crate) fn generation(
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
     read: &mut HashMap<String, Option<String>>,
-) -> Result<Written, GenFault> {
+) -> Result<Generated, GenFault> {
     let sources_hash = generator_cache_key(
         &crate::gen::compiler_identity(),
         gen_mod_key,
@@ -2559,11 +2594,7 @@ pub(crate) fn generation(
         // forged list passes `all`. The call site decides first: an entry that
         // does not record `gen_mod_key` is not this generation.
         let valid = |inputs: &[(String, String)], read: &mut HashMap<String, Option<String>>| {
-            inputs.iter().any(|(path, _)| path == gen_mod_key)
-                && inputs.iter().all(|(path, hash)| {
-                    current_input_hash(resolver, path, read).unwrap_or_else(|| ABSENT.to_string())
-                        == *hash
-                })
+            inputs.iter().any(|(path, _)| path == gen_mod_key) && all_fresh(inputs, resolver, read)
         };
         // The entry this thread last read for the key, then the resolver's. A
         // remembered entry is validated like a read one, and skips the read and
@@ -2575,7 +2606,10 @@ pub(crate) fn generation(
             valid(&entry.0, read).then(|| Rc::new(entry))
         });
         if let Some(entry) = hit {
-            let output = entry.1.clone();
+            let output = Generated {
+                written: entry.1.clone(),
+                inputs: entry.0.clone(),
+            };
             GEN_ENTRIES.with(|m| {
                 let mut m = m.borrow_mut();
                 // ponytail: an edited generator input leaves its old entry
@@ -2642,38 +2676,51 @@ pub(crate) fn generation(
     let out = out.map_err(GenFault::Run)?;
     bump_gen_runs();
 
-    // Cache the output under its recorded inputs, for the next load and the
-    // LSP's per-keystroke re-analysis.
-    if !no_cache {
-        let mut inputs: Vec<(String, String)> = out
-            .reads
-            .iter()
-            .map(|(p, bytes)| {
-                let h = match bytes {
-                    Some(b) => crate::hash::sha256_hex(b),
-                    None => ABSENT.to_string(),
-                };
-                (p.clone(), h)
-            })
-            .collect();
-        // The generator's own transitive sources join the recorded inputs, so
-        // the entry carries its own validity and the lookup key stays cheap.
-        inputs.extend(checked.sources.iter().cloned());
-        // Recorded unconditionally: a hit is validated against the generator
-        // module the call site named.
-        if !inputs.iter().any(|(p, _)| p == gen_mod_key) {
-            if let Some(h) = current_input_hash(resolver, gen_mod_key, read) {
-                inputs.push((gen_mod_key.to_string(), h));
-            }
-        }
-        if checked.describable {
-            resolver.gen_cache_put(
-                &sources_hash,
-                &render_cache_entry(&sources_hash, &inputs, &out.written),
-            );
+    let mut inputs: Vec<(String, String)> = out
+        .reads
+        .iter()
+        .map(|(p, bytes)| {
+            let h = match bytes {
+                Some(b) => crate::hash::sha256_hex(b),
+                None => ABSENT.to_string(),
+            };
+            (p.clone(), h)
+        })
+        .collect();
+    // The generator's own transitive sources join the recorded inputs, so
+    // the entry carries its own validity and the lookup key stays cheap.
+    inputs.extend(checked.sources.iter().cloned());
+    // Recorded unconditionally: a hit is validated against the generator
+    // module the call site named.
+    if !inputs.iter().any(|(p, _)| p == gen_mod_key) {
+        if let Some(h) = current_input_hash(resolver, gen_mod_key, read) {
+            inputs.push((gen_mod_key.to_string(), h));
         }
     }
-    Ok(out.written)
+    // Cache the output under its recorded inputs, for the next load and the
+    // LSP's per-keystroke re-analysis.
+    if !no_cache && checked.describable {
+        resolver.gen_cache_put(
+            &sources_hash,
+            &render_cache_entry(&sources_hash, &inputs, &out.written),
+        );
+    }
+    Ok(Generated {
+        written: out.written,
+        inputs: Rc::from(inputs),
+    })
+}
+
+/// Whether each recorded input still hashes the same. An input recorded as absent
+/// must still be absent.
+fn all_fresh(
+    inputs: &[(String, String)],
+    resolver: &dyn ModuleResolver,
+    read: &mut HashMap<String, Option<String>>,
+) -> bool {
+    inputs.iter().all(|(path, hash)| {
+        current_input_hash(resolver, path, read).unwrap_or_else(|| ABSENT.to_string()) == *hash
+    })
 }
 
 /// A generator module loaded and checked as a runnable program, with its
@@ -2684,9 +2731,10 @@ struct CheckedGen {
     name: String,
     /// Each source of the generator's closure with its content hash.
     sources: Vec<(String, String)>,
-    /// Whether every source has a readable file. A generated module's banner key
-    /// has none, and a closure holding one has no fingerprint: no cache entry,
-    /// since an unverifiable input is worse than a miss, and no artifact key.
+    /// Whether every source has a readable file, or is a generated module whose
+    /// inputs stand for the file its banner key does not have. A closure with any
+    /// other source has no fingerprint: no cache entry, since an unverifiable input
+    /// is worse than a miss, and no artifact key.
     describable: bool,
     fingerprint: Option<String>,
     /// Whether `program` passed its check; see [`checked_generator`].
@@ -2741,10 +2789,7 @@ fn checked_generator(
     });
     if let Some(k) = &memo_key {
         let hit = CHECKED_GENS.with(|m| m.borrow().get(k).cloned());
-        let mut fresh = |c: &CheckedGen| {
-            (c.sources.iter())
-                .all(|(p, h)| current_input_hash(resolver, p, read).as_ref() == Some(h))
-        };
+        let mut fresh = |c: &CheckedGen| all_fresh(&c.sources, resolver, read);
         if let Some(c) = hit.filter(|c| c.describable && (c.checked || !check) && fresh(c)) {
             return Ok(c);
         }
@@ -2760,7 +2805,15 @@ fn checked_generator(
     // as inputs, and the wasm engine keys its compiled artifact on them.
     let mut gen_sources: Vec<(String, String)> = Vec::new();
     let mut describable = true;
-    for (key, _, _) in &gen_graph {
+    for (key, _, generated) in &gen_graph {
+        if let Some(g) = generated {
+            for input in g.inputs.iter() {
+                if !gen_sources.contains(input) {
+                    gen_sources.push(input.clone());
+                }
+            }
+            continue;
+        }
         match current_input_hash(resolver, key, read) {
             Some(h) => gen_sources.push((key.clone(), h)),
             None => {
@@ -3111,7 +3164,7 @@ fn read_cache_entry(
     }
     let (spans, reports) = read_written_table(&mut line)?;
     Some((
-        inputs,
+        Rc::from(inputs),
         Written {
             source: text[idx..].to_string(),
             spans,
@@ -4965,7 +5018,7 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
     let std_root = format!("{}/", normalize(std_root));
     (modules.iter())
         .filter(|m| m.key != root_key && !is_remote(&m.key))
-        .filter(|m| normalize(&m.key).starts_with(&std_root))
+        .filter(|m| normalize(generated_importer(&m.key).unwrap_or(&m.key)).starts_with(&std_root))
         .map(|m| m.key.clone())
         .collect()
 }
@@ -5944,7 +5997,7 @@ mod tests {
         let entry = render_cache_entry("k", &inputs, &written);
         assert_eq!(
             read_cache_entry("k", &entry, None),
-            Some((inputs.to_vec(), written))
+            Some((Rc::from(inputs.to_vec()), written))
         );
     }
 

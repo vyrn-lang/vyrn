@@ -762,6 +762,8 @@ compiler/vyrn-cli/tests/check/validated_types_join_beside_branded_handles.vyrn	0
 compiler/vyrn-cli/tests/check/validated_types_over_different_bases_do_not_join.vyrn	0	cbf29ce484222325	20	18	8e61d3de401587da
 compiler/vyrn-cli/tests/check/validation_stays_non_codable.vyrn	0	cbf29ce484222325	20	17	b0dd359e217a3bda
 compiler/vyrn-cli/tests/check/variant_named_like_a_std_type.vyrn	0	cbf29ce484222325	20	17	8468123fcd12f036
+compiler/vyrn-cli/tests/check/vyx_a_script_in_a_template.vyrn	0	cbf29ce484222325	20	18	dc897667643039b0
+compiler/vyrn-cli/tests/check/vyx_refusals.vyrn	0	cbf29ce484222325	20	18	318827c1d0ffcd04
 compiler/vyrn-cli/tests/check/where_group_accepted.vyrn	0	cbf29ce484222325	20	18	997b4af997bb7c1f
 compiler/vyrn-cli/tests/check/where_rule_element.vyrn	0	cbf29ce484222325	20	18	c876a92975dd0631
 compiler/vyrn-cli/tests/check/where_rule_element_store_computed.vyrn	0	cbf29ce484222325	20	17	53c46dbf5c99d9c5
@@ -953,7 +955,7 @@ compiler/vyrn-cli/tests/shapes/a-smallarray-literal-of-owned-elements-the-core-m
 compiler/vyrn-cli/tests/shapes/a-smallarray-literal-the-core-makes.vyrn	0	cbf29ce484222325	20	18	a57246faf86475d7
 compiler/vyrn-cli/tests/shapes/a-smallarray-name-read-beside-a-statement-the-arm-emits.vyrn	0	cbf29ce484222325	20	16	cf2af0965c3bde8e
 compiler/vyrn-cli/tests/shapes/a-smallarray-shrunk-and-copied-out-by-core-rows.vyrn	0	cbf29ce484222325	20	13	d77d3c009b44a95c
-compiler/vyrn-cli/tests/shapes/a-std-release-of-a-sum-dropped-whole.vyrn	0	cbf29ce484222325	20	17	3b597bd80c205e22
+compiler/vyrn-cli/tests/shapes/a-std-release-of-a-sum-dropped-whole.vyrn	0	cbf29ce484222325	20	17	2e6490d709f854f9
 compiler/vyrn-cli/tests/shapes/a-store-evaluates-its-receiver-indices-once.vyrn	0	cbf29ce484222325	20	19	8451193cab738079
 compiler/vyrn-cli/tests/shapes/a-store-into-a-binding-of-a-where-type.vyrn	0	cbf29ce484222325	20	14	0ea5b381b67076b4
 compiler/vyrn-cli/tests/shapes/a-store-into-a-field-of-a-string-a-record-an-array-and-an-enum.vyrn	0	cbf29ce484222325	20	15	6040eadaa1e07952
@@ -1426,7 +1428,7 @@ std/hints.vyrn	0	cbf29ce484222325	20	18	ff404a8bd2a62e4e
 std/html.vyrn	0	cbf29ce484222325	20	18	1afbb1136f293870
 std/http.editor.vyrn	0	cbf29ce484222325	20	14	91f14c208f78343d
 std/http.vyrn	0	cbf29ce484222325	20	20	b3266d48365502ee
-std/i18n.vyrn	0	cbf29ce484222325	20	18	b214a9794526fe8e
+std/i18n.vyrn	0	cbf29ce484222325	20	17	114ef771cda04737
 std/icons.vyrn	0	cbf29ce484222325	20	18	f80a875af9bf4753
 std/imports.vyrn	0	cbf29ce484222325	20	18	409f686b6f933556
 std/json.vyrn	0	cbf29ce484222325	20	17	3b360934678d6034
@@ -1463,6 +1465,6 @@ std/tw.vyrn	0	cbf29ce484222325	20	18	f2fad103d0167ca2
 std/ui.editor.vyrn	0	cbf29ce484222325	20	16	165d157576480128
 std/ui.vyrn	0	cbf29ce484222325	20	19	fd29f6c6e8c7db47
 std/von.vyrn	0	cbf29ce484222325	20	18	d4a7b318a4c1ac9b
-std/vyx-hints.vyrn	0	cbf29ce484222325	20	15	adee3b6b9b7cf01d
-std/vyx.editor.vyrn	0	cbf29ce484222325	20	18	65ea2edc035ab188
-std/vyx.vyrn	0	cbf29ce484222325	20	17	6294571fa6ea8ef6
+std/vyx-hints.vyrn	0	cbf29ce484222325	20	17	419bbcaf8cbfa78e
+std/vyx.editor.vyrn	0	cbf29ce484222325	20	16	f6b42596395b523d
+std/vyx.vyrn	0	cbf29ce484222325	20	18	bed9b8c2a668a303

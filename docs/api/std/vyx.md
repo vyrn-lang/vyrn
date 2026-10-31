@@ -38,7 +38,8 @@ Template grammar (Vue-flavored):
 
 Whitespace: an all-whitespace run that spans a newline is dropped; a
 same-line whitespace run is one space; other runs collapse to single spaces.
-`<!-- ... -->` comments are inert, and a lone `{` in text is literal.
+`<!-- ... -->` comments are inert, and a lone `{` in text is literal. The grammar
+is `std/vyx.syntax`, and each of its rows has its sentence in `std/vyx.errors`.
 
 Every generation failure is a `std/diag` report at the `.vyx` line it came
 from. `vyrn emit-gen <file>` shows the synthesized module.
@@ -83,19 +84,6 @@ check the provider's shape, because a template-named provider is outside its
 read roots; a wrong shape fails the emitted import with the loader's
 diagnostic.
 
-## VyxAttr
-
-```vyrn
-type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line: Int64, col: Int64 }
-```
-
-One attribute of a template element. `name` drops a leading `:` or `@`; a
-`v-` directive keeps its prefix (`v-if`, `v-for`). `value` is the quoted
-text, trimmed, and `""` for a bare attribute (`disabled`). `dyn` marks
-`:name="expr"`, whose value is a Vyrn expression; `evt` marks
-`@event="handler"`. `line` and `col` are 1-based in the `.vyx` file: the
-value's position, or the name's for a bare attribute.
-
 ## VyxSpan
 
 ```vyrn
@@ -104,49 +92,15 @@ type VyxSpan = { text: String, line: Int64, col: Int64 }
 
 Text of a `.vyx` file and the 1-based line and column it starts at there.
 
-## VyxNode
-
-```vyrn
-type VyxNode = enum { VNText(String), VNInterp(String, Int64, Int64), VNRaw(String, Int64, Int64), VNChildren, VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64), VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool), VNFor(String, VyxSpan, String, Array<VyxNode>, Int64, Int64, Int64, Int64) }
-```
-
-A node of a parsed template. Lines and columns are 1-based in the `.vyx`
-file. [`vyxParseTemplate`](#vyxparsetemplate) yields four variants:
-
-- `VNText(text)`: literal text, each whitespace run collapsed to one space.
-  A whitespace-only run that holds a line break yields no node.
-- `VNInterp(expr, line, col)`: `{{ expr }}`, the expression trimmed.
-- `VNChildren`: `<slot/>`.
-- `VNElem(tag, isComp, attrs, kids, line)`: an element, or a component when
-  `tag` starts with an uppercase letter (`isComp`). `line` is the `<`'s.
-  A self-closing tag has no `kids`.
-
-The compiler's grouping pass consumes the directives and makes the other
-three: `VNRaw(expr, line, col)` for `v-html`; `VNIf(conds, condLines,
-condCols, bodies, elseBody, hasElse)` for a `v-if` chain, one body per
-condition; and `VNFor(var, iter, key, body, line, col, keyLine, keyCol)` for
-`v-for` with its `:key`, where `iter` is the iterable and its position and
-`line` and `col` are the header's. A `match` has no wildcard arm, so a walker names
-them too.
-
-## VyxBody
-
-```vyrn
-type VyxBody = { nodes: Array<VyxNode> }
-```
-
-One branch of a `VNIf`: a node list, so bodies nest in a payload without
-`Array<Array<VyxNode>>`.
-
 ## VyxTemplate
 
 ```vyrn
-type VyxTemplate = { nodes: Array<VyxNode>, err: String }
+type VyxTemplate = { nodes: Array<vx.VyxNode>, err: String }
 ```
 
-The parsed `<template>` of a `.vyx` source: its top-level nodes, and in
-`err` the diagnostic that stopped the parse, or `""`. After an error,
-`nodes` holds what parsed before it.
+The parsed `<template>` of a `.vyx` source: its top-level nodes in the tree
+`std/vyx.syntax` writes, and in `err` the sentence of the row that stopped the
+parse, or `""`.
 
 ## vyxParseTemplate
 
@@ -154,41 +108,39 @@ The parsed `<template>` of a `.vyx` source: its top-level nodes, and in
 fn vyxParseTemplate(source: String) -> VyxTemplate
 ```
 
-Parses the `<template>` section of the `.vyx` text `source` into the tree
-the compiler walks, for a generator or a checker such as `std/vyx-hints`.
-It reads no props or imports, resolves no component and groups no
-directive: `v-if`, `v-for` and `v-html` stay attributes. `err` is set when
-`source` has no `<template>` or it does not parse. Call it during
-generation only.
+Parses the `<template>` section of the `.vyx` text `source` into its tree, for a
+generator or a checker such as `std/vyx-hints`. It reads no props or imports,
+resolves no component and groups no directive: `v-if`, `v-for` and `v-html` stay
+attributes, a comment is no node, and `<slot/>` is an element. `err` is set when
+`source` has no `<template>`, or it does not parse. Call it during generation only.
 
 A generator that writes the outline of a template, saved as `outline.vyrn`:
 
 ```vyrn
-import { vyxParseTemplate, VyxAttr, VyxNode } from "std/vyx"
+import { syntax } from "std/syntax"
+import * as vx from syntax("std/vyx.syntax")
+import { vyxParseTemplate } from "std/vyx"
 
 /// ` :name` for each bound attribute in `attrs`.
-gen fn bound(attrs: Array<VyxAttr>) -> String {
+gen fn bound(attrs: Array<vx.VyxAttr>) -> String {
     let mut out = ""
     for a in attrs {
-        if a.dyn {
-            out = out + " :" + a.name
+        if let Some(mark) = a.dyn {
+            out = out + " :" + a.name.text
         }
     }
     return out
 }
 
-/// One line per element, depth first: its tag, line and bound attributes.
-gen fn walk(nodes: Array<VyxNode>) -> String {
+/// One line per element, depth first: its tag, its offset and bound attributes.
+gen fn walk(nodes: Array<vx.VyxNode>) -> String {
     let mut out = ""
     for n in nodes {
-        out = out + match n {
-            VNElem(tag, _, attrs, kids, line) => tag + ":" + line.toString() + bound(attrs) + "\n" + walk(kids),
-            VNText(_) => "",
-            VNInterp(_, _, _) => "",
-            VNRaw(_, _, _) => "",
-            VNChildren => "",
-            VNIf(_, _, _, _, _, _) => "",
-            VNFor(_, _, _, _, _, _, _, _) => "",
+        if let VyxNodeVyxElem(e) = n {
+            out = out + e.tag.text + ":" + e.start.toString() + bound(e.attrs) + "\n"
+            if let Some(kids) = e.body {
+                out = out + walk(kids.nodes)
+            }
         }
     }
     return out
@@ -203,7 +155,7 @@ export gen fn outline(source: String) -> Code {
 }
 ```
 
-A program that prints `ul:2` and `li:3 :class`:
+A program that prints `ul:11` and `li:18 :class`:
 
 ```vyrn
 import { outline } from "./outline"

@@ -13,7 +13,7 @@ directive = 'syntax' gap name
           / ('keyword' / 'token') gap name gap string
           / 'nest' gap digit+ gap throw
           / 'expect' gap throw
-          / 'row' gap name
+          / 'row' gap name ('(' name (',' sp name)* ')')?
 rule = ('nest' gap)? name sp '=' sp alt (sp 'fail' sp throw)?
 
 // Inside a definition, a newline is a space when the next line is indented.

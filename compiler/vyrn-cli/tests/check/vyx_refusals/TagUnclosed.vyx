@@ -1,0 +1,3 @@
+<template>
+<a>{{ <!-- }}</a><b x="-->"
+</template>

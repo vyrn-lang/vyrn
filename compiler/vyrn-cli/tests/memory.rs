@@ -798,7 +798,7 @@ type Row = {{ name: String, n: Int64 }}
 type Doc = {{ title: String, body: String }}
 
 /// A type that reaches ITSELF — `Twig` holds `Array<Twig>`. The shape the
-/// release walk needs a declaration to enter, and the shape `std/vyx`'s
+/// release walk needs a declaration to enter, and the shape `std/vyx.syntax`'s
 /// `VyxNode` and `std/graphql`'s `GqlSel` have.
 type Twig = enum {{
     Tip(String),

@@ -31,7 +31,9 @@
 
 import { reportHere, Severity } from "std/diag"
 import { Finding, earned, findingsText, noPolicy, policyOf, reports, unusedWaivers, HintPolicy } from "std/hints"
-import { VyxAttr, VyxBody, VyxNode, vyxParseTemplate } from "std/vyx"
+import { vyxAttrText, vyxAttrValue, vyxDyn, vyxEvt, vyxParseTemplate } from "std/vyx"
+import { syntax } from "std/syntax"
+import * as vx from syntax("std/vyx.syntax")
 import { join } from "std/code"
 import { contains, endsWith, slice, startsWith } from "std/strpred"
 import { substring, toLower, trim } from "std/strings"
@@ -147,7 +149,7 @@ gen fn vhFindings(p: HintPolicy, src: String) -> Array<Finding> {
         // half a tree would bury it.
         return found
     }
-    vhNodes(t.nodes, false, false, false, false, found)
+    vhNodes(t.nodes, bytes(src), false, false, false, false, found)
     // Only a template carrying a marker pays for the waiver audit.
     if contains(src, "vyrn-ignore") {
         for w in unusedWaivers(p, src, found) {
@@ -158,7 +160,8 @@ gen fn vhFindings(p: HintPolicy, src: String) -> Array<Finding> {
 }
 
 fn vhNodes(
-    nodes: Array<VyxNode>,
+    nodes: Array<vx.VyxNode>,
+    ba: Array<UInt8>,
     inFor: Bool,
     inLabel: Bool,
     inForm: Bool,
@@ -166,72 +169,41 @@ fn vhNodes(
     out: modify Array<Finding>,
 ) {
     for n in nodes {
-        vhNode(n, inFor, inLabel, inForm, inForeign, out)
-    }
-}
-
-fn vhNode(
-    n: VyxNode,
-    inFor: Bool,
-    inLabel: Bool,
-    inForm: Bool,
-    inForeign: Bool,
-    out: modify Array<Finding>,
-) {
-    match n {
-        VNElem(tag, isComp, attrs, kids, line) =>
-        vhElem(tag, isComp, attrs, kids, line, inFor, inLabel, inForm, inForeign, out),
-        // `vyxParseTemplate` does not group, so these nodes do not appear. Walked
-        // anyway, so a rule stays correct on a grouped tree.
-        VNFor(v, it, key, body, line, col, keyLine, keyCol) =>
-        vhNodes(body, true, inLabel, inForm, inForeign, out),
-        VNIf(conds, cl, cc, bodies, els, has) =>
-        vhBodies(bodies, els, has, inFor, inLabel, inForm, inForeign, out),
-        VNText(s) => {}
-        VNInterp(x, line, col) => {}
-        VNRaw(x, line, col) => {}
-        VNChildren => {}
-    }
-}
-
-fn vhBodies(
-    bodies: Array<VyxBody>,
-    els: VyxBody,
-    has: Bool,
-    inFor: Bool,
-    inLabel: Bool,
-    inForm: Bool,
-    inForeign: Bool,
-    out: modify Array<Finding>,
-) {
-    for b in bodies {
-        vhNodes(b.nodes, inFor, inLabel, inForm, inForeign, out)
-    }
-    if has {
-        vhNodes(els.nodes, inFor, inLabel, inForm, inForeign, out)
+        if let VyxNodeVyxElem(e) = n {
+            // `<slot/>` is where a caller's markup goes, which its own file checks.
+            if e.tag.text != "slot" {
+                if let Some(kids) = e.body {
+                    vhElem(e, kids.nodes, ba, inFor, inLabel, inForm, inForeign, out)
+                } else {
+                    vhElem(e, [], ba, inFor, inLabel, inForm, inForeign, out)
+                }
+            }
+        }
     }
 }
 
 /// One element: its rules, then its children's.
 fn vhElem(
-    tag: String,
-    isComp: Bool,
-    attrs: Array<VyxAttr>,
-    kids: Array<VyxNode>,
-    line: Int64,
+    e: vx.VyxElem,
+    kids: Array<vx.VyxNode>,
+    ba: Array<UInt8>,
     inFor: Bool,
     inLabel: Bool,
     inForm: Bool,
     inForeign: Bool,
     out: modify Array<Finding>,
 ) {
+    let tag = e.tag.text
+    let attrs = e.attrs
+    let isComp = bytes(tag)[0] >= 'A' && bytes(tag)[0] <= 'Z'
     // A component call renders markup its tag name does not reveal; its own
     // file is checked on its own terms, so only its children are walked.
     if isComp == false {
-        vhElemRules(tag, attrs, kids, line, inFor, inLabel, inForm, inForeign, out)
+        vhElemRules(tag, attrs, kids, lineAt(ba, e.start), ba, inFor, inLabel, inForm, inForeign, out)
     }
     vhNodes(
         kids,
+        ba,
         inFor || vhHas(attrs, "v-for"),
         inLabel || tag == "label",
         inForm || tag == "form",
@@ -244,17 +216,18 @@ fn vhElem(
 /// earned it, or at the element's line.
 fn vhElemRules(
     tag: String,
-    attrs: Array<VyxAttr>,
-    kids: Array<VyxNode>,
+    attrs: Array<vx.VyxAttr>,
+    kids: Array<vx.VyxNode>,
     line: Int64,
+    ba: Array<UInt8>,
     inFor: Bool,
     inLabel: Bool,
     inForm: Bool,
     inForeign: Bool,
     out: modify Array<Finding>,
 ) {
-    let aLine = vhAnchorLine(attrs, line)
-    let aCol = vhAnchorCol(attrs)
+    let aLine = vhAnchorLine(ba, attrs, line)
+    let aCol = vhAnchorCol(ba, attrs)
 
     // html/deprecated and html/element-name. Not inside `<svg>`/`<math>`, whose
     // vocabulary the table does not describe. A tag with `-` is a custom element.
@@ -282,59 +255,60 @@ fn vhElemRules(
     }
 
     for a in attrs {
+        let v = vyxAttrValue(ba, a)
         // sec/inline-handler. `@click` dispatches through the export table and
         // needs no `script-src 'unsafe-inline'`.
-        if a.evt == false && vhIsHandlerAttr(a.name) {
+        if vyxEvt(a) == false && vhIsHandlerAttr(a.name.text) {
             out.push(Finding {
                 code: "sec/inline-handler",
                 dflt: Error,
-                line: a.line,
-                col: a.col,
-                message: "`\{a.name}` is an inline script handler; write `@\{vhEventOf(a.name)}`, which dispatches through the export table",
+                line: v.line,
+                col: v.col,
+                message: "`\{a.name.text}` is an inline script handler; write `@\{vhEventOf(a.name.text)}`, which dispatches through the export table",
             })
         }
         // sec/unsafe-url. Static only: a dynamic URL is a value this library
         // cannot see.
-        if a.dyn == false && vhIsUrlAttr(a.name) && vhIsJavascriptUrl(a.value) {
+        if vyxDyn(a) == false && vhIsUrlAttr(a.name.text) && vhIsJavascriptUrl(v.text) {
             out.push(Finding {
                 code: "sec/unsafe-url",
                 dflt: Error,
-                line: a.line,
-                col: a.col,
-                message: "`\{a.name}` is a `javascript:` URL; only http, https, mailto, tel and relative URLs are safe here",
+                line: v.line,
+                col: v.col,
+                message: "`\{a.name.text}` is a `javascript:` URL; only http, https, mailto, tel and relative URLs are safe here",
             })
         }
         // a11y/tabindex-positive. A positive `tabindex` reorders the whole page's
         // focus sequence.
-        if a.name == "tabindex" && a.dyn == false && vhPositive(a.value) {
+        if a.name.text == "tabindex" && vyxDyn(a) == false && vhPositive(v.text) {
             out.push(Finding {
                 code: "a11y/tabindex-positive",
                 dflt: Warning,
-                line: a.line,
-                col: a.col,
-                message: "`tabindex=\"\{a.value}\"` reorders focus for the whole page; use `0`, or `-1` for a programmatic target",
+                line: v.line,
+                col: v.col,
+                message: "`tabindex=\"\{v.text}\"` reorders focus for the whole page; use `0`, or `-1` for a programmatic target",
             })
         }
         // a11y/dup-id. A `v-for` body renders once per row, so a static id is
         // duplicated by construction.
-        if a.name == "id" && a.dyn == false && a.value != "" && (inFor || vhHas(attrs, "v-for")) {
+        if a.name.text == "id" && vyxDyn(a) == false && v.text != "" && (inFor || vhHas(attrs, "v-for")) {
             out.push(Finding {
                 code: "a11y/dup-id",
                 dflt: Warning,
-                line: a.line,
-                col: a.col,
-                message: "`id=\"\{a.value}\"` is inside a `v-for`, so every row renders the same id; write `:id` with the row key in it",
+                line: v.line,
+                col: v.col,
+                message: "`id=\"\{v.text}\"` is inside a `v-for`, so every row renders the same id; write `:id` with the row key in it",
             })
         }
         // sec/blank-target. Browsers imply `noopener`; the rule is about the
         // referrer the new document receives.
-        if a.name == "target" && a.dyn == false && a.value == "_blank" {
+        if a.name.text == "target" && vyxDyn(a) == false && v.text == "_blank" {
             if contains(toLower(vhValue(attrs, "rel")), "noreferrer") == false {
                 out.push(Finding {
                     code: "sec/blank-target",
                     dflt: Warning,
-                    line: a.line,
-                    col: a.col,
+                    line: v.line,
+                    col: v.col,
                     message: "`target=\"_blank\"` hands the new document this page's referrer; add `rel=\"noopener noreferrer\"`",
                 })
             }
@@ -342,73 +316,73 @@ fn vhElemRules(
         // sec/inline-style (`html-validate` `no-inline-style`). `style-src
         // 'unsafe-inline'` covers the whole page. Static only: a `:style` holds a
         // computed value no class can hold.
-        if a.evt == false && a.dyn == false && a.name == "style" {
+        if vyxEvt(a) == false && vyxDyn(a) == false && a.name.text == "style" {
             out.push(Finding {
                 code: "sec/inline-style",
                 dflt: Error,
-                line: a.line,
-                col: a.col,
+                line: v.line,
+                col: v.col,
                 message: "`style` is an inline style, so the page needs `style-src 'unsafe-inline'`; move the declarations to a class in the sheet",
             })
         }
         // a11y/aria-name. The ARIA vocabulary is closed, so an unknown `aria*`
         // name is a typo, and browsers ignore it silently. Bound names count too.
-        if a.evt == false && startsWith(a.name, "aria") && vhAriaAttr(a.name) == false {
+        if vyxEvt(a) == false && startsWith(a.name.text, "aria") && vhAriaAttr(a.name.text) == false {
             out.push(Finding {
                 code: "a11y/aria-name",
                 dflt: Warning,
-                line: a.line,
-                col: a.col,
-                message: "`\{a.name}` is not an ARIA attribute — a typo? The vocabulary is closed, and a misspelled name is silently ignored",
+                line: v.line,
+                col: v.col,
+                message: "`\{a.name.text}` is not an ARIA attribute — a typo? The vocabulary is closed, and a misspelled name is silently ignored",
             })
         }
         // html/deprecated-attr (`html-validate` `no-deprecated-attr`, `"error"`).
         // The table is keyed by tag and attribute together: `align` is removed on
         // `<td>` and was never on `<span>`.
-        if a.evt == false && vhDeprecatedAttrOn(tag, a.name) {
+        if vyxEvt(a) == false && vhDeprecatedAttrOn(tag, a.name.text) {
             out.push(Finding {
                 code: "html/deprecated-attr",
                 dflt: Error,
-                line: a.line,
-                col: a.col,
-                message: "`\{a.name}` on `<\{tag}>` was removed from HTML; the platform may ignore it — write CSS or current markup",
+                line: v.line,
+                col: v.col,
+                message: "`\{a.name.text}` on `<\{tag}>` was removed from HTML; the platform may ignore it — write CSS or current markup",
             })
         }
         // html/attr-name. Names only, not values. A name that is not global, not
         // the element's own, and not in a space with its own rule is a typo or a
         // misplacement. Asked only on tags the element table knows; a warning,
         // like `html/element-name`.
-        if a.evt == false
+        if vyxEvt(a) == false
         && inForeign == false
         && tag != "svg"
         && tag != "math"
         && contains(tag, "-") == false
         && vhKnownTag(tag)
-        && startsWith(a.name, "v-") == false
-        && a.name != "key"
-        && startsWith(a.name, "data-") == false
-        && startsWith(a.name, "aria") == false
-        && a.name != "role"
-        && vhGlobalAttr(a.name) == false
-        && vhElementAttr(tag, a.name) == false
-        && vhDeprecatedAttrOn(tag, a.name) == false
+        && startsWith(a.name.text, "v-") == false
+        && a.name.text != "key"
+        && startsWith(a.name.text, "data-") == false
+        && startsWith(a.name.text, "aria") == false
+        && a.name.text != "role"
+        && vhGlobalAttr(a.name.text) == false
+        && vhElementAttr(tag, a.name.text) == false
+        && vhDeprecatedAttrOn(tag, a.name.text) == false
         {
             out.push(Finding {
                 code: "html/attr-name",
                 dflt: Warning,
-                line: a.line,
-                col: a.col,
-                message: "`\{a.name}` is not an attribute of `<\{tag}>` — a typo, or an attribute that belongs on another element?",
+                line: v.line,
+                col: v.col,
+                message: "`\{a.name.text}` is not an attribute of `<\{tag}>` — a typo, or an attribute that belongs on another element?",
             })
         }
         // a11y/autoplay (`html-validate` `no-autoplay`, WCAG 1.4.2). The
         // attribute is present in either spelling.
-        if a.evt == false && a.name == "autoplay" && (tag == "audio" || tag == "video") {
+        if vyxEvt(a) == false && a.name.text == "autoplay" && (tag == "audio" || tag == "video") {
             out.push(Finding {
                 code: "a11y/autoplay",
                 dflt: Error,
-                line: a.line,
-                col: a.col,
+                line: v.line,
+                col: v.col,
                 message: "`autoplay` starts this `<\{tag}>` before the reader asks; drop it, and let them press play",
             })
         }
@@ -561,7 +535,7 @@ fn vhElemRules(
 
 /// The tags whose accessible name is an `alt`: `<img>`, `<area>` in an image
 /// map, and the button spelled as an image input.
-fn vhNeedsAlt(tag: String, attrs: Array<VyxAttr>) -> Bool {
+fn vhNeedsAlt(tag: String, attrs: Array<vx.VyxAttr>) -> Bool {
     if tag == "img" || tag == "area" {
         return true
     }
@@ -577,7 +551,7 @@ fn vhNamedByContent(tag: String) -> Bool {
 /// Form controls that carry their own name, minus the ones named some other way:
 /// a hidden field is not perceivable, and a `submit`/`reset`/`button` input is
 /// named by its `value`.
-fn vhIsNameable(tag: String, attrs: Array<VyxAttr>) -> Bool {
+fn vhIsNameable(tag: String, attrs: Array<vx.VyxAttr>) -> Bool {
     if tag == "select" || tag == "textarea" {
         return true
     }
@@ -603,7 +577,7 @@ fn vhIsVoid(tag: String) -> Bool {
 
 /// Whether a `<tr>` is a direct child. Rows inside `<thead>`, `<tbody>` or
 /// `<tfoot>` are that section's children.
-fn vhHasDirectRow(kids: Array<VyxNode>) -> Bool {
+fn vhHasDirectRow(kids: Array<vx.VyxNode>) -> Bool {
     for k in kids {
         if vhIsRow(k) {
             return true
@@ -612,16 +586,11 @@ fn vhHasDirectRow(kids: Array<VyxNode>) -> Bool {
     return false
 }
 
-fn vhIsRow(n: VyxNode) -> Bool {
-    return match n {
-        VNElem(tag, isComp, attrs, kids, line) => tag == "tr" && isComp == false,
-        VNText(s) => false,
-        VNInterp(x, line, col) => false,
-        VNRaw(x, line, col) => false,
-        VNChildren => false,
-        VNIf(conds, cl, cc, bodies, els, has) => false,
-        VNFor(v, it, key, body, line, col, keyLine, keyCol) => false,
+fn vhIsRow(n: vx.VyxNode) -> Bool {
+    if let VyxNodeVyxElem(e) = n {
+        return e.tag.text == "tr"
     }
+    return false
 }
 
 /// The URL attribute that must carry an `integrity` here, or `""` for an
@@ -630,7 +599,7 @@ fn vhIsRow(n: VyxNode) -> Bool {
 /// `<script src>` and `<link rel="stylesheet" href>`, only for a static URL on
 /// another host. Narrower than `html-validate`, whose default also asks for
 /// same-origin files the build wrote.
-fn vhSriUrlAttr(tag: String, attrs: Array<VyxAttr>) -> String {
+fn vhSriUrlAttr(tag: String, attrs: Array<vx.VyxAttr>) -> String {
     if tag == "script" && vhIsExternalUrl(vhValue(attrs, "src")) {
         return "src"
     }
@@ -714,10 +683,10 @@ fn vhSlice(s: String, from: Int64, to: Int64) -> String {
 
 /// The first `&name;` or `&#digits;` in an element's direct text children, or
 /// `""`. Nested elements report their own text.
-fn vhEntityInText(kids: Array<VyxNode>) -> String {
+fn vhEntityInText(kids: Array<vx.VyxNode>) -> String {
     for k in kids {
-        if let VNText(s) = k {
-            let hit = vhEntityIn(s)
+        if let VyxNodeVyxText(t) = k {
+            let hit = vhEntityIn(t.value.text)
             if hit != "" {
                 return hit
             }
@@ -1747,42 +1716,42 @@ fn vhPositive(value: String) -> Bool {
 }
 
 /// Whether `attrs` carries `name` static, `:bound` or as a `v-` directive.
-fn vhHas(attrs: Array<VyxAttr>, name: String) -> Bool {
+fn vhHas(attrs: Array<vx.VyxAttr>, name: String) -> Bool {
     for a in attrs {
-        if a.evt == false && a.name == name {
+        if vyxEvt(a) == false && a.name.text == name {
             return true
         }
     }
     return false
 }
 
-fn vhHasAny(attrs: Array<VyxAttr>, a1: String, a2: String, a3: String) -> Bool {
+fn vhHasAny(attrs: Array<vx.VyxAttr>, a1: String, a2: String, a3: String) -> Bool {
     return vhHas(attrs, a1) || vhHas(attrs, a2) || vhHas(attrs, a3)
 }
 
 /// The static value of `name`, or `""` when it is absent or dynamic.
-fn vhValue(attrs: Array<VyxAttr>, name: String) -> String {
+fn vhValue(attrs: Array<vx.VyxAttr>, name: String) -> String {
     for a in attrs {
-        if a.evt == false && a.dyn == false && a.name == name {
-            return a.value.copy()
+        if vyxEvt(a) == false && vyxDyn(a) == false && a.name.text == name {
+            return vyxAttrText(a)
         }
     }
     return ""
 }
 
 /// Whether `attrs` binds the `@name` event.
-fn vhHasEvent(attrs: Array<VyxAttr>, name: String) -> Bool {
+fn vhHasEvent(attrs: Array<vx.VyxAttr>, name: String) -> Bool {
     for a in attrs {
-        if a.evt && a.name == name {
+        if vyxEvt(a) && a.name.text == name {
             return true
         }
     }
     return false
 }
 
-fn vhAnyEvent(attrs: Array<VyxAttr>) -> Bool {
+fn vhAnyEvent(attrs: Array<vx.VyxAttr>) -> Bool {
     for a in attrs {
-        if a.evt {
+        if vyxEvt(a) {
             return true
         }
     }
@@ -1790,7 +1759,7 @@ fn vhAnyEvent(attrs: Array<VyxAttr>) -> Bool {
 }
 
 /// Whether a child list can name its parent: any node but whitespace text.
-fn vhHasContent(kids: Array<VyxNode>) -> Bool {
+fn vhHasContent(kids: Array<vx.VyxNode>) -> Bool {
     for k in kids {
         if vhNodeHasContent(k) {
             return true
@@ -1799,30 +1768,25 @@ fn vhHasContent(kids: Array<VyxNode>) -> Bool {
     return false
 }
 
-fn vhNodeHasContent(n: VyxNode) -> Bool {
-    return match n {
-        VNText(s) => trim(s) != "",
-        VNInterp(x, line, col) => true,
-        VNRaw(x, line, col) => true,
-        VNChildren => true,
-        VNElem(tag, isComp, attrs, kids, line) => true,
-        VNIf(conds, cl, cc, bodies, els, has) => true,
-        VNFor(v, it, key, body, line, col, keyLine, keyCol) => true,
+fn vhNodeHasContent(n: vx.VyxNode) -> Bool {
+    if let VyxNodeVyxText(t) = n {
+        return trim(t.value.text) != ""
     }
+    return true
 }
 
-/// The first attribute's line, or `line` when there is none. A `VNElem` has no
-/// column, and the first attribute is on the tag.
-fn vhAnchorLine(attrs: Array<VyxAttr>, line: Int64) -> Int64 {
+/// The first attribute's line, or `line` when there is none. An element has no column
+/// here, and the first attribute is on the tag.
+fn vhAnchorLine(ba: Array<UInt8>, attrs: Array<vx.VyxAttr>, line: Int64) -> Int64 {
     for a in attrs {
-        return a.line
+        return vyxAttrValue(ba, a).line
     }
     return line
 }
 
-fn vhAnchorCol(attrs: Array<VyxAttr>) -> Int64 {
+fn vhAnchorCol(ba: Array<UInt8>, attrs: Array<vx.VyxAttr>) -> Int64 {
     for a in attrs {
-        return a.col
+        return vyxAttrValue(ba, a).col
     }
     return 1
 }

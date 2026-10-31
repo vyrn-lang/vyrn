@@ -232,8 +232,8 @@ fn rows(g: &Grammar) -> BTreeMap<Rc<str>, Vec<Rc<str>>> {
             _ => {}
         });
     }
-    for row in &g.builder {
-        rows.entry(row.clone()).or_default();
+    for (row, holes) in &g.builder {
+        rows.insert(row.clone(), holes.clone());
     }
     rows
 }
@@ -1968,6 +1968,18 @@ mod tests {
         let g = load("expect ^E\nA = '(' A ')' / B\nB = 'b'\n").expect("it loads");
         let written = parser(&g).expect("it lowers");
         assert!(written.contains("impl Owned for A"), "{written}");
+    }
+
+    #[test]
+    fn a_row_line_names_its_holes() {
+        let g = crate::load("expect ^E\nrow Two(a, b)\nrow None\nDoc = 'x'\n").expect("loads");
+        let written = parser(&g).expect("writes");
+        assert!(written.contains("    Two(String, String),\n"), "{written}");
+        assert!(written.contains("    None,\n"), "{written}");
+        for bad in ["row Two(a, a)", "row Two(a", "row Two(1)", "row 1"] {
+            let no = crate::load(&format!("expect ^E\n{bad}\nDoc = 'x'\n"));
+            assert!(no.is_err(), "{bad}");
+        }
     }
 
     #[test]
