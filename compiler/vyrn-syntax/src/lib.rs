@@ -24,7 +24,7 @@ mod recognizer;
 mod shape;
 mod textmate;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 pub use gen::lexer;
@@ -223,8 +223,9 @@ pub struct Grammar {
     expect: Rc<Throw>,
     /// The rows a refusal of the grammar names.
     stated: BTreeSet<Rc<str>>,
-    /// The rows a `row` line names: the host's tree builder raises them.
-    builder: BTreeSet<Rc<str>>,
+    /// The rows a `row` line names, with their holes: the host's tree builder or a
+    /// reader raises them.
+    builder: BTreeMap<Rc<str>, Vec<Rc<str>>>,
 }
 
 impl Grammar {
@@ -246,7 +247,7 @@ impl Grammar {
     /// Returns the rows a `row` line names, which the host raises as a value or
     /// tree check, in name order. No row is both stated and a builder's.
     pub fn builder_rows(&self) -> impl Iterator<Item = &str> {
-        self.builder.iter().map(|r| &**r)
+        self.builder.keys().map(|r| &**r)
     }
 
     fn body(&self, id: RuleId) -> &Rule {

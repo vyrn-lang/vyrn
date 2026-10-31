@@ -8,7 +8,7 @@
 //! undefined rule and a left-recursive rule, so every rule call either consumes
 //! input or descends the acyclic graph of calls at one position.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
 pub fn load(src: &str) -> Result<Grammar, Refused> {
     let defs = definitions(src)?;
     let mut tokens: Vec<(String, String, bool)> = Vec::new();
-    let mut builder: BTreeSet<Rc<str>> = BTreeSet::new();
+    let mut builder: BTreeMap<Rc<str>, Vec<Rc<str>>> = BTreeMap::new();
     let mut by_name: HashMap<String, RuleId> = HashMap::new();
     // The directives and the rule names first, so a reference may precede its
     // rule. A throw waits for the second pass, which knows every name.
@@ -35,8 +35,10 @@ pub fn load(src: &str) -> Result<Grammar, Refused> {
                 let spelling = unquote(lit).ok_or_else(|| err("a token spelling is a literal"))?;
                 tokens.push((name.to_string(), spelling, *head == "keyword"));
             }
-            ["row", name] => {
-                builder.insert(Rc::from(*name));
+            ["row", ..] if words.get(1) != Some(&"=") => {
+                let rest = d.split_once("row").map_or("", |(_, r)| r);
+                let (name, holes) = row_line(rest).map_err(|e| err(&e))?;
+                builder.insert(name, holes);
             }
             ["nest", n, ..] if n.parse::<u32>().is_ok() => {
                 throws.push((
@@ -121,7 +123,7 @@ pub fn load(src: &str) -> Result<Grammar, Refused> {
             None => expect = Some(t),
         }
     }
-    if let Some(r) = m.rows.intersection(&builder).next() {
+    if let Some(r) = m.rows.iter().find(|r| builder.contains_key(*r)) {
         let sentence = format!("row `{r}` is both stated and a builder's");
         return Err(Refused::at(1, 1, sentence));
     }
@@ -425,6 +427,32 @@ fn guard(g: &Grammar, e: &E) -> E {
 }
 
 /// `l` without a `//` comment outside a literal or a class.
+fn row_line(rest: &str) -> Result<(Rc<str>, Vec<Rc<str>>), String> {
+    let bad = || format!("a `row` line reads `row Name` or `row Name(a, b)`, not `row{rest}`");
+    let (name, holes) = match rest.trim().split_once('(') {
+        Some((name, tail)) => (name, Some(tail.strip_suffix(')').ok_or_else(bad)?)),
+        None => (rest.trim(), None),
+    };
+    let word = |w: &str| {
+        let mut bytes = w.bytes();
+        bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    };
+    if !word(name.trim_end()) {
+        return Err(bad());
+    }
+    let mut out: Vec<Rc<str>> = Vec::new();
+    for hole in holes.into_iter().flat_map(|h| h.split(',')).map(str::trim) {
+        if !word(hole) || out.iter().any(|h| &**h == hole) {
+            return Err(bad());
+        }
+        out.push(Rc::from(hole));
+    }
+    Ok((Rc::from(name.trim_end()), out))
+}
+
 fn strip_comment(l: &str) -> &str {
     let b = l.as_bytes();
     let (mut quoted, mut class) = (false, false);
