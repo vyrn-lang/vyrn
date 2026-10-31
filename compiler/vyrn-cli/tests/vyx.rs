@@ -1157,6 +1157,20 @@ fn an_unchanged_rebuild_regenerates_no_provider() {
 /// The other `Ui*` names are the stems `std/ui` gives the component it compiles a
 /// route file into.
 const ALLOWED_CAPITALIZED_LITERALS: &[&str] = &[
+    // Rules of `vyrn.syntax` that `vyrnModule` names.
+    "DeclName",
+    "Export",
+    "FnDecl",
+    "Import",
+    "ImportName",
+    "Params",
+    "Ret",
+    "SkimBody",
+    "Source",
+    "Type",
+    // Type spellings the generated module writes.
+    "Data",
+    "Html",
     "PageError",
     "Params",
     "UiClientData",

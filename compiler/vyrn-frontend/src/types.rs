@@ -1630,6 +1630,10 @@ fn resolve_d<'a>(ty: &'a Type, types: &'a dyn Decls, depth: usize) -> Cow<'a, Ty
                     name: "col".to_string(),
                     ty: Type::Int,
                 },
+                Field {
+                    name: "start".to_string(),
+                    ty: Type::Int,
+                },
             ]))
         }
         Type::Named(n) => match types.decl(n) {

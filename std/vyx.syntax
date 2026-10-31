@@ -1,8 +1,8 @@
 // A .vyx file: a script read as text and a template read as a tree, which std/vyx
 // reads and std/vyx.errors says. The grammar has no `trivia` rule, so a syntactic rule
 // reads bytes and each rule names the whitespace it passes: a template's whitespace is
-// text. A Vyrn expression in a template stays text: `use` stays out of the format, and
-// std/vyx hands a script to the compiler's reader with its span.
+// text. A Vyrn expression in a template stays text, because S7 decides how Vyrn enters
+// a grammar.
 syntax Vyx
 
 expect ^Expected(token=token)

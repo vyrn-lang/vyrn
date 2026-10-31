@@ -69,7 +69,6 @@ fn gqlStripBang(s: String) -> String {
     return s.copy()
 }
 
-
 /// Whether `t` declares a record, which needs an `Input` twin in input position. An
 /// `Omit`, `Pick`, `Merge` or `Partial` of one spells as its fields.
 fn gqlDeclaresRecord(t: TypeInfo) -> Bool {

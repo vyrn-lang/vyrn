@@ -55,18 +55,18 @@ fn main()
     let @t16! = fn build(read lit 9)
     let s! = make Strided {data, stride}(@t16!, lit 3)
     let @t17 = read s!.stride
-    let @b30_22.k = prim mul(lit 0, @t17)
-    proved array-index s!.data[@b30_22.k]  (line 45 #0)
-    let @borrow = read s!.data[@b30_22.k]
+    let @b31_22.k = prim mul(lit 0, @t17)
+    proved array-index s!.data[@b31_22.k]  (line 45 #0)
+    let @borrow = read s!.data[@b31_22.k]
     let @t18! = builtin @str(read @borrow)
     let @t19! = prim add(lit "strided: ", @t18!)
     drop @t18!
     let @t20! = prim add(@t19!, lit " ")
     drop @t19!
     let @t21 = read s!.stride
-    let @b30_31.k = prim mul(lit 1, @t21)
-    proved array-index s!.data[@b30_31.k]  (line 45 #1)
-    let @borrow = read s!.data[@b30_31.k]
+    let @b31_31.k = prim mul(lit 1, @t21)
+    proved array-index s!.data[@b31_31.k]  (line 45 #1)
+    let @borrow = read s!.data[@b31_31.k]
     let @t22! = builtin @str(read @borrow)
     let @t23! = prim add(@t20!, @t22!)
     drop @t20!
@@ -74,9 +74,9 @@ fn main()
     let @t24! = prim add(@t23!, lit " ")
     drop @t23!
     let @t25 = read s!.stride
-    let @b30_40.k = prim mul(lit 2, @t25)
-    proved array-index s!.data[@b30_40.k]  (line 45 #2)
-    let @borrow = read s!.data[@b30_40.k]
+    let @b31_40.k = prim mul(lit 2, @t25)
+    proved array-index s!.data[@b31_40.k]  (line 45 #2)
+    let @borrow = read s!.data[@b31_40.k]
     let @t26! = builtin @str(read @borrow)
     let @t27! = prim add(@t24!, @t26!)
     drop @t24!
@@ -85,50 +85,50 @@ fn main()
     drop @t27!
     let @t28! = fn build(read lit 3)
     let c! = make Clamped {data}(@t28!)
-    let @p30_49.i = lit 0
-    let @b30_49.n = read c!.data.length
-    let @t30 = prim lt(@p30_49.i, @b30_49.n)
+    let @p31_49.i = lit 0
+    let @b31_49.n = read c!.data.length
+    let @t30 = prim lt(@p31_49.i, @b31_49.n)
     if @t30
-      @t29 = @p30_49.i  (Nothing)
+      @t29 = @p31_49.i  (Nothing)
     else
-      let @t31 = prim sub(@b30_49.n, lit 1)
+      let @t31 = prim sub(@b31_49.n, lit 1)
       @t29 = @t31  (Nothing)
-    let @b30_49.j = @t29
-    proved array-index c!.data[@b30_49.j]  (line 48 #0)
-    let @borrow = read c!.data[@b30_49.j]
+    let @b31_49.j = @t29
+    proved array-index c!.data[@b31_49.j]  (line 48 #0)
+    let @borrow = read c!.data[@b31_49.j]
     let @t32! = builtin @str(read @borrow)
     let @t33! = prim add(lit "clamped: ", @t32!)
     drop @t32!
     let @t34! = prim add(@t33!, lit " ")
     drop @t33!
-    let @p30_68.i = lit 2
-    let @b30_68.n = read c!.data.length
-    let @t36 = prim lt(@p30_68.i, @b30_68.n)
+    let @p31_68.i = lit 2
+    let @b31_68.n = read c!.data.length
+    let @t36 = prim lt(@p31_68.i, @b31_68.n)
     if @t36
-      @t35 = @p30_68.i  (Nothing)
+      @t35 = @p31_68.i  (Nothing)
     else
-      let @t37 = prim sub(@b30_68.n, lit 1)
+      let @t37 = prim sub(@b31_68.n, lit 1)
       @t35 = @t37  (Nothing)
-    let @b30_68.j = @t35
-    proved array-index c!.data[@b30_68.j]  (line 48 #1)
-    let @borrow = read c!.data[@b30_68.j]
+    let @b31_68.j = @t35
+    proved array-index c!.data[@b31_68.j]  (line 48 #1)
+    let @borrow = read c!.data[@b31_68.j]
     let @t38! = builtin @str(read @borrow)
     let @t39! = prim add(@t34!, @t38!)
     drop @t34!
     drop @t38!
     let @t40! = prim add(@t39!, lit " ")
     drop @t39!
-    let @p30_87.i = lit 9
-    let @b30_87.n = read c!.data.length
-    let @t42 = prim lt(@p30_87.i, @b30_87.n)
+    let @p31_87.i = lit 9
+    let @b31_87.n = read c!.data.length
+    let @t42 = prim lt(@p31_87.i, @b31_87.n)
     if @t42
-      @t41 = @p30_87.i  (Nothing)
+      @t41 = @p31_87.i  (Nothing)
     else
-      let @t43 = prim sub(@b30_87.n, lit 1)
+      let @t43 = prim sub(@b31_87.n, lit 1)
       @t41 = @t43  (Nothing)
-    let @b30_87.j = @t41
-    proved array-index c!.data[@b30_87.j]  (line 48 #2)
-    let @borrow = read c!.data[@b30_87.j]
+    let @b31_87.j = @t41
+    proved array-index c!.data[@b31_87.j]  (line 48 #2)
+    let @borrow = read c!.data[@b31_87.j]
     let @t44! = builtin @str(read @borrow)
     let @t45! = prim add(@t40!, @t44!)
     drop @t40!
