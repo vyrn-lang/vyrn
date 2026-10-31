@@ -904,7 +904,7 @@ pub fn derive(
                 unplaced("the engine asked to check a checked program".to_string())
             }
         })?;
-        let (fns, decls) = adopt(&written.source, g).map_err(unplaced)?;
+        let (fns, decls) = adopt(&written.written.source, g).map_err(unplaced)?;
         for s in sites.iter().filter(|s| s.g == g) {
             let Some(f) = fns.iter().find(|f| f.name == derived_name(g, &s.ty)) else {
                 return Err(unplaced(format!(

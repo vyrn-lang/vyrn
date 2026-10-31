@@ -113,7 +113,9 @@ the playground serves an embedded `std/`. The loader:
   (`manifest.rs`), or a generator call;
 - runs each generator call (`run_generator`) through the load's engine,
   caches its output under its recorded inputs, and maps generated lines back
-  to their origin (`origin.rs`);
+  to their origin (`origin.rs`). A generated module in a generator's closure
+  is described by the inputs its own generation recorded, so that generator
+  has a cache entry and an artifact key;
 - links the modules (`link`), so no later pass sees a module boundary, and
   refuses cycles, missing or unexported names, duplicates and two impls of
   one pair;

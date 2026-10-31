@@ -522,6 +522,79 @@ fn editing_a_generator_recompiles_its_artifact() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A generator whose closure holds a grammar's parser has a cache entry and an
+/// artifact: the grammar's inputs stand for the generated module, so an unchanged
+/// grammar reuses both and an edited one runs and compiles again.
+#[test]
+fn a_generator_that_holds_a_generated_module_is_cached_under_its_inputs() {
+    let dir = std::env::temp_dir().join(format!("vyrn_gen_in_gen_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    let grammar = dir.join("g.syntax");
+    std::fs::write(
+        &grammar,
+        "syntax G\nexpect ^E\nDoc = w:word\nword = [a-z]+\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("gen.vyrn"),
+        "import { syntax } from \"std/syntax\"\n\
+         import * as g from syntax(\"./g.syntax\")\n\
+         export gen fn mk() -> Code {\n\
+         \x20   let n = match g.parseDoc(\"abc\") {\n\
+         \x20       Ok(d) => d.w.text.byteLength,\n\
+         \x20       Err(e) => 0,\n\
+         \x20   }\n\
+         \x20   return vyrn\"export fn n() -> Int64 { return \\{n} }\"\n\
+         }\n",
+    )
+    .unwrap();
+    let main = dir.join("main.vyrn");
+    std::fs::write(
+        &main,
+        "import { mk } from \"./gen\"\n\
+         import { n } from mk()\n\
+         fn main() -> Int64 { print(n()) return 0 }\n",
+    )
+    .unwrap();
+    let run = |output_cache: bool| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_vyrn"));
+        c.env("VYRN_GENWASM_TRACE", "1")
+            .env("USERPROFILE", dir.join("home"))
+            .env("HOME", dir.join("home"));
+        if !output_cache {
+            c.env("VYRN_NO_GEN_CACHE", "1");
+        }
+        let out = c.arg("emit-gen").arg(&main).output().expect("emit-gen");
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let trace = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(out.status.success(), "{trace}");
+        (text, trace)
+    };
+
+    let (text, trace) = run(true);
+    assert!(text.contains("return 3"), "{text}");
+    assert!(trace.contains("genwasm cranelift"), "{trace}");
+    let (_, trace) = run(true);
+    assert!(!trace.contains("genwasm run:"), "no entry reused: {trace}");
+    // A nested load compiles at its own depth, so the first cold run fills that key.
+    run(false);
+    let (text, trace) = run(false);
+    assert!(text.contains("return 3"), "{text}");
+    assert!(trace.contains("genwasm run:"), "{trace}");
+    assert!(!trace.contains("genwasm cranelift"), "no artifact: {trace}");
+
+    std::fs::write(
+        &grammar,
+        "syntax G\nexpect ^E\nDoc = w:word\nword = [a-z]\n",
+    )
+    .unwrap();
+    let (text, trace) = run(true);
+    assert!(text.contains("return 0"), "a stale parser answered: {text}");
+    assert!(trace.contains("genwasm cranelift"), "{trace}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The trace proves the engine ran: a file with no `genwasm run:` line fails
 /// even though its two runs agree.
 ///

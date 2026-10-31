@@ -702,7 +702,7 @@ fn emit_gen(call: &Call) -> Outcome {
 fn generated(graph: &loader::ModuleGraph) -> Vec<(&str, &str)> {
     graph
         .iter()
-        .filter_map(|(key, _, gen)| Some((key.as_str(), gen.as_deref()?)))
+        .filter_map(|(key, _, gen)| Some((key.as_str(), gen.as_ref()?.source.as_str())))
         .collect()
 }
 

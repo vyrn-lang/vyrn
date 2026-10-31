@@ -1932,7 +1932,7 @@ fn index_imported_symbols(
         let gen = graph
             .iter()
             .find(|(k, _, _)| k == target)
-            .and_then(|(_, _, g)| g.as_deref());
+            .and_then(|(_, _, g)| g.as_ref().map(|g| g.source.as_str()));
         let Some(program) = declared(target, resolver, gen) else {
             continue;
         };
@@ -2007,7 +2007,7 @@ fn index_namespaces(
             let gen = graph
                 .iter()
                 .find(|(k, _, _)| k == target)
-                .and_then(|(_, _, g)| g.as_deref());
+                .and_then(|(_, _, g)| g.as_ref().map(|g| g.source.as_str()));
             let mut members = namespace_members(target, (&root_key, opts), resolver, gen);
             for m in &mut members {
                 let generated = m.name.clone();
@@ -2143,7 +2143,7 @@ impl OriginIndex {
         let mut out = OriginIndex::default();
         for (key, _, gen) in graph {
             let Some(src) = gen else { continue };
-            let syms = crate::symbolmap::read(src);
+            let syms = crate::symbolmap::read(&src.source);
             if syms.is_empty() {
                 continue;
             }
