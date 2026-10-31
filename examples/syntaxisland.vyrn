@@ -1,0 +1,59 @@
+// An island's tree through std/syntax: its spans are offsets of the whole text, a
+// refusal in it names its true line, and a failed `@` releases the island it built.
+
+import { syntax } from "std/syntax"
+import { Block, Item, Row, parseDocument } from syntax("./syntaxisland.syntax")
+
+fn say(row: Row) -> String {
+    return match row {
+        Expected(token) => "expected \{token}",
+        NotWord(found) => "no word at \{found}",
+        Trailing(src) => "trailing in \{src}",
+    }
+}
+
+fn showItem(i: Item) -> String {
+    return match i {
+        ItemHeld(h) => showBlock(h.block),
+        ItemWord(w) => "\{w.text.text}@\{w.start.toString()}",
+    }
+}
+
+fn showBlock(b: Block) -> String {
+    let mut out = "\{b.name.text}@\{b.start.toString()}-\{b.end.toString()}"
+    if let Some(n) = b.note {
+        out = out + " (\{showItem(n.inner)})"
+    }
+    out = out + " {"
+    for i in b.body.items {
+        out = out + " " + showItem(i)
+    }
+    return out + " }"
+}
+
+fn run(text: String) {
+    match parseDocument(text) {
+        Ok(d) => {
+            for b in d.blocks {
+                print(showBlock(b))
+            }
+        }
+        Err(errors) => {
+            for e in errors {
+                print("\{e.line.toString()}:\{e.col.toString()}: \{say(e.row)}")
+            }
+        }
+    }
+    print("--")
+}
+
+fn main() -> Int64 {
+    run("a { b c }")
+    run("a { b { c } d }\n  e { }  \n")
+    run("a (n)! { b }")
+    run("a {\n  ? b\n}")
+    run("a { b ; c }")
+    run("a (n) { b }")
+    run("a { b")
+    return 0
+}

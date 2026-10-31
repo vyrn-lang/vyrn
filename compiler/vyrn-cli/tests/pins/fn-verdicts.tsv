@@ -1661,6 +1661,11 @@ examples/syntaxcalc.vyrn	showStmt	yes	no, its effect set is alloc
 examples/syntaxcalc.vyrn	showFn	yes	no, its effect set is alloc
 examples/syntaxcalc.vyrn	check	no, it calls `parseProgram`, which is not trap-free	no, its effect set is alloc, write-output
 examples/syntaxcalc.vyrn	main	no, it calls `check`, which is not trap-free	no, its effect set is alloc, write-output
+examples/syntaxisland.vyrn	say	yes	no, its effect set is alloc
+examples/syntaxisland.vyrn	showItem	yes	no, its effect set is alloc
+examples/syntaxisland.vyrn	showBlock	yes	no, its effect set is alloc
+examples/syntaxisland.vyrn	run	no, it calls `parseDocument`, which is not trap-free	no, its effect set is alloc, write-output
+examples/syntaxisland.vyrn	main	no, it calls `run`, which is not trap-free	no, its effect set is alloc, write-output
 examples/syntaxjson.vyrn	say	yes	no, its effect set is alloc
 examples/syntaxjson.vyrn	show	yes	no, its effect set is alloc
 examples/syntaxjson.vyrn	check	no, it calls `parseDocument`, which is not trap-free	no, its effect set is alloc, write-output

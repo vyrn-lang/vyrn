@@ -959,7 +959,7 @@ impl Writer<'_> {
             }
             E::Many(x, c, rec) => self.many_recovering(x, c, rec)?,
             E::List(x, sep, c) => self.list(x, sep, c)?,
-            E::Embed(em) => self.embed(em)?,
+            E::Embed(em) => self.embed(em, None)?,
             E::Climb(..) => {
                 return Err(self.no("`climb` is the whole of a rule".into()));
             }
@@ -1091,6 +1091,10 @@ impl Writer<'_> {
             E::Many(y, c, rec) => self.hit(&E::Many(at(y), c.clone(), rec.clone())),
             E::List(y, sep, c) => self.hit(&E::List(at(y), sep.clone(), c.clone())),
             E::SetFlag(f, v, y) => self.hit(&E::SetFlag(*f, *v, at(y))),
+            E::Embed(em) if self.g.body(em.inner).syntactic => self.embed(em, Some(label)),
+            E::Embed(_) => Err(self.no(format!(
+                "label `{label}` holds an island's tree, and a lexical rule has none; label the rule's text"
+            ))),
             E::Ref(r) if self.g.body(*r).syntactic => {
                 let (h, args) = (self.local("h"), self.labels(*r, ""));
                 self.line(format!("let mut {h} = false"));
@@ -1436,18 +1440,29 @@ impl Writer<'_> {
     }
 
     /// `embed(extent, Rule, wrap=^Row, trailing=^Row)`: matches the extent, then
-    /// parses exactly that text with `Rule`, unless a predicate is looking.
-    fn embed(&mut self, em: &Embed) -> Result<String, Refused> {
+    /// parses exactly that text with `Rule`, unless a predicate is looking. `keep`
+    /// names the label that holds the island's tree. A tree has no default, so a
+    /// predicate parses a kept island too. In a syntactic rule the extent is a token:
+    /// the island stops before the trivia it took, and its end takes that trivia again.
+    fn embed(&mut self, em: &Embed, keep: Option<&str>) -> Result<String, Refused> {
         let from = self.local("q");
         self.line(format!("let {from} = p.pos"));
         let hit = self.hit(&em.extent)?;
         let h = self.local("h");
         self.line(format!("let mut {h} = {hit}"));
-        self.open(format!("if {h} && p.looking == 0 {{"));
+        match keep {
+            Some(_) => self.open(format!("if {h} {{")),
+            None => self.open(format!("if {h} && p.looking == 0 {{")),
+        }
         let (to, stop, last) = (self.local("q"), self.local("q"), self.local("l"));
-        self.line(format!("let {to} = p.pos"));
+        match self.syntactic() {
+            true => self.line(format!("let {to} = endOf(p, {from})")),
+            false => self.line(format!("let {to} = p.pos")),
+        }
         self.line(format!("let {stop} = p.stop"));
-        self.line(format!("let {last} = p.last"));
+        if !self.syntactic() {
+            self.line(format!("let {last} = p.last"));
+        }
         self.line(format!("p.pos = {from}"));
         self.line(format!("p.stop = {to}"));
         if self.g.rule("trivia").is_some() {
@@ -1458,6 +1473,9 @@ impl Writer<'_> {
         if self.g.body(em.inner).syntactic {
             self.line(format!("{h} = false"));
             self.open(format!("if let Some(v) = {f}(text, p{args}) {{"));
+            if let Some(label) = keep {
+                self.line(self.store(label, "v"));
+            }
             self.line(format!("{h} = true"));
             self.close();
         } else {
@@ -1484,7 +1502,10 @@ impl Writer<'_> {
         self.line(format!("p.stop = {stop}"));
         self.open("if !p.refused {");
         self.line(format!("p.pos = {to}"));
-        self.line(format!("p.last = {last}"));
+        match self.syntactic() {
+            true => self.line(format!("{h} = advance(text, p, 0)")),
+            false => self.line(format!("p.last = {last}")),
+        }
         self.close();
         self.close();
         Ok(h)
@@ -1947,6 +1968,12 @@ mod tests {
         let g = load("expect ^E\nA = '(' A ')' / B\nB = 'b'\n").expect("it loads");
         let written = parser(&g).expect("it lowers");
         assert!(written.contains("impl Owned for A"), "{written}");
+    }
+
+    #[test]
+    fn a_label_on_an_island_with_no_tree_is_refused() {
+        let no = refusal("expect ^E\nA = x:embed(b, c)\nb = 'b'\nc = 'c'\n");
+        assert!(no.contains("label `x` holds an island's tree"), "{no}");
     }
 
     #[test]
