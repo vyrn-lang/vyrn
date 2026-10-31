@@ -134,6 +134,11 @@ the playground serves an embedded `std/`. The loader:
 - loads a generator's module as its own root, for an import line's generator
   and a `derive` generator alike (`checked_generator`), and links only what its
   gen fn reaches (`keep_reached`);
+- leaves out of the program a std module imported only for generators its
+  importer spells on import lines (`unlinked_import`). The loader parses that
+  module alone, to read each generator's signature and `export to` paths. The
+  decision reads no generator cache, so a hit and a miss load the same modules.
+  A user's module links, and so does every module under a floor or an audience;
 - links `std/runtime` into every program, each declaration renamed with the
   `runtime$` prefix, `std/task` with the `task$` prefix into a program that
   imports it, and `std/json` and similar modules when a builtin that lives in
