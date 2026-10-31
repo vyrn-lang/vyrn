@@ -2282,7 +2282,8 @@ impl<'a> Cx<'a> {
             Type::Named(n) | Type::App(n, _) => match self.types.get(n) {
                 Some(_) => {}
                 // `Code` and `Token` are builtins `resolve` knows without a decl.
-                None if vyrn_frontend::ast::is_gen_handle(n) || vyrn_frontend::ast::is_gen_record(n) => {}
+                None if vyrn_frontend::ast::is_gen_handle(n)
+                    || vyrn_frontend::ast::is_gen_record(n) => {}
                 None => return Some(format!("the unknown type `{n}`")),
             },
             _ => {}

@@ -1,5 +1,5 @@
 command	lines	sentences
-why	802	12
+why	787	12
 serve, dev	697	6
 bench	500	11
 dev	408	15
@@ -13,7 +13,7 @@ update	194	5
 fmt	186	5
 fix	140	1
 build, bench	138	0
-test, bench	116	2
+test, bench	128	2
 (global)	94	2
 test	76	0
 vendor	64	6
