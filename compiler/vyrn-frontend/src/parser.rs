@@ -100,6 +100,13 @@ impl Skimmed {
         Some(&self.tokens[range.clone()])
     }
 
+    /// Whether a skimmed body spells the identifier `name`.
+    pub fn mentions(&self, name: &str) -> bool {
+        (self.bodies.iter())
+            .flat_map(|(_, range)| &self.tokens[range.clone()])
+            .any(|t| matches!(&t.tok, Tok::Ident(s) if s == name))
+    }
+
     /// Parses `f`'s skimmed body, as [`parse_accum`] would have, or returns
     /// `None` when the parse did not skim it.
     pub fn body(&self, f: &Function) -> Option<Result<Block, Vec<Diagnostic>>> {

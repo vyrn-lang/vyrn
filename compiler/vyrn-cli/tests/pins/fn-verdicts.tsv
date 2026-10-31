@@ -306,7 +306,7 @@ examples/codecbytes.vyrn	show	yes	no, its effect set is alloc
 examples/codecbytes.vyrn	main	no, it calls `hexDecode`, which is not trap-free	no, its effect set is alloc, write-output
 examples/columns.vyrn	particle	yes	no, `f` is Float64, and WGSL has no 64-bit float
 examples/columns.vyrn	rowsOf	yes	no, its effect set is alloc
-examples/columns.vyrn	columnsOf__from0	no, it calls `particleColumns`, which is not trap-free	no, its effect set is alloc
+examples/columns.vyrn	columnsOf	no, it calls `particleColumns`, which is not trap-free	no, its effect set is alloc
 examples/columns.vyrn	sumRows	yes	no, `ps` is Array<Particle>, not an integer, Bool or a read array of one
 examples/columns.vyrn	sumColumns	yes	no, `c` is ParticleColumns, not an integer, Bool or a read array of one
 examples/columns.vyrn	moveRows	no, it keeps an index check	no, it is not trap-free

@@ -975,6 +975,9 @@ struct Work {
     real_paths: HashMap<String, Option<String>>,
     /// Each generation input's hash as this load read it ([`current_input_hash`]).
     inputs: HashMap<String, Option<String>>,
+    /// The parse of each module [`unlinked_import`] left out, by key, in key
+    /// order for the search of a generator no import of its module names.
+    unlinked: BTreeMap<String, Rc<Parsed>>,
 }
 
 /// The prefix every declaration of an injected runtime module is renamed to.
@@ -1622,6 +1625,7 @@ fn load_modules(
         stack: Vec::new(),
         real_paths: HashMap::new(),
         inputs: HashMap::new(),
+        unlinked: BTreeMap::new(),
     };
 
     fn visit(
@@ -1662,31 +1666,7 @@ fn load_modules(
         drop(_read);
         crate::prof::read_lines(text.lines().count());
         let is_root = key == root_key;
-        // Non-cryptographic: this key never leaves the process.
-        let hash = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for b in text.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            format!("{h:x}:{}", text.len())
-        };
-        // An imported std module's top-level bodies, and those of a module a std
-        // module's generator import wrote, are parsed when a root reaches them
-        // ([`parse_reached`]). The floor reads every body's carriers at load, so a
-        // load that declares artifacts parses them all.
-        let owner = generated_importer(key).unwrap_or(key);
-        let skim = !is_root
-            && opts.artifacts.is_none()
-            && import_specifier("", owner, opts.std_root.as_deref()).starts_with("std/");
-        // The root parses its `test` and `bench` blocks, an imported module skips
-        // them, so one text loaded as both parses twice.
-        let cache_key = match (is_root, skim) {
-            (true, _) => hash.clone(),
-            (false, false) => format!("{hash}:imported"),
-            (false, true) => format!("{hash}:skim"),
-        };
-        let parsed = PARSE_CACHE.with(|c| c.borrow().get(&cache_key).cloned());
+        let hash = text_hash(&text);
 
         let written = generated.map(|g| &g.written);
         // A generated module's errors show where its span table says, and its
@@ -1785,63 +1765,7 @@ fn load_modules(
             w.states.insert(key.to_string(), true);
             return Ok(());
         }
-        // Lex and parse, memoized on the module's text: a keystroke changes one
-        // module, and the text is the whole input to the parse. The per-module
-        // attribution below depends on `key`, so it runs after the cache: one
-        // text loaded under two keys gives two modules from one parse. Only
-        // successes are cached.
-        let parsed = match parsed {
-            Some(p) => p,
-            None => {
-                let _p = crate::prof::phase("parse");
-                let scan = lexer::scan(&text);
-                let tokens = lexer::tokens(scan.map_err(|d| vec![in_module(d, key, root_key)])?);
-                let in_key = |errors: Vec<Diagnostic>| -> Vec<Diagnostic> {
-                    (errors.into_iter())
-                        .map(|d| in_module(d, key, root_key))
-                        .collect()
-                };
-                let (mut program, errors, skimmed) = match is_root {
-                    true => {
-                        let (program, errors) = parser::parse_accum(tokens);
-                        (program, errors, None)
-                    }
-                    false => {
-                        let (program, errors, skimmed) = parser::parse_imported(tokens, skim);
-                        (program, errors, skim.then_some(skimmed))
-                    }
-                };
-                if !errors.is_empty() {
-                    return Err(in_key(errors));
-                }
-                if let Some(s) = &skimmed {
-                    // A body that may mention a runtime builtin is parsed now, so
-                    // the mention scan below sees every mention.
-                    for f in &mut program.functions {
-                        if s.tokens(f).is_some_and(mentions_runtime) {
-                            if let Some(body) = s.body(f) {
-                                f.body = body.map_err(in_key)?;
-                            }
-                        }
-                    }
-                }
-                let p = Rc::new(Parsed {
-                    refs: Rc::new(program_ref_names(&program)),
-                    program,
-                    skimmed,
-                });
-                PARSE_CACHE.with(|c| {
-                    let mut c = c.borrow_mut();
-                    // ponytail: a keystroke leaves the old text's entry behind.
-                    // Cleared at 512 entries; an LRU if it ever matters.
-                    if c.len() > 512 {
-                        c.clear();
-                    }
-                    c.insert(cache_key, p.clone());
-                });
-                p
-            }
-        };
+        let parsed = module_parse(key, &text, &hash, root_key, opts)?;
         let mut program = {
             let _p = crate::prof::phase("parse (clone)");
             parsed.program.clone()
@@ -1939,7 +1863,20 @@ fn load_modules(
                 {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
-                visit(&target, None, None, opts, resolver, engine, w, root_key)?;
+                let left_out = (!w.states.contains_key(&target))
+                    .then(|| {
+                        let held = (key, &*parsed, &program);
+                        let hand = written.is_none();
+                        let paths = &mut w.real_paths;
+                        unlinked_import(imp, &target, held, hand, root_key, opts, resolver, paths)
+                    })
+                    .flatten();
+                match left_out {
+                    Some(found) => {
+                        w.unlinked.insert(target.clone(), found);
+                    }
+                    None => visit(&target, None, None, opts, resolver, engine, w, root_key)?,
+                }
                 import_targets[i] = Some(target);
             }
         }
@@ -1949,6 +1886,24 @@ fn load_modules(
         // not re-run.
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Generator { name, args, line } = &imp.source {
+                let bound = bound_target(&program, &import_targets, name);
+                // A name this module did not import reads any loaded module, so
+                // the module another import left out loads here.
+                if bound.is_none() && !(w.modules.iter()).any(|m| exports_gen(&m.program, name)) {
+                    let left_out = (w.unlinked.iter())
+                        .find(|(k, p)| exports_gen(&p.program, name) && !w.states.contains_key(*k))
+                        .map(|(k, _)| k.clone());
+                    if let Some(target) = left_out {
+                        visit(&target, None, None, opts, resolver, engine, w, root_key)?;
+                    }
+                }
+                let home = (bound.and_then(|t| w.unlinked.get_key_value(t)))
+                    .map(|(k, p)| (k.as_str(), &p.program))
+                    .or_else(|| {
+                        (w.modules.iter())
+                            .find(|m| exports_gen(&m.program, name))
+                            .map(|m| (m.key.as_str(), &m.program))
+                    });
                 let (gen_key, generated) = run_generator(
                     key,
                     name,
@@ -1957,7 +1912,7 @@ fn load_modules(
                     opts,
                     resolver,
                     engine,
-                    &w.modules,
+                    home,
                     &w.states,
                     &mut w.identities,
                     &mut w.inputs,
@@ -2168,6 +2123,168 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
+/// A module text's key in [`PARSE_CACHE`]. Non-cryptographic: this key never
+/// leaves the process.
+fn text_hash(text: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:x}:{}", text.len())
+}
+
+/// Whether `key` is a module of the std tree.
+fn in_std(key: &str, opts: &LoadOptions) -> bool {
+    import_specifier("", key, opts.std_root.as_deref()).starts_with("std/")
+}
+
+/// Lexes and parses module `key`, memoized on its `text` and its [`text_hash`]:
+/// a keystroke changes one module, and the text is the whole input to the parse.
+/// Only successes are cached.
+fn module_parse(
+    key: &str,
+    text: &str,
+    hash: &str,
+    root_key: &str,
+    opts: &LoadOptions,
+) -> Result<Rc<Parsed>, Vec<Diagnostic>> {
+    let is_root = key == root_key;
+    // An imported std module's top-level bodies, and those of a module a std
+    // module's generator import wrote, are parsed when a root reaches them
+    // ([`parse_reached`]). The floor reads every body's carriers at load, so a
+    // load that declares artifacts parses them all.
+    let owner = generated_importer(key).unwrap_or(key);
+    let skim = !is_root && opts.artifacts.is_none() && in_std(owner, opts);
+    // The root parses its `test` and `bench` blocks, an imported module skips
+    // them, so one text loaded as both parses twice.
+    let cache_key = match (is_root, skim) {
+        (true, _) => hash.to_string(),
+        (false, false) => format!("{hash}:imported"),
+        (false, true) => format!("{hash}:skim"),
+    };
+    if let Some(p) = PARSE_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
+        return Ok(p);
+    }
+    let _p = crate::prof::phase("parse");
+    let scan = lexer::scan(text);
+    let tokens = lexer::tokens(scan.map_err(|d| vec![in_module(d, key, root_key)])?);
+    let in_key = |errors: Vec<Diagnostic>| -> Vec<Diagnostic> {
+        (errors.into_iter())
+            .map(|d| in_module(d, key, root_key))
+            .collect()
+    };
+    let (mut program, errors, skimmed) = match is_root {
+        true => {
+            let (program, errors) = parser::parse_accum(tokens);
+            (program, errors, None)
+        }
+        false => {
+            let (program, errors, skimmed) = parser::parse_imported(tokens, skim);
+            (program, errors, skim.then_some(skimmed))
+        }
+    };
+    if !errors.is_empty() {
+        return Err(in_key(errors));
+    }
+    if let Some(s) = &skimmed {
+        // A body that may mention a runtime builtin is parsed here, so
+        // the mention scan in [`load_modules`] sees every mention.
+        for f in &mut program.functions {
+            if s.tokens(f).is_some_and(mentions_runtime) {
+                if let Some(body) = s.body(f) {
+                    f.body = body.map_err(in_key)?;
+                }
+            }
+        }
+    }
+    let p = Rc::new(Parsed {
+        refs: Rc::new(program_ref_names(&program)),
+        program,
+        skimmed,
+    });
+    PARSE_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        // ponytail: a keystroke leaves the old text's entry behind.
+        // Cleared at 512 entries; an LRU if it ever matters.
+        if c.len() > 512 {
+            c.clear();
+        }
+        c.insert(cache_key, p.clone());
+    });
+    Ok(p)
+}
+
+/// Whether program `p` exports the `gen fn` `name`.
+fn exports_gen(p: &Program, name: &str) -> bool {
+    (p.functions.iter()).any(|f| f.name == name && f.is_gen && f.exported)
+}
+
+/// The parse of `target` when import `imp` of the module `key` needs nothing of
+/// `target` linked: each name is an admitted exported `gen fn` of the std module
+/// `target`, and `key` spells it only on a generator import line. A generator
+/// runs in its own load ([`checked_generator`]), and std checks its modules as
+/// roots of their own loads, so the program holds nothing of `target`. The answer
+/// reads no generator cache, so a hit and a miss load one module set. `None`
+/// sends the import through [`load_modules`]'s ordinary path, which states every
+/// refusal. A user's module always links: each of its bodies stays checked. A
+/// load under a floor or an audience links it too, because both walk the
+/// whole closure.
+#[allow(clippy::too_many_arguments)]
+fn unlinked_import(
+    imp: &ImportDecl,
+    target: &str,
+    (key, parsed, program): (&str, &Parsed, &Program),
+    hand_written: bool,
+    root_key: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    real_paths: &mut HashMap<String, Option<String>>,
+) -> Option<Rc<Parsed>> {
+    if opts.artifacts.is_some()
+        || opts.audience.is_some()
+        || imp.namespace.is_some()
+        || imp.names.is_empty()
+    {
+        return None;
+    }
+    let bindings = |n: &str| {
+        let by_name = |i: &ImportDecl| i.names.iter().filter(|x| x.local() == n).count();
+        let by_ns = |i: &ImportDecl| usize::from(i.namespace.as_deref() == Some(n));
+        (program.imports.iter())
+            .map(|i| by_name(i) + by_ns(i))
+            .sum::<usize>()
+    };
+    let on_a_generator_line = |n: &str| {
+        (program.imports.iter())
+            .any(|i| matches!(&i.source, ImportSource::Generator { name, .. } if name == n))
+    };
+    let only_named = imp.names.iter().all(|n| {
+        let name = n.original.as_str();
+        n.local() == name
+            && on_a_generator_line(name)
+            && bindings(name) == 1
+            && !parsed.refs.contains(name)
+            && !parsed.skimmed.as_ref().is_some_and(|s| s.mentions(name))
+            && !decls(program).any(|d| d.name == name)
+    });
+    if !only_named || !in_std(target, opts) {
+        return None;
+    }
+    let text = resolver.read(target).ok()?;
+    let found = module_parse(target, &text, &text_hash(&text), root_key, opts).ok()?;
+    let mut admitted = |f: &Function| {
+        f.export_to.is_empty()
+            || (hand_written && admits(&f.export_to, target, Judged(key), opts, real_paths))
+    };
+    let usable = imp.names.iter().all(|n| {
+        (found.program.functions.iter())
+            .find(|f| f.name == n.original && f.is_gen && f.exported)
+            .is_some_and(&mut admitted)
+    });
+    usable.then_some(found)
+}
+
 /// A generator cache entry: its recorded `(input, hash)` pairs and its output.
 type CacheEntry = (GenDeps, Written);
 
@@ -2182,6 +2299,18 @@ pub(crate) struct Generated {
 fn std_input(arg: &str, opts: &LoadOptions) -> Option<String> {
     let rest = arg.strip_prefix("std/")?;
     Some(normalize(&format!("{}/{rest}", opts.std_root.as_deref()?)))
+}
+
+/// The target of the import of `program` that binds `name`, as far as
+/// `targets` resolved them.
+fn bound_target<'a>(
+    program: &Program,
+    targets: &'a [Option<String>],
+    name: &str,
+) -> Option<&'a str> {
+    let binds = |i: &ImportDecl| i.names.iter().any(|n| n.local() == name);
+    let at = program.imports.iter().position(binds)?;
+    targets[at].as_deref()
 }
 
 /// Runs a generator-call import target and returns the generated
@@ -2200,7 +2329,7 @@ fn run_generator(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
-    modules: &[Module],
+    home: Option<(&str, &Program)>,
     states: &HashMap<String, bool>,
     identities: &mut HashMap<String, String>,
     read: &mut HashMap<String, Option<String>>,
@@ -2248,20 +2377,9 @@ fn run_generator(
     identities.insert(ident, gen_key.clone());
 
     // The generator must be an exported `gen fn` in a module this file loaded.
-    let gen_mod_key = modules
-        .iter()
-        .find(|m| {
-            m.program
-                .functions
-                .iter()
-                .any(|f| f.name == name && f.is_gen && f.exported)
-        })
-        .map(|m| m.key.clone())
-        .ok_or_else(|| err(rule!(GenImportNotGen, name)))?;
-    let gen_fn = modules
-        .iter()
-        .flat_map(|m| &m.program.functions)
-        .find(|f| f.name == name && f.is_gen)
+    let (gen_mod_key, gen_program) = home.ok_or_else(|| err(rule!(GenImportNotGen, name)))?;
+    let gen_fn = (gen_program.functions.iter())
+        .find(|f| f.name == name && f.is_gen && f.exported)
         .expect("generator found above");
     if gen_fn.params.len() != consts.len() {
         return Err(err(rule!(
@@ -2278,7 +2396,7 @@ fn run_generator(
         importer,
         name,
         &consts,
-        &gen_mod_key,
+        gen_mod_key,
         Site { line, root_key },
         (true, false),
         opts,
@@ -4291,6 +4409,21 @@ fn link(
     opts: &LoadOptions,
 ) -> Result<Program, Vec<Diagnostic>> {
     let mut errors: Vec<Diagnostic> = Vec::new();
+    // An import whose target no edge loaded ([`unlinked_import`]) holds nothing
+    // the link reads. The module graph keeps it, because a host zips the graph's
+    // targets with the imports of its own parse.
+    let unlinked: HashSet<String> = {
+        let loaded: HashSet<&str> = modules.iter().map(|m| m.key.as_str()).collect();
+        (modules.iter().flat_map(|m| &m.import_targets))
+            .filter(|t| !loaded.contains(t.as_str()))
+            .cloned()
+            .collect()
+    };
+    for m in modules.iter_mut().filter(|_| !unlinked.is_empty()) {
+        let mut kept = m.import_targets.iter().map(|t| !unlinked.contains(t));
+        m.program.imports.retain(|_| kept.next().unwrap_or(true));
+        m.import_targets.retain(|t| !unlinked.contains(t));
+    }
     // The keys of `std/order` and `std/proof`, whose declarations the
     // compiler reads. The root's key may spell the file another way
     // (`std/order.vyrn` run as the root of its own tests); only a root of that

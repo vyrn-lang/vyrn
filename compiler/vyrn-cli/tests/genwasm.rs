@@ -675,3 +675,278 @@ fn a_generator_programs_projection_site_expands_apart_from_its_importers() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "37\n", "{err}");
 }
+
+/// A std copy holding a generator module with one import of its own and one
+/// grammar, a program that imports only the generator, and the commands over
+/// them. A witness needs a module of the std tree, because a user's module links.
+struct StdTool {
+    dir: PathBuf,
+}
+
+impl StdTool {
+    const TOOL: &'static str = "import { helpValue } from \"std/toolhelp\"\n\
+         import { syntax } from \"std/syntax\"\n\
+         import * as g from syntax(\"./tool.syntax\")\n\
+         export gen fn mk(tag: String) -> Code {\n\
+         \x20   let n = match g.parseDoc(\"abc\") {\n\
+         \x20       Ok(d) => d.w.text.byteLength,\n\
+         \x20       Err(e) => 0,\n\
+         \x20   }\n\
+         \x20   return vyrn\"export fn n() -> Int64 { return \\{n + helpValue()} }\\nexport fn tag() -> String { return \\{tag} }\\n\"\n\
+         }\n\
+         export fn plain() -> Int64 { return 7 }\n\
+         export to \"./elsewhere\" gen fn fenced(tag: String) -> Code {\n\
+         \x20   return vyrn\"export fn f() -> Int64 { return 1 }\\n\"\n\
+         }\n";
+    const MAIN: &'static str = "import { mk } from \"std/tool\"\n\
+         import { n, tag } from mk(\"x\")\n\
+         fn main() -> Int64 { print(n()) print(tag()) return 0 }\n";
+
+    fn new(test: &str) -> Self {
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for e in std::fs::read_dir(from).unwrap() {
+                let e = e.unwrap();
+                match e.file_type().unwrap().is_dir() {
+                    true => copy(&e.path(), &to.join(e.file_name())),
+                    false => drop(std::fs::copy(e.path(), to.join(e.file_name())).unwrap()),
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("vyrn_{test}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy(&repo_file("std"), &dir.join("std"));
+        let tool = Self { dir };
+        tool.write(
+            "std/toolhelp.vyrn",
+            "export fn helpValue() -> Int64 { return 100 }\n",
+        );
+        tool.write(
+            "std/tool.syntax",
+            "syntax G\nexpect ^E\nDoc = w:word\nword = [a-z]+\n",
+        );
+        tool.write("std/tool.vyrn", Self::TOOL);
+        tool.write("main.vyrn", Self::MAIN);
+        tool
+    }
+
+    fn write(&self, rel: &str, text: &str) {
+        std::fs::write(self.dir.join(rel), text).unwrap();
+    }
+
+    fn edit(&self, rel: &str, from: &str, to: &str) {
+        let text = std::fs::read_to_string(self.dir.join(rel)).unwrap();
+        assert!(text.contains(from), "{rel} holds no `{from}`");
+        self.write(rel, &text.replace(from, to));
+    }
+
+    /// `vyrn <cmd> main.vyrn` with this tree's std and cache, as stdout, stderr
+    /// and exit code.
+    fn run(&self, cmd: &str, cached: bool) -> (String, String, Option<i32>) {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_vyrn"));
+        c.current_dir(&self.dir)
+            .env("VYRN_STD", self.dir.join("std"))
+            .env("VYRN_GEN_CACHE_DIR", self.dir.join("cache"))
+            .env("USERPROFILE", self.dir.join("home"))
+            .env("HOME", self.dir.join("home"));
+        if !cached {
+            c.env("VYRN_NO_GEN_CACHE", "1");
+        }
+        let out = c.arg(cmd).arg("main.vyrn").output().expect("run vyrn");
+        let text = |b: &[u8]| String::from_utf8_lossy(b).to_string();
+        (text(&out.stdout), text(&out.stderr), out.status.code())
+    }
+
+    /// What `emit-gen` writes with a cached generation, asserted equal to what it
+    /// writes with none, on `check` as well.
+    fn written(&self) -> String {
+        for cmd in ["emit-gen", "check"] {
+            let hit = self.run(cmd, true);
+            assert_eq!(hit, self.run(cmd, true), "{cmd}: a second hit moved");
+            assert_eq!(hit, self.run(cmd, false), "{cmd}: a hit and a miss differ");
+        }
+        self.run("emit-gen", true).0
+    }
+
+    /// The refusal `check` prints, asserted equal with and without a cached
+    /// generation.
+    fn refusal(&self) -> String {
+        let (out, err, code) = self.run("check", true);
+        assert_eq!(code, Some(1), "not refused: {out}{err}");
+        assert_eq!(
+            (out, err.clone(), code),
+            self.run("check", false),
+            "a hit and a miss differ"
+        );
+        err
+    }
+}
+
+impl Drop for StdTool {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[test]
+fn a_generator_imported_alone_leaves_its_module_out_of_the_program() {
+    let t = StdTool::new("tool_out");
+    let text = t.written();
+    assert!(text.contains("return 103"), "{text}");
+    assert!(!text.contains("tool.syntax"), "the module linked: {text}");
+}
+
+#[test]
+fn an_edit_to_a_left_out_generator_module_reaches_the_next_compile() {
+    let t = StdTool::new("tool_module");
+    t.written();
+    t.edit("std/tool.vyrn", "n + helpValue()", "n + helpValue() + 1000");
+    assert!(t.written().contains("return 1103"));
+}
+
+#[test]
+fn an_edit_to_an_import_of_a_left_out_module_reaches_the_next_compile() {
+    let t = StdTool::new("tool_import");
+    t.written();
+    t.edit("std/toolhelp.vyrn", "return 100", "return 200");
+    assert!(t.written().contains("return 203"));
+}
+
+#[test]
+fn an_edit_to_a_grammar_a_left_out_module_reads_reaches_the_next_compile() {
+    let t = StdTool::new("tool_grammar");
+    t.written();
+    t.edit("std/tool.syntax", "[a-z]+", "[a-z]");
+    assert!(t.written().contains("return 100"));
+}
+
+#[test]
+fn an_edit_to_the_generator_arguments_reaches_the_next_compile() {
+    let t = StdTool::new("tool_args");
+    t.written();
+    t.edit("main.vyrn", "mk(\"x\")", "mk(\"y\")");
+    assert!(t.written().contains("return \"y\""));
+}
+
+#[test]
+fn a_cached_generator_whose_name_left_the_exports_is_refused() {
+    let t = StdTool::new("tool_unexported");
+    t.written();
+    t.edit("std/tool.vyrn", "export gen fn mk", "gen fn mk");
+    assert!(t.refusal().contains("mk"));
+}
+
+#[test]
+fn a_cached_generator_whose_body_stopped_checking_is_refused() {
+    let t = StdTool::new("tool_refused");
+    t.written();
+    t.edit(
+        "std/tool.vyrn",
+        "let n = match",
+        "let z: Int64 = \"no\"\n    let n = match",
+    );
+    assert!(t.refusal().contains("String"));
+}
+
+#[test]
+fn a_deleted_cache_entry_writes_the_same_module() {
+    let t = StdTool::new("tool_deleted");
+    let before = t.written();
+    std::fs::remove_dir_all(t.dir.join("cache")).unwrap();
+    assert_eq!(before, t.written());
+}
+
+#[test]
+fn a_second_name_from_the_generator_module_links_it() {
+    let t = StdTool::new("tool_second");
+    t.edit("main.vyrn", "{ mk }", "{ mk, plain }");
+    t.edit("main.vyrn", "print(n())", "print(n() + plain())");
+    let text = t.written();
+    assert!(
+        text.contains("tool.syntax"),
+        "the module did not link: {text}"
+    );
+    assert_eq!(t.run("check", true).2, Some(0));
+}
+
+#[test]
+fn a_std_body_that_spells_the_generator_links_its_module() {
+    let t = StdTool::new("tool_spelled");
+    t.write(
+        "std/toolcaller.vyrn",
+        "import { mk } from \"std/tool\"\n\
+         import { n } from mk(\"z\")\n\
+         export fn viaBody() -> Int64 { let c = mk(\"q\") return n() }\n",
+    );
+    t.write(
+        "main.vyrn",
+        "import { viaBody } from \"std/toolcaller\"\n\
+         fn main() -> Int64 { return viaBody() }\n",
+    );
+    assert!(t.written().contains("tool.syntax"));
+}
+
+#[test]
+fn a_fenced_generator_stays_refused() {
+    let t = StdTool::new("tool_fenced");
+    t.write(
+        "main.vyrn",
+        "import { fenced } from \"std/tool\"\n\
+         import { f } from fenced(\"x\")\n\
+         fn main() -> Int64 { return f() }\n",
+    );
+    assert!(t.refusal().contains("only to"));
+}
+
+#[test]
+fn a_declaration_of_the_imported_generator_name_stays_refused() {
+    let t = StdTool::new("tool_declared");
+    t.edit(
+        "main.vyrn",
+        "fn main()",
+        "fn mk() -> Int64 { return 1 }\nfn main()",
+    );
+    assert!(t.refusal().contains("declared by both"));
+}
+
+#[test]
+fn a_generator_its_module_did_not_import_runs_from_a_left_out_module() {
+    let t = StdTool::new("tool_unbound");
+    t.write(
+        "first.vyrn",
+        "import { mk } from \"std/tool\"\n\
+         import { n } from mk(\"a\")\n\
+         export fn one() -> Int64 { return n() }\n",
+    );
+    t.write(
+        "second.vyrn",
+        "import * as b from mk(\"b\")\n\
+         export fn two() -> Int64 { return b.n() }\n",
+    );
+    t.write(
+        "main.vyrn",
+        "import { one } from \"./first\"\n\
+         import { two } from \"./second\"\n\
+         fn main() -> Int64 { return one() + two() }\n",
+    );
+    assert!(t.written().contains("return \"b\""));
+}
+
+#[test]
+fn an_unreached_body_of_a_user_generator_module_stays_refused() {
+    let t = StdTool::new("tool_user");
+    t.write(
+        "local.vyrn",
+        "export gen fn mine(tag: String) -> Code {\n\
+         \x20   return vyrn\"export fn n() -> Int64 { return 1 }\\n\"\n\
+         }\n\
+         fn broken() -> Int64 { return \"no\" }\n",
+    );
+    t.write(
+        "main.vyrn",
+        "import { mine } from \"./local\"\n\
+         import { n } from mine(\"x\")\n\
+         fn main() -> Int64 { return n() }\n",
+    );
+    assert!(t.refusal().contains("expected Int64"));
+}

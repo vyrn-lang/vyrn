@@ -1187,6 +1187,37 @@ fn vyx_scratch(tag: &str, vyx_body: &str) -> std::path::PathBuf {
     dir
 }
 
+/// A generator imported alone leaves its module out of the program, and the
+/// editor still reads the name's declaration from that module.
+#[test]
+fn a_left_out_generator_module_answers_hover_and_definition() {
+    let dir = vyx_scratch("left_out", VYX_OK);
+    let uri = file_uri(&dir.join("app.vyrn"));
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", VYX_APP);
+    let at = serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": 0, "character": 12 } });
+    let ask = |client: &mut LspClient, id: i64, method: &str| {
+        let id = serde_json::json!(id);
+        client.send(
+            &serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": at }),
+        );
+        client.read_response(&id)
+    };
+    let hover = ask(&mut client, 2, "textDocument/hover");
+    assert!(
+        hover
+            .to_string()
+            .contains("fn components(dir: String) -> Code"),
+        "{hover}"
+    );
+    let definition = ask(&mut client, 3, "textDocument/definition");
+    assert!(
+        definition.to_string().contains("std/vyx.vyrn"),
+        "{definition}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn spawn_client() -> LspClient {
     handshake(LspClient::spawn().expect("spawn vyrn-lsp"))
 }

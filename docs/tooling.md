@@ -397,7 +397,7 @@ declaration its symbol map names, or `null` for a page or a hand-written route.
 - `vyrn emit-lowered [file]`: the named core the emitter reads, root module only.
   The text is deterministic and starts with a version line; its format promises
   no stability, and nothing parses it.
-- `vyrn emit-gen [file] [--maps]`: the source of every module a generator import
+- `vyrn emit-gen [file] [--maps]`: the source of every module a generator import of the program
   synthesizes, each under a `// ==== ... ====` banner naming its call site.
   `--maps` prints each module's symbol map as one JSON document per line, with
   the banners on stderr.
