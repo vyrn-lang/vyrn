@@ -740,7 +740,7 @@ fn member_completion_on_std_vyx_offers_only_its_public_api() {
     assert_member_completion(
         "std/vyx",
         "vyxParseTemplate(\"\")",
-        &["components", "vyxParseTemplate", "VyxNode"],
+        &["components", "vyxParseTemplate", "VyxTemplate"],
         &[
             "vyxPageShape",
             "vyxDataRunner",

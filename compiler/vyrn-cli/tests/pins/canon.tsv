@@ -2,73 +2,73 @@ census	count
 roots	446
 roots that do not check	35
 members BoolLambda	5
-members Condition	4277
+members Condition	4200
 members KeyBlockLambda	3
 members KeyLambda	57
-members MoreStatements	26
-members OneReturn	72
+members MoreStatements	24
+members OneReturn	71
 unfit Bool functions Budget	1
 unfit Bool functions Effect	11
-unfit Bool functions Loop	81
-unfit Bool functions Switch	22
+unfit Bool functions Loop	80
+unfit Bool functions Switch	28
 unfit Bool functions Writes	11
 unfit lambdas Effect	1
-predicates as 4.5 counts them, across the corpus: members	77
-predicates as 4.5 counts them, across the corpus: L0 identities	71
+predicates as 4.5 counts them, across the corpus: members	76
+predicates as 4.5 counts them, across the corpus: L0 identities	70
 predicates as 4.5 counts them, across the corpus: L0 pairs	9
 predicates as 4.5 counts them, across the corpus: L0 complement pairs	0
-predicates as 4.5 counts them, across the corpus: L1 identities	71
+predicates as 4.5 counts them, across the corpus: L1 identities	70
 predicates as 4.5 counts them, across the corpus: L1 pairs	9
 predicates as 4.5 counts them, across the corpus: L1 complement pairs	0
-predicates as 4.5 counts them, across the corpus: L2 identities	71
+predicates as 4.5 counts them, across the corpus: L2 identities	70
 predicates as 4.5 counts them, across the corpus: L2 pairs	9
 predicates as 4.5 counts them, across the corpus: L2 complement pairs	0
 predicates as 4.5 counts them, across the corpus: most atoms at L2	25
 predicates as 4.5 counts them, across the corpus: most diagram nodes at L2	32
 predicates as 4.5 counts them, across the corpus: decided at L2 by step Partial	1
-predicates as 4.5 counts them, across the corpus: decided at L2 by step Whole	76
-predicates as 4.5 counts them, within one file: members	77
-predicates as 4.5 counts them, within one file: L0 identities	77
+predicates as 4.5 counts them, across the corpus: decided at L2 by step Whole	75
+predicates as 4.5 counts them, within one file: members	76
+predicates as 4.5 counts them, within one file: L0 identities	76
 predicates as 4.5 counts them, within one file: L0 pairs	0
 predicates as 4.5 counts them, within one file: L0 complement pairs	0
-predicates as 4.5 counts them, within one file: L1 identities	77
+predicates as 4.5 counts them, within one file: L1 identities	76
 predicates as 4.5 counts them, within one file: L1 pairs	0
 predicates as 4.5 counts them, within one file: L1 complement pairs	0
-predicates as 4.5 counts them, within one file: L2 identities	77
+predicates as 4.5 counts them, within one file: L2 identities	76
 predicates as 4.5 counts them, within one file: L2 pairs	0
 predicates as 4.5 counts them, within one file: L2 complement pairs	0
 predicates as 4.5 counts them, within one file: most atoms at L2	25
 predicates as 4.5 counts them, within one file: most diagram nodes at L2	32
 predicates as 4.5 counts them, within one file: decided at L2 by step Partial	1
-predicates as 4.5 counts them, within one file: decided at L2 by step Whole	76
-every predicate, across the corpus: members	103
-every predicate, across the corpus: L0 identities	97
+predicates as 4.5 counts them, within one file: decided at L2 by step Whole	75
+every predicate, across the corpus: members	100
+every predicate, across the corpus: L0 identities	94
 every predicate, across the corpus: L0 pairs	9
 every predicate, across the corpus: L0 complement pairs	0
-every predicate, across the corpus: L1 identities	97
+every predicate, across the corpus: L1 identities	94
 every predicate, across the corpus: L1 pairs	9
 every predicate, across the corpus: L1 complement pairs	0
-every predicate, across the corpus: L2 identities	97
+every predicate, across the corpus: L2 identities	94
 every predicate, across the corpus: L2 pairs	9
 every predicate, across the corpus: L2 complement pairs	0
 every predicate, across the corpus: most atoms at L2	166
 every predicate, across the corpus: most diagram nodes at L2	61
 every predicate, across the corpus: decided at L2 by step Partial	6
-every predicate, across the corpus: decided at L2 by step Whole	97
-every predicate, within one file: members	103
-every predicate, within one file: L0 identities	103
+every predicate, across the corpus: decided at L2 by step Whole	94
+every predicate, within one file: members	100
+every predicate, within one file: L0 identities	100
 every predicate, within one file: L0 pairs	0
 every predicate, within one file: L0 complement pairs	0
-every predicate, within one file: L1 identities	103
+every predicate, within one file: L1 identities	100
 every predicate, within one file: L1 pairs	0
 every predicate, within one file: L1 complement pairs	0
-every predicate, within one file: L2 identities	103
+every predicate, within one file: L2 identities	100
 every predicate, within one file: L2 pairs	0
 every predicate, within one file: L2 complement pairs	0
 every predicate, within one file: most atoms at L2	166
 every predicate, within one file: most diagram nodes at L2	61
 every predicate, within one file: decided at L2 by step Partial	6
-every predicate, within one file: decided at L2 by step Whole	97
+every predicate, within one file: decided at L2 by step Whole	94
 key and other lambdas, across the corpus: members	60
 key and other lambdas, across the corpus: L0 identities	51
 key and other lambdas, across the corpus: L0 pairs	13
@@ -79,16 +79,16 @@ key and other lambdas, across the corpus: L2 pairs	14
 key and other lambdas, across the corpus: most atoms at L2	0
 key and other lambdas, across the corpus: most diagram nodes at L2	0
 key and other lambdas, across the corpus: decided at L2 by step Whole	60
-conditions, within one function: members	4277
-conditions, within one function: L0 identities	4131
-conditions, within one function: L0 pairs	187
+conditions, within one function: members	4200
+conditions, within one function: L0 identities	4058
+conditions, within one function: L0 pairs	182
 conditions, within one function: L0 complement pairs	2
-conditions, within one function: L1 identities	4131
-conditions, within one function: L1 pairs	187
+conditions, within one function: L1 identities	4058
+conditions, within one function: L1 pairs	182
 conditions, within one function: L1 complement pairs	22
-conditions, within one function: L2 identities	4131
-conditions, within one function: L2 pairs	187
-conditions, within one function: L2 complement pairs	42
+conditions, within one function: L2 identities	4058
+conditions, within one function: L2 pairs	182
+conditions, within one function: L2 complement pairs	41
 conditions, within one function: most atoms at L2	14
-conditions, within one function: most diagram nodes at L2	36
-conditions, within one function: decided at L2 by step Whole	4277
+conditions, within one function: most diagram nodes at L2	38
+conditions, within one function: decided at L2 by step Whole	4200

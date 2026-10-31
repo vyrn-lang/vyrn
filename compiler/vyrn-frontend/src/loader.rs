@@ -1671,12 +1671,14 @@ fn load_modules(
             }
             format!("{h:x}:{}", text.len())
         };
-        // An imported std module's top-level bodies are parsed when a root
-        // reaches them ([`parse_reached`]). The floor reads every body's
-        // carriers at load, so a load that declares artifacts parses them all.
+        // An imported std module's top-level bodies, and those of a module a std
+        // module's generator import wrote, are parsed when a root reaches them
+        // ([`parse_reached`]). The floor reads every body's carriers at load, so a
+        // load that declares artifacts parses them all.
+        let owner = generated_importer(key).unwrap_or(key);
         let skim = !is_root
             && opts.artifacts.is_none()
-            && import_specifier("", key, opts.std_root.as_deref()).starts_with("std/");
+            && import_specifier("", owner, opts.std_root.as_deref()).starts_with("std/");
         // The root parses its `test` and `bench` blocks, an imported module skips
         // them, so one text loaded as both parses twice.
         let cache_key = match (is_root, skim) {
@@ -2175,6 +2177,13 @@ pub(crate) struct Generated {
     inputs: GenDeps,
 }
 
+/// The key of a generator's path argument under `std/`, which names a file beside
+/// std's modules, as an import does.
+fn std_input(arg: &str, opts: &LoadOptions) -> Option<String> {
+    let rest = arg.strip_prefix("std/")?;
+    Some(normalize(&format!("{}/{rest}", opts.std_root.as_deref()?)))
+}
+
 /// Runs a generator-call import target and returns the generated
 /// module's key, with what the generator wrote, or `None` when it is already
 /// synthesized.
@@ -2218,9 +2227,10 @@ fn run_generator(
     let mut ident = format!("{name}\u{0}");
     for c in &consts {
         match c {
-            crate::consteval::ConstVal::Str(s) => {
-                ident.push_str(&join_importer_dir(importer, s));
-            }
+            crate::consteval::ConstVal::Str(s) => match std_input(s, opts) {
+                Some(key) => ident.push_str(&key),
+                None => ident.push_str(&join_importer_dir(importer, s)),
+            },
             other => ident.push_str(&other.to_string()),
         }
         ident.push('\u{0}');
@@ -2471,6 +2481,10 @@ fn run_resolved(
                     allowed.push(key.clone());
                     aliased.push((s.clone(), key));
                 }
+            }
+            if let Some(key) = std_input(s, opts) {
+                allowed.push(key.clone());
+                aliased.push((s.clone(), key));
             }
         }
     }
@@ -5004,7 +5018,7 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
     let std_root = format!("{}/", normalize(std_root));
     (modules.iter())
         .filter(|m| m.key != root_key && !is_remote(&m.key))
-        .filter(|m| normalize(&m.key).starts_with(&std_root))
+        .filter(|m| normalize(generated_importer(&m.key).unwrap_or(&m.key)).starts_with(&std_root))
         .map(|m| m.key.clone())
         .collect()
 }

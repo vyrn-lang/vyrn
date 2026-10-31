@@ -1,0 +1,75 @@
+// A .vyx file: a script read as text and a template read as a tree, which std/vyx
+// reads and std/vyx.errors says. The grammar has no `trivia` rule, so a syntactic rule
+// reads bytes and each rule names the whitespace it passes: a template's whitespace is
+// text. A Vyrn expression in a template stays text, because S7 decides how Vyrn enters
+// a grammar.
+syntax Vyx
+
+expect ^Expected(token=token)
+
+// What std/vyx raises from the tree: a comparison of names, a count, a placement.
+row ScriptUnclosed
+row TemplateUnclosed
+row NoTemplate
+row NoElement
+row ManyRoots
+row ElemUnclosed(tag)
+row TagMismatch(tag, close)
+row StrayClose(tag)
+row VforNoKey
+row VforNoIn
+row VforRunsIn
+row VforEmpty
+row ElseIfOrphan
+row ElseOrphan
+
+// The sections and their bounds. It refuses nothing, so a tool reads a script beside a
+// broken template, and a reader judges a section before it reads the next.
+VyxOutline = anyPart (script:VyxScriptPart noTemplate template:VyxTemplatePart?
+                      / template:VyxTemplatePart noScript script:VyxScriptPart?)? rest
+VyxScriptPart = open:'<script>' body:code close:'</script>'?
+VyxTemplatePart = open:'<template>' body:markup close:'</template>'?
+
+VyxFile = anyPart (scriptPart noTemplate)? template:VyxSection? rest
+VyxSection = '<template>' body:embed(markup, VyxMarkup) '</template>'
+VyxMarkup = comments (nodes:VyxNode comments)* stray:VyxClose?
+VyxNode = VyxElem / VyxInterp / VyxText
+VyxText = value:text
+VyxInterp = open:'{{' (&(blank '}}') ^InterpEmpty@open)? blank expr:expr blank ('}}' / ^InterpUnclosed@open)
+VyxElem = !'</' '<' tag:VyxTagName tagGap many attrs:VyxAttr until ('>' / '/>' / eof)
+          ('/>' / body:VyxKids / ^TagUnclosed@tag)
+VyxTagName = tagName fail ^NoTag
+VyxKids = '>' comments (nodes:VyxNode comments)* close:VyxClose?
+VyxClose = '</' name:closeName closeRest
+VyxAttr = (evt:'@' / dyn:':')? name:VyxAttrName blank
+          ('=' blank (value:attrValue / ^AttrUnquoted@name))? tagGap
+VyxAttrName = attrName fail ^AttrName
+
+anyPart = (!'<script>' !'<template>' .)*
+noTemplate = (!'<template>' .)*
+noScript = (!'<script>' .)*
+rest = .*
+scriptPart = '<script>' code '</script>'?
+
+// A script: a string or a comment hides a close tag.
+code = (codeString / '//' (!'\n' .)* / '/*' (!'*/' .)* '*/'? / !'</script>' .)*
+codeString = '"' ('\\' . / [^"])* '"'?
+
+// A template's extent: a comment or a tag hides a close tag, a nested template has its
+// own, and `<` in text opens a tag.
+markup = ([^<] / '<!--' (!'-->' .)* '-->'? / nested / !'</template>' tagSkip)*
+nested = '<template' &([ \t\r\n>/] / eof) openRest markup '</template>'?
+openRest = (!'/>' !'>' (quoted / .))* '>'
+tagSkip = '<' (quoted / [^>])* '>'?
+quoted = '"' ('\\' . / [^"])* '"'? / '\'' ('\\' . / [^'])* '\''?
+
+comments = ('<!--' (!'-->' .)* '-->'?)*
+blank = [ \t\r\n]*
+tagGap = ([ \t\r\n] / '/' !'>')*
+text = (!'{{' [^<])+
+expr = (!(blank '}}') (codeString / .))*
+tagName = [A-Za-z0-9_-]+
+closeName = [A-Za-z0-9_-]*
+closeRest = [^>]* '>'?
+attrName = [A-Za-z0-9_-]+
+attrValue = '"' ('\\' . / [^"])* ('"' / eof) / '\'' ('\\' . / [^'])* ('\'' / eof)

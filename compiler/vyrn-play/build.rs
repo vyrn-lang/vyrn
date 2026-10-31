@@ -22,8 +22,10 @@ fn main() {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", std_dir.display()))
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".vyrn"))
+        .filter(|n| n.ends_with(".vyrn") || n.ends_with(".syntax"))
         .collect();
+    // What `std/vyx` reads at generation: the sentences of its grammar.
+    names.push("vyx.errors/en.json".to_string());
     // Sorted so the generated file is byte-identical between builds; a directory
     // listing is not ordered.
     names.sort();

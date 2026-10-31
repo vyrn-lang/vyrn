@@ -1124,8 +1124,8 @@ fn an_unchanged_rebuild_regenerates_no_provider() {
     let after_first = stamp(&cache);
     assert_eq!(
         after_first.len(),
-        3,
-        "one entry for the template and one per tag: {after_first:?}"
+        5,
+        "one entry for the template, one per tag, and std/vyx's grammar and catalogue: {after_first:?}"
     );
     let second = build();
     assert_eq!(first, second, "the cached rebuild rendered differently");
@@ -1309,7 +1309,7 @@ fn the_vyx_parse_template_doc_example_runs() {
     // The outline ends each line, and `print` adds one.
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "ul:2\nli:3 :class\n\n"
+        "ul:11\nli:18 :class\n\n"
     );
 }
 

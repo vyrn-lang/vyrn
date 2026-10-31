@@ -1802,7 +1802,9 @@ fn a_runtime_modules_private_function_takes_its_callers_facts() {
         let repo_std = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
         for e in std::fs::read_dir(repo_std).unwrap() {
             let e = e.unwrap().path();
-            std::fs::copy(&e, std_dir.join(e.file_name().unwrap())).unwrap();
+            if e.is_file() {
+                std::fs::copy(&e, std_dir.join(e.file_name().unwrap())).unwrap();
+            }
         }
         let text = std_dir.join("text.vyrn");
         let mut src = std::fs::read_to_string(&text).unwrap();

@@ -3,8 +3,10 @@
 /// No program links this module, so a program that uses `std/vyx` pays
 /// nothing for it. A tool finds it beside `std/vyx` by its name.
 
-import { vyxSection, vyxSectionAvoid, vyxIsWs, vyxIsIdent, vyxIsIdentifier, vyxCharStart, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt, vyxLowerFirst, vyxLineAt, vyxColAt } from "std/vyx"
+import { vyxOutlineOf, vyxIsWs, vyxIsIdent, vyxIsIdentifier, vyxCharStart, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt, vyxLowerFirst, vyxLineAt, vyxColAt } from "std/vyx"
 import { join } from "std/code"
+import { syntax } from "std/syntax"
+import * as vx from syntax("std/vyx.syntax")
 import { Json, JsonField, emit } from "std/json"
 import { endsWith, startsWith } from "std/strpred"
 
@@ -62,12 +64,25 @@ gen fn vyxCharColAt(ba: Array<UInt8>, at: Int64) -> Int64 {
 
 /// Whether byte `at` is inside the `<script>` body. A section never closed
 /// owns everything after its open tag.
-gen fn vyxInScript(ba: Array<UInt8>, at: Int64) -> Bool {
-    let s = vyxSection(ba, "script", true)
-    if s.found {
-        return at >= s.start && at <= s.end
+gen fn vyxInScript(src: String, at: Int64) -> Bool {
+    if let Some(s) = vyxOutlineOf(src).script {
+        return match s.close {
+            Some(c) => at >= s.body.start && at <= s.body.end,
+            None => at > s.start,
+        }
     }
-    return s.openAt >= 0 && at > s.openAt
+    return false
+}
+
+/// The script section of `src`, when it closes.
+gen fn vyxClosedScript(src: String) -> Option<vx.VyxScriptPart> {
+    let outline = vyxOutlineOf(src)
+    if let Some(s) = outline.script {
+        if let Some(c) = s.close {
+            return Some(s.copy())
+        }
+    }
+    return None
 }
 
 /// Whether byte `at` is inside a `{{ ... }}` interpolation.
@@ -174,7 +189,7 @@ gen fn vyxCursorInTag(ba: Array<UInt8>, lt: Int64, at: Int64) -> VyxCursor {
 gen fn vyxCursorAt(src: String, line: Int64, col: Int64) -> VyxCursor {
     let ba = bytes(src)
     let at = vyxOffsetAt(ba, line, col)
-    if at < 0 || vyxInScript(ba, at) || vyxInMustache(ba, at) {
+    if at < 0 || vyxInScript(src, at) || vyxInMustache(ba, at) {
         return vyxNoCursor()
     }
     let lt = vyxEnclosingOpenTag(ba, at)
@@ -310,9 +325,8 @@ export gen fn vyrnCompleteVyx(root: String, path: String, line: Int64, col: Int6
             Err(e) => "",
         }
         let cb = bytes(comp)
-        let sec = vyxSection(cb, "script", true)
-        if sec.found {
-            let sc = vyxParseScriptAt(cb, sec.start, sec.end, "props", "", cur.tag)
+        if let Some(part) = vyxClosedScript(comp) {
+            let sc = vyxParseScriptAt(cb, part.body.start, part.body.end, "props", "", cur.tag)
             for p in sc.props {
                 let detail = "prop: " + p.ty.text
                 items.push(vyxItem(p.name.text, "field", detail, cur.from))
@@ -339,19 +353,20 @@ export gen fn vyrnCompleteVyx(root: String, path: String, line: Int64, col: Int6
 /// nothing.
 export to "./ui.editor" gen fn vyxScriptView(path: String, src: String) -> Code {
     let ba = bytes(src)
-    let sec = vyxSection(ba, "script", true)
-    if sec.found == false {
-        return vyxBlankLines(ba, 0, ba.length)
+    if let Some(part) = vyxClosedScript(src) {
+        let from = part.body.start
+        let to = part.body.end
+        let mut out = vyxBlankLines(ba, 0, from)
+        let col = vyxColAt(ba, from)
+        let mut c = 1
+        while c < col {
+            out = out + vyrn" "
+            c = c + 1
+        }
+        let body = codeAt(path, vyxLineAt(ba, from), col, part.body.text)
+        return out + body + vyxBlankLines(ba, to, ba.length)
     }
-    let mut out = vyxBlankLines(ba, 0, sec.start)
-    let col = vyxColAt(ba, sec.start)
-    let mut c = 1
-    while c < col {
-        out = out + vyrn" "
-        c = c + 1
-    }
-    let body = codeAt(path, vyxLineAt(ba, sec.start), col, vyxSlice(ba, sec.start, sec.end))
-    return out + body + vyxBlankLines(ba, sec.end, ba.length)
+    return vyxBlankLines(ba, 0, ba.length)
 }
 
 /// One LF for each LF in bytes `[a, b)` of `ba`.
@@ -370,14 +385,10 @@ gen fn vyxBlankLines(ba: Array<UInt8>, a: Int64, b: Int64) -> Code {
 /// Whether `src` has a `<template>` section outside its `<script>`, closed or
 /// not.
 export to "./ui.editor" gen fn vyxHasTemplate(src: String) -> Bool {
-    let ba = bytes(src)
-    let s = vyxSection(ba, "script", true)
-    let t = if s.found {
-        vyxSectionAvoid(ba, "template", false, s.start, s.end)
-    } else {
-        vyxSection(ba, "template", false)
+    return match vyxOutlineOf(src).template {
+        Some(t) => true,
+        None => false,
     }
-    return t.found || t.openAt >= 0
 }
 
 /// The file name of `path` without its `.vyx` extension.
@@ -401,10 +412,9 @@ gen fn vyxComponentView(path: String, src: String, stem: String) -> Code {
         return view
     }
     let ba = bytes(src)
-    let sec = vyxSection(ba, "script", true)
     let mut params: Array<Code> = []
-    if sec.found {
-        let sc = vyxParseScriptAt(ba, sec.start, sec.end, "props", "", stem)
+    if let Some(part) = vyxClosedScript(src) {
+        let sc = vyxParseScriptAt(ba, part.body.start, part.body.end, "props", "", stem)
         for p in sc.props {
             let pn = codeAt(path, p.name.line, p.name.col, p.name.text)
             let pt = codeAt(path, p.ty.line, p.ty.col, p.ty.text)
@@ -438,7 +448,7 @@ export gen fn vyrnDefinitionVyx(root: String, path: String, line: Int64, col: In
     }
     let ba = bytes(src)
     let at = vyxOffsetAt(ba, line, col)
-    if at < 0 || vyxInScript(ba, at) {
+    if at < 0 || vyxInScript(src, at) {
         return ""
     }
     let mut s = at

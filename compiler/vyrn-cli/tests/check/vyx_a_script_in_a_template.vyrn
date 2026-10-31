@@ -1,0 +1,3 @@
+// A `<script>` inside a `<template>` that comes first is an element of that template.
+import { components } from "std/vyx"
+import { holder } from components("./vyx_a_script_in_a_template")

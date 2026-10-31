@@ -476,7 +476,9 @@ fn complete_json(src: &str, line: usize, col: usize) -> String {
     if string_context(src, line, col) {
         if let Some(prefix) = std_import_prefix(src, line, col) {
             for (key, _) in std_modules::STD {
-                let name = key.trim_end_matches(".vyrn");
+                let Some(name) = key.strip_suffix(".vyrn") else {
+                    continue;
+                };
                 if let Some(rest) = name.strip_prefix(prefix) {
                     out.push(item_json(rest, "module", name, None));
                 }

@@ -80,14 +80,6 @@ fn root_of(file: &'static str, name: &str) -> &'static str {
     }
 }
 
-struct Disk;
-
-impl vyrn_frontend::loader::ModuleResolver for Disk {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-}
-
 /// The pinned row of each census function of `root`: its label, or `not an
 /// array result` where it returns none, and the reason an unknown gives.
 fn rows_of(root: &str) -> Vec<(usize, String)> {
@@ -100,9 +92,15 @@ fn rows_of(root: &str) -> Vec<(usize, String)> {
         ..Default::default()
     };
     let engine = vyrn_genwasm::engine();
-    let (program, world) = vyrn_lower::load_warned(&src, &key, &opts, &Disk, Some(&*engine))
-        .0
-        .unwrap_or_else(|_| panic!("{root} checks"));
+    let (program, world) = vyrn_lower::load_warned(
+        &src,
+        &key,
+        &opts,
+        &vyrn_frontend::loader::DiskResolver,
+        Some(&*engine),
+    )
+    .0
+    .unwrap_or_else(|_| panic!("{root} checks"));
     let rows = world.fn_rows();
     let mut out = Vec::new();
     for (i, (file, name, _)) in CENSUS.iter().enumerate() {

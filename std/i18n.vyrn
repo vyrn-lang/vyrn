@@ -53,7 +53,7 @@ gen fn isWs(b: UInt8) -> Bool {
 }
 
 /// The first non-whitespace index at or after `i`.
-gen fn skipWs(ba: Array<UInt8>, i: Int64, e: Int64) -> Int64 {
+gen fn skipJsonSpace(ba: Array<UInt8>, i: Int64, e: Int64) -> Int64 {
     let mut j = i
     while j < e {
         if isWs(ba[j]) {
@@ -390,21 +390,21 @@ gen fn parseBranches(blob: String) -> Branches {
     let ba = bytes(blob)
     let e = ba.length
     let mut items: Array<Branch> = []
-    let mut i = skipWs(ba, 0, e)
+    let mut i = skipJsonSpace(ba, 0, e)
     while i < e {
         let mut selEnd = i
         while selEnd < e && isWs(ba[selEnd]) == false && ba[selEnd] != '{' {
             selEnd = selEnd + 1
         }
         let sel = sliceStr(ba, i, selEnd)
-        let braceAt = skipWs(ba, selEnd, e)
+        let braceAt = skipJsonSpace(ba, selEnd, e)
         if braceAt >= e || ba[braceAt] != '{' {
             return Branches { branches: items }
         }
         let close = matchBrace(ba, braceAt, e)
         let inner = sliceStr(ba, braceAt + 1, close - 1)
         items.push(Branch { selector: sel, text: inner })
-        i = skipWs(ba, close, e)
+        i = skipJsonSpace(ba, close, e)
     }
     return Branches { branches: items }
 }
