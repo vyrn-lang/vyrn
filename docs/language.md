@@ -668,7 +668,7 @@ A hole means what its type says:
 
 A hole inside a `//`, `///` or `//!` comment writes plain text: a `String` as written, a `Code` as its text, a number or `Bool` as it prints. Each newline in that text continues the comment on a new line with the same prefix, so the text never leaves the comment.
 
-A hole glued to a word (`get\{n}`) writes part of a name, so it takes a `Name`. A hole alone on its line stands for a list of declarations or statements. A quote that opens with a newline after `"""` drops that newline, its closing line, and the closing line's indentation from each of its lines. A multi-line `Code` spliced into a hole is re-indented to the hole's line; text `codeAt` copied never is.
+A hole glued to a word (`get\{n}`) writes part of a name, so it takes a `Name`. A hole stands for any number of declarations or statements where one of them may stand, and for a whole list where it is alone in that list's brackets. A hole cannot stand in a string literal of the quote's text. A quote that opens with a newline after `"""` drops that newline, its closing line, and the closing line's indentation from each of its lines. A multi-line `Code` spliced into a hole is re-indented to the hole's line; text `codeAt` copied never is.
 
 The whole `Code` API:
 

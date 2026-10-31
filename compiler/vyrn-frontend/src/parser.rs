@@ -258,14 +258,11 @@ fn if_let(pattern: Pattern, scrutinee: Expr, then: Block, els: Option<Block>, li
     Stmt::expr(m)
 }
 
-/// Whether `src` is a separator `join` puts between items (`", "`, `" else "`):
-/// punctuation and keywords, no bracket, no name and no literal, which no mode
-/// parses alone and no unit of code can open or close.
-fn is_separator(src: &str) -> bool {
-    let Ok(toks) = crate::lexer::lex(src) else {
-        return false;
-    };
-    toks.iter().all(|t| {
+/// Whether `tokens` are a separator `join` puts between items (`", "`, `" else "`):
+/// punctuation and keywords, no bracket, no name and no literal, which no kind of
+/// quote holds alone and no unit of code can open or close.
+fn is_separator(tokens: &[Token]) -> bool {
+    tokens.iter().all(|t| {
         let (kind, text) = crate::lexer::token_name_and_text(&t.tok);
         match kind.as_str() {
             "eof" | "keyword" => true,
@@ -273,41 +270,6 @@ fn is_separator(src: &str) -> bool {
             _ => false,
         }
     })
-}
-
-/// Whether every bracket `src` closes was opened in `src` first, and every one
-/// it opens is closed.
-fn balanced(src: &str) -> bool {
-    let Ok(toks) = crate::lexer::lex(src) else {
-        return false;
-    };
-    let mut depth = 0usize;
-    for t in &toks {
-        let (kind, text) = crate::lexer::token_name_and_text(&t.tok);
-        match (kind.as_str(), text.as_str()) {
-            ("punct", "(" | "[" | "{") => depth += 1,
-            ("punct", ")" | "]" | "}") => match depth.checked_sub(1) {
-                Some(d) => depth = d,
-                None => return false,
-            },
-            _ => {}
-        }
-    }
-    depth == 0
-}
-
-/// Whether the hole between parts `before` and `after` is all that stands
-/// between a bracket and its closing one: `f(\{args})`, `P { \{fields} }`.
-fn alone_in_brackets(before: &str, after: &str) -> bool {
-    before.trim_end().ends_with(['(', '[', '{']) && after.trim_start().starts_with([')', ']', '}'])
-}
-
-/// Whether the hole between parts `before` and `after` is alone on its line;
-/// `first` says `before` starts the quote, so it starts a line.
-fn alone_on_line(before: &str, after: &str, first: bool) -> bool {
-    let head = before.rsplit('\n').next().unwrap_or(before);
-    let tail = after.split('\n').next().unwrap_or(after);
-    (first || before.contains('\n')) && head.trim().is_empty() && tail.trim().is_empty()
 }
 
 /// The text a splice writes after each newline, for a hole that ends `line`:
@@ -348,136 +310,29 @@ fn comment_start(line: &str) -> Option<usize> {
     None
 }
 
-/// Whether the hole after part `before` is an import's specifier: it follows
-/// the word `from`.
-fn is_specifier(before: &str) -> bool {
-    before
-        .trim_end()
-        .strip_suffix("from")
-        .is_some_and(|rest| !rest.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
-}
-
-fn as_fn_body(src: &str) -> String {
-    format!("fn __vyrn_probe__() {{\n{src}\n}}")
-}
-
 /// Returns the refusal of a `vyrn"..."` code quote at line `line`, column `col`
 /// whose parts form no skeleton, or `None`.
 ///
 /// The lexer has dropped a `vyrn"""` quote's closing indentation
-/// (`lexer::dedent`). The parts, with each hole replaced by a `__vyrn_holeN`
-/// placeholder, form a skeleton. It must parse here as declarations,
-/// statements, an expression, a type, or one item of a list
-/// ([`parses_as_item`]); a failure is a parse diagnostic at the
-/// literal. A hole alone on its line stands for a list of items of its
-/// block, so its placeholder may also be a declaration; a hole alone in
-/// its brackets stands for the whole list there, so its placeholder may
-/// also be empty, though an import list cannot; a hole after an import's
-/// `from` may also be a string literal, which the specifier needs.
+/// (`lexer::dedent`). The parts, joined by a NUL for each hole, form the skeleton,
+/// and `vyrn.syntax`'s `Quote` reads it once. A failure on its first line stands at
+/// the literal.
 pub(crate) fn skeleton_refusal(
     parts: &[String],
-    holes: usize,
     (line, col): (usize, usize),
-    scope: &[&str],
     answers: &HashSet<String>,
 ) -> Option<(Rule, (usize, usize))> {
-    let skeleton = |item: bool, empty: bool, lit: bool| {
-        let mut skel = String::new();
-        for (i, part) in parts.iter().enumerate() {
-            skel.push_str(part);
-            if i < holes {
-                let (before, after) = (&parts[i], &parts[i + 1]);
-                let placeholder = if item && alone_on_line(before, after, i == 0) {
-                    format!("let __vyrn_hole{i} = 0")
-                } else if item && alone_in_brackets(before, after) {
-                    if empty {
-                        String::new()
-                    } else {
-                        format!("__vyrn_hole{i}")
-                    }
-                } else if lit && is_specifier(before) {
-                    format!("\"__vyrn_hole{i}\"")
-                } else {
-                    format!("__vyrn_hole{i}")
-                };
-                skel.push_str(&placeholder);
-            }
-        }
-        skel
+    let Ok(tokens) = crate::lexer::lex_quote(&parts.join("\0")) else {
+        return Some((Rule::SkeletonUnparsable {}, (line, col)));
     };
-    let probe = Probe { scope, answers };
-    let skel = skeleton(false, false, false);
-    let separator = holes == 0 && is_separator(&skel);
-    let tries = [(true, true, false), (true, true, true), (true, false, true)];
-    if separator
-        || probe.parses_any(&skel)
-        || (tries.iter()).any(|&(i, e, l)| probe.parses_any(&skeleton(i, e, l)))
-    {
+    if parts.len() == 1 && is_separator(&tokens) {
         return None;
     }
-    let (rule, skel_line, skel_col) = probe.error_detail(&skel);
-    let rline = line + skel_line.saturating_sub(1);
-    let rcol = if skel_line <= 1 { col } else { skel_col };
-    Some((rule, (rline, rcol)))
-}
-
-/// A quote's skeleton parsed in each mode, with the enclosing type names, so a
-/// skeleton naming `T` in a generic `gen fn` parses.
-struct Probe<'p> {
-    scope: &'p [&'p str],
-    answers: &'p HashSet<String>,
-}
-
-impl Probe<'_> {
-    /// Statements first: most quotes are statement lists, and each mode that
-    /// fails costs a whole parse.
-    fn parses_any(&self, src: &str) -> bool {
-        self.parses_as_decls(&as_fn_body(src))
-            || self.parses_as_decls(src)
-            || self.parses_as_expr(src)
-            || self.parses_as_type(src)
-            || self.parses_as_item(src)
-    }
-
-    /// List-item mode: `src` is one item of a record literal (`port: v`), a
-    /// `match` (`Some(x) => x`) or a parameter list (`n: Int64`), each wrapped
-    /// in the smallest unit that holds it. Its brackets must balance, so a
-    /// wrapper cannot close one the quote opened.
-    fn parses_as_item(&self, src: &str) -> bool {
-        balanced(src)
-            && (self.parses_as_expr(&format!("__vyrn_r {{ {src} }}"))
-                || self.parses_as_expr(&format!("match __vyrn_m {{ {src} }}"))
-                || self.parses_as_decls(&format!("fn __vyrn_f({src}) {{}}")))
-    }
-
-    fn parses_as_decls(&self, src: &str) -> bool {
-        (crate::lexer::lex(src).ok())
-            .is_some_and(|t| recognizer::decl_refusals(&t, self.scope, self.answers).is_empty())
-    }
-
-    fn parses_as_expr(&self, src: &str) -> bool {
-        (crate::lexer::lex(src).ok())
-            .is_some_and(|t| recognizer::whole_expr(&t, self.scope, self.answers))
-    }
-
-    fn parses_as_type(&self, src: &str) -> bool {
-        (crate::lexer::lex(src).ok())
-            .is_some_and(|t| recognizer::whole_type(&t, self.scope, self.answers))
-    }
-
-    /// The message and skeleton-relative line and column for a skeleton that parses
-    /// in no mode, preferring the statement-mode error.
-    fn error_detail(&self, skel: &str) -> (Rule, usize, usize) {
-        if let Ok(t) = crate::lexer::lex(&as_fn_body(skel)) {
-            let errs = recognizer::decl_refusals(&t, self.scope, self.answers);
-            if let Some(d) = errs.into_iter().next() {
-                let sl = d.line.saturating_sub(1).max(1); // undo the wrapper's line
-                let detail = d.message;
-                return (rule!(SkeletonDetail, detail), sl, d.col);
-            }
-        }
-        (Rule::SkeletonUnparsable {}, 1, 1)
-    }
+    let d = recognizer::quote_refusal(&tokens, answers)?;
+    // A sentence holds a hole raw in a name and escaped in a found token.
+    let detail = d.message.replace('\0', "\\{}").replace("\\0", "\\{}");
+    let rcol = if d.line <= 1 { col } else { d.col };
+    Some((rule!(SkeletonDetail, detail), (line + d.line - 1, rcol)))
 }
 
 /// Returns the root's id and name, the steps from the root to the place the
@@ -3068,6 +2923,99 @@ mod tests {
 
     fn parse_src(s: &str) -> Program {
         parse(lex(s).unwrap()).unwrap()
+    }
+
+    fn quote_refused(parts: &[&str]) -> bool {
+        let parts: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
+        skeleton_refusal(&parts, (1, 1), &HashSet::new()).is_some()
+    }
+
+    #[test]
+    fn a_quote_of_each_kind_parses() {
+        let quotes: &[&[&str]] = &[
+            &[""],
+            &[", "],
+            &[" else "],
+            &["fn f() {}\nlet a = 1"],
+            &["let a = 1\nfn f() {}"],
+            &["let a = 1\nreturn a"],
+            &["a + 1"],
+            &["a().push(1)"],
+            &["if a { 1 } else { 2 } + 3"],
+            &["Array<Int64>"],
+            &["{ a: Int64 }"],
+            &["fn(Int64) -> Bool"],
+            &["port: 1, host: h"],
+            &["n: Array<Int64>, m: read T"],
+            &["Some(x) => x"],
+            &["A => 1, B => { 2 }"],
+        ];
+        for parts in quotes {
+            assert!(!quote_refused(parts), "{parts:?}");
+        }
+    }
+
+    #[test]
+    fn a_hole_stands_where_the_grammar_says() {
+        let quotes: &[&[&str]] = &[
+            &["", ""],
+            &["get", "(r)"],
+            &["", "_", ""],
+            &["fn ", "() {}"],
+            &["", "\nfn f() {}"],
+            &["fn f() {}\n", ""],
+            &["", "\nreturn 1"],
+            &["fn f() {\n    ", "\n}"],
+            &["", "\n(a).push(1)"],
+            &["", "\n(a, b)"],
+            &["", "\n[i] = 1"],
+            &["fn f(", ") {}"],
+            &["fn f(\n", "\n) {}"],
+            &["P { ", " }"],
+            &["type T = { ", " }"],
+            &["match x { ", " }"],
+            &["impl P for T { ", " }"],
+            &["protocol P { ", " }"],
+            &["contract C { ", " }"],
+            &["contract C { fn m(", ") }"],
+            &["logging { ", " }"],
+            &["import { ", " } from \"x\""],
+            &["import { a } from ", ""],
+            &["import * as a from ", "(1)"],
+            &["Array<", ">"],
+            &["", ": ", ""],
+            &["", " => ", ""],
+            &["// ", "\nfn f() {}"],
+            &["\"\\{", "}\""],
+            &["P { ", " }.x"],
+            &["fn f<", ">(x: ", "<Int64>) {}"],
+            &["contract C { let ", ": Int64\nfn ", "() }"],
+        ];
+        for parts in quotes {
+            assert!(!quote_refused(parts), "{parts:?}");
+        }
+    }
+
+    #[test]
+    fn a_quote_is_refused_where_no_list_or_name_stands() {
+        let quotes: &[&[&str]] = &[
+            &[") {} fn g("],
+            &["} fn g() {"],
+            &["fn ("],
+            &["foo()\nfn f() {}"],
+            &["fn f() {}\nfoo()"],
+            &["export ", ""],
+            &["fn f(a: Int64, ", ") {}"],
+            &["P { a: 1, ", " }"],
+            &["match x { ", ", A => 1 }"],
+            &["impl P for T { ", "\nfn m(self) {} }"],
+            &["let s = \"a", "b\""],
+            &["import { a } from", ""],
+            &["from ", " \"x\" fn f() {}"],
+        ];
+        for parts in quotes {
+            assert!(quote_refused(parts), "{parts:?}");
+        }
     }
 
     /// Every `#unit.local` a numbered tree's `{:#?}` prints.

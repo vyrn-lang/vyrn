@@ -370,6 +370,8 @@ fn first_into(g: &Grammar, e: &E, out: &mut Set) -> bool {
             out.insert(format!("{}\\b", esc(&l.s)));
             false
         }
+        // A NUL is a hole of a code quote's text, which no editor shows.
+        E::Lit(l) if &*l.s == "\0" => false,
         E::Builtin(Builtin::Eof) => false,
         E::Builtin(Builtin::NoNl) | E::And(_) | E::Not(_) | E::TestFlag(_) => true,
         E::Seq(v) => v.iter().all(|x| first_into(g, x, out)),

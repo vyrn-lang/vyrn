@@ -102,9 +102,13 @@ trivia = (ws / comment)*
 comment = '//' !('/' !'/') (!'\n' .)*
 doc = '//' '/' !'/' (!'\n' .)*
 scan = trivia (token trivia)* (eof / ^UnexpectedChar(c=.:?))
-token = string / byte / number / word / doc / punct
+token = string / byte / number / word / doc / punct / splice
 
 word = (alpha / '_') (alnum / '_')*
+// The hole of a code quote's text, and what is glued after it. The host refuses it
+// in any other text, and joins it to a word just before it: an identifier. A syntactic
+// rule reads a hole with nothing glued, which stands for items of its list, any number.
+splice = '\0' (alnum / '_' / '\0')*
 ident = !reserved word
 int = digit+ !('.' digit)
 number = digit+ ('.' digit+)?
@@ -145,7 +149,7 @@ Module = many Item until eof recover decl ItemStart
 ItemStart = 'fn' / 'type' / 'protocol' / 'impl' / 'import' / 'export' / 'let' / 'logging'
           / 'mut' 'fn' / 'extern' 'fn' / 'gen' 'fn' / 'test' plainStr / 'bench' plainStr / ContractHead
 ContractHead = 'contract' ident '{'
-Item = doc* (&eof / Export / Decl)
+Item = doc* (&eof / Export / ?quote splice / Decl)
 
 Export = 'export' ( &(ExportTo 'extern' 'fn') ExportTo ^ExportToExtern / ExportTo? +exported(ExportTarget) )
 ExportTo = &('to' plainStr) 'to' plainStr (&(',' plainStr) ',' plainStr)*
@@ -162,7 +166,7 @@ Import = i:'import' ( '*' ('as' / ^ImportStarAs(found=found)@(i,here)!) ns:Ident
 // The host reads the names a module answers to as these close.
 ImportName = Ident ('as' Ident)?
 DeclName = Ident
-Source = plainStr / &(ident '(') ident Args / ^ImportPathExpected(found=found)@(i,here)
+Source = plainStr / &(ident '(') ident Args / ?quote splice / ^ImportPathExpected(found=found)@(i,here)
 
 TypeDecl = 'type' DeclName ('<' list TName sep ',' until '>' Close)? '=' +collect(EnumType / Type) ('where' Expr)? ';'?
 EnumType = 'enum' '{' list Variant sep ',' until '}' '}'
@@ -180,7 +184,7 @@ TypeBinder = '<' list TParam sep ',' until '>' Close
 TParam = TName (':' Ident ('+' Ident)*)?
 // A name a type then reads as bound: `TypeName` sets `scoped` for it.
 TName = Ident
-Params = '(' list Param sep ',' until ')' ')'
+Params = '(' (Alone / list Param sep ',' until ')') ')'
 Param = Ident ':' Cap? Type ('where' Expr)?
 CapWord = 'read' / 'modify' / 'consume'
 Cap = &(CapWord (ident / 'fn')) CapWord
@@ -195,12 +199,12 @@ Bench = &('bench' plainStr) 'bench' plainStr TestBody
 
 // The host refuses a second block as this closes.
 LogHead = 'logging'
-Logging = LogHead '{' list LogField sep ',' until '}' '}'
+Logging = LogHead '{' (Alone / list LogField sep ',' until '}') '}'
 LogField = k:'level' ':' LogLevel / k:'sink' ':' Sink / k:Ident ':' ^UnknownLoggingField(other=k)@k
 LogLevel = 'trace' / 'debug' / 'info' / 'warn' / 'error' / n:Ident ^UnknownLogLevel(name=n)@k
 Sink = 'stderr' / 'stdout' / s:'file' '(' (plainStr / ^FileSinkPath(found=found)@s!) ')' / n:Ident ^UnknownSink(other=n)@n
 
-Protocol = 'protocol' pname:DeclName '{' many PAssoc until (doc* !'type') many PItem until '}' '}'
+Protocol = 'protocol' pname:DeclName '{' (Alone / many PAssoc until (doc* !'type') many PItem until '}') '}'
 PAssoc = doc* t:'type' n:TName (&'=' ^AssocTypeRhs(aname=n)@t / ';'?)
 PItem = doc* ( &'}'
              / t:'type' n:Ident (&'=' ^AssocTypeRhs(aname=n)@t / ^AssocTypeAfterMethods(aname=n, name=pname)@t)
@@ -210,16 +214,16 @@ Recv = SelfCap?
 SelfCap = &(CapWord 'self') CapWord
 RCap = &('consume' (ident / '(' / 'fn')) ^ConsumeResult / &(('read' / 'modify') (ident / '(' / 'fn')) ('read' / 'modify')
 
-Contract = &ContractHead 'contract' cname:CName '{' many CItem until ('}' / eof) '}'
+Contract = &ContractHead 'contract' cname:CName '{' (Alone / many CItem until ('}' / eof)) '}'
 CName = Ident
 CItem = doc* (&'}' / CLet / CFn / ^ContractMemberExpected(name=cname, found=found))
 CLet = 'let' m:Ident (':' / ^ContractMemberNeedsType(name=m)) Type ('=' Expr)? ';'?
-CFn = 'fn' ( '*' '(' (&('.' '.') '.' '.' / list CParam sep ',' until ')') ')' ('->' Type)? (&'=' ^ContractOpenRuleDefault)? ';'?
-           / m:Ident '(' (&('.' '.') ^ContractMemberParams(name=m) / list CParam sep ',' until ')') ')' ('->' Type)? ('=' Expr)? ';'? )
+CFn = 'fn' ( '*' '(' (Alone / &('.' '.') '.' '.' / list CParam sep ',' until ')') ')' ('->' Type)? (&'=' ^ContractOpenRuleDefault)? ';'?
+           / m:Ident '(' (Alone / &('.' '.') ^ContractMemberParams(name=m) / list CParam sep ',' until ')') ')' ('->' Type)? ('=' Expr)? ';'? )
 CParam = Ident ':' Type
 
 // The host sets `methods` as a method that is no projection closes.
-Impl = 'impl' TypeBinder? proto:Ident 'for' ty:Type '{' -methods(many IItem until '}') '}'
+Impl = 'impl' TypeBinder? proto:Ident 'for' ty:Type '{' -methods(Alone / many IItem until '}') '}'
 IBind = IHead '=' Type
 IHead = 'type' Ident
 IItem = doc* ( &'}' / ?methods t:'type' n:Ident ^ImplAssocTypeOrder(aname=n, protocol=proto, ty=ty)@t / IBind ';'? / IMethod )
@@ -253,14 +257,16 @@ Constructor = 'Stream' '<' Type Close
 TypeName = Ident
 // Only the outermost record of a `type` declaration may refine a field.
 RecordType = ?collect -collect(+named(RecordBody)) / -named(RecordBody)
-RecordBody = '{' list Field sep ',' until '}' '}'
+RecordBody = '{' (Alone / list Field sep ',' until '}') '}'
 Field = Ident ':' ( l:'lazy' (?named / ^LazyAnonymous@l) Type (w:'where' Expr (?named / ^WhereAnonymous@w) ^LazyWhere@w)?
                   / Type (w:'where' Expr (?named / ^WhereAnonymous@w))? )
 
 // ------------------------------------------------------------- statements
 
 nest Block = '{' many BItem until ('}' / eof) recover stmt '}'
-BItem = doc / ';' / Stmt
+// A bracket on the line after a hole reads as a call or an index of a name, or, where
+// that reading fails, as a statement after the hole's.
+BItem = doc / ';' / ?quote &(splice !nonl ('(' / '[')) (@Stmt / splice) / Stmt
 Stmt = Let / Return / Break / Continue / If / While / For / Region / Drop / Assign / ExprStmt
 Let = l:'let' ( &('mut' ident '(') 'mut' v:ident ^LetMutPattern(variant=v)@(l,v)
               / &(ident '(') RefLet
@@ -332,16 +338,33 @@ IdentExpr = ident (&('.' ident '?' '(') Folded)* (&('?' '(') Fallible)? (&'<' @(
 Folded = '.' ident
 Fallible = '?'
 TypeArgs = '<' Type (',' Type)* '>'
-StructBody = '{' -nostruct(list SField sep ',' until '}') '}'
+StructBody = '{' -nostruct(Alone / list SField sep ',' until '}') '}'
 SField = Ident ':' Expr
 LambdaHead = '(' ')' '->' / '(' ident (',' ident)* ')' '->'
 Lambda = (ident / '(' list Ident sep ',' until ')' ')') '->' (Block / -nostruct(Expr))
 ArrayLit = '[' -nostruct( ':' ']' / ']'
                         / Expr ( ':' Expr (',' (&']' / Expr ':' Expr))* ']' / (',' (&']' / Expr))* ']' ) )
-Match = 'match' +nostruct(Expr) '{' many Arm until ('}' / eof) '}'
-Arm = Pattern '=>' (Block ','? / Expr (',' / &'}'))
+Match = 'match' +nostruct(Expr) '{' (Alone / many Arm until ('}' / eof)) '}'
+Arm = Pattern '=>' (Block ','? / Expr (',' / ?quote &eof / &'}'))
 Pattern = Ident ('.' Ident)* ('(' list Ident sep ',' until ')' ')')?
 IfExpr = i:'if' IfTail
 IfTail = &'let' ^IfLetExpr@(i,here) / +nostruct(Expr) IfBranch ('else' (i:'if' IfTail / IfBranch))?
 IfBranch = b:'{' ( &('let' / 'return' / 'while' / 'for' / 'region' / 'drop' / 'break' / 'continue') ^IfExprStatements
                  / -nostruct(Expr) (&'}' / ^IfExprStatements@(b,here)) ) '}'
+
+// ------------------------------------------------------------- code quotes
+
+// A code quote's text, its holes as NULs. A type, an expression and one item of a
+// list come first, because a statement cannot read each of them. No other text
+// reaches this rule, so no other parse sets `quote`.
+Quote = +quote( @(Type eof) / @(Expr eof)
+              / @(list SField sep ',' until eof eof) / @(list Param sep ',' until eof eof) / @(many Arm until eof)
+              / many Lead until !LeadStart (&DeclStart Module / many BItem until eof recover stmt) )
+// A list of declarations and a list of statements both hold these, so the first
+// item past them says which list the text is.
+Lead = doc / Let / splice
+LeadStart = doc / 'let' / splice (doc / 'let' / splice / eof / DeclStart)
+// `fn (` starts a type, and a `logging` that opens no block is a name.
+DeclStart = !'let' !('fn' '(') !('logging' !'{') ItemStart
+// A hole alone in its brackets stands for the whole list there, possibly empty.
+Alone = ?quote &(splice (')' / '}')) splice
