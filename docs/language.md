@@ -691,6 +691,7 @@ Each span of a `Code` value has an author: a quote's text is written by the modu
 - `Row` has one variant per `^Row` and per `row` line, with one `String` per hole in the order the file first names them. A grammar holds no sentence, so a reader states each row's in one `match`.
 - `SyntaxError<Row>` holds the row, a 1-based `line` and `col` in bytes, and `end`, the byte offset past the refused token. A parser answers with its own `Row`, so one grammar's refusal has no type in another.
 - A syntactic rule commits and reads tokens, with `trivia` between them. A lexical rule backtracks and reads bytes. A character outside ASCII counts as a letter.
+- `embed(extent, Rule)` matches the lexical `extent`, then parses exactly that text with `Rule`. A label on it in a syntactic rule holds `Rule`'s tree, whose spans are offsets of the whole text, so a refusal in an island names its true line.
 
 A label is a field, and every record holds its `start` and `end` byte offsets:
 

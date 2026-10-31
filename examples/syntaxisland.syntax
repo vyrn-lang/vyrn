@@ -1,0 +1,21 @@
+// Blocks whose bodies are islands: the outer rule finds a body by its braces, and
+// the inner rule reads a tree at offsets of the whole text, which
+// examples/syntaxisland.vyrn prints with std/syntax.
+syntax Island
+
+expect ^Expected(token=token)
+
+trivia = [ \t\r\n]*
+
+Document = many blocks:Block until eof
+Block = name:word note:Note? '{'
+        body:embed(braced, Items, trailing=^Trailing(src=extent)@name) '}'
+Note = @('(' inner:embed(bare, Item) ')' '!')
+Items = many items:Item until (eof / ';')
+Item = Held / Word
+Held = &Block block:Block
+Word = text:word fail ^NotWord(found=found)
+
+braced = (!'{' !'}' . / '{' braced '}')*
+bare = (!')' .)*
+word = [a-z0-9]+

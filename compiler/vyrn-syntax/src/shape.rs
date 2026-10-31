@@ -3,7 +3,8 @@
 //! A label is a field. A rule with no label is a choice of rule references when each
 //! alternative holds one, and that reference when it holds one. Any other rule keeps
 //! its span alone. A `climb` rule is an enum of its operand and a binary node. A
-//! lexical rule's value is its text and its span.
+//! lexical rule's value is its text and its span, and a label on an `embed` holds the
+//! tree of its island.
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -210,6 +211,7 @@ fn nested(x: &E, m: Mult, out: &mut Vec<Field>) -> Result<(), String> {
 fn label_value(x: &E) -> (Ty, Mult) {
     match x {
         E::Ref(r) => (Ty::Rule(*r), Mult::One),
+        E::Embed(em) => (Ty::Rule(em.inner), Mult::One),
         E::Star(y) | E::Plus(y) | E::Many(y, ..) | E::List(y, ..) => (label_value(y).0, Mult::Many),
         E::Opt(y) => {
             let (ty, m) = label_value(y);
