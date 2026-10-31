@@ -622,7 +622,7 @@ it in wasmtime, and reads the result through the `vyrn_gen.result` import. A
 module generator returns `Code`; an editor companion's `String` answer crosses
 as one span of the call site's data. File reads
 go through the loader's resolver and are recorded as the generator's inputs;
-`lex`, `moduleInterface`, `moduleCode` and `contractOf` cross as a host
+`lex`, `vyrnModule`, `vyrnType`, `moduleInterface`, `moduleCode` and `contractOf` cross as a host
 encoding and a synthesized decoder. `syntaxParser` reads its grammar the same
 way and answers with one span: the module `vyrn_syntax::parser` writes, by the
 generator's module, or a report at the grammar's line and column. A generator

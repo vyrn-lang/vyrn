@@ -36,7 +36,8 @@ const NODES: &[&str] = &[
     "Expr", "Lambda", "NsStruct", "Tagged", "RefLet", "Folded", "Fallible", "TypeArgs",
 ];
 
-/// The rules whose close the host reads.
+/// The rules whose close the host reads. From `Module` on, only a generator's reader
+/// reads them (`reader` in `vyrn-frontend`), and a file's run records nothing.
 const HOOKS: &[&str] = &[
     "TName",
     "TypeName",
@@ -58,6 +59,19 @@ const HOOKS: &[&str] = &[
     "TestBody",
     "DeclName",
     "ImportName",
+    "Module",
+    "Item",
+    "Export",
+    "GenFn",
+    "MutFn",
+    "Import",
+    "Source",
+    "FnDecl",
+    "Params",
+    "Param",
+    "Ret",
+    "Type",
+    "Field",
 ];
 
 /// The rules the host may skip unread as they open.
@@ -132,7 +146,7 @@ impl Lower<'_> {
         for k in NODES {
             let _ = writeln!(o, "    {k},");
         }
-        o.push_str("}\n\n/// A rule whose close the host reads.\n#[derive(Clone, Copy)]\npub(super) enum Hook {\n");
+        o.push_str("}\n\n/// A rule whose close the host reads.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Hook {\n");
         for h in HOOKS {
             let _ = writeln!(o, "    {h},");
         }

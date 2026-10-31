@@ -24,8 +24,8 @@ pub enum Kind {
 }
 
 /// A rule whose close the host reads.
-#[derive(Clone, Copy)]
-pub(super) enum Hook {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hook {
     TName,
     TypeName,
     IHead,
@@ -46,6 +46,19 @@ pub(super) enum Hook {
     TestBody,
     DeclName,
     ImportName,
+    Module,
+    Item,
+    Export,
+    GenFn,
+    MutFn,
+    Import,
+    Source,
+    FnDecl,
+    Params,
+    Param,
+    Ret,
+    Type,
+    Field,
 }
 
 /// The grammar's context flags.
@@ -96,12 +109,17 @@ impl Recognizer<'_> {
 
     pub(super) fn _module(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = me.many_recovering(
                 |me| matches!(me.peek(), Tok::Eof),
                 |me| Ok(me._item()?),
                 |me| me.expected("\"\""),
                 Some(|me: &mut Self| Ok(me._item_start()?)),
             )?;
+        if hit {
+            me.closed(Hook::Module, open, start)?;
+        }
         Ok(hit)
     }
 
@@ -163,6 +181,8 @@ impl Recognizer<'_> {
 
     fn _item(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             (({ loop { let p = me.cur; if !me.eat_if(matches!(me.peek(), Tok::Doc(_))) || me.cur == p { break; } } true })
@@ -173,11 +193,16 @@ impl Recognizer<'_> {
             ) || (me.committed(p0) && me.expected("\"\"")?)))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::Item, open, start)?;
+        }
         Ok(hit)
     }
 
     fn _export(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Export)
@@ -204,6 +229,9 @@ impl Recognizer<'_> {
             ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(ExportNeedsDecl))?)))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::Export, open, start)?;
+        }
         Ok(hit)
     }
 
@@ -288,6 +316,8 @@ impl Recognizer<'_> {
 
     fn _import(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             (({ let from = me.cur; me.eat(&Tok::Import) && ({ let l_i = Capture { from, to: me.cur };
@@ -336,6 +366,9 @@ impl Recognizer<'_> {
                 && ({ let _ = me.eat(&Tok::Semi); true }) }) }))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::Import, open, start)?;
+        }
         Ok(hit)
     }
 
@@ -373,6 +406,8 @@ impl Recognizer<'_> {
 
     fn _source(&mut self, l_i: Capture) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = me.eat_if(matches!(me.peek(), Tok::Str(_)))
             || ({
                 let p0 = me.save();
@@ -382,6 +417,9 @@ impl Recognizer<'_> {
                 || { me.back(p0); false }
             })
             || me.refuse((me.line_of(l_i), me.here().1), |me| rule!(ImportPathExpected, found = me.found()))?;
+        if hit {
+            me.closed(Hook::Source, open, start)?;
+        }
         Ok(hit)
     }
 
@@ -476,6 +514,8 @@ impl Recognizer<'_> {
 
     fn _fn_decl(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Fn)
@@ -492,6 +532,9 @@ impl Recognizer<'_> {
                 && (me._skim_body()? || (me.committed(p0) && me.expected("LBrace")?)) }) }))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::FnDecl, open, start)?;
+        }
         Ok(hit)
     }
 
@@ -525,6 +568,8 @@ impl Recognizer<'_> {
 
     fn _gen_fn(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             ((matches!(me.peek(), Tok::Ident(w) if w == "gen") && matches!(me.ahead(1), Tok::Fn))
@@ -532,11 +577,16 @@ impl Recognizer<'_> {
                 && (me._fn_decl()? || (me.committed(p0) && me.expected("Fn")?)))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::GenFn, open, start)?;
+        }
         Ok(hit)
     }
 
     fn _mut_fn(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             ((matches!(me.peek(), Tok::Mut) && matches!(me.ahead(1), Tok::Fn))
@@ -544,6 +594,9 @@ impl Recognizer<'_> {
                 && (me._fn_decl()? || (me.committed(p0) && me.expected("Fn")?)))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::MutFn, open, start)?;
+        }
         Ok(hit)
     }
 
@@ -594,6 +647,8 @@ impl Recognizer<'_> {
 
     fn _params(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::LParen)
@@ -601,11 +656,16 @@ impl Recognizer<'_> {
                 && (me.eat(&Tok::RParen) || (me.committed(p0) && me.expected("RParen")?)))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::Params, open, start)?;
+        }
         Ok(hit)
     }
 
     fn _param(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             (me._ident()?
@@ -620,6 +680,9 @@ impl Recognizer<'_> {
             }); true }))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::Param, open, start)?;
+        }
         Ok(hit)
     }
 
@@ -650,6 +713,8 @@ impl Recognizer<'_> {
 
     fn _ret(&mut self, l_name: Capture) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             (me.eat(&Tok::Arrow)
@@ -670,6 +735,9 @@ impl Recognizer<'_> {
             ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::Ret, open, start)?;
+        }
         Ok(hit)
     }
 
@@ -1261,6 +1329,8 @@ impl Recognizer<'_> {
 
     pub(super) fn _type(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             (me._inter()?
@@ -1272,6 +1342,9 @@ impl Recognizer<'_> {
             }) || me.cur == p { break; } } true }))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::Type, open, start)?;
+        }
         Ok(hit)
     }
 
@@ -1558,6 +1631,8 @@ impl Recognizer<'_> {
 
     fn _field(&mut self) -> R {
         let me = self;
+        let open = me.mark();
+        let start = me.cur;
         let hit = ({
             let p0 = me.save();
             (me._ident()?
@@ -1602,6 +1677,9 @@ impl Recognizer<'_> {
             ) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
             || { me.back(p0); false }
         });
+        if hit {
+            me.closed(Hook::Field, open, start)?;
+        }
         Ok(hit)
     }
 

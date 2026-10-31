@@ -89,6 +89,8 @@ pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
 pub const GEN_ENTRY_MODULE_CODE: &str = "__vyrnGenModuleCode";
 pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
 pub const GEN_ENTRY_CODE_RUNS: &str = "__vyrnGenCodeRuns";
+pub const GEN_ENTRY_VYRN_MODULE: &str = "__vyrnGenVyrnModule";
+pub const GEN_ENTRY_VYRN_TYPE: &str = "__vyrnGenVyrnType";
 pub const GEN_ENTRY_TYPE_ARG: &str = "__vyrnGenTypeArg";
 
 /// The nullary entry `contractOf(contract)` calls, one per contract.
@@ -2395,9 +2397,9 @@ impl<'a> Checker<'a> {
             {
                 return Err(cerr!(line, GenOnlyType, name = n));
             }
-            Type::Named(n) if n == "Token" && self.decl("Token").is_none() => {
+            Type::Named(n) if crate::ast::is_gen_record(n) && self.decl(n).is_none() => {
                 if !self.frame.borrow().in_gen {
-                    return Err(cerr!(line, GenOnlyType, name = "Token"));
+                    return Err(cerr!(line, GenOnlyType, name = n));
                 }
                 return Ok(());
             }
@@ -4202,10 +4204,10 @@ impl<'a> Checker<'a> {
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
         let decl = self.decl(name);
-        // `Token` has no declaration; `types::record_fields` states its
+        // A generation record has no declaration; `types::record_fields` states its
         // fields. A synthesized decoder builds one in generation code
         // (`vyrn_genwasm`'s `Decoders::materialize`).
-        if decl.is_none() && !(name == "Token" && self.frame.borrow().in_gen) {
+        if decl.is_none() && !(crate::ast::is_gen_record(name) && self.frame.borrow().in_gen) {
             return self.judged();
         }
         let named = Type::Named(name.to_string());
@@ -5041,6 +5043,8 @@ impl<'a> Checker<'a> {
                     "render" => "`render` is",
                     "lex" => "`lex` is",
                     "codeRuns" => "`codeRuns` is",
+                    "vyrnModule" => "`vyrnModule` is",
+                    "vyrnType" => "`vyrnType` is",
                     "syntaxParser" => "`syntaxParser` is",
                     "name" => "`name` is",
                     "diag" => "`diag` is",

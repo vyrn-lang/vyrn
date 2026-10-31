@@ -22,8 +22,7 @@
 #[allow(unused_variables, unused_parens, clippy::all)]
 mod rules;
 
-use rules::Hook;
-pub use rules::Kind;
+pub use rules::{Hook, Kind};
 
 use crate::ast::{Capability, OPEN_RULE_NAME};
 use crate::diagnostics::Diagnostic;
@@ -60,6 +59,18 @@ pub enum Event {
     Skipped(u32),
     /// A declaration closed.
     Item,
+}
+
+/// A hook's rule that matched, in a reader's run: the token it opened at, the token it
+/// stopped before, and whether that token's first `>` has gone.
+#[derive(Debug, Clone, Copy)]
+pub struct Spanned {
+    pub hook: Hook,
+    pub from: u32,
+    pub to: u32,
+    pub split: bool,
+    /// The event count as the rule closed: a backtrack below it drops the rule.
+    events: u32,
 }
 
 /// A run's record, read by [`crate::parser`].
@@ -149,6 +160,40 @@ fn run<'t>(
     words.extend(run_words);
     words.sort_unstable();
     Recognized { errors, words }
+}
+
+/// What a reader starts from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start {
+    Module,
+    Type,
+}
+
+/// Reads `tokens` from `start` and returns each hook's rule that matched, in the order
+/// the rules closed. A declaration a recovery dropped has none, and a function's body
+/// stays unread, so a mistake in it does not drop the function. A `Type` that does not
+/// read has none at all.
+pub fn nodes(tokens: &[Token], start: Start) -> Vec<Spanned> {
+    let answers = HashSet::new();
+    let cx = Cx {
+        skim: true,
+        ..Cx::plain(&answers)
+    };
+    let mut r = Recognizer::over(tokens, cx, &[]);
+    r.keep_nodes = true;
+    let read = match start {
+        Start::Module => r._module(),
+        // A `type` declaration's record: a field may refine its type.
+        Start::Type => {
+            r.flags.collect = true;
+            r._type()
+        }
+    };
+    if matches!(read, Ok(true)) {
+        r.nodes
+    } else {
+        Vec::new()
+    }
 }
 
 /// Reads a file.
@@ -283,6 +328,9 @@ struct Recognizer<'t> {
     holes: Vec<HoleRun>,
     /// Whether a reader wants the words of the text a recovery drops.
     keep_words: bool,
+    /// Whether a reader wants [`Recognizer::nodes`].
+    keep_nodes: bool,
+    nodes: Vec<Spanned>,
     /// The words of the text a recovery dropped from `events`.
     dropped_words: Vec<usize>,
     /// See [`Run::skips`].
@@ -338,6 +386,8 @@ impl<'t> Recognizer<'t> {
             events: Vec::with_capacity(toks.len()),
             holes: Vec::new(),
             keep_words: false,
+            keep_nodes: false,
+            nodes: Vec::new(),
             dropped_words: Vec::new(),
             skips: Vec::new(),
             answered: Vec::new(),
@@ -462,7 +512,7 @@ impl<'t> Recognizer<'t> {
     #[inline]
     fn close(&mut self, open: u32, hit: bool) {
         if !hit {
-            self.events.truncate(open as usize);
+            self.cut_events(open as usize);
         } else {
             self.record(Event::Close(open));
         }
@@ -481,7 +531,27 @@ impl<'t> Recognizer<'t> {
             Hook::TestBody => self.cx.imported,
             _ => false,
         };
-        skip.then(|| self.skip_braces())
+        skip.then(|| {
+            let start = self.cur;
+            let hit = self.skip_braces();
+            if matches!(hit, Ok(true)) {
+                self.node(hook, start);
+            }
+            hit
+        })
+    }
+
+    /// Records for a reader that the rule of `hook` matched from `start` to the cursor.
+    fn node(&mut self, hook: Hook, start: Cursor) {
+        if self.keep_nodes && self.looking == 0 {
+            self.nodes.push(Spanned {
+                hook,
+                from: start.at,
+                to: self.cur.at,
+                split: self.cur.split,
+                events: self.events.len() as u32,
+            });
+        }
     }
 
     /// Moves past one `{ .. }` group without reading it.
@@ -510,6 +580,7 @@ impl<'t> Recognizer<'t> {
     /// Reads the rule `hook` that matched from `start`, with its events from `open`,
     /// and raises the rows that rule holds.
     fn closed(&mut self, hook: Hook, open: u32, start: Cursor) -> Result<(), Refused> {
+        self.node(hook, start);
         let toks = self.toks;
         let name = |at: u32| match &toks[at as usize].tok {
             Tok::Ident(name) => name.as_str(),
@@ -650,6 +721,19 @@ impl<'t> Recognizer<'t> {
                 self.answers_to(name(local));
             }
             Hook::SkimBody | Hook::TestBody => {}
+            Hook::Module
+            | Hook::Item
+            | Hook::Export
+            | Hook::GenFn
+            | Hook::MutFn
+            | Hook::Import
+            | Hook::Source
+            | Hook::FnDecl
+            | Hook::Params
+            | Hook::Param
+            | Hook::Ret
+            | Hook::Type
+            | Hook::Field => {}
         }
         Ok(())
     }
@@ -773,7 +857,17 @@ impl<'t> Recognizer<'t> {
     #[inline]
     fn back(&mut self, to: Save) {
         self.cur = to.cur;
-        self.events.truncate(to.events as usize);
+        self.cut_events(to.events as usize);
+    }
+
+    /// Takes the events back to `len`, with a reader's nodes that closed past them.
+    fn cut_events(&mut self, len: usize) {
+        self.events.truncate(len);
+        if self.keep_nodes {
+            while self.nodes.last().is_some_and(|n| n.events as usize > len) {
+                self.nodes.pop();
+            }
+        }
     }
 
     /// Whether a sequence that started at `from` has committed.
@@ -898,7 +992,7 @@ impl<'t> Recognizer<'t> {
             });
             self.dropped_words.extend(words);
         }
-        self.events.truncate(from);
+        self.cut_events(from);
     }
 
     /// Skips one token, then to the next token at brace depth 0 that `starts`

@@ -447,6 +447,33 @@ pub fn gen_code_runs_lit(source: &str) -> Expr {
     }
 }
 
+/// Returns the `vyrnModule` or `vyrnType` answer as an `Array<VyrnNode>` record
+/// literal, which the wasm generation engine encodes for the guest.
+pub fn gen_vyrn_nodes_lit(source: &str, start: crate::recognizer::Start) -> Expr {
+    let ints = |ix: Vec<usize>| Expr::ArrayLit {
+        id: Id::NEW,
+        elems: ix.into_iter().map(|i| Expr::int(i as i64)).collect(),
+        line: 0,
+    };
+    Expr::ArrayLit {
+        id: Id::NEW,
+        elems: (crate::reader::read(source, start).into_iter())
+            .map(|n| Expr::StructLit {
+                id: Id::NEW,
+                name: "VyrnNode".to_string(),
+                fields: vec![
+                    ("rule".to_string(), Expr::str(n.rule)),
+                    ("start".to_string(), Expr::int(n.start as i64)),
+                    ("stop".to_string(), Expr::int(n.stop as i64)),
+                    ("kids".to_string(), ints(n.kids)),
+                ],
+                line: 0,
+            })
+            .collect(),
+        line: 0,
+    }
+}
+
 /// Runs the lexer over `source` as `(kind, text, line, col)` rows: the one
 /// place the `lex` builtin's token list is decided.
 pub(crate) fn lexed(source: &str) -> Vec<(String, String, i64, i64)> {

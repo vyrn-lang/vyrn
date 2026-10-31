@@ -359,15 +359,24 @@ pub enum LogSink {
 /// `Info`: `trace` and `debug` are dropped unless a `logging` block lowers it.
 pub const DEFAULT_LOG_LEVEL: usize = 2;
 
+/// Whether `n` is a record only generation reads, with no declaration: what `lex`,
+/// `vyrnModule` and `vyrnType` answer. A program pays nothing for one it does not name;
+/// `types::record_fields` states the fields.
+pub fn is_gen_record(n: &str) -> bool {
+    n == "Token" || n == "VyrnNode"
+}
+
 /// The builtins spelled as ordinary identifiers rather than with an `@` prefix.
 ///
 /// They are not reserved: a module that declares or imports one means its own.
 /// The question is asked of the calling module's scope, never of the linked
 /// program (see [`Program::surface_shadows`]).
-pub const SURFACE_BUILTINS: [&str; 8] = [
+pub const SURFACE_BUILTINS: [&str; 10] = [
     "render",
     "lex",
     "codeRuns",
+    "vyrnModule",
+    "vyrnType",
     "syntaxParser",
     "name",
     "diag",
