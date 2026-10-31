@@ -404,6 +404,9 @@ pub(super) trait Hooks {
     fn word(&mut self, start: usize, end: usize) -> Result<(), Box<Diagnostic>> {
         Ok(())
     }
+    fn splice(&mut self, start: usize, end: usize) -> Result<(), Box<Diagnostic>> {
+        Ok(())
+    }
     fn number(&mut self, start: usize, end: usize) -> Result<(), Box<Diagnostic>> {
         Ok(())
     }
@@ -616,7 +619,8 @@ impl<'s, H: Hooks> Scanner<'s, H> {
             || (matches!(self.peek_byte(), Some(b'0'..=b'9')) && self.number()?)
             || (matches!(self.peek_byte(), Some(b'A'..=b'Z' | b'_' | b'a'..=b'z' | b'\x80'..=b'\xff')) && self.word()?)
             || (matches!(self.peek_byte(), Some(b'/')) && self.doc()?)
-            || self.punct()?;
+            || self.punct()?
+            || (matches!(self.peek_byte(), Some(b'\x00')) && self.splice()?);
         if !hit {
             return Ok(false);
         }
@@ -635,6 +639,20 @@ impl<'s, H: Hooks> Scanner<'s, H> {
             return Ok(false);
         }
         self.hooks.word(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn splice(&mut self) -> Result<bool, Box<Diagnostic>> {
+        let start = self.pos;
+        let hit = {
+            let p0 = self.pos;
+            (self.eat_byte(b'\x00') && { self.eat_while(|c| c.is_alphanumeric() || c == '_' || c == '\0'); true })
+            || { self.pos = p0; false }
+        };
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.splice(start, self.pos)?;
         Ok(true)
     }
 

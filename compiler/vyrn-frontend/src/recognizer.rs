@@ -234,21 +234,11 @@ pub(crate) fn block<T>(
     Ok(read(r.view()))
 }
 
-/// The refusals of `tokens` read as a file, with `scope` bound.
-pub(crate) fn decl_refusals(
-    tokens: &[Token],
-    scope: &[&str],
-    answers: &HashSet<String>,
-) -> Vec<Diagnostic> {
-    let mut r = Recognizer::over(tokens, Cx::plain(answers), scope);
-    let _ = r._module();
-    r.sorted_refusals()
-}
-
-/// Whether `tokens` are one expression and nothing else, with `scope` bound.
-pub(crate) fn whole_expr(tokens: &[Token], scope: &[&str], answers: &HashSet<String>) -> bool {
-    let mut r = Recognizer::over(tokens, Cx::plain(answers), scope);
-    matches!(r._expr(), Ok(true)) && matches!(r.peek(), Tok::Eof)
+/// The first refusal of `tokens` read as a code quote's text ([`lexer::lex_quote`]).
+pub(crate) fn quote_refusal(tokens: &[Token], answers: &HashSet<String>) -> Option<Diagnostic> {
+    let mut r = Recognizer::over(tokens, Cx::plain(answers), &[]);
+    let _ = r._quote();
+    r.sorted_refusals().into_iter().next()
 }
 
 /// Reads the one type in `tokens`, or `None`.
@@ -259,12 +249,6 @@ pub(crate) fn read_type<T>(
 ) -> Option<T> {
     let mut r = Recognizer::over(tokens, Cx::plain(answers), &[]);
     matches!(r._type(), Ok(true)).then(|| read(r.view()))
-}
-
-/// Whether `tokens` are one type and nothing else, with `scope` bound.
-pub(crate) fn whole_type(tokens: &[Token], scope: &[&str], answers: &HashSet<String>) -> bool {
-    let mut r = Recognizer::over(tokens, Cx::plain(answers), scope);
-    matches!(r._type(), Ok(true)) && matches!(r.peek(), Tok::Eof)
 }
 
 /// A place in the tokens: the token, and whether its first `>` has gone.
@@ -582,15 +566,17 @@ impl<'t> Recognizer<'t> {
     fn closed(&mut self, hook: Hook, open: u32, start: Cursor) -> Result<(), Refused> {
         self.node(hook, start);
         let toks = self.toks;
+        let quote = self.flags.quote;
+        // A word that holds a hole names nothing yet, so it matches no other word.
         let name = |at: u32| match &toks[at as usize].tok {
-            Tok::Ident(name) => name.as_str(),
+            Tok::Ident(name) if !(quote && name.contains('\0')) => name.as_str(),
             _ => "",
         };
         let first = &toks[start.at as usize];
         let open = open as usize;
         match hook {
             Hook::TName => {
-                self.scope.push(name(start.at));
+                self.bind(name(start.at));
                 self.params = self.scope.len();
             }
             Hook::IHead => {
@@ -600,7 +586,7 @@ impl<'t> Recognizer<'t> {
                     self.refuse(at, |_| rule!(ImplAssocTypeClash, aname))?;
                 }
             }
-            Hook::IBind => self.scope.push(name(start.at + 1)),
+            Hook::IBind => self.bind(name(start.at + 1)),
             Hook::TypeName => {
                 self.flags.scoped = self.scope.contains(&name(start.at));
                 if self.flags.scoped && self.looking == 0 {
@@ -738,6 +724,14 @@ impl<'t> Recognizer<'t> {
         Ok(())
     }
 
+    /// Adds `name` to the names a type reads as bound. A word that holds a hole binds
+    /// nothing.
+    fn bind(&mut self, name: &'t str) {
+        if !name.is_empty() {
+            self.scope.push(name);
+        }
+    }
+
     /// Records that the closed declaration's `name` answers to a method-form builtin
     /// spelling, if it spells one ([`crate::prelude::Builtin::method`]): a written
     /// `recv.m(..)` with `m` among these calls the module's `m`, not the builtin.
@@ -784,6 +778,9 @@ impl<'t> Recognizer<'t> {
     /// module matches any one (a page's `head` varies). Refused: a second open rule,
     /// and one name as both a `let` and a `fn` member.
     fn member(&mut self, member: &'t str, value: bool, line: usize) -> Result<(), Refused> {
+        if member.is_empty() {
+            return Ok(());
+        }
         let at = (line, self.here().1);
         let name = self.contract;
         if let Some(prev) = self.members.iter().find(|m| m.name == member) {
@@ -808,6 +805,16 @@ impl<'t> Recognizer<'t> {
             line,
         });
         Ok(())
+    }
+
+    /// `splice`: passes a hole that stands for items of its list. It records nothing,
+    /// so a tree a row reads holds none of them.
+    fn splice(&mut self) -> bool {
+        let hit = matches!(self.peek(), Tok::Ident(w) if w == "\0");
+        if hit {
+            self.bump();
+        }
+        hit
     }
 
     /// `split '>'`: takes one `>`. A `>>` leaves a `>` and a `>=` leaves an `=`.
@@ -1127,10 +1134,7 @@ impl<'t> Recognizer<'t> {
             _ => unreachable!("matched above"),
         };
         if quote {
-            let answers = self.cx.answers;
-            if let Some((rule, at)) =
-                parser::skeleton_refusal(parts, exprs.len(), at, &self.scope, answers)
-            {
+            if let Some((rule, at)) = parser::skeleton_refusal(parts, at, self.cx.answers) {
                 return self.refuse(at, |_| rule);
             }
         }
@@ -1148,7 +1152,8 @@ impl<'t> Recognizer<'t> {
 
     /// Lexes and reads one hole. Its tokens count from its own line 1, column 1, so
     /// they move to where the hole stands, and a node's line and a lambda's key are its
-    /// own. Its recovered refusals are its own and go with it.
+    /// own. Its recovered refusals are its own and go with it. An interpolation in a
+    /// quote's text may hold the quote's own hole.
     fn read_hole(
         &self,
         hole: &Hole,
@@ -1156,7 +1161,11 @@ impl<'t> Recognizer<'t> {
         wrap: fn(String) -> Rule,
         trailing: fn(&str) -> Rule,
     ) -> Result<HoleRun, Rule> {
-        let mut toks = lexer::lex(&hole.src).map_err(|e| wrap(e.render()))?;
+        let lex = match self.flags.quote {
+            true => lexer::lex_quote,
+            false => lexer::lex,
+        };
+        let mut toks = lex(&hole.src).map_err(|e| wrap(e.render()))?;
         for t in &mut toks {
             if t.line == 1 {
                 t.col += hole.col - 1;
@@ -1166,6 +1175,7 @@ impl<'t> Recognizer<'t> {
         let run = {
             let cx = Cx::plain(self.cx.answers);
             let mut sub = Recognizer::over(&toks, cx, &self.scope);
+            sub.flags.quote = self.flags.quote;
             if inner(&mut sub).is_err() {
                 let detail = sub.refusal.take().map_or_else(String::new, |d| d.message);
                 return Err(wrap(detail));

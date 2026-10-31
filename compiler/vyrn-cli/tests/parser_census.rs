@@ -65,7 +65,6 @@ fn parser_sections() -> Vec<Section> {
         sec("fn binop_text", Shared),
         sec("fn if_let(", Desugar),
         sec("fn is_separator", Recovery),
-        sec("fn as_fn_body", Desugar),
         sec("fn skeleton_refusal", Recovery),
         sec("fn store_target", Grammar),
         sec("fn build(", Shared),

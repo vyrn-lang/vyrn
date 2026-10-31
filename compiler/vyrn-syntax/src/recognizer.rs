@@ -1,6 +1,6 @@
 //! Writes a grammar's syntactic rules as a recognizer over `vyrn-frontend`'s tokens.
 //!
-//! [`recognizer`] lowers each syntactic rule that `Module` reaches to one method
+//! [`recognizer`] lowers each syntactic rule that a start rule reaches to one method
 //! of the host's `Recognizer`. A literal is a comparison on `Tok`, and a lexical
 //! rule is the token its match lexes to ([`TERMINALS`]). A method returns
 //! `Ok(false)` with the cursor unmoved when its rule does not match, and `Err`
@@ -28,6 +28,7 @@ const TERMINALS: &[(&str, &str)] = &[
     ("byte", "Tok::Byte(_)"),
     ("doc", "Tok::Doc(_)"),
     ("plainOrHoled", "Tok::Str(_) | Tok::TemplateStr { .. }"),
+    ("splice", "Tok::Ident(w) if w == \"\\0\""),
 ];
 
 /// The rules with a node in the event log. The builder tells every other rule from
@@ -81,12 +82,13 @@ const SKIPPED: &[&str] = &["SkimBody", "TestBody"];
 const ROOT: &str = "Module";
 
 /// The other rules the host starts a run with.
-const ENTRIES: &[&str] = &["Type", "Block"];
+const ENTRIES: &[&str] = &["Type", "Block", "Quote"];
 
 /// Returns the Rust source of `g`'s syntactic rules, or why they do not lower.
 pub fn recognizer(g: &Grammar) -> Result<String, String> {
     let root = g.rule(ROOT).ok_or("the grammar has no `Module` rule")?;
-    let rules = reachable(g, root);
+    let entries = (ENTRIES.iter()).filter_map(|name| g.rule(name));
+    let rules = reachable(g, std::iter::once(root).chain(entries).collect());
     let l = Lower {
         g,
         free: free_labels(g, &rules),
@@ -94,11 +96,10 @@ pub fn recognizer(g: &Grammar) -> Result<String, String> {
     l.emit(&rules)
 }
 
-/// The syntactic rules `root` reaches, in file order. A lexical rule is a token,
+/// The syntactic rules `todo` reaches, in file order. A lexical rule is a token,
 /// so the walk stops there.
-fn reachable(g: &Grammar, root: RuleId) -> Vec<RuleId> {
+fn reachable(g: &Grammar, mut todo: Vec<RuleId>) -> Vec<RuleId> {
     let mut seen = vec![false; g.rules.len()];
-    let mut todo = vec![root];
     while let Some(r) = todo.pop() {
         if !g.body(r).syntactic || std::mem::replace(&mut seen[r.0 as usize], true) {
             continue;
@@ -478,6 +479,7 @@ impl Lower<'_> {
         match &*rule.name {
             "string" => return Ok("me.string(false)?".into()),
             "tagged" => return Ok("me.string(true)?".into()),
+            "splice" => return Ok("me.splice()".into()),
             _ => {}
         }
         let (_, tok) = (TERMINALS.iter())
@@ -680,7 +682,7 @@ const PRELUDE: &str = "\
 // fresh run, and VYRN_PIN=write rewrites it.
 
 //! The syntactic rules of `vyrn.syntax` as Rust: one method of [`Recognizer`] per
-//! rule that `Module` reaches. A method returns `Ok(false)` with the cursor
+//! rule that a start rule reaches. A method returns `Ok(false)` with the cursor
 //! unmoved when its rule does not match, and `Err` when the rule refuses.
 
 use super::{Capture, Recognizer, R};

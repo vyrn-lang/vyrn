@@ -7,7 +7,7 @@ pub(crate) use grammar::punct_tok;
 pub use grammar::{Tok, CONTEXTUAL, KEYWORDS, PUNCT_SPELLINGS};
 
 use crate::diagnostics::Diagnostic;
-use crate::rules::{refuse, Rule};
+use crate::rules::{refuse, rule, Rule};
 
 /// An interpolation hole: its raw source and where that source starts, so the
 /// nodes parsed from it carry their own lines and columns (#471).
@@ -141,8 +141,15 @@ pub struct Scan {
 /// literal's payload is decoded here and its raw text kept beside it, so
 /// neither reader scans again.
 pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
+    scan_as(src, false)
+}
+
+/// [`scan`] with `quote` saying whether `src` is a code quote's text, where a NUL is
+/// a hole.
+fn scan_as(src: &str, quote: bool) -> Result<Scan, Diagnostic> {
     let items = Items {
         src,
+        quote,
         items: Vec::new(),
         escapes: Vec::new(),
         lines: LineCol::START,
@@ -208,6 +215,8 @@ enum Escape {
 /// The items of one scan, built as the scanner reports its rules.
 struct Items<'s> {
     src: &'s str,
+    /// Whether the source is a code quote's text.
+    quote: bool,
     items: Vec<Triv>,
     /// The escapes of the string literal being scanned, each with its byte
     /// range from the backslash; the `string` hook empties it.
@@ -280,6 +289,30 @@ impl grammar::Hooks for Items<'_> {
         let text = &self.src[start..end];
         let tok = grammar::keyword(text).unwrap_or_else(|| Tok::Ident(text.to_string()));
         self.push(TrivKind::Tok(tok), at, at.0, start..end, end);
+        Ok(())
+    }
+
+    fn splice(&mut self, start: usize, end: usize) -> Result<(), Box<Diagnostic>> {
+        if !self.quote {
+            return Err(self.refuse(start, rule!(UnexpectedChar, c = "'\\0'")));
+        }
+        let word = |t: &Tok| matches!(t, Tok::Ident(_)) || t.keyword_text().is_some();
+        let src = self.src;
+        match self.items.last_mut() {
+            Some(last)
+                if self.end == start && matches!(&last.kind, TrivKind::Tok(t) if word(t)) =>
+            {
+                last.span.end = end;
+                let text = src[last.span.clone()].to_string();
+                last.kind = TrivKind::Tok(Tok::Ident(text));
+                self.end = end;
+            }
+            _ => {
+                let at = self.lines.of(src, start);
+                let tok = TrivKind::Tok(Tok::Ident(src[start..end].to_string()));
+                self.push(tok, at, at.0, start..end, end);
+            }
+        }
         Ok(())
     }
 
@@ -435,6 +468,13 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
     Ok(tokens(scan(src)?))
 }
 
+/// Tokenizes a code quote's text, each NUL a hole: a word, alone or part of a longer
+/// one. Only [`crate::parser::skeleton_refusal`] and the holes of the text it reads
+/// come here, and no part holds a NUL, because no string does.
+pub(crate) fn lex_quote(src: &str) -> Result<Vec<Token>, Diagnostic> {
+    Ok(tokens(scan_as(src, true)?))
+}
+
 /// The tokens of a [`scan`], comments dropped and `Eof` last.
 pub fn tokens(scanned: Scan) -> Vec<Token> {
     let mut out = Vec::with_capacity(scanned.items.len() + 1);
@@ -461,6 +501,18 @@ pub fn tokens(scanned: Scan) -> Vec<Token> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_nul_is_a_hole_only_in_a_quote() {
+        for src in ["\0", "a\0", "\0a", "fn \0"] {
+            let err = lex(src).err().expect("refused");
+            assert_eq!(err.message, "unexpected character '\\0'", "{src:?}");
+            let word = lex_quote(src).expect("reads");
+            assert!(word
+                .iter()
+                .any(|t| matches!(&t.tok, Tok::Ident(w) if w.contains('\0'))));
+        }
+    }
 
     /// A string literal's error sits where the literal starts, as its token does:
     /// the line it reports holds the column it reports.

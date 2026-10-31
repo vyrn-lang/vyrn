@@ -89,6 +89,15 @@ mod tests {
     }
 
     #[test]
+    fn a_hole_has_no_nodes_outside_a_quote() {
+        for src in ["\0", "fn \0() {}", "fn f(\0) {}", "type T = { \0 }"] {
+            assert_eq!(rows(src, Start::Module), Vec::<String>::new(), "{src:?}");
+        }
+        assert_eq!(rows("\0", Start::Type), Vec::<String>::new());
+        assert_eq!(rows("{ \0 }", Start::Type), Vec::<String>::new());
+    }
+
+    #[test]
     fn a_type_stops_before_its_where() {
         assert_eq!(
             rows("Int64 where value > 0", Start::Type),
