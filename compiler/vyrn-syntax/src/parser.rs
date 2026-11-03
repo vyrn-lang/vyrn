@@ -32,7 +32,7 @@ use std::fmt::Write;
 use std::rc::Rc;
 
 use crate::gen::walk;
-use crate::lower::{free_labels, miss, Miss};
+use crate::lower::{can_miss, fallible, free_labels, miss, Miss};
 use crate::shape::{shapes, type_name, Field, Mult, Shape, Ty};
 use crate::{At, Builtin, Embed, Grammar, HoleSrc, Level, Lit, Recover, Refused, RuleId, Throw, E};
 
@@ -72,6 +72,7 @@ pub fn parser(g: &Grammar) -> Result<String, Refused> {
     let mut w = Writer {
         g,
         free: free_labels(g, &rules),
+        fallible: fallible(g),
         rows,
         o: String::new(),
         ind: 0,
@@ -347,6 +348,8 @@ struct Writer<'g> {
     g: &'g Grammar,
     /// The labels each rule reads that it does not bind: its parameters.
     free: Vec<BTreeSet<Rc<str>>>,
+    /// Whether each rule can fail without a refusal.
+    fallible: Vec<bool>,
     rows: BTreeMap<Rc<str>, Vec<Rc<str>>>,
     o: String,
     ind: usize,
@@ -1152,10 +1155,17 @@ impl Writer<'_> {
     /// rule, an element that fails after the sequence moved is a refusal unless a
     /// predicate is looking. A label binds the elements after it. When `reset`, a
     /// failure takes back the fields this sequence kept; a rule's whole body needs no
-    /// reset, because its function answers `None` and its locals go.
+    /// reset, because its function answers `None` and its locals go. A first element
+    /// that fails moved nothing, so only a later element that can fail needs the
+    /// commit test and the way back.
     fn seq(&mut self, v: &[E], reset: bool) -> Result<String, Refused> {
         let depth = self.scope.len();
-        let (q, l) = self.save();
+        let back = v[1..].iter().any(|x| can_miss(&self.fallible, x));
+        let (q, l) = if back {
+            self.save()
+        } else {
+            Default::default()
+        };
         let h = self.local("h");
         let resets = self.resets(v, reset);
         for x in v {
@@ -1182,7 +1192,7 @@ impl Writer<'_> {
                 0 => self.put(&format!("let mut {h} = "), x)?,
                 _ => self.put(&format!("{h} = "), x)?,
             }
-            if i > 0 && self.syntactic() {
+            if i > 0 && self.syntactic() && can_miss(&self.fallible, x) {
                 self.open(format!(
                     "if !{h} && !p.refused && p.looking == 0 && p.pos != {q} {{"
                 ));
@@ -1208,9 +1218,11 @@ impl Writer<'_> {
             }
             self.close();
         }
-        self.open(format!("if !{h} && !p.refused {{"));
-        self.restore(&q, &l);
-        self.close();
+        if back {
+            self.open(format!("if !{h} && !p.refused {{"));
+            self.restore(&q, &l);
+            self.close();
+        }
         Ok(h)
     }
 

@@ -1,5 +1,6 @@
 //! What the writers of a grammar's rules share: which labels a rule reads from its
-//! callers, and which refusal a committed failure states.
+//! callers, which rules can fail without a refusal, and which refusal a committed
+//! failure states.
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -23,6 +24,36 @@ pub(crate) fn free_labels(g: &Grammar, rules: &[RuleId]) -> Vec<BTreeSet<Rc<str>
         if !moved {
             return free;
         }
+    }
+}
+
+/// Whether each rule can fail without a refusal, by rule index. The answers only grow
+/// and each is one bit, so the iteration to the least fixed point ends.
+pub(crate) fn fallible(g: &Grammar) -> Vec<bool> {
+    let mut can = vec![false; g.rules.len()];
+    loop {
+        let mut moved = false;
+        for (i, rule) in g.rules.iter().enumerate() {
+            let f = can_miss(&can, &rule.body);
+            moved |= f != can[i];
+            can[i] = f;
+        }
+        if !moved {
+            return can;
+        }
+    }
+}
+
+/// Whether `e` can fail without a refusal, given [`fallible`].
+pub(crate) fn can_miss(fallible: &[bool], e: &E) -> bool {
+    match e {
+        E::Star(_) | E::Opt(_) | E::Throw(_) => false,
+        E::Seq(v) => v.iter().any(|x| can_miss(fallible, x)),
+        E::Alt(v) => v.iter().all(|x| can_miss(fallible, x)),
+        E::Plus(x) | E::Field(_, x) => can_miss(fallible, x),
+        E::Embed(em) => can_miss(fallible, &em.extent),
+        E::Ref(r) => fallible[r.0 as usize],
+        _ => true,
     }
 }
 
