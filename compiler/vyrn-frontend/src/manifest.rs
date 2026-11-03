@@ -518,6 +518,40 @@ fn project_lock_path(project_dir: &Path, what: &str) -> PathBuf {
 /// mtime lies within it of a check can change again without moving its mtime.
 pub const MTIME_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// A file's settled stamp: its length, its two times and, on unix, its inode.
+/// The times are the modification and change times on unix, else the
+/// modification and creation times. Only [`settled_stamp`] makes one, and an
+/// authenticated generator cache entry carries one back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stamp(pub(crate) String);
+
+/// The stamp of the file at `path`, once both its times lie [`MTIME_SLACK`]
+/// before now; `None` for a directory, an unreadable file or a time inside the
+/// slack. A write through the filesystem after the stat moves a time past the
+/// one stamped, so a later equal stamp proves the bytes unchanged. A tool that
+/// sets a time explicitly can forge that proof only where the second time is
+/// a creation time: a change time is set from the clock.
+pub fn settled_stamp(path: &Path) -> Option<Stamp> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let m = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    #[cfg(unix)]
+    let (second, id) = {
+        use std::os::unix::fs::MetadataExt;
+        let since =
+            std::time::Duration::new(m.ctime().try_into().ok()?, m.ctime_nsec().try_into().ok()?);
+        (UNIX_EPOCH.checked_add(since)?, m.ino())
+    };
+    #[cfg(not(unix))]
+    let (second, id) = (m.created().ok()?, 0);
+    let now = SystemTime::now();
+    let settled = |t: SystemTime| match now.duration_since(t) {
+        Ok(age) if age >= MTIME_SLACK => Some(t.duration_since(UNIX_EPOCH).ok()?.as_nanos()),
+        _ => None,
+    };
+    let (first, second) = (settled(m.modified().ok()?)?, settled(second)?);
+    Some(Stamp(format!("{}:{first}:{second}:{id}", m.len())))
+}
+
 /// The user's module cache: `~/.vyrn/cache/sha256/<hex>`.
 pub fn cache_dir() -> PathBuf {
     Path::new(&home()).join(".vyrn/cache/sha256")

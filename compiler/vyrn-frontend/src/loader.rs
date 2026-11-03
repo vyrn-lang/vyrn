@@ -26,6 +26,12 @@ pub trait ModuleResolver {
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
         Err(crate::trap::io_at("listerr", resolved))
     }
+    /// The settled stamp of the file `read` serves for `resolved`, which the
+    /// generator cache trusts in place of reading it. `None`, the default, for a
+    /// resolver that serves anything but the disk's bytes at the stat.
+    fn stamp(&self, _resolved: &str) -> Option<crate::manifest::Stamp> {
+        None
+    }
     /// Returns a cached generator output by its content-address key.
     /// The default is a permanent miss.
     fn gen_cache_get(&self, _key: &str) -> Option<String> {
@@ -98,6 +104,9 @@ impl ModuleResolver for WithRoot<'_> {
     }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
         self.resolver.list_kinds(resolved)
+    }
+    fn stamp(&self, resolved: &str) -> Option<crate::manifest::Stamp> {
+        (resolved != self.key).then(|| self.resolver.stamp(resolved))?
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         self.resolver.gen_cache_get(key)
@@ -172,6 +181,9 @@ impl ModuleResolver for DiskResolver {
         let mut names = read_dir_names(resolved)?;
         names.sort();
         Ok(names)
+    }
+    fn stamp(&self, resolved: &str) -> Option<crate::manifest::Stamp> {
+        crate::manifest::settled_stamp(std::path::Path::new(resolved))
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         crate::manifest::gen_cache_get(key)
@@ -2285,8 +2297,17 @@ fn unlinked_import(
     usable.then_some(found)
 }
 
-/// A generator cache entry: its recorded `(input, hash)` pairs and its output.
-type CacheEntry = (GenDeps, Written);
+/// A generator cache entry: its recorded `(input, hash)` pairs, the stamps
+/// that vouch for some of them ([`vouched_stamps`]), and its output.
+struct CacheEntry {
+    inputs: GenDeps,
+    stamps: Stamps,
+    written: Written,
+}
+
+/// A settled stamp per recorded file input, by the input's path. An input with
+/// none is read and hashed.
+type Stamps = HashMap<String, crate::manifest::Stamp>;
 
 /// A generation's output and what it depends on.
 pub(crate) struct Generated {
@@ -2680,10 +2701,10 @@ pub(crate) enum GenFault {
 /// share this path and its cache. The key names the compiler, the module, the
 /// gen fn, the arguments and the input roots ([`generator_cache_key`]); the
 /// entry records every input the run read and the generator's sources, and a
-/// hit re-hashes each one. `(cache, memo)`: with `cache` false the output is
-/// neither looked up nor stored; with `memo` a checked generator program is
-/// reused while its sources are unchanged, which the editor's and the tools'
-/// calls ask for.
+/// hit checks each one by its stamp or its hash. `(cache, memo)`: with `cache`
+/// false the output is neither looked up nor stored; with `memo` a checked
+/// generator program is reused while its sources are unchanged, which the
+/// editor's and the tools' calls ask for.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generation(
     gen_mod_key: &str,
@@ -2705,28 +2726,29 @@ pub(crate) fn generation(
     let no_cache = !cache || std::env::var("VYRN_NO_GEN_CACHE").is_ok();
 
     // Cache hit: the entry is one this compiler wrote for this key, it records
-    // the generator's own module, and every recorded input still hashes the
-    // same. An input recorded as absent must still be absent.
+    // the generator's own module, and every recorded input still has its stamp
+    // or hashes the same. An input recorded as absent must still be absent.
     if !no_cache {
         // `inputs` comes from the entry and so agrees with itself: an empty or
         // forged list passes `all`. The call site decides first: an entry that
         // does not record `gen_mod_key` is not this generation.
-        let valid = |inputs: &[(String, String)], read: &mut HashMap<String, Option<String>>| {
-            inputs.iter().any(|(path, _)| path == gen_mod_key) && all_fresh(inputs, resolver, read)
+        let valid = |e: &CacheEntry, read: &mut HashMap<String, Option<String>>| {
+            e.inputs.iter().any(|(path, _)| path == gen_mod_key)
+                && all_fresh(&e.inputs, &e.stamps, resolver, read)
         };
         // The entry this thread last read for the key, then the resolver's. A
         // remembered entry is validated like a read one, and skips the read and
         // the tag check, the cost of a warm keystroke's generator import.
         let remembered = GEN_ENTRIES.with(|m| m.borrow().get(&sources_hash).cloned());
-        let hit = remembered.filter(|e| valid(&e.0, read)).or_else(|| {
+        let hit = remembered.filter(|e| valid(e, read)).or_else(|| {
             let cached = resolver.gen_cache_get(&sources_hash)?;
             let entry = read_cache_entry(&sources_hash, &cached, inner.session.as_deref())?;
-            valid(&entry.0, read).then(|| Rc::new(entry))
+            valid(&entry, read).then(|| Rc::new(entry))
         });
         if let Some(entry) = hit {
             let output = Generated {
-                written: entry.1.clone(),
-                inputs: entry.0.clone(),
+                written: entry.written.clone(),
+                inputs: entry.inputs.clone(),
             };
             GEN_ENTRIES.with(|m| {
                 let mut m = m.borrow_mut();
@@ -2818,9 +2840,10 @@ pub(crate) fn generation(
     // Cache the output under its recorded inputs, for the next load and the
     // LSP's per-keystroke re-analysis.
     if !no_cache && checked.describable {
+        let stamps = vouched_stamps(&inputs, resolver);
         resolver.gen_cache_put(
             &sources_hash,
-            &render_cache_entry(&sources_hash, &inputs, &out.written),
+            &render_cache_entry(&sources_hash, &inputs, &stamps, &out.written),
         );
     }
     Ok(Generated {
@@ -2829,16 +2852,36 @@ pub(crate) fn generation(
     })
 }
 
-/// Whether each recorded input still hashes the same. An input recorded as absent
-/// must still be absent.
+/// Whether each recorded input still has its stamp in `stamps`, or else still
+/// hashes the same. An input recorded as absent must still be absent.
 fn all_fresh(
     inputs: &[(String, String)],
+    stamps: &Stamps,
     resolver: &dyn ModuleResolver,
     read: &mut HashMap<String, Option<String>>,
 ) -> bool {
     inputs.iter().all(|(path, hash)| {
-        current_input_hash(resolver, path, read).unwrap_or_else(|| ABSENT.to_string()) == *hash
+        let unchanged =
+            (stamps.get(path)).is_some_and(|s| resolver.stamp(path).as_ref() == Some(s));
+        unchanged
+            || current_input_hash(resolver, path, read).unwrap_or_else(|| ABSENT.to_string())
+                == *hash
     })
+}
+
+/// The settled stamp of each recorded input that has one, each taken before a
+/// read whose bytes hash as recorded. A write after that stat moves the stamp,
+/// so a stamp never stands for bytes other than the hashed ones, though the
+/// generator read its inputs before the stat. An input changed since the
+/// generator read it gets no stamp, and the next load hashes it.
+fn vouched_stamps(inputs: &[(String, String)], resolver: &dyn ModuleResolver) -> Stamps {
+    (inputs.iter())
+        .filter_map(|(path, hash)| {
+            let stamp = resolver.stamp(path)?;
+            let text = resolver.read(path).ok()?;
+            (content_hash(path, Some(text))? == *hash).then(|| (path.clone(), stamp))
+        })
+        .collect()
 }
 
 /// A generator module loaded and checked as a runnable program, with its
@@ -2907,7 +2950,7 @@ fn checked_generator(
     });
     if let Some(k) = &memo_key {
         let hit = CHECKED_GENS.with(|m| m.borrow().get(k).cloned());
-        let mut fresh = |c: &CheckedGen| all_fresh(&c.sources, resolver, read);
+        let mut fresh = |c: &CheckedGen| all_fresh(&c.sources, &Stamps::new(), resolver, read);
         if let Some(c) = hit.filter(|c| c.describable && (c.checked || !check) && fresh(c)) {
             return Ok(c);
         }
@@ -3020,7 +3063,7 @@ fn restamp_contracts(program: &mut Program, gen_mod_key: &str, std_root: Option<
 ///
 /// The key omits the generator's sources: finding them means parsing the whole
 /// generator graph on every hit. The entry records them among its inputs, so a
-/// hit re-hashes them and misses if any changed. Two versions of a generator
+/// hit checks them and misses if any changed. Two versions of a generator
 /// share one key and take turns owning the entry.
 fn generator_cache_key(
     identity: &str,
@@ -3068,7 +3111,15 @@ fn current_input_hash(
         }),
         None => resolver.read(path).ok(),
     };
-    let hash = HASHES.with(|m| {
+    let hash = content_hash(path, content);
+    inputs.insert(path.to_string(), hash.clone());
+    hash
+}
+
+/// The sha256 of `content`, read from `path`, or the one [`HASHES`] keeps for
+/// the same content there; `None` for no content.
+fn content_hash(path: &str, content: Option<String>) -> Option<String> {
+    HASHES.with(|m| {
         let mut m = m.borrow_mut();
         let hash = match m.get(path).filter(|e| e.content == content) {
             Some(e) => e.hash.clone(),
@@ -3082,9 +3133,7 @@ fn current_input_hash(
         };
         m.insert(path.to_string(), entry);
         hash
-    });
-    inputs.insert(path.to_string(), hash.clone());
-    hash
+    })
 }
 
 /// A generation input's content and its hash, as [`current_input_hash`] last
@@ -3103,20 +3152,29 @@ const ABSENT: &str = "absent";
 /// The cache entry format tag, bumped when an entry's meaning changes.
 /// [`read_cache_entry`] rejects any other tag as a miss, so the generator re-runs
 /// and overwrites the entry.
-const CACHE_ENTRY_TAG: &str = "v5";
+const CACHE_ENTRY_TAG: &str = "v6";
 
 /// Formats this compiler wrote before [`CACHE_ENTRY_TAG`]. Such an entry is
 /// stale, not foreign, so it is ignored without a warning.
-const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2", "v3", "v4"];
+const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2", "v3", "v4", "v5"];
 
-/// Serializes a cache entry: `v5 <tag> <N>`, then `path<TAB>hash` lines, then
-/// the span table and the reports ([`written_table`]), then the generated
-/// source verbatim. The tag authenticates everything after it, and
-/// [`entry_tag`] binds the lookup key into it.
-fn render_cache_entry(key: &str, inputs: &[(String, String)], output: &Written) -> String {
+/// Serializes a cache entry: `v6 <tag> <N>`, then `path<TAB>hash` lines, each
+/// with `<TAB>stamp` where `stamps` holds one, then the span table and the
+/// reports ([`written_table`]), then the generated source verbatim. The tag
+/// authenticates everything after it, and [`entry_tag`] binds the lookup key
+/// into it.
+fn render_cache_entry(
+    key: &str,
+    inputs: &[(String, String)],
+    stamps: &Stamps,
+    output: &Written,
+) -> String {
     let mut body = format!("{}\n", inputs.len());
     for (p, h) in inputs {
-        body.push_str(&format!("{p}\t{h}\n"));
+        match stamps.get(p) {
+            Some(s) => body.push_str(&format!("{p}\t{h}\t{}\n", s.0)),
+            None => body.push_str(&format!("{p}\t{h}\n")),
+        }
     }
     body.push_str(&written_table(output));
     body.push_str(&output.source);
@@ -3276,19 +3334,28 @@ fn read_cache_entry(
     // No `with_capacity(n)`: `n` comes from the file, and a truncated write can
     // make it `usize::MAX`, which aborts on the allocation.
     let mut inputs = Vec::new();
+    let mut stamps = Stamps::new();
     for _ in 0..n {
-        let (p, h) = line()?.split_once('\t')?;
+        let (p, rest) = line()?.split_once('\t')?;
+        let h = match rest.split_once('\t') {
+            Some((h, stamp)) => {
+                stamps.insert(p.to_string(), crate::manifest::Stamp(stamp.to_string()));
+                h
+            }
+            None => rest,
+        };
         inputs.push((p.to_string(), h.to_string()));
     }
     let (spans, reports) = read_written_table(&mut line)?;
-    Some((
-        Rc::from(inputs),
-        Written {
+    Some(CacheEntry {
+        inputs: Rc::from(inputs),
+        stamps,
+        written: Written {
             source: text[idx..].to_string(),
             spans,
             reports,
         },
-    ))
+    })
 }
 
 /// Warns of a foreign entry. The LSP validates the same entry on every
@@ -6076,14 +6143,17 @@ mod tests {
     #[test]
     fn a_cache_entry_from_an_older_format_misses_instead_of_being_misread() {
         // A `v1` entry cannot say whether a missing file has since appeared, a
-        // `v2` entry is not authenticated, and a `v3` entry has no span table.
-        // All miss.
+        // `v2` entry is not authenticated, a `v3` entry has no span table, and a
+        // `v5` entry has no stamps. All miss.
         let key = "k";
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
-        let current =
-            render_cache_entry(key, &inputs, &text("export fn n() -> Int64 { return 1 }"));
+        let output = text("export fn n() -> Int64 { return 1 }");
+        let current = render_cache_entry(key, &inputs, &Stamps::new(), &output);
         assert!(read_cache_entry(key, &current, None).is_some());
+        let body = "1\ndata/a.txt\tdeadbeef\n0\n0\nx";
+        let v5 = format!("v5 {} {body}", entry_tag(key, body));
         for older in [
+            v5.as_str(),
             "v4 tag 1\ndata/a.txt\tdeadbeef\n-\nx",
             "v3 tag 1\ndata/a.txt\tdeadbeef\nx",
             "v2 1\ndata/a.txt\tdeadbeef\nx",
@@ -6096,11 +6166,16 @@ mod tests {
         }
     }
 
-    /// A span table and its reports survive the cache, a colon in a key or a
-    /// path and a tab in a report included.
+    /// A span table, its reports and the stamps survive the cache, a colon in a
+    /// key or a path and a tab in a report included.
     #[test]
     fn a_cache_entry_keeps_its_span_table() {
-        let inputs = [("g.vyrn".to_string(), "deadbeef".to_string())];
+        let inputs = [
+            ("g.vyrn".to_string(), "deadbeef".to_string()),
+            ("d/".to_string(), "feed".to_string()),
+        ];
+        let stamp = crate::manifest::Stamp("4:1:2:0".to_string());
+        let stamps = Stamps::from([("g.vyrn".to_string(), stamp)]);
         let pos = |line, col| Pos { line, col };
         let written = Written {
             source: "import { a } from \"./a\"\nfn f() {}\n".to_string(),
@@ -6127,11 +6202,11 @@ mod tests {
                 line: "warning C:/p/in.txt:1:1 a\tb".to_string(),
             }],
         };
-        let entry = render_cache_entry("k", &inputs, &written);
-        assert_eq!(
-            read_cache_entry("k", &entry, None),
-            Some((Rc::from(inputs.to_vec()), written))
-        );
+        let entry = render_cache_entry("k", &inputs, &stamps, &written);
+        let read = read_cache_entry("k", &entry, None).unwrap();
+        assert_eq!(*read.inputs, inputs);
+        assert_eq!(read.stamps, stamps);
+        assert_eq!(read.written, written);
     }
 
     /// A hit is linked without re-running the generator, so an entry written by
@@ -6141,7 +6216,7 @@ mod tests {
         let key = "k";
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
         let output = text("export fn n() -> Int64 { return 1 }");
-        let honest = render_cache_entry(key, &inputs, &output);
+        let honest = render_cache_entry(key, &inputs, &Stamps::new(), &output);
         assert!(
             read_cache_entry(key, &honest, None).is_some(),
             "the control"
