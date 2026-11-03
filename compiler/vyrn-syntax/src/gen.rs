@@ -18,6 +18,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::rc::Rc;
 
+use crate::lower::{can_miss, fallible};
 use crate::{At, Builtin, Grammar, HoleSrc, Lit, Recover, RuleId, Throw, E};
 
 /// The scanner's own names, which no rule or label may take.
@@ -49,7 +50,7 @@ pub fn lexer(g: &Grammar) -> Result<String, String> {
     let rules = reachable(g, scan)?;
     let mut l = Lower {
         g,
-        fallible: vec![false; g.rules.len()],
+        fallible: fallible(g),
         free: vec![BTreeSet::new(); g.rules.len()],
     };
     l.solve(&rules)?;
@@ -182,20 +183,18 @@ struct Lower<'g> {
 }
 
 impl Lower<'_> {
-    /// Computes `fallible` and `free` by iteration to their least fixed point.
-    /// Both only grow, and each is bounded, so the loop ends.
+    /// Computes `free` by iteration to its least fixed point. It only grows, and it
+    /// is bounded, so the loop ends.
     fn solve(&mut self, rules: &[RuleId]) -> Result<(), String> {
         loop {
             let mut moved = false;
             for &r in rules {
                 let rule = self.g.body(r);
-                let f = self.can_fail(&rule.body);
                 let mut free = BTreeSet::new();
                 self.reads(&rule.body, &mut Vec::new(), &mut free)
                     .map_err(|e| format!("rule `{}`: {e}", rule.name))?;
                 let i = r.0 as usize;
-                moved |= f != self.fallible[i] || free != self.free[i];
-                self.fallible[i] = f;
+                moved |= free != self.free[i];
                 self.free[i] = free;
             }
             if !moved {
@@ -206,15 +205,7 @@ impl Lower<'_> {
 
     /// Whether `e` can fail without a refusal.
     fn can_fail(&self, e: &E) -> bool {
-        match e {
-            E::Star(_) | E::Opt(_) | E::Throw(_) => false,
-            E::Seq(v) => v.iter().any(|x| self.can_fail(x)),
-            E::Alt(v) => v.iter().all(|x| self.can_fail(x)),
-            E::Plus(x) | E::Field(_, x) => self.can_fail(x),
-            E::Embed(em) => self.can_fail(&em.extent),
-            E::Ref(r) => self.fallible[r.0 as usize],
-            _ => true,
-        }
+        can_miss(&self.fallible, e)
     }
 
     /// Adds to `out` each label `e` reads that `bound` does not hold. A label
