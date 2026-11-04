@@ -519,7 +519,7 @@ impl Writer<'_> {
         }
         if let (Some((max, t)), true) = (&self.g.nest_limit, rule.nest) {
             self.open(format!("if p.depth >= {max} {{"));
-            self.refuse(t, None);
+            self.refuse(t, None, None, "");
             self.line(format!("return {miss_answer}"));
             self.close();
             self.line("p.depth = p.depth + 1");
@@ -843,6 +843,10 @@ impl Writer<'_> {
             E::Ref(r) if !self.g.body(*r).syntactic && !self.syntactic() => {
                 format!("{}(text, p{})", self.function(*r), self.labels(*r, ""))
             }
+            E::Throw(t) => {
+                self.refuse(t, None, None, head);
+                return Ok(());
+            }
             _ => self.hit(e)?,
         };
         self.line(format!("{head}{call}"));
@@ -977,7 +981,7 @@ impl Writer<'_> {
             E::Field(label, x) if self.syntactic() && self.looking == 0 => self.keep(label, x)?,
             E::Field(_, x) | E::Guard(_, x) => self.hit(x)?,
             E::Throw(t) => {
-                self.refuse(t, None);
+                self.refuse(t, None, None, "");
                 "false".into()
             }
             E::Skip(t) => {
@@ -1390,8 +1394,7 @@ impl Writer<'_> {
         if let Some((max, t)) = nest {
             self.line(format!("{links} = {links} + 1"));
             self.open(format!("if p.depth + {links} >= {max} {{"));
-            self.refuse(t, None);
-            self.line(format!("{h} = false"));
+            self.refuse(t, None, None, &format!("{h} = "));
             self.line("break");
             self.close();
         }
@@ -1549,15 +1552,14 @@ impl Writer<'_> {
             self.open("if p.refused && p.quiet == 0 {");
             self.open("if let Some(e) = p.errors.pop() {");
             let (line, col) = self.anchors(t);
-            let row = self.row(t, None, Some("rowName(e.row)"), Some((&from, &to)));
+            let (row, _) = self.row(t, None, Some("rowName(e.row)"), Some((&from, &to)));
             self.line(format!("record(text, p, {row}, {line}, {col})"));
             self.close();
             self.close();
         }
         if let Some(t) = &em.trailing {
             self.open(format!("if {h} && !p.refused && p.pos < {to} {{"));
-            self.line(format!("{h} = false"));
-            self.refuse_at(t, Some((&from, &to)));
+            self.refuse(t, None, Some((&from, &to)), &format!("{h} = "));
             self.close();
         }
         self.line(format!("p.stop = {stop}"));
@@ -1583,81 +1585,95 @@ impl Writer<'_> {
         (at(t.line), at(t.col))
     }
 
-    /// The row a refusal states, as a Vyrn expression. A hole this site does not fill
-    /// is empty, and so is a label that is not bound here.
+    /// The row a refusal states, as a Vyrn expression, and whether building it reads
+    /// the text. A hole this site does not fill is empty, and so is a label that is
+    /// not bound here.
     fn row(
         &self,
         t: &Throw,
         token: Option<&str>,
         inner: Option<&str>,
         extent: Option<(&str, &str)>,
-    ) -> String {
+    ) -> (String, bool) {
         let holes = &self.rows[&t.row];
         if holes.is_empty() {
-            return t.row.to_string();
+            return (t.row.to_string(), false);
         }
         let mut args = Vec::new();
+        let mut reads = false;
         for hole in holes {
             let site = t.holes.iter().find(|h| h.0 == *hole).map(|h| &h.1);
-            args.push(match site {
-                Some(HoleSrc::Text(x)) => string_lit(x),
+            let read = |e: String| (e, true);
+            let (arg, read) = match site {
+                Some(HoleSrc::Text(x)) => (string_lit(x), false),
                 Some(HoleSrc::Label(l)) if self.scope.contains(l) => {
-                    format!("textOf(text, {l}From, {l}To)")
+                    read(format!("textOf(text, {l}From, {l}To)"))
                 }
-                Some(HoleSrc::Char { debug: false }) => "charHere(text, p)".to_string(),
+                Some(HoleSrc::Char { debug: false }) => read("charHere(text, p)".to_string()),
                 Some(HoleSrc::Char { debug: true }) => {
-                    "\"'\" + charHere(text, p) + \"'\"".to_string()
+                    read("\"'\" + charHere(text, p) + \"'\"".to_string())
                 }
-                Some(HoleSrc::Found) => "textOf(text, p.pos, tokenEnd(text, p, p.pos))".to_string(),
-                Some(HoleSrc::Token) => string_lit(token.unwrap_or("")),
-                Some(HoleSrc::Inner) => inner.unwrap_or("\"\"").to_string(),
-                Some(HoleSrc::Extent) => match extent {
-                    Some((a, b)) => format!("trimmed(text, {a}, {b})"),
-                    None => "\"\"".to_string(),
+                Some(HoleSrc::Found) => {
+                    read("textOf(text, p.pos, tokenEnd(text, p, p.pos))".to_string())
+                }
+                Some(HoleSrc::Token) => (string_lit(token.unwrap_or("")), false),
+                Some(HoleSrc::Inner) => match inner {
+                    Some(e) => read(e.to_string()),
+                    None => ("\"\"".to_string(), false),
                 },
-                Some(HoleSrc::Label(_)) | None => "\"\"".to_string(),
-            });
+                Some(HoleSrc::Extent) => match extent {
+                    Some((a, b)) => read(format!("trimmed(text, {a}, {b})")),
+                    None => ("\"\"".to_string(), false),
+                },
+                Some(HoleSrc::Label(_)) | None => ("\"\"".to_string(), false),
+            };
+            args.push(arg);
+            reads |= read;
         }
-        format!("{}({})", t.row, args.join(", "))
+        (format!("{}({})", t.row, args.join(", ")), reads)
     }
 
     /// Records a refusal, unless a predicate or an `@e` discards it.
     fn record(&mut self, t: &Throw, token: Option<&str>) {
         let (line, col) = self.anchors(t);
-        let row = self.row(t, token, None, None);
+        let (row, _) = self.row(t, token, None, None);
         self.open("if p.quiet == 0 {");
         self.line(format!("record(text, p, {row}, {line}, {col})"));
         self.close();
     }
 
-    /// Refuses with `t`. A `!` passes the token here before recovery starts.
-    fn refuse(&mut self, t: &Throw, token: Option<&str>) {
-        self.record(t, token);
-        self.line("p.refused = true");
+    /// Refuses with `t` over `extent`, and writes the refusal's false after `head`
+    /// when it assigns a flag. A row that reads the text is built
+    /// only when it is recorded, so its quiet test stays at the site. A `!` passes
+    /// the token here before recovery starts.
+    fn refuse(&mut self, t: &Throw, token: Option<&str>, extent: Option<(&str, &str)>, head: &str) {
+        let (line, col) = self.anchors(t);
+        let (row, reads) = self.row(t, token, None, extent);
+        if reads {
+            self.open("if p.quiet == 0 {");
+            self.line(format!("record(text, p, {row}, {line}, {col})"));
+            self.close();
+            self.line("p.refused = true");
+            if !head.is_empty() {
+                self.line(format!("{head}false"));
+            }
+        } else {
+            self.line(format!("{head}refuseRow(text, p, {row}, {line}, {col})"));
+        }
         if t.past {
             self.line("bump(text, p)");
         }
     }
 
-    /// Refuses with an `embed`'s trailing row.
-    fn refuse_at(&mut self, t: &Throw, extent: Option<(&str, &str)>) {
-        let (line, col) = self.anchors(t);
-        let row = self.row(t, None, None, extent);
-        self.open("if p.quiet == 0 {");
-        self.line(format!("record(text, p, {row}, {line}, {col})"));
-        self.close();
-        self.line("p.refused = true");
-    }
-
     fn refuse_expected(&mut self, token: &str) {
         let t = self.g.expect.clone();
-        self.refuse(&t, Some(token));
+        self.refuse(&t, Some(token), None, "");
     }
 
     /// Refuses as a committed failure of `e` does.
     fn refuse_miss(&mut self, e: &E) {
         match miss(self.g, e) {
-            Miss::Row(t) => self.refuse(t, None),
+            Miss::Row(t) => self.refuse(t, None, None, ""),
             Miss::Expected(name) => self.refuse_expected(&name),
         }
     }
@@ -1852,6 +1868,20 @@ fn trimmed(text: String, from: Int64, to: Int64) -> String {
         b = b - 1
     }
     return textOf(text, a, b)
+}
+"
+            .to_string(),
+        ),
+        (
+            "refuseRow",
+            "/// Refuses with `row`, unless a predicate or an `@e` discards it. False, the
+/// value of the expression that refused.
+fn refuseRow(text: String, p: modify Parse, row: consume Row, lineAt: Int64, colAt: Int64) -> Bool {
+    if p.quiet == 0 {
+        record(text, p, row, lineAt, colAt)
+    }
+    p.refused = true
+    return false
 }
 "
             .to_string(),
