@@ -73,7 +73,7 @@ fn emit_gen_shows_the_synthesized_translation_module() {
     );
 
     assert!(
-        src.contains("export type TStatusState = String where value =~ \"(active|other|paused)\""),
+        src.contains("export type TStatusState = String where value =~ \"(active|paused)\""),
         "select arg type:\n{src}"
     );
 
@@ -92,7 +92,9 @@ fn emit_gen_shows_the_synthesized_translation_module() {
 
     assert!(src.contains("/// Welcome"), "arg-less doc:\n{src}");
     assert!(
-        src.contains("/// {count, plural, one {# item} other {# items}}"),
+        src.contains(
+            "/// .input {$count :number} .match $count one {{{$count} item}} * {{{$count} items}}"
+        ),
         "plural doc:\n{src}"
     );
 
@@ -126,7 +128,7 @@ fn namespace_access_reads_unprefixed_keys() {
     let dir = scratch("nsaccess");
     write(
         &dir.join("locales/en.json"),
-        "{ \"app\": { \"title\": \"Paste Bin\" }, \"greeting\": \"Hi {name}\" }",
+        "{ \"app\": { \"title\": \"Paste Bin\" }, \"greeting\": \"Hi {$name}\" }",
     );
     write(
         &dir.join("app.vyrn"),
@@ -230,7 +232,7 @@ fn plural_in_a_locale_without_a_rule_fails() {
     // `xx` has no CLDR plural rule in the starter table.
     write(
         &dir.join("locales/xx.json"),
-        "{ \"n\": \"{count, plural, one {# x} other {# xs}}\" }",
+        "{ \"n\": \".input {$count :number} .match $count one {{{$count} x}} * {{{$count} xs}}\" }",
     );
     write(
         &dir.join("app.vyrn"),
@@ -260,7 +262,7 @@ fn a_lone_apostrophe_is_literal_and_keeps_the_placeholder() {
     let dir = scratch("apos");
     write(
         &dir.join("locales/en.json"),
-        "{ \"greet\": \"It's {name}!\" }",
+        "{ \"greet\": \"It's {$name}!\" }",
     );
     write(
         &dir.join("app.vyrn"),
@@ -286,12 +288,12 @@ fn a_lone_apostrophe_is_literal_and_keeps_the_placeholder() {
 }
 
 #[test]
-fn paired_and_quoting_apostrophes_render_per_icu() {
+fn an_apostrophe_is_text_and_a_backslash_escapes_a_brace() {
     let dir = scratch("apos2");
-    // `''` -> one apostrophe; `'{'` -> a literal brace.
+    // MessageFormat 2 has no apostrophe quoting; `\{` is a literal brace.
     write(
         &dir.join("locales/en.json"),
-        "{ \"a\": \"b''c\", \"d\": \"x '{' y\" }",
+        "{ \"a\": \"b''c\", \"d\": \"x \\\\{ y\" }",
     );
     write(
         &dir.join("app.vyrn"),
@@ -310,8 +312,8 @@ fn paired_and_quoting_apostrophes_render_per_icu() {
         String::from_utf8_lossy(&out.stderr)
     );
     let sout = String::from_utf8_lossy(&out.stdout);
-    assert!(sout.contains("b'c"), "paired '' -> one apostrophe:\n{sout}");
-    assert!(sout.contains("x { y"), "'{{' -> literal brace:\n{sout}");
+    assert!(sout.contains("b''c"), "an apostrophe is text:\n{sout}");
+    assert!(sout.contains("x { y"), "\\{{ -> literal brace:\n{sout}");
 }
 
 #[test]
@@ -339,7 +341,7 @@ fn an_unmatched_brace_fails_generation() {
     let err =
         String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(
-        err.contains("key `msg` has an unbalanced brace"),
+        err.contains("key `msg` is not a message std/i18n reads"),
         "brace diagnostic naming the key:\n{err}"
     );
 }
@@ -434,7 +436,7 @@ fn a_catalogue_links_beside_a_program_s_own_i18n() {
     let dir = scratch("catalogue");
     write(&dir.join("locales/en.json"), "{ \"hi\": \"hello\" }");
     std::fs::create_dir_all(dir.join("errors")).unwrap();
-    write(&dir.join("errors/en.json"), "{ \"bad\": \"bad {what}\" }");
+    write(&dir.join("errors/en.json"), "{ \"bad\": \"bad {$what}\" }");
     write(
         &dir.join("app.vyrn"),
         "import { i18n, catalogue } from \"std/i18n\"\n\

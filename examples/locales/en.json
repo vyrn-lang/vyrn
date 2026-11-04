@@ -8,8 +8,8 @@
         "settings": { "label": "Settings" }
     },
     "cart": {
-        "items": "{count, plural, one {# item} other {# items}}"
+        "items": ".input {$count :number}\n.match $count\none {{{$count} item}}\n* {{{$count} items}}"
     },
-    "greeting": "Hello, {name}!",
-    "status": "{state, select, active {Active} paused {Paused} other {Unknown}}"
+    "greeting": "Hello, {$name}!",
+    "status": ".input {$state :string}\n.match $state\nactive {{Active}}\npaused {{Paused}}\n* {{Unknown}}"
 }

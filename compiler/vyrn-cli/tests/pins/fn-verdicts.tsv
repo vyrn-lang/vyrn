@@ -2658,9 +2658,6 @@ std/http.vyrn	Frames$Socket$subprotocol	yes	no, its effect set is alloc
 std/http.vyrn	Frames$Socket$maxFrame	yes	no, its effect set is alloc
 std/http.vyrn	where$pInstant	yes	yes, emulated Int64
 std/http.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-std/i18n.vyrn	sliceStr	no, it keeps an index check	no, its effect set is alloc
-std/i18n.vyrn	isWs	yes	yes, packed UInt8
-std/i18n.vyrn	skipJsonSpace	no, it keeps an index check	no, it is not trap-free
 std/i18n.vyrn	upperFirst	yes	no, its effect set is alloc
 std/i18n.vyrn	keyTypeBase	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
 std/i18n.vyrn	keyFnName	no, it calls `keyTypeBase`, which is not trap-free	no, its effect set is alloc, trap
@@ -2678,47 +2675,58 @@ std/i18n.vyrn	parseLocaleJson	no, it calls `parseJson`, which is not trap-free	n
 std/i18n.vyrn	localeKeys	yes	no, its effect set is alloc
 std/i18n.vyrn	entryIndex	yes	no, `d` is LocaleData, not an integer, Bool or a read array of one
 std/i18n.vyrn	hasKey	yes	no, `d` is LocaleData, not an integer, Bool or a read array of one
-std/i18n.vyrn	icuApostrophe	no, it keeps an index check	no, it is not trap-free
-std/i18n.vyrn	readLiteral	no, it keeps an index check	no, its effect set is alloc
-std/i18n.vyrn	matchBrace	no, it keeps an index check	no, it is not trap-free
-std/i18n.vyrn	splitTopCommas	no, it keeps an index check	no, its effect set is alloc, trap
-std/i18n.vyrn	parseBranches	no, it keeps an index check	no, its effect set is alloc
-std/i18n.vyrn	branchText	yes	no, its effect set is alloc
-std/i18n.vyrn	hasBranch	yes	no, `br` is Branches, not an integer, Bool or a read array of one
-std/i18n.vyrn	argError	yes	no, its effect set is alloc
-std/i18n.vyrn	argReserved	yes	no, `name` is String, not an integer, Bool or a read array of one
-std/i18n.vyrn	joinSortedSelectors	yes	no, its effect set is alloc
-std/i18n.vyrn	scanArgs	no, it keeps an index check	no, its effect set is alloc, trap
-std/i18n.vyrn	branchBlob	no, it keeps an index check	no, its effect set is alloc
-std/i18n.vyrn	dedupeArgs	no, it keeps an index check	no, its effect set is alloc
+std/i18n.vyrn	mfSay	yes	no, its effect set is alloc
+std/i18n.vyrn	mfAt	yes	no, its effect set is alloc
+std/i18n.vyrn	mfUnescape	yes	no, its effect set is alloc
+std/i18n.vyrn	mfKey	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
+std/i18n.vyrn	mfKind	yes	no, its effect set is alloc
+std/i18n.vyrn	declIndex	yes	no, `decls` is Array<Decl>, not an integer, Bool or a read array of one
+std/i18n.vyrn	argIndex	yes	no, `args` is Array<Arg>, not an integer, Bool or a read array of one
+std/i18n.vyrn	mfResolve	yes	no, its effect set is alloc
+std/i18n.vyrn	argNameOk	yes	no, its effect set is alloc
+std/i18n.vyrn	mfUse	yes	no, its effect set is alloc
+std/i18n.vyrn	mfFunc	yes	no, its effect set is alloc
+std/i18n.vyrn	mfPatternUses	yes	no, its effect set is alloc
+std/i18n.vyrn	mfDeclare	yes	no, its effect set is alloc
+std/i18n.vyrn	mfNumberKey	yes	no, its effect set is alloc
+std/i18n.vyrn	mfMatcher	no, it keeps an index check	no, its effect set is alloc, trap
+std/i18n.vyrn	mfArgs	no, it calls `mfMatcher`, which is not trap-free	no, its effect set is alloc, trap
+std/i18n.vyrn	readMessage	no, it keeps an index check	no, its effect set is alloc, trap
+std/i18n.vyrn	checkMessage	no, it calls `checked`, which is not trap-free	no, its effect set is alloc, trap
+std/i18n.vyrn	checked	no, it keeps an index check	no, its effect set is alloc
+std/i18n.vyrn	mfBody	no, it calls `mfPattern`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	mfText	yes	no, its effect set is alloc
+std/i18n.vyrn	mfPattern	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/i18n.vyrn	listSeparators	yes	no, its effect set is alloc
+std/i18n.vyrn	mfList	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/i18n.vyrn	keyIndex	yes	no, `keys` is Array<String>, not an integer, Bool or a read array of one
+std/i18n.vyrn	mfMatch	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	sorted	yes	no, its effect set is alloc
 std/i18n.vyrn	argSignature	yes	no, its effect set is alloc
 std/i18n.vyrn	pluralCategories	yes	no, its effect set is alloc
 std/i18n.vyrn	pluralSupported	yes	no, its effect set is alloc
 std/i18n.vyrn	pluralAbs	yes	no, its effect set is gen-only
 std/i18n.vyrn	pluralCondition	yes	no, its effect set is gen-only
-std/i18n.vyrn	compileBody	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
-std/i18n.vyrn	compilePlural	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/i18n.vyrn	compileSelect	no, it calls `compileBody`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	localeErr	no, it calls `report`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/i18n.vyrn	icuBadBrace	no, it keeps an index check	no, its effect set is alloc
 std/i18n.vyrn	keyCollisionErrors	no, it calls `keyFnName`, which is not trap-free	no, its effect set is alloc, trap
 std/i18n.vyrn	i18n	no, it calls `checkedLocales`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/i18n.vyrn	catalogue	no, it calls `checkedLocales`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/i18n.vyrn	checkedLocales	no, it keeps an index check	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/i18n.vyrn	listed	yes	no, `args` is Array<Arg>, not an integer, Bool or a read array of one
 std/i18n.vyrn	buildCatalogue	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	buildModule	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
-std/i18n.vyrn	buildSelectTypes	no, it calls `scanArgs`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	buildSelectTypes	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	buildTransKey	yes	no, its effect set is alloc, gen-only
-std/i18n.vyrn	splitCsv	no, it calls `sliceStr`, which is not trap-free	no, its effect set is alloc
 std/i18n.vyrn	selectType	no, it calls `keyTypeBase`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	paramList	no, it calls `argType`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	argList	yes	no, its effect set is alloc, gen-only
 std/i18n.vyrn	argType	no, it calls `selectType`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	buildKeyFns	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
-std/i18n.vyrn	buildLocaleFn	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	buildLocaleFn	no, it calls `mfBody`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	docComment	yes	no, its effect set is alloc
-std/i18n.vyrn	buildT	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
-std/i18n.vyrn	bodyText	no, it calls `compileBody`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	buildT	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/i18n.vyrn	bodyText	no, it calls `readMessage`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/i18n.vyrn	argsText	no, it calls `readMessage`, which is not trap-free	no, its effect set is alloc, trap
 std/i18n.vyrn	conditionText	yes	no, its effect set is alloc, gen-only
 std/icons.vyrn	icons	no, it calls `iconsModule`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/icons.vyrn	iconsAt	no, it calls `iconsModule`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only

@@ -1,0 +1,60 @@
+// A message of a locale file in Unicode MessageFormat 2, as std/i18n reads it: text,
+// placeholders, `.input` and `.local` declarations, a quoted pattern, and `.match` on
+// variants. The grammar has no `trivia` rule, so a syntactic rule reads bytes and each
+// rule names the whitespace it passes: a pattern's whitespace is text. It states shape
+// only: which function a name is, what a variable holds and which variant a key picks
+// are std/i18n's. Markup, a literal or a function alone in a placeholder, an option and
+// an attribute are refused until a message asks for one.
+syntax I18n
+
+expect ^MessageExpected(token=token)
+
+// What std/i18n raises from the tree: a name compared with a name, a count, a key read
+// as a number.
+row ArgName(name)
+row BadNumberKey(key)
+row DuplicateDeclaration(name)
+row DuplicateVariant
+row KindClash(name)
+row KeyCount
+row ManySelectors
+row MissingAnnotation(name)
+row MissingFallback
+row SelectorFunction(name)
+row UnknownFunction(name)
+
+I18nMessage = &(i18nOws ('.' / '{{')) complex:I18nComplex (eof / ^MessageTrailing)
+              / simple:I18nPattern (eof / ^MessageBrace)
+
+I18nComplex = i18nOws (decls:I18nDeclaration i18nOws)*
+              (&'{{' body:I18nQuoted / matcher:I18nMatcher / ^MessageBody) i18nOws
+I18nDeclaration = I18nInput / I18nLocal
+I18nInput = '.input' i18nOws expr:I18nExpression
+I18nLocal = '.local' i18nSpace var:I18nVariable i18nOws '=' i18nOws expr:I18nExpression
+
+I18nMatcher = '.match' (&(i18nSpace '$') / ^Selector)
+              (&(i18nSpace '$') i18nSpace sels:I18nVariable)+
+              (&(i18nOws i18nKeyStart) i18nOws variants:I18nVariant)*
+I18nVariant = keys:I18nKey (&(i18nSpace i18nKeyStart) i18nSpace keys:I18nKey)* i18nOws pattern:I18nQuoted
+I18nKey = i18nStar / i18nLiteral / i18nUnquoted
+
+I18nQuoted = ('{{' / ^QuotedOpen) pattern:I18nPattern ('}}' / ^QuotedUnclosed)
+I18nPattern = parts:I18nPart*
+I18nPart = I18nExpression / i18nText
+
+I18nExpression = '{' i18nOws
+                 (&('#' / '/') ^MarkupPlaceholder / &':' ^FunctionAlone / &'$' / &i18nKeyStart ^LiteralAlone / ^ExpressionForm)
+                 var:I18nVariable (&(i18nSpace ':') i18nSpace func:I18nFunction)?
+                 (&(i18nOws '@') ^Attribute)? i18nOws ('}' / ^ExpressionUnclosed)
+I18nVariable = '$' name:i18nName
+I18nFunction = ':' name:i18nIdent (&(i18nSpace i18nName) ^FunctionOption)?
+
+i18nText = ([^\\{}] / '\\' ([\\{|}] / ^Escape))+
+i18nStar = '*'
+i18nLiteral = '|' ([^\\|] / '\\' ([\\{|}] / ^Escape))* ('|' / ^QuotedLiteral)
+i18nUnquoted = [A-Za-z0-9_.+-]+
+i18nKeyStart = [*|A-Za-z0-9_.+-]
+i18nIdent = i18nName (':' i18nName)?
+i18nName = [A-Za-z_+] [A-Za-z0-9_.+-]*
+i18nSpace = [ \t\r\n]+
+i18nOws = [ \t\r\n]*
