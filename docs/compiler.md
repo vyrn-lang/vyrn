@@ -135,9 +135,11 @@ the playground serves an embedded `std/`. The loader:
   and a `derive` generator alike (`checked_generator`), and links only what its
   gen fn reaches (`keep_reached`);
 - leaves out of the program a std module imported only for generators its
-  importer spells on import lines (`unlinked_import`). The loader parses that
-  module alone, to read each generator's signature and `export to` paths. The
-  decision reads no generator cache, so a hit and a miss load the same modules.
+  importer spells on import lines (`unlinked_import`). The decision reads each
+  exported gen fn's signature and `export to` paths: from the cache entry of
+  the import's generation when it is fresh, which records them from the bytes
+  it vouches for, else from a parse of that module alone. Both read the same
+  bytes, so a hit and a miss load the same modules.
   A user's module links, and so does every module under a floor or an audience;
 - links `std/runtime` into every program, each declaration renamed with the
   `runtime$` prefix, `std/task` with the `task$` prefix into a program that
