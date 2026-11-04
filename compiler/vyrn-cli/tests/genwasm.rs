@@ -860,6 +860,34 @@ fn a_cached_generator_whose_name_left_the_exports_is_refused() {
     assert!(t.refusal().contains("mk"));
 }
 
+/// A settled entry records the module's gen fns, so these witness that an edit
+/// to a signature or an `export to` moves the stamp the entry vouches with.
+#[test]
+fn a_settled_generator_whose_export_to_left_its_importer_is_refused() {
+    let t = StdTool::new("tool_fenced_later");
+    t.age();
+    t.written();
+    t.edit(
+        "std/tool.vyrn",
+        "export gen fn mk",
+        "export to \"./elsewhere\" gen fn mk",
+    );
+    assert!(t.refusal().contains("only to"));
+}
+
+#[test]
+fn a_settled_generator_whose_arity_moved_is_refused() {
+    let t = StdTool::new("tool_arity_later");
+    t.age();
+    t.written();
+    t.edit(
+        "std/tool.vyrn",
+        "mk(tag: String)",
+        "mk(tag: String, more: String)",
+    );
+    assert!(t.refusal().contains("mk"));
+}
+
 #[test]
 fn a_cached_generator_whose_body_stopped_checking_is_refused() {
     let t = StdTool::new("tool_refused");
@@ -923,7 +951,7 @@ fn a_std_module_edited_in_a_checkout_reaches_the_next_compile() {
     assert!(t.written().contains("return 203"));
 }
 
-/// An entry in the format before stamps is a silent miss, so the generator runs
+/// An entry in the format before gen fns is a silent miss, so the generator runs
 /// again and writes what a cold compile writes.
 #[test]
 fn an_entry_an_older_compiler_left_runs_the_generator_again() {
@@ -933,9 +961,9 @@ fn an_entry_an_older_compiler_left_runs_the_generator_again() {
     for e in std::fs::read_dir(t.dir.join("cache")).unwrap() {
         let path = e.unwrap().path();
         if let Some(rest) = (std::fs::read_to_string(&path).ok())
-            .and_then(|text| text.strip_prefix("v6 ").map(str::to_string))
+            .and_then(|text| text.strip_prefix("v7 ").map(str::to_string))
         {
-            std::fs::write(&path, format!("v5 {rest}")).unwrap();
+            std::fs::write(&path, format!("v6 {rest}")).unwrap();
         }
     }
     assert_eq!(before, t.written());

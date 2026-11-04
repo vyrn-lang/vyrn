@@ -987,9 +987,9 @@ struct Work {
     real_paths: HashMap<String, Option<String>>,
     /// Each generation input's hash as this load read it ([`current_input_hash`]).
     inputs: HashMap<String, Option<String>>,
-    /// The parse of each module [`unlinked_import`] left out, by key, in key
-    /// order for the search of a generator no import of its module names.
-    unlinked: BTreeMap<String, Rc<Parsed>>,
+    /// The exported gen fns of each module [`unlinked_import`] left out, by key,
+    /// in key order for the search of a generator no import of its module names.
+    unlinked: BTreeMap<String, GenFns>,
 }
 
 /// The prefix every declaration of an injected runtime module is renamed to.
@@ -1879,8 +1879,8 @@ fn load_modules(
                     .then(|| {
                         let held = (key, &*parsed, &program);
                         let hand = written.is_none();
-                        let paths = &mut w.real_paths;
-                        unlinked_import(imp, &target, held, hand, root_key, opts, resolver, paths)
+                        let read = (&mut w.real_paths, &mut w.inputs);
+                        unlinked_import(imp, &target, held, hand, root_key, opts, resolver, read)
                     })
                     .flatten();
                 match left_out {
@@ -1901,20 +1901,22 @@ fn load_modules(
                 let bound = bound_target(&program, &import_targets, name);
                 // A name this module did not import reads any loaded module, so
                 // the module another import left out loads here.
-                if bound.is_none() && !(w.modules.iter()).any(|m| exports_gen(&m.program, name)) {
+                if bound.is_none()
+                    && !(w.modules.iter()).any(|m| exported_gen(&m.program, name).is_some())
+                {
                     let left_out = (w.unlinked.iter())
-                        .find(|(k, p)| exports_gen(&p.program, name) && !w.states.contains_key(*k))
+                        .find(|(k, g)| gen_fn(g, name).is_some() && !w.states.contains_key(*k))
                         .map(|(k, _)| k.clone());
                     if let Some(target) = left_out {
                         visit(&target, None, None, opts, resolver, engine, w, root_key)?;
                     }
                 }
                 let home = (bound.and_then(|t| w.unlinked.get_key_value(t)))
-                    .map(|(k, p)| (k.as_str(), &p.program))
+                    .and_then(|(k, g)| Some((k.as_str(), gen_fn(g, name)?.clone())))
                     .or_else(|| {
-                        (w.modules.iter())
-                            .find(|m| exports_gen(&m.program, name))
-                            .map(|m| (m.key.as_str(), &m.program))
+                        (w.modules.iter()).find_map(|m| {
+                            Some((m.key.as_str(), GenFn::of(exported_gen(&m.program, name)?)))
+                        })
                     });
                 let (gen_key, generated) = run_generator(
                     key,
@@ -2227,17 +2229,54 @@ fn module_parse(
     Ok(p)
 }
 
-/// Whether program `p` exports the `gen fn` `name`.
-fn exports_gen(p: &Program, name: &str) -> bool {
-    (p.functions.iter()).any(|f| f.name == name && f.is_gen && f.exported)
+/// The `gen fn` `name` that program `p` exports.
+fn exported_gen<'a>(p: &'a Program, name: &str) -> Option<&'a Function> {
+    (p.functions.iter()).find(|f| f.name == name && f.is_gen && f.exported)
 }
 
-/// The parse of `target` when import `imp` of the module `key` needs nothing of
-/// `target` linked: each name is an admitted exported `gen fn` of the std module
-/// `target`, and `key` spells it only on a generator import line. A generator
-/// runs in its own load ([`checked_generator`]), and std checks its modules as
-/// roots of their own loads, so the program holds nothing of `target`. The answer
-/// reads no generator cache, so a hit and a miss load one module set. `None`
+/// An exported `gen fn` as a load reads it: what a generator import checks its
+/// call against, and the paths its `export to` admits.
+#[derive(Clone, Debug, PartialEq)]
+struct GenFn {
+    name: String,
+    params: usize,
+    /// The return type as a sentence spells it, when it is not `Code`.
+    ret: Option<String>,
+    export_to: Vec<String>,
+}
+
+impl GenFn {
+    fn of(f: &Function) -> GenFn {
+        let code = f.ret == Type::Named("Code".into());
+        GenFn {
+            name: f.name.clone(),
+            params: f.params.len(),
+            ret: (!code).then(|| f.ret.to_string()),
+            export_to: f.export_to.clone(),
+        }
+    }
+}
+
+/// A module's exported gen fns, in source order.
+type GenFns = Vec<GenFn>;
+
+fn gen_fns(p: &Program) -> GenFns {
+    let gens = (p.functions.iter()).filter(|f| f.is_gen && f.exported);
+    gens.map(GenFn::of).collect()
+}
+
+fn gen_fn<'a>(gens: &'a [GenFn], name: &str) -> Option<&'a GenFn> {
+    gens.iter().find(|g| g.name == name)
+}
+
+/// The exported gen fns of `target` when import `imp` of the module `key` needs
+/// nothing of `target` linked: each name is an admitted exported `gen fn` of the
+/// std module `target`, and `key` spells it only on a generator import line. A
+/// generator runs in its own load ([`checked_generator`]), and std checks its
+/// modules as roots of their own loads, so the program holds nothing of `target`.
+/// The gen fns are the ones a fresh cache entry of `key`'s generator import
+/// recorded ([`recorded_gens`]), else `target`'s parse. Both are the gen fns of
+/// the bytes `target` holds, so a hit and a miss load one module set. `None`
 /// sends the import through [`load_modules`]'s ordinary path, which states every
 /// refusal. A user's module always links: each of its bodies stays checked. A
 /// load under a floor or an audience links it too, because both walk the
@@ -2251,8 +2290,11 @@ fn unlinked_import(
     root_key: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
-    real_paths: &mut HashMap<String, Option<String>>,
-) -> Option<Rc<Parsed>> {
+    (real_paths, read): (
+        &mut HashMap<String, Option<String>>,
+        &mut HashMap<String, Option<String>>,
+    ),
+) -> Option<GenFns> {
     if opts.artifacts.is_some()
         || opts.audience.is_some()
         || imp.namespace.is_some()
@@ -2283,25 +2325,66 @@ fn unlinked_import(
     if !only_named || !in_std(target, opts) {
         return None;
     }
-    let text = resolver.read(target).ok()?;
-    let found = module_parse(target, &text, &text_hash(&text), root_key, opts).ok()?;
-    let mut admitted = |f: &Function| {
-        f.export_to.is_empty()
-            || (hand_written && admits(&f.export_to, target, Judged(key), opts, real_paths))
+    let gens = match recorded_gens(imp, target, (key, program), opts, resolver, read) {
+        Some(gens) => gens,
+        None => {
+            let text = resolver.read(target).ok()?;
+            let found = module_parse(target, &text, &text_hash(&text), root_key, opts).ok()?;
+            gen_fns(&found.program)
+        }
     };
     let usable = imp.names.iter().all(|n| {
-        (found.program.functions.iter())
-            .find(|f| f.name == n.original && f.is_gen && f.exported)
-            .is_some_and(&mut admitted)
+        gen_fn(&gens, &n.original).is_some_and(|g| {
+            g.export_to.is_empty()
+                || (hand_written && admits(&g.export_to, target, Judged(key), opts, real_paths))
+        })
     });
-    usable.then_some(found)
+    usable.then_some(gens)
+}
+
+/// The exported gen fns of `target` that the fresh cache entry of the first
+/// generator import of `program`, the module `key`, that spells a name of `imp`
+/// recorded, when its arguments are constants.
+fn recorded_gens(
+    imp: &ImportDecl,
+    target: &str,
+    (key, program): (&str, &Program),
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    read: &mut HashMap<String, Option<String>>,
+) -> Option<GenFns> {
+    let line = |n: &crate::ast::ImportName| {
+        (program.imports.iter()).find_map(|i| match &i.source {
+            ImportSource::Generator { name, args, .. } if *name == n.original => Some((name, args)),
+            _ => None,
+        })
+    };
+    let (name, args) = imp
+        .names
+        .iter()
+        .find_map(line)
+        .filter(|_| !gen_cache_off())?;
+    let empty = HashMap::new();
+    let consts: Option<Vec<_>> = (args.iter())
+        .map(|a| crate::consteval::eval(a, &empty))
+        .collect();
+    let consts = consts?;
+    let call = gen_call(key, &consts, opts);
+    let id = crate::gen::compiler_identity();
+    let entry_key = generator_cache_key(&id, target, name, &call.arg_repr, &call.allowed);
+    cached(&entry_key, target, opts, resolver, read)?
+        .gens
+        .clone()
 }
 
 /// A generator cache entry: its recorded `(input, hash)` pairs, the stamps
-/// that vouch for some of them ([`vouched_stamps`]), and its output.
+/// that vouch for some of them ([`vouched_stamps`]), the exported gen fns of
+/// the generator's module when it is a std module ([`declared_gens`]), and its
+/// output.
 struct CacheEntry {
     inputs: GenDeps,
     stamps: Stamps,
+    gens: Option<GenFns>,
     written: Written,
 }
 
@@ -2350,7 +2433,7 @@ fn run_generator(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
-    home: Option<(&str, &Program)>,
+    home: Option<(&str, GenFn)>,
     states: &HashMap<String, bool>,
     identities: &mut HashMap<String, String>,
     read: &mut HashMap<String, Option<String>>,
@@ -2398,20 +2481,17 @@ fn run_generator(
     identities.insert(ident, gen_key.clone());
 
     // The generator must be an exported `gen fn` in a module this file loaded.
-    let (gen_mod_key, gen_program) = home.ok_or_else(|| err(rule!(GenImportNotGen, name)))?;
-    let gen_fn = (gen_program.functions.iter())
-        .find(|f| f.name == name && f.is_gen && f.exported)
-        .expect("generator found above");
-    if gen_fn.params.len() != consts.len() {
+    let (gen_mod_key, gen_fn) = home.ok_or_else(|| err(rule!(GenImportNotGen, name)))?;
+    if gen_fn.params != consts.len() {
         return Err(err(rule!(
             GenImportArity,
             name,
-            want = gen_fn.params.len(),
+            want = gen_fn.params,
             got = consts.len()
         )));
     }
-    if gen_fn.ret != Type::Named("Code".into()) {
-        return Err(err(rule!(GenImportNotCode, name, ret = &gen_fn.ret)));
+    if let Some(ret) = &gen_fn.ret {
+        return Err(err(rule!(GenImportNotCode, name, ret)));
     }
     let generated = run_resolved(
         importer,
@@ -2595,46 +2675,8 @@ fn run_resolved(
 ) -> Result<Generated, Vec<Diagnostic>> {
     let Site { line, root_key } = site;
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
-    let arg_repr = args_repr(consts);
-    let importer_dir = dir_of(generated_importer(importer).unwrap_or(importer)).to_string();
-    let join_dir = |s: &str| join_importer_dir(importer, s);
-
-    // Each constant string path argument is an allowed input root; a path with
-    // no extension also admits its `.vyrn` file. A path that names a manifest
-    // dependency also admits the key the import map resolves it to,
-    // and the pair goes to the sandbox, which cannot resolve aliases. The
-    // resolved key joins the cache key, so re-pinning the dependency misses.
-    let mut allowed: Vec<String> = Vec::new();
-    let mut aliased: Vec<(String, String)> = Vec::new();
-    for c in consts {
-        if let crate::consteval::ConstVal::Str(s) = c {
-            allowed.push(join_dir(s));
-            if !s.ends_with(".vyrn") && !s.ends_with(".json") {
-                allowed.push(join_dir(&format!("{s}.vyrn")));
-            }
-            // An alias `resolve_spec` refuses adds no pair, so the read fails as a
-            // plain path. The module import of that alias already reports the
-            // manifest's fault.
-            if opts.aliases.contains_key(s.as_str()) {
-                if let Ok(key) = resolve_spec(s, importer, opts) {
-                    allowed.push(key.clone());
-                    aliased.push((s.clone(), key));
-                }
-            }
-            if let Some(key) = std_input(s, opts) {
-                allowed.push(key.clone());
-                aliased.push((s.clone(), key));
-            }
-        }
-    }
-    let call = GenCall {
-        consts,
-        type_arg: None,
-        arg_repr: arg_repr.clone(),
-        importer_dir,
-        allowed,
-        aliased,
-    };
+    let call = gen_call(importer, consts, opts);
+    let arg_repr = call.arg_repr.clone();
     let inner = generator_opts(opts);
     generation(
         &gen_mod_key,
@@ -2668,6 +2710,52 @@ fn run_resolved(
             trap = "the engine asked to check a checked program"
         )),
     })
+}
+
+/// What the generator import of `consts` written in `importer` runs on.
+fn gen_call<'a>(
+    importer: &str,
+    consts: &'a [crate::consteval::ConstVal],
+    opts: &LoadOptions,
+) -> GenCall<'a> {
+    let importer_dir = dir_of(generated_importer(importer).unwrap_or(importer)).to_string();
+    let join_dir = |s: &str| join_importer_dir(importer, s);
+    // Each constant string path argument is an allowed input root; a path with
+    // no extension also admits its `.vyrn` file. A path that names a manifest
+    // dependency also admits the key the import map resolves it to,
+    // and the pair goes to the sandbox, which cannot resolve aliases. The
+    // resolved key joins the cache key, so re-pinning the dependency misses.
+    let mut allowed: Vec<String> = Vec::new();
+    let mut aliased: Vec<(String, String)> = Vec::new();
+    for c in consts {
+        if let crate::consteval::ConstVal::Str(s) = c {
+            allowed.push(join_dir(s));
+            if !s.ends_with(".vyrn") && !s.ends_with(".json") {
+                allowed.push(join_dir(&format!("{s}.vyrn")));
+            }
+            // An alias `resolve_spec` refuses adds no pair, so the read fails as a
+            // plain path. The module import of that alias already reports the
+            // manifest's fault.
+            if opts.aliases.contains_key(s.as_str()) {
+                if let Ok(key) = resolve_spec(s, importer, opts) {
+                    allowed.push(key.clone());
+                    aliased.push((s.clone(), key));
+                }
+            }
+            if let Some(key) = std_input(s, opts) {
+                allowed.push(key.clone());
+                aliased.push((s.clone(), key));
+            }
+        }
+    }
+    GenCall {
+        consts,
+        type_arg: None,
+        arg_repr: args_repr(consts),
+        importer_dir,
+        allowed,
+        aliased,
+    }
 }
 
 /// What one generation runs on ([`generation`]): an import line's constants,
@@ -2723,44 +2811,13 @@ pub(crate) fn generation(
         &call.arg_repr,
         &call.allowed,
     );
-    let no_cache = !cache || std::env::var("VYRN_NO_GEN_CACHE").is_ok();
-
-    // Cache hit: the entry is one this compiler wrote for this key, it records
-    // the generator's own module, and every recorded input still has its stamp
-    // or hashes the same. An input recorded as absent must still be absent.
-    if !no_cache {
-        // `inputs` comes from the entry and so agrees with itself: an empty or
-        // forged list passes `all`. The call site decides first: an entry that
-        // does not record `gen_mod_key` is not this generation.
-        let valid = |e: &CacheEntry, read: &mut HashMap<String, Option<String>>| {
-            e.inputs.iter().any(|(path, _)| path == gen_mod_key)
-                && all_fresh(&e.inputs, &e.stamps, resolver, read)
-        };
-        // The entry this thread last read for the key, then the resolver's. A
-        // remembered entry is validated like a read one, and skips the read and
-        // the tag check, the cost of a warm keystroke's generator import.
-        let remembered = GEN_ENTRIES.with(|m| m.borrow().get(&sources_hash).cloned());
-        let hit = remembered.filter(|e| valid(e, read)).or_else(|| {
-            let cached = resolver.gen_cache_get(&sources_hash)?;
-            let entry = read_cache_entry(&sources_hash, &cached, inner.session.as_deref())?;
-            valid(&entry, read).then(|| Rc::new(entry))
+    let no_cache = !cache || gen_cache_off();
+    let hit = (!no_cache).then(|| cached(&sources_hash, gen_mod_key, inner, resolver, read));
+    if let Some(entry) = hit.flatten() {
+        return Ok(Generated {
+            written: entry.written.clone(),
+            inputs: entry.inputs.clone(),
         });
-        if let Some(entry) = hit {
-            let output = Generated {
-                written: entry.written.clone(),
-                inputs: entry.inputs.clone(),
-            };
-            GEN_ENTRIES.with(|m| {
-                let mut m = m.borrow_mut();
-                // ponytail: an edited generator input leaves its old entry
-                // behind. Cleared at 512 entries, like the parse cache.
-                if m.len() > 512 {
-                    m.clear();
-                }
-                m.insert(sources_hash, entry);
-            });
-            return Ok(output);
-        }
     }
 
     // Cache miss: load and check the generator as a runnable program. Skipping
@@ -2841,10 +2898,17 @@ pub(crate) fn generation(
     // LSP's per-keystroke re-analysis.
     if !no_cache && checked.describable {
         let stamps = vouched_stamps(&inputs, resolver);
-        resolver.gen_cache_put(
+        let gens = in_std(gen_mod_key, inner)
+            .then(|| declared_gens(gen_mod_key, &inputs, inner, resolver))
+            .flatten();
+        let entry = render_cache_entry(
             &sources_hash,
-            &render_cache_entry(&sources_hash, &inputs, &stamps, &out.written),
+            &inputs,
+            &stamps,
+            gens.as_deref(),
+            &out.written,
         );
+        resolver.gen_cache_put(&sources_hash, &entry);
     }
     Ok(Generated {
         written: out.written,
@@ -2852,8 +2916,72 @@ pub(crate) fn generation(
     })
 }
 
+/// Whether `VYRN_NO_GEN_CACHE` turns the generator cache off.
+fn gen_cache_off() -> bool {
+    std::env::var("VYRN_NO_GEN_CACHE").is_ok()
+}
+
+/// The entry under `key` of a generation of the module `gen_mod_key`, when this
+/// compiler wrote it for the key, it records `gen_mod_key`, and every input it
+/// records still has its stamp or hashes the same. An input recorded as absent
+/// must still be absent. A hit is the thread's entry for the key from then on.
+fn cached(
+    key: &str,
+    gen_mod_key: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    read: &mut HashMap<String, Option<String>>,
+) -> Option<Rc<CacheEntry>> {
+    // `inputs` comes from the entry and so agrees with itself: an empty or
+    // forged list passes `all`. The call site decides first: an entry that
+    // does not record `gen_mod_key` is not this generation.
+    let valid = |e: &CacheEntry, read: &mut HashMap<String, Option<String>>| {
+        e.inputs.iter().any(|(path, _)| path == gen_mod_key)
+            && all_fresh(&e.inputs, &e.stamps, resolver, read)
+    };
+    // The entry this thread last read for the key, then the resolver's. A
+    // remembered entry is validated like a read one, and skips the read and
+    // the tag check, the cost of a warm keystroke's generator import.
+    let remembered = GEN_ENTRIES.with(|m| m.borrow().get(key).cloned());
+    let hit = remembered.filter(|e| valid(e, read)).or_else(|| {
+        let text = resolver.gen_cache_get(key)?;
+        let entry = read_cache_entry(key, &text, opts.session.as_deref())?;
+        valid(&entry, read).then(|| Rc::new(entry))
+    })?;
+    GEN_ENTRIES.with(|m| {
+        let mut m = m.borrow_mut();
+        // ponytail: an edited generator input leaves its old entry
+        // behind. Cleared at 512 entries, like the parse cache.
+        if m.len() > 512 {
+            m.clear();
+        }
+        m.insert(key.to_string(), hit.clone());
+    });
+    Some(hit)
+}
+
+/// The exported gen fns of the std module `gen_mod_key` that its bytes declare
+/// when they still hash as `inputs` records them, for an entry to hold. `None`
+/// when they do not, or when a path its `export to` names holds a tab or a line
+/// break, which the entry's lines cannot hold.
+fn declared_gens(
+    gen_mod_key: &str,
+    inputs: &[(String, String)],
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Option<GenFns> {
+    let (_, recorded) = inputs.iter().find(|(p, _)| p == gen_mod_key)?;
+    let text = resolver.read(gen_mod_key).ok()?;
+    let found = module_parse(gen_mod_key, &text, &text_hash(&text), "", opts).ok()?;
+    let gens = gen_fns(&found.program);
+    let plain = |g: &GenFn| g.export_to.iter().all(|t| !t.contains(['\t', '\n']));
+    (content_hash(gen_mod_key, Some(text))? == *recorded && gens.iter().all(plain)).then_some(gens)
+}
+
 /// Whether each recorded input still has its stamp in `stamps`, or else still
-/// hashes the same. An input recorded as absent must still be absent.
+/// hashes the same. An input recorded as absent must still be absent. A stamp
+/// that holds vouches for the recorded hash, which `read` keeps for the rest of
+/// the load, so a second entry that records the input stats nothing.
 fn all_fresh(
     inputs: &[(String, String)],
     stamps: &Stamps,
@@ -2861,8 +2989,11 @@ fn all_fresh(
     read: &mut HashMap<String, Option<String>>,
 ) -> bool {
     inputs.iter().all(|(path, hash)| {
-        let unchanged =
-            (stamps.get(path)).is_some_and(|s| resolver.stamp(path).as_ref() == Some(s));
+        let unchanged = !read.contains_key(path)
+            && (stamps.get(path)).is_some_and(|s| resolver.stamp(path).as_ref() == Some(s));
+        if unchanged {
+            read.insert(path.clone(), Some(hash.clone()));
+        }
         unchanged
             || current_input_hash(resolver, path, read).unwrap_or_else(|| ABSENT.to_string())
                 == *hash
@@ -3152,21 +3283,24 @@ const ABSENT: &str = "absent";
 /// The cache entry format tag, bumped when an entry's meaning changes.
 /// [`read_cache_entry`] rejects any other tag as a miss, so the generator re-runs
 /// and overwrites the entry.
-const CACHE_ENTRY_TAG: &str = "v6";
+const CACHE_ENTRY_TAG: &str = "v7";
 
 /// Formats this compiler wrote before [`CACHE_ENTRY_TAG`]. Such an entry is
 /// stale, not foreign, so it is ignored without a warning.
-const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2", "v3", "v4", "v5"];
+const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2", "v3", "v4", "v5", "v6"];
 
-/// Serializes a cache entry: `v6 <tag> <N>`, then `path<TAB>hash` lines, each
-/// with `<TAB>stamp` where `stamps` holds one, then the span table and the
-/// reports ([`written_table`]), then the generated source verbatim. The tag
+/// Serializes a cache entry: `v7 <tag> <N>`, then `path<TAB>hash` lines, each
+/// with `<TAB>stamp` where `stamps` holds one; then `-`, or the count of `gens`
+/// and one `name<TAB>params<TAB>ret` line per gen fn, `ret` `-` for `Code`, each
+/// `export to` path after another tab; then the span table and the reports
+/// ([`written_table`]), then the generated source verbatim. The tag
 /// authenticates everything after it, and [`entry_tag`] binds the lookup key
 /// into it.
 fn render_cache_entry(
     key: &str,
     inputs: &[(String, String)],
     stamps: &Stamps,
+    gens: Option<&[GenFn]>,
     output: &Written,
 ) -> String {
     let mut body = format!("{}\n", inputs.len());
@@ -3175,6 +3309,18 @@ fn render_cache_entry(
             Some(s) => body.push_str(&format!("{p}\t{h}\t{}\n", s.0)),
             None => body.push_str(&format!("{p}\t{h}\n")),
         }
+    }
+    match gens {
+        Some(gens) => body.push_str(&format!("{}\n", gens.len())),
+        None => body.push_str("-\n"),
+    }
+    for g in gens.unwrap_or_default() {
+        let ret = g.ret.as_deref().unwrap_or("-");
+        body.push_str(&format!("{}\t{}\t{ret}", g.name, g.params));
+        g.export_to
+            .iter()
+            .for_each(|t| body.push_str(&format!("\t{t}")));
+        body.push('\n');
     }
     body.push_str(&written_table(output));
     body.push_str(&output.source);
@@ -3346,10 +3492,32 @@ fn read_cache_entry(
         };
         inputs.push((p.to_string(), h.to_string()));
     }
+    let gens = match line()? {
+        "-" => None,
+        count => {
+            let mut gens = Vec::new();
+            for _ in 0..count.parse::<usize>().ok()? {
+                let mut field = line()?.split('\t');
+                let (name, params) = (field.next()?.to_string(), field.next()?.parse().ok()?);
+                let ret = Some(field.next()?)
+                    .filter(|r| *r != "-")
+                    .map(str::to_string);
+                let export_to = field.map(str::to_string).collect();
+                gens.push(GenFn {
+                    name,
+                    params,
+                    ret,
+                    export_to,
+                });
+            }
+            Some(gens)
+        }
+    };
     let (spans, reports) = read_written_table(&mut line)?;
     Some(CacheEntry {
         inputs: Rc::from(inputs),
         stamps,
+        gens,
         written: Written {
             source: text[idx..].to_string(),
             spans,
@@ -6148,7 +6316,7 @@ mod tests {
         let key = "k";
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
         let output = text("export fn n() -> Int64 { return 1 }");
-        let current = render_cache_entry(key, &inputs, &Stamps::new(), &output);
+        let current = render_cache_entry(key, &inputs, &Stamps::new(), None, &output);
         assert!(read_cache_entry(key, &current, None).is_some());
         let body = "1\ndata/a.txt\tdeadbeef\n0\n0\nx";
         let v5 = format!("v5 {} {body}", entry_tag(key, body));
@@ -6166,8 +6334,8 @@ mod tests {
         }
     }
 
-    /// A span table, its reports and the stamps survive the cache, a colon in a
-    /// key or a path and a tab in a report included.
+    /// A span table, its reports, the stamps and the gen fns survive the cache, a
+    /// colon in a key or a path and a tab in a report included.
     #[test]
     fn a_cache_entry_keeps_its_span_table() {
         let inputs = [
@@ -6202,10 +6370,25 @@ mod tests {
                 line: "warning C:/p/in.txt:1:1 a\tb".to_string(),
             }],
         };
-        let entry = render_cache_entry("k", &inputs, &stamps, &written);
+        let gens = vec![
+            GenFn {
+                name: "mk".into(),
+                params: 1,
+                ret: None,
+                export_to: vec!["./a:b.vyrn".into(), "./c.vyrn".into()],
+            },
+            GenFn {
+                name: "bad".into(),
+                params: 0,
+                ret: Some("Array<String>".into()),
+                export_to: Vec::new(),
+            },
+        ];
+        let entry = render_cache_entry("k", &inputs, &stamps, Some(&gens), &written);
         let read = read_cache_entry("k", &entry, None).unwrap();
         assert_eq!(*read.inputs, inputs);
         assert_eq!(read.stamps, stamps);
+        assert_eq!(read.gens, Some(gens));
         assert_eq!(read.written, written);
     }
 
@@ -6216,7 +6399,7 @@ mod tests {
         let key = "k";
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
         let output = text("export fn n() -> Int64 { return 1 }");
-        let honest = render_cache_entry(key, &inputs, &Stamps::new(), &output);
+        let honest = render_cache_entry(key, &inputs, &Stamps::new(), None, &output);
         assert!(
             read_cache_entry(key, &honest, None).is_some(),
             "the control"
