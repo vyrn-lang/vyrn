@@ -350,6 +350,7 @@ pull request.
 - A generator import's identity is its resolved path arguments, so two spellings of one path are one module.
 - A JSON Schema type import round-trips byte-exact with the schema emitter; an inexpressible keyword is an error, never a silent drop.
 - The placer rebuilds a body its placement touched; placement is not an edit of the core (95% of rebuilt bodies only gain `drop` statements, 5 in 938 renumber names, and the name numbers decide the order of wasm locals). The rebuild runs on every thread and merges in job order.
+- The kernel forks its state at a branch instead of copying it: each arm walks a child of the entry, and the join folds its result back (`kernel::state`), so an `if` or a `match` costs the facts its arms change, not the names in scope. A written parser's rule keeps four `Bool` temporaries per alternative in scope; a copy per branch made its check quadratic.
 
 ## Standard library and web
 

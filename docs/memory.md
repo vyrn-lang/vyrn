@@ -361,6 +361,8 @@ Each rule has one home. The names below are the entry points.
   body; `kernel::placement` reports the releases it is missing.
   `Kernel::exclusive` states the exclusivity of a `modify` or `consume`
   argument, by path.
+- `vyrn-lower/src/kernel/state.rs`: the linear judgment's `State` at one
+  point of the walk, as layers over the state a branch forked from.
 - `vyrn-lower/src/typed.rs`: the typed judgment.
 - `vyrn-lower/src/rules.rs`: how the kernel, the typed judgment and the
   builder state a refusal. The rows are `vyrn_frontend::rules::Rule`'s.
