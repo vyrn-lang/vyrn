@@ -83,6 +83,8 @@ pub fn parser(g: &Grammar) -> Result<String, Refused> {
         shapes,
         take: None,
         looking: 0,
+        into: None,
+        muts: BTreeSet::new(),
     };
     for &r in &rules {
         w.rule(r)?;
@@ -368,6 +370,11 @@ struct Writer<'g> {
     take: Option<String>,
     /// How many predicates the writer stands in. A predicate keeps nothing.
     looking: usize,
+    /// The flag the next call of a syntactic rule sets, declared and false, in place
+    /// of a local of its own.
+    into: Option<String>,
+    /// The mutable locals of the function being written.
+    muts: BTreeSet<String>,
 }
 
 impl Writer<'_> {
@@ -375,7 +382,14 @@ impl Writer<'_> {
         for _ in 0..self.ind {
             self.o.push_str("    ");
         }
-        self.o.push_str(text.as_ref());
+        let text = text.as_ref();
+        if let Some((name, _)) = text
+            .strip_prefix("let mut ")
+            .and_then(|t| t.split_once(' '))
+        {
+            self.muts.insert(name.to_string());
+        }
+        self.o.push_str(text);
         self.o.push('\n');
     }
 
@@ -424,6 +438,7 @@ impl Writer<'_> {
     fn start_rule(&mut self, r: RuleId) {
         self.at = r;
         self.fresh = 0;
+        self.muts.clear();
         self.ind = 0;
         self.scope = self.free[r.0 as usize].iter().cloned().collect();
         self.kept.clear();
@@ -583,9 +598,8 @@ impl Writer<'_> {
                 self.open(format!("if !{h} && !p.refused {{"));
             }
             self.take = variant.clone();
-            let hit = self.hit(x)?;
+            self.put_into(&h, x)?;
             self.take = None;
-            self.line(format!("{h} = {hit}"));
             if i > 0 {
                 self.close();
             }
@@ -835,6 +849,36 @@ impl Writer<'_> {
         Ok(())
     }
 
+    /// Writes `e` so that the flag `h`, declared and false, says whether it matched.
+    /// A call of a syntactic rule sets `h` itself.
+    fn put_into(&mut self, h: &str, e: &E) -> Result<(), Refused> {
+        if let E::Ref(r) = e {
+            if self.g.body(*r).syntactic && self.syntactic() {
+                self.into = Some(h.to_string());
+                self.hit(e)?;
+                return Ok(());
+            }
+        }
+        self.put(&format!("{h} = "), e)
+    }
+
+    /// Writes `e` and returns a mutable flag that says whether it matched: the local
+    /// `e` answers with when it is one, so no copy is written.
+    fn flag(&mut self, e: &E) -> Result<String, Refused> {
+        let hit = match e {
+            E::Ref(r) if !self.g.body(*r).syntactic && !self.syntactic() => {
+                format!("{}(text, p{})", self.function(*r), self.labels(*r, ""))
+            }
+            _ => self.hit(e)?,
+        };
+        if self.muts.contains(&hit) {
+            return Ok(hit);
+        }
+        let h = self.local("h");
+        self.line(format!("let mut {h} = {hit}"));
+        Ok(h)
+    }
+
     /// Writes the statements of `e`, and returns an expression with no side effect:
     /// whether `e` matched. When it is false and `p.refused` is unset, the cursor
     /// stands where it stood.
@@ -894,11 +938,10 @@ impl Writer<'_> {
             E::Seq(v) if v.is_empty() => "true".into(),
             E::Seq(v) => self.seq(v, true)?,
             E::Alt(v) => {
-                let h = self.local("h");
-                self.put(&format!("let mut {h} = "), &v[0])?;
+                let h = self.flag(&v[0])?;
                 for x in &v[1..] {
                     self.open(format!("if !{h} && !p.refused {{"));
-                    self.put(&format!("{h} = "), x)?;
+                    self.put_into(&h, x)?;
                     self.close();
                 }
                 h
@@ -1046,7 +1089,13 @@ impl Writer<'_> {
             }
             return Ok(h);
         }
-        self.line(format!("let mut {h} = false"));
+        let h = match self.into.take() {
+            Some(into) => into,
+            None => {
+                self.line(format!("let mut {h} = false"));
+                h
+            }
+        };
         let store = match self.take.take().filter(|_| self.looking == 0) {
             Some(variant) => self.kept_it(&variant, "v".to_string()),
             None => String::new(),
@@ -1166,7 +1215,7 @@ impl Writer<'_> {
         } else {
             Default::default()
         };
-        let h = self.local("h");
+        let mut h = String::new();
         let resets = self.resets(v, reset);
         for x in v {
             if let E::Field(label, _) = x {
@@ -1189,7 +1238,7 @@ impl Writer<'_> {
                 self.line(format!("{label}From = p.pos"));
             }
             match i {
-                0 => self.put(&format!("let mut {h} = "), x)?,
+                0 => h = self.flag(x)?,
                 _ => self.put(&format!("{h} = "), x)?,
             }
             if i > 0 && self.syntactic() && can_miss(&self.fallible, x) {
