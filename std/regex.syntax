@@ -1,0 +1,44 @@
+// The regular-expression language, which `=~` and std/regex read. The grammar has no
+// `trivia` rule, so a syntactic rule reads bytes. It states shape only: what a pattern
+// means is each reader's. A builder may refuse a form the grammar accepts, and that is
+// the one difference between the readers' languages.
+syntax Regex
+
+expect ^Expected(token=token)
+nest 250 ^TooDeep
+
+// What std/regex raises from the tree: a form its builder does not compile, and a
+// comparison of bytes. The compiler's builder raises its own.
+row Anchor
+row Backwards
+row Counted
+row EmptyClass
+row EmptyPattern
+
+RegexPattern = RegexAlt (eof / ^StrayParen)
+
+nest RegexAlt = branches:RegexBranch ('|' branches:RegexBranch)*
+RegexBranch = (!('|' / ')' / eof) pieces:RegexPiece)*
+RegexPiece = atom:RegexAtom (op:regexOp / count:RegexCount)?
+RegexCount = '{' (regexInt / ^CountNumber)
+             ('}' / ',' ('}' / (regexInt / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
+
+// The order states the language: a literal is what no other alternative takes.
+RegexAtom = RegexGroup / RegexClass / RegexEscape / RegexDot
+            / &('*' / '+' / '?') ^NoTerm / &'{' ^NoCountTerm / &'}' ^StrayBrace
+            / RegexLiteral
+RegexGroup = '(' alt:RegexAlt (')' / ^GroupUnclosed)
+RegexEscape = '\\' (regexChar / ^PatternBackslash)
+RegexDot = '.'
+RegexLiteral = regexChar
+
+// A `]` first closes the class, and a `-` before the `]` is a member.
+RegexClass = '[' negate:'^'? (!(']' / eof) items:RegexItem)* (']' / ^ClassUnclosed)
+RegexItem = RegexItemEscape / RegexMember
+RegexItemEscape = '\\' (regexChar / ^ClassBackslash)
+RegexMember = regexChar hi:regexHi?
+
+regexChar = .
+regexHi = '-' !']' .
+regexInt = [0-9]+
+regexOp = '*' (&'?' ^NonGreedy(op='*'))? / '+' (&'?' ^NonGreedy(op='+'))? / '?'

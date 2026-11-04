@@ -1443,7 +1443,7 @@ std/openapi.vyrn	0	cbf29ce484222325	20	17	a347559be7420f9b
 std/order.vyrn	0	cbf29ce484222325	20	20	34901d18d4f3ea0c
 std/proof.vyrn	0	cbf29ce484222325	20	15	8e96b2727a96087c
 std/random.vyrn	0	cbf29ce484222325	20	16	b8e97c8b736a86a6
-std/regex.vyrn	0	cbf29ce484222325	20	18	2922b24e1808bd6e
+std/regex.vyrn	0	cbf29ce484222325	20	17	cfb07ec5985e7a67
 std/rpc.editor.vyrn	0	cbf29ce484222325	20	15	5308db71b62b6a5c
 std/rpc.vyrn	0	cbf29ce484222325	20	17	1fb054967659d958
 std/runtime.vyrn	0	cbf29ce484222325	20	18	33c34a2c42fbefcb

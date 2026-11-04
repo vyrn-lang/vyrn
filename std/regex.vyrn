@@ -4,12 +4,14 @@
 /// is Vyrn, not a builtin, so every engine runs one source and agrees on offsets
 /// and counts.
 ///
-/// Supports literals, `.`, classes (`[abc]`, `[a-z]`, `[^>]`), alternation,
-/// grouping, `*` `+` `?`, and `\` escapes. A Thompson NFA with no backtracking,
-/// so the time is linear in the pattern size times the input for every pattern.
-/// A search runs it as a lazy DFA: one table read per byte.
-/// Refuses anchors, non-greedy repeats and counted repetition. It has no
-/// backreferences or lookaround: `\1` is the byte `1`.
+/// The language is `std/regex.syntax`, the one `=~` reads, and a pattern means what
+/// it means there: `.` is any character but `\n` and `\r`, `\d`, `\w` and `\s` are
+/// shorthands, `\n`, `\t`, `\r`, `\f` and `\v` are control characters, and any
+/// other escape is the character after it. A Thompson NFA with no backtracking, so
+/// the time is linear in the pattern size times the input for every pattern. A
+/// search runs it as a lazy DFA: one table read per byte. Refuses what the grammar
+/// accepts and this builder does not compile: anchors, counted repetition and an
+/// empty class. It has no backreferences or lookaround: `\1` is the byte `1`.
 ///
 /// Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
 /// backtracking engine answers `a`.
@@ -19,6 +21,11 @@
 /// a non-ASCII character is a set of its bytes.
 
 import { substring } from "std/strings"
+import { catalogue } from "std/i18n"
+import { syntax } from "std/syntax"
+// Each by a namespace: a written module's names, such as `Row`, are program-wide.
+import * as rx from syntax("./regex.syntax")
+import * as say from catalogue("./regex.errors")
 
 // A Thompson NFA as four parallel arrays: one instruction is one index into
 // `op`/`a`/`b`/`cls`.
@@ -81,7 +88,7 @@ fn hasByte(s: ByteSet, c: Int64) -> Bool {
     return ((w >> UInt64(c & 63)) & 1) != 0
 }
 
-// Recursive descent that emits as it goes. Each level answers a fragment: its
+// A walk of the tree that emits as it goes. Each level answers a fragment: its
 // start pc and the operand slots that still need an exit patched in. A hole is
 // `pc * 2 + which`, `which` being 0 for `a` and 1 for `b`.
 
@@ -92,9 +99,44 @@ type Builder = {
     a: Array<Int64>,
     b: Array<Int64>,
     cls: Array<ByteSet>,
-    pat: Array<UInt8>,
-    at: Int64,
-    err: String,
+    err: Option<rx.Row>,
+}
+
+/// The sentence of `row`, the one place a refusal is said. Every form of a counted
+/// repetition says one sentence, because this builder compiles none of them.
+fn regexSay(row: rx.Row) -> String {
+    return match row {
+        Anchor => say.tAnchor__En(),
+        Backwards => say.tBackwards__En(),
+        ClassBackslash => say.tClassBackslash__En(),
+        ClassUnclosed => say.tClassUnclosed__En(),
+        CountForm => say.tCounted__En(),
+        CountNumber => say.tCounted__En(),
+        CountUnclosed => say.tCounted__En(),
+        Counted => say.tCounted__En(),
+        EmptyClass => say.tEmptyClass__En(),
+        EmptyPattern => say.tEmptyPattern__En(),
+        Expected(token) => say.tExpected__En(token),
+        GroupUnclosed => say.tGroupUnclosed__En(),
+        NoCountTerm => say.tNoCountTerm__En(),
+        NoTerm => say.tNoTerm__En(),
+        NonGreedy(op) => say.tNonGreedy__En(op),
+        PatternBackslash => say.tPatternBackslash__En(),
+        StrayBrace => say.tStrayBrace__En(),
+        StrayParen => say.tStrayParen__En(),
+        TooDeep => say.tTooDeep__En(),
+    }
+}
+
+/// Records `row` unless the walk has refused already, so a pattern answers with its
+/// first refusal.
+fn refuse(bd: modify Builder, row: consume rx.Row) {
+    match bd.err {
+        Some(first) => {}
+        None => {
+            bd.err = Some(row)
+        }
+    }
 }
 
 fn emit(bd: modify Builder, o: Int64, x: Int64, y: Int64, s: ByteSet) -> Int64 {
@@ -134,108 +176,93 @@ fn joinHoles(x: Array<Int64>, y: Array<Int64>) -> Array<Int64> {
     return out
 }
 
-fn peek(bd: Builder) -> Int64 {
-    if bd.at >= bd.pat.length {
-        return 0 - 1
+/// Adds the bytes of `pattern` from `from` up to `to`.
+fn addBytes(k: modify ByteSet, pattern: String, from: Int64, to: Int64) {
+    let mut i = from
+    while i < to {
+        addByte(k, Int64(pattern[i]))
+        i = i + 1
     }
-    return Int64(bd.pat[bd.at])
 }
 
-/// `[...]`, with the `[` consumed.
-fn bracketClass(bd: modify Builder) -> ByteSet {
+/// Adds the bytes from `lo` to `hi`.
+fn addRange(k: modify ByteSet, lo: Int64, hi: Int64) {
+    let mut x = lo
+    while x <= hi {
+        addByte(k, x)
+        x = x + 1
+    }
+}
+
+/// The bytes the escape `\c` stands for: a shorthand (`\d`, `\w`, `\s` and their
+/// capitals, which negate), a control character (`\t`, `\n`, `\v`, `\f`, `\r`), or
+/// `c` itself.
+fn escapeBytes(c: UInt8) -> ByteSet {
     let mut k = noBytes()
-    let mut negate = false
-    if peek(bd) == '^' {
-        negate = true
-        bd.at = bd.at + 1
+    if c == 'd' || c == 'D' || c == 'w' || c == 'W' {
+        addRange(k, '0', '9')
     }
-    let mut any = false
-    // A `]` first is a literal `]`.
-    while bd.at < bd.pat.length {
-        let c = Int64(bd.pat[bd.at])
-        if c == ']' && any {
-            bd.at = bd.at + 1
-            if negate {
-                return ByteSet { w0: ~k.w0, w1: ~k.w1, w2: ~k.w2, w3: ~k.w3 }
-            }
-            return k
-        }
-        bd.at = bd.at + 1
-        let mut lo = c
-        if c == 92 {
-            if bd.at >= bd.pat.length {
-                bd.err = "a backslash at the end of a character class"
-                return k
-            }
-            lo = Int64(bd.pat[bd.at])
-            bd.at = bd.at + 1
-        }
-        // `a-z`, but a `-` last in the class is a literal `-`.
-        if peek(bd) == '-' && bd.at + 1 < bd.pat.length && Int64(bd.pat[bd.at + 1]) != ']' {
-            bd.at = bd.at + 1
-            let mut hi = Int64(bd.pat[bd.at])
-            bd.at = bd.at + 1
-            if hi == 92 && bd.at < bd.pat.length {
-                hi = Int64(bd.pat[bd.at])
-                bd.at = bd.at + 1
-            }
-            if hi < lo {
-                bd.err = "a character range that runs backwards"
-                return k
-            }
-            let mut x = lo
-            while x <= hi {
-                addByte(k, x)
-                x = x + 1
-            }
-        } else {
-            addByte(k, lo)
-        }
-        any = true
+    if c == 'w' || c == 'W' {
+        addRange(k, 'a', 'z')
+        addRange(k, 'A', 'Z')
+        addByte(k, '_')
     }
-    bd.err = "a character class with no closing `]`"
+    if c == 's' || c == 'S' {
+        addByte(k, ' ')
+        addRange(k, 9, 13)
+    }
+    if c == 'D' || c == 'W' || c == 'S' {
+        return ByteSet { w0: ~k.w0, w1: ~k.w1, w2: ~k.w2, w3: ~k.w3 }
+    }
+    if c == 'n' || c == 'r' || c == 't' || c == 'f' || c == 'v' {
+        addByte(k, if c == 'n' { 10 } else if c == 'r' { 13 } else if c == 't' { 9 } else if c == 'f' { 12 } else { 11 })
+    } else if c != 'd' && c != 'w' && c != 's' {
+        addByte(k, Int64(c))
+    }
     return k
 }
 
-fn parseAtom(bd: modify Builder) -> Frag {
-    let c = peek(bd)
-    if c < 0 {
-        bd.err = "a pattern that ends where a term was expected"
-        return Frag { start: 0, holes: [] }
-    }
-    if c == '(' {
-        bd.at = bd.at + 1
-        let inner = parseAlt(bd)
-        if peek(bd) != ')' {
-            bd.err = "a group with no closing `)`"
-            return inner
-        }
-        bd.at = bd.at + 1
-        return inner
-    }
-    if c == '^' || c == '$' {
-        bd.err = "anchors (`^` and `$`) are not supported"
-        bd.at = bd.at + 1
-        return Frag { start: 0, holes: [] }
-    }
-    bd.at = bd.at + 1
-    let all: UInt64 = 18446744073709551615
+/// The set a class states. An escape stands for its bytes, and a member's range runs
+/// between the two bytes that touch its `-`.
+fn classBytes(bd: modify Builder, pattern: String, c: rx.RegexClass) -> ByteSet {
     let mut k = noBytes()
-    if c == '[' {
-        k = bracketClass(bd)
-    } else if c == '.' {
-        // Every byte but `\n`.
-        k = ByteSet { w0: ~(UInt64(1) << 10), w1: all, w2: all, w3: all }
-    } else if c == 92 {
-        if bd.at >= bd.pat.length {
-            bd.err = "a backslash at the end of the pattern"
-            return Frag { start: 0, holes: [] }
-        }
-        addByte(k, Int64(bd.pat[bd.at]))
-        bd.at = bd.at + 1
-    } else {
-        addByte(k, c)
+    if c.items.length == 0 {
+        refuse(bd, EmptyClass)
     }
+    let mut i = 0
+    while i < c.items.length {
+        match c.items[i] {
+            RegexItemRegexItemEscape(e) => {
+                let x = escapeBytes(pattern[e.start + 1])
+                k = ByteSet { w0: k.w0 | x.w0, w1: k.w1 | x.w1, w2: k.w2 | x.w2, w3: k.w3 | x.w3 }
+                addBytes(k, pattern, e.start + 2, e.end)
+            }
+            RegexItemRegexMember(m) => {
+                if let Some(h) = m.hi {
+                    addBytes(k, pattern, m.start, h.start - 1)
+                    let lo = Int64(pattern[h.start - 1])
+                    let hi = Int64(pattern[h.start + 1])
+                    if hi < lo {
+                        refuse(bd, Backwards)
+                    }
+                    addRange(k, lo, hi)
+                    addBytes(k, pattern, h.start + 2, h.end)
+                } else {
+                    addBytes(k, pattern, m.start, m.end)
+                }
+            }
+        }
+        i = i + 1
+    }
+    if let Some(n) = c.negate {
+        return ByteSet { w0: ~k.w0, w1: ~k.w1, w2: ~k.w2, w3: ~k.w3 }
+    }
+    return k
+}
+
+/// One class test, as a fragment.
+fn fragSet(bd: modify Builder, k: ByteSet) -> Frag {
+    let all: UInt64 = 18446744073709551615
     let pc = emit(bd, opClass, 0 - 1, 0, k)
     // `.` and a negated class hold every byte from 0x80 up, and they match a
     // whole character: a byte of the class below 0x80, or a lead byte and then
@@ -259,71 +286,93 @@ fn parseAtom(bd: modify Builder) -> Frag {
     return Frag { start: pc, holes: [pc * 2 + 1, sp * 2 + 1] }
 }
 
-fn parseRepeat(bd: modify Builder) -> Frag {
-    let mut f = parseAtom(bd)
-    while bd.err.byteLength == 0 {
-        let c = peek(bd)
-        if c == '*' {
-            bd.at = bd.at + 1
-            if peek(bd) == '?' {
-                bd.err = "non-greedy repetition (`*?`) is not supported"
-                return f
-            }
-            // Greedy: the split's first operand enters the body, which loops
-            // back to the split.
-            let sp = emit(bd, opSplit, f.start, 0, noBytes())
-            patch(bd, f.holes, sp)
-            f = Frag { start: sp, holes: [sp * 2 + 1] }
-        } else if c == '+' {
-            bd.at = bd.at + 1
-            if peek(bd) == '?' {
-                bd.err = "non-greedy repetition (`+?`) is not supported"
-                return f
-            }
-            let sp = emit(bd, opSplit, f.start, 0, noBytes())
-            patch(bd, f.holes, sp)
-            f = Frag { start: f.start, holes: [sp * 2 + 1] }
-        } else if c == '?' {
-            bd.at = bd.at + 1
-            let sp = emit(bd, opSplit, f.start, 0, noBytes())
-            f = Frag { start: sp, holes: joinHoles(f.holes, [sp * 2 + 1]) }
-        } else if c == '{' {
-            bd.err = "counted repetition (`{m,n}`) is not supported"
-            return f
-        } else {
-            return f
+/// `f` under the repeat of `piece`, if it has one.
+fn fragRepeat(bd: modify Builder, f: consume Frag, piece: rx.RegexPiece) -> Frag {
+    if let Some(c) = piece.count {
+        refuse(bd, Counted)
+    }
+    if let Some(op) = piece.op {
+        let sp = emit(bd, opSplit, f.start, 0, noBytes())
+        if op.text == "?" {
+            return Frag { start: sp, holes: joinHoles(f.holes, [sp * 2 + 1]) }
         }
+        // Greedy: the split's first operand enters the body, which loops back to
+        // the split.
+        patch(bd, f.holes, sp)
+        return Frag { start: if op.text == "*" { sp } else { f.start }, holes: [sp * 2 + 1] }
     }
     return f
 }
 
-fn parseConcat(bd: modify Builder) -> Frag {
-    let c = peek(bd)
-    if c < 0 || c == '|' || c == ')' {
+/// The bytes of `pattern` from `from` up to `to`, one term each, with the repeat of
+/// `piece` on the last: a repeat takes one byte of a character outside ASCII.
+fn fragBytes(bd: modify Builder, pattern: String, from: Int64, to: Int64, piece: rx.RegexPiece) -> Frag {
+    let mut k = noBytes()
+    addByte(k, Int64(pattern[from]))
+    let f = fragSet(bd, k)
+    if from + 1 == to {
+        return fragRepeat(bd, f, piece)
+    }
+    let g = fragBytes(bd, pattern, from + 1, to, piece)
+    patch(bd, f.holes, g.start)
+    return Frag { start: f.start, holes: consume g.holes }
+}
+
+fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag {
+    match piece.atom {
+        RegexAtomRegexGroup(g) => {
+            return fragRepeat(bd, fragAlt(bd, pattern, g.alt), piece)
+        }
+        RegexAtomRegexClass(c) => {
+            return fragRepeat(bd, fragSet(bd, classBytes(bd, pattern, c)), piece)
+        }
+        RegexAtomRegexEscape(e) => {
+            // A character outside ASCII stands for its bytes.
+            if e.end > e.start + 2 {
+                return fragBytes(bd, pattern, e.start + 1, e.end, piece)
+            }
+            return fragRepeat(bd, fragSet(bd, escapeBytes(pattern[e.start + 1])), piece)
+        }
+        RegexAtomRegexDot(d) => {
+            // Every byte but `\n` and `\r`.
+            let all: UInt64 = 18446744073709551615
+            let k = ByteSet { w0: ~((UInt64(1) << 10) | (UInt64(1) << 13)), w1: all, w2: all, w3: all }
+            return fragRepeat(bd, fragSet(bd, k), piece)
+        }
+        RegexAtomRegexLiteral(l) => {
+            if l.text == "^" || l.text == "$" {
+                refuse(bd, Anchor)
+            }
+            return fragBytes(bd, pattern, l.start, l.end, piece)
+        }
+    }
+}
+
+fn fragBranch(bd: modify Builder, pattern: String, branch: rx.RegexBranch) -> Frag {
+    if branch.pieces.length == 0 {
         // The empty branch, as in `(a|)`: a split with both edges dangling.
         let sp = emit(bd, opSplit, 0, 0, noBytes())
         return Frag { start: sp, holes: [sp * 2, sp * 2 + 1] }
     }
-    let mut f = parseRepeat(bd)
-    while bd.err.byteLength == 0 {
-        let n = peek(bd)
-        if n < 0 || n == '|' || n == ')' {
-            return f
-        }
-        let g = parseRepeat(bd)
+    let mut f = fragPiece(bd, pattern, branch.pieces[0])
+    let mut i = 1
+    while i < branch.pieces.length {
+        let g = fragPiece(bd, pattern, branch.pieces[i])
         patch(bd, f.holes, g.start)
         f = Frag { start: f.start, holes: consume g.holes }
+        i = i + 1
     }
     return f
 }
 
-fn parseAlt(bd: modify Builder) -> Frag {
-    let mut f = parseConcat(bd)
-    while bd.err.byteLength == 0 && peek(bd) == '|' {
-        bd.at = bd.at + 1
-        let g = parseConcat(bd)
+fn fragAlt(bd: modify Builder, pattern: String, alt: rx.RegexAlt) -> Frag {
+    let mut f = fragBranch(bd, pattern, alt.branches[0])
+    let mut i = 1
+    while i < alt.branches.length {
+        let g = fragBranch(bd, pattern, alt.branches[i])
         let sp = emit(bd, opSplit, f.start, g.start, noBytes())
         f = Frag { start: sp, holes: joinHoles(f.holes, g.holes) }
+        i = i + 1
     }
     return f
 }
@@ -351,25 +400,20 @@ fn byteClasses(bd: Builder) -> Array<UInt8> {
 /// Compiles `pattern`, or says what is wrong with it. Compile once and search
 /// often: the whole cost of a pattern is paid here.
 export fn compile(pattern: String) -> Result<Regex, String> {
-    let mut bd = Builder {
-        op: [],
-        a: [],
-        b: [],
-        cls: [],
-        pat: bytes(pattern),
-        at: 0,
-        err: "",
+    if pattern.byteLength == 0 {
+        return Err(regexSay(EmptyPattern))
     }
-    if bd.pat.length == 0 {
-        return Err("an empty pattern")
+    return match rx.parseRegexPattern(pattern) {
+        Ok(tree) => build(pattern, tree),
+        Err(errors) => Err(regexSay(errors[0].row)),
     }
-    let f = parseAlt(bd)
-    if bd.err.byteLength > 0 {
-        return Err(bd.err.copy())
-    }
-    if bd.at < bd.pat.length {
-        // The only way out of `parseAlt` with input left is an unbalanced `)`.
-        return Err("a `)` with no `(` before it")
+}
+
+fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
+    let mut bd = Builder { op: [], a: [], b: [], cls: [], err: None }
+    let f = fragAlt(bd, pattern, tree)
+    if let Some(row) = bd.err {
+        return Err(regexSay(row))
     }
     let m = emit(bd, opMatch, 0, 0, noBytes())
     patch(bd, f.holes, m)
@@ -711,6 +755,14 @@ test "a star is greedy" {
     assertEq(replaceAll(re, "<>", "|"), "|")
     // Two tags, not one run across both, because `[^>]` cannot cross a `>`.
     assertEq(replaceAll(re, "<a><b>", "|"), "||")
+}
+
+test "a shorthand, a control escape and a dot mean what they mean after =~" {
+    let re = match compile("\\d+|\\s|\\W|\\t|.") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(re, "ab 42\r"), 5)
 }
 
 test "an escape is the byte after it, not the metacharacter" {
