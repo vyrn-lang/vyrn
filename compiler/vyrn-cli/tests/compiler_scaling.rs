@@ -141,11 +141,72 @@ fn main() -> Int64 { return pick(V0(\"a\")) }
     }
     s.push_str("fn main() -> Int64 {\n    return lowerBound<Asc<Int64>>(h0([3, 1], true), 2)\n}\n");
     out.push(("many summarized helpers", s));
+
+    // One rule of a written parser: `n / 4` alternatives in one body, each
+    // an `if` on two flags, so every branch has the earlier alternatives'
+    // temporaries in scope.
+    let mut s = String::from(
+        "type P = { pos: Int64, stop: Int64, refused: Bool }
+fn lit(text: String, p: modify P) -> Option<String> {
+    if p.pos < p.stop && text[p.pos] == 'a' {
+        p.pos = p.pos + 1
+        return Some(\"a\")
+    }
+    return None
+}
+fn refuse(p: modify P) -> Bool {
+    p.refused = true
+    return false
+}
+fn rule(text: String, p: modify P) -> Option<String> {
+    let mut kept: Option<String> = None
+    let mut done = false
+",
+    );
+    for i in 0..n / 4 {
+        s.push_str("    if !done && !p.refused {\n");
+        match i % 2 {
+            0 => s.push_str(
+                "        if let Some(v) = lit(text, p) {
+            kept = Some(v)
+            done = true
+        }
+",
+            ),
+            _ => writeln!(
+                s,
+                "        let a{i} = p.pos + 1 <= p.stop && text[p.pos] == '*'
+        let mut b{i} = a{i}
+        if b{i} {{
+            b{i} = refuse(p)
+        }}
+        done = b{i}"
+            )
+            .unwrap(),
+        }
+        s.push_str("    }\n");
+    }
+    s.push_str(
+        "    if !done {
+        return None
+    }
+    return kept
+}
+fn main() -> Int64 {
+    let mut p = P { pos: 0, stop: 1, refused: false }
+    if let Some(l) = rule(\"a\", p) {
+        return l.byteLength
+    }
+    return 1
+}
+",
+    );
+    out.push(("one written rule", s));
     out
 }
 
 #[test]
-#[ignore = "builds fourteen generated programs on one thread; named in the gate list"]
+#[ignore = "builds sixteen generated programs on one thread; named in the gate list"]
 fn no_phase_allocates_faster_than_its_input() {
     let dir = scratch("scaling");
     let cache = scratch("scaling-gen");

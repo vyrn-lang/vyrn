@@ -42,7 +42,7 @@
 //!   a capture); a take of one is refused. A read of module state is an alias
 //!   of the global. Every other unowned name is invisible here.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use vyrn_frontend::ast::{Capability, FnId, NodeId};
@@ -58,6 +58,9 @@ use vyrn_frontend::rule;
 use vyrn_frontend::rules::Rule;
 
 use crate::rules::exit_words;
+
+mod state;
+use state::{Fork, State};
 
 /// A release the plan owes and did not place: `name` is still held where the
 /// exit at `site` runs, or on one edge of the join at `site`, or at the end
@@ -123,82 +126,6 @@ enum Own {
     Gone,
     /// Bound to a literal: nothing to release until a store replaces it.
     Static,
-}
-
-/// The state at one point: every owned name's [`Own`], plus whether the path
-/// has ended. A name absent from a map has no fact there, so a clone or a
-/// join costs the facts present, not the names the body declares.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-struct State {
-    /// Every name not [`Own::Gone`]: gone is absence here, and static is
-    /// [`Own::Static`].
-    held: BTreeMap<Name, Own>,
-    /// The sub-places taken out of held names, as `(name, path)`, sorted.
-    holes: Vec<(Name, String)>,
-    /// The path returned, broke, continued or trapped: it reaches no join.
-    ended: bool,
-    /// What consumed each name, for a refusal's wording only: the line, the
-    /// taker, and the edit that copies the name there.
-    taker: BTreeMap<Name, (usize, By, Taker, Option<Fix>)>,
-    /// Where each hole was taken: `(name, path, line, the edits that copy the
-    /// path in the take's place)`. Append-only, wording only.
-    taken_at: Vec<(Name, String, usize, Vec<Fix>)>,
-    /// For an alias whose place was written: the line and the place. A later
-    /// read is refused.
-    dead: BTreeMap<Name, (usize, String)>,
-    /// What each alias reads, set by the `let` that reads the place or the
-    /// store that rebinds a borrow's binding.
-    alias: BTreeMap<Name, Alias>,
-}
-
-impl State {
-    fn own(&self, n: Name) -> Own {
-        self.held.get(&n).copied().unwrap_or(Own::Gone)
-    }
-
-    fn set_own(&mut self, n: Name, o: Own) {
-        match o {
-            Own::Gone => self.held.remove(&n),
-            _ => self.held.insert(n, o),
-        };
-    }
-
-    /// The names not gone, ascending, which is creation order.
-    fn live(&self) -> Vec<Name> {
-        self.held.keys().copied().collect()
-    }
-
-    /// Every name held, taken or holed in `self` or `other`, ascending. Any
-    /// other name is gone with no taker and no hole in both, so a join or a
-    /// back edge finds nothing to say about it.
-    fn named(&self, other: &State) -> BTreeSet<Name> {
-        let mut out = BTreeSet::new();
-        for s in [self, other] {
-            out.extend(s.held.keys());
-            out.extend(s.taker.keys());
-            out.extend(s.holes.iter().map(|(n, _)| *n));
-        }
-        out
-    }
-
-    /// Widens a loop's entry by the back edge `at`: `Static` to `Held`, and
-    /// an alias ended there stays ended. Returns whether anything changed.
-    fn widen(&mut self, at: &State) -> bool {
-        let mut changed = false;
-        for (n, o) in self.held.iter_mut() {
-            if *o == Own::Static && at.own(*n) == Own::Held {
-                *o = Own::Held;
-                changed = true;
-            }
-        }
-        for (n, d) in &at.dead {
-            if !self.dead.contains_key(n) {
-                self.dead.insert(*n, d.clone());
-                changed = true;
-            }
-        }
-        changed
-    }
 }
 
 /// Whether two paths under one name are equal or one is under the other.
@@ -625,7 +552,8 @@ struct Kernel<'b> {
     read_out: Vec<bool>,
     /// The names whose block has ended, which lost their taker there. A
     /// taker is read only for a row's operand ([`Kernel::stmt`]) or a name
-    /// with a fact ([`State::named`]), so the check covers every read.
+    /// whose facts differ at a join ([`State::differs`]), so the check covers
+    /// every read.
     ended: Vec<bool>,
 }
 
@@ -890,7 +818,7 @@ impl<'b> Kernel<'b> {
     /// Marks `n` consumed and keeps its taker for the wording.
     fn gone(&self, st: &mut State, n: Name) {
         st.set_own(n, Own::Gone);
-        st.holes.retain(|(h, _)| *h != n);
+        st.keep_holes(n, |_| false);
         let by = match self
             .part
             .get()
@@ -905,8 +833,7 @@ impl<'b> Kernel<'b> {
             0 => self.takes.get(),
             _ => Taker::Stores,
         };
-        st.taker
-            .insert(n, (self.here, by.clone(), takes, self.copy_at(n)));
+        st.set_taker(n, Some((self.here, by.clone(), takes, self.copy_at(n))));
         // The report's copy, one per binding across paths. A placed release
         // or scope end takes nothing, and a rebind clears the row, so the row
         // is the last take not followed by a rebind.
@@ -929,14 +856,14 @@ impl<'b> Kernel<'b> {
     /// an unbound name, not a use after a take.
     fn unbind(&self, st: &mut State, n: Name) {
         st.set_own(n, Own::Gone);
-        st.holes.retain(|(h, _)| *h != n);
-        st.taker.remove(&n);
+        st.keep_holes(n, |_| false);
+        st.set_taker(n, None);
     }
 
     /// Whether `n` is gone by a take this body made. A heapless name with no
     /// taker was never bound (a `match`'s unit result, an arm's temporary).
     fn used_up(&self, st: &State, n: Name) -> bool {
-        st.own(n) == Own::Gone && (self.releases(n) || st.taker.contains_key(&n))
+        st.own(n) == Own::Gone && (self.releases(n) || st.taker(n).is_some())
     }
 
     /// The name a refusal quotes: for a temporary minted for a read of a
@@ -961,7 +888,7 @@ impl<'b> Kernel<'b> {
     /// `std/vyx.vyrn`), and the name it is handed to reads nothing.
     fn gives(&self, st: &State, n: Name) -> bool {
         self.read_out[n.index()]
-            && matches!(st.alias.get(&n),
+            && matches!(st.alias(n),
                 Some(Alias { via: Some(m), .. }) if self.owned(*m))
     }
 
@@ -974,7 +901,7 @@ impl<'b> Kernel<'b> {
             None => return Ok(()),
             Some(Payload::Sealed(ty)) => {
                 let b = self.src(n);
-                let m = match st.alias.get(&n) {
+                let m = match st.alias(n) {
                     Some(Alias { via: Some(m), .. }) => self.src(*m),
                     _ => b,
                 };
@@ -987,24 +914,22 @@ impl<'b> Kernel<'b> {
             root: Root::N(r),
             path,
             ..
-        }) = st.alias.get(&n)
+        }) = st.alias(n)
         else {
             return Ok(());
         };
         let (r, hole) = (*r, format!("{path}{payload}"));
-        if !st.holes.iter().any(|(h, p)| *h == r && *p == hole) {
-            st.taken_at.push((r, hole.clone(), self.here, Vec::new()));
-            st.holes.push((r, hole));
-            st.holes.sort();
+        if !st.holes(r).contains(&hole) {
+            st.hole_taken((r, hole.clone(), self.here, Vec::new()));
+            st.add_hole(r, hole);
         }
         Ok(())
     }
 
-    /// The payload binder live in `st` that reads the hole `h` of `n`.
+    /// The first payload binder live in `st` that reads the hole `h` of `n`.
     fn payload_binder(&self, st: &State, n: Name, h: &str) -> Option<Name> {
-        st.alias
-            .iter()
-            .find_map(|(b, a)| match (&self.body.names[b.index()].payload, a) {
+        (st.aliases())
+            .filter_map(|(b, a)| match (&self.body.names[b.index()].payload, a) {
                 (
                     Some(Payload::Hole(p)),
                     Alias {
@@ -1012,9 +937,10 @@ impl<'b> Kernel<'b> {
                         path,
                         ..
                     },
-                ) if *r == n && format!("{path}{p}") == h => Some(*b),
+                ) if *r == n && format!("{path}{p}") == h => Some(b),
                 _ => None,
             })
+            .min()
     }
 
     /// A payload hole one arm left is a hole on every arm of the switch: the
@@ -1023,7 +949,7 @@ impl<'b> Kernel<'b> {
         let Val::Name(s) = on else {
             return;
         };
-        let (root, prefix) = match entry.alias.get(s) {
+        let (root, prefix) = match entry.alias(*s) {
             Some(Alias {
                 root: Root::N(r),
                 path,
@@ -1037,7 +963,7 @@ impl<'b> Kernel<'b> {
             for b in &arm.binds {
                 if let Some(Payload::Hole(p)) = &self.body.names[b.index()].payload {
                     let h = format!("{prefix}{p}");
-                    if out.holes.iter().any(|(r, hp)| *r == root && *hp == h) {
+                    if out.holes(root).contains(&h) {
                         left.push(h);
                     }
                 }
@@ -1045,11 +971,10 @@ impl<'b> Kernel<'b> {
         }
         for out in outs.iter_mut().filter(|o| o.own(root) == Own::Held) {
             for h in &left {
-                if !out.holes.iter().any(|(r, hp)| *r == root && hp == h) {
-                    out.holes.push((root, h.clone()));
+                if !out.holes(root).contains(h) {
+                    out.add_hole(root, h.clone());
                 }
             }
-            out.holes.sort();
         }
     }
 
@@ -1057,7 +982,7 @@ impl<'b> Kernel<'b> {
     /// its root: after `let mt = h.meta`, `mt[0]` reads `h.meta.[]`.
     fn src_of(&self, st: &State, p: &Place) -> Alias {
         match p {
-            Place::Name(n) => match st.alias.get(n) {
+            Place::Name(n) => match st.alias(*n) {
                 Some(a) => Alias {
                     via: Some(*n),
                     ..a.clone()
@@ -1089,7 +1014,7 @@ impl<'b> Kernel<'b> {
 
     /// The source of an alias, spelled for a refusal: `h.meta`, `xs[..]`.
     fn src_text(&self, st: &State, n: Name) -> String {
-        match st.alias.get(&n) {
+        match st.alias(n) {
             Some(a) => self.alias_text(a),
             None => self.src(n).to_string(),
         }
@@ -1149,7 +1074,7 @@ impl<'b> Kernel<'b> {
         let p = match w {
             Write::Store(p) | Write::Take(p) => p,
             Write::Hand(Val::Name(n), consume)
-                if self.owned(*n) && !st.alias.contains_key(n) && self.moves(*n, consume) =>
+                if self.owned(*n) && st.alias(*n).is_none() && self.moves(*n, consume) =>
             {
                 name = Place::Name(*n);
                 &name
@@ -1177,27 +1102,30 @@ impl<'b> Kernel<'b> {
         let mut via = root_of(p).map(|(n, _)| n);
         while let Some(n) = via {
             chain.push(n);
-            via = st.alias.get(&n).and_then(|x| x.via);
+            via = st.alias(n).and_then(|x| x.via);
         }
-        for (k, x) in &st.alias {
-            let info = &self.body.names[k.index()];
-            // An owned name holds a copy and aliases nothing, but a payload
-            // binder is the payload's address ([`Kernel::read_out`]).
-            let copied =
-                self.owned(*k) && !self.read_out[k.index()] && !(by_call && info.walked.is_some());
-            let element = store
-                && info.walked == Some(Walk::While)
-                && path.strip_prefix(x.path.as_str()).is_some_and(in_element);
-            if !copied
-                && !element
-                && !chain.contains(k)
-                && x.root == root
-                && overlaps(&x.path, &path)
-            {
-                st.dead
-                    .entry(*k)
-                    .or_insert_with(|| (self.here, what.clone()));
-            }
+        let dead: Vec<Name> = (st.aliases())
+            .filter(|(k, x)| {
+                let info = &self.body.names[k.index()];
+                // An owned name holds a copy and aliases nothing, but a payload
+                // binder is the payload's address ([`Kernel::read_out`]).
+                let copied = self.owned(*k)
+                    && !self.read_out[k.index()]
+                    && !(by_call && info.walked.is_some());
+                let element = store
+                    && info.walked == Some(Walk::While)
+                    && path.strip_prefix(x.path.as_str()).is_some_and(in_element);
+                !copied
+                    && !element
+                    && !chain.contains(k)
+                    && x.root == root
+                    && overlaps(&x.path, &path)
+                    && st.dead(*k).is_none()
+            })
+            .map(|(k, _)| k)
+            .collect();
+        for k in dead {
+            st.set_dead(k, Some((self.here, what.clone())));
         }
     }
 
@@ -1263,7 +1191,7 @@ impl<'b> Kernel<'b> {
             let by = &self.by;
             let r = self.refuse(self.here, rule!(ConsumedAndPassed, s, by, o));
             let fix = match a {
-                Arg::Val(Val::Name(n)) if !st.alias.contains_key(n) => self.copy_at(*n),
+                Arg::Val(Val::Name(n)) if st.alias(*n).is_none() => self.copy_at(*n),
                 _ => None,
             };
             return Err(Self::fixed(r, fix));
@@ -1322,7 +1250,7 @@ impl<'b> Kernel<'b> {
     /// Refuses a read of an alias whose place was written since, at the write,
     /// in the checker's two-line form.
     fn alias_read(&self, st: &State, n: Name, what: &str) -> Result<(), Refusal> {
-        let Some((l, place)) = st.dead.get(&n) else {
+        let Some((l, place)) = st.dead(n) else {
             return Ok(());
         };
         // The way out copies the place the alias reads, where it was bound.
@@ -1348,7 +1276,7 @@ impl<'b> Kernel<'b> {
             root: Root::G(g),
             path,
             ..
-        }) = st.alias.get(&n)
+        }) = st.alias(n)
         {
             if path.is_empty() {
                 // Only a return has a way out: the caller gets a copy.
@@ -1383,8 +1311,8 @@ impl<'b> Kernel<'b> {
         if *by != By::Release && !write_back && !s.starts_with('@') {
             // The nearest name on the chain: `p.name` in `for p in ps` is a
             // loop variable however the parameter behind `ps` was declared.
-            let mut m = st.alias.get(&n).and_then(|a| a.via);
-            let root = match st.alias.get(&n) {
+            let mut m = st.alias(n).and_then(|a| a.via);
+            let root = match st.alias(n) {
                 Some(Alias {
                     root: Root::N(r), ..
                 }) => Some(*r),
@@ -1401,7 +1329,7 @@ impl<'b> Kernel<'b> {
                 if m.is_none() {
                     break;
                 }
-                m = st.alias.get(&k).and_then(|a| a.via);
+                m = st.alias(k).and_then(|a| a.via);
             }
         }
         // Only an unnamed temporary keeps the place in the sentence; for any
@@ -1425,7 +1353,7 @@ impl<'b> Kernel<'b> {
             // In `movecheck::Borrow::what`'s words: a second name for a
             // parameter where the alias reads one (`let ops = self.ops` in a
             // `read self` method, `examples/mustuse_abandoned.vyrn`).
-            let kind = match st.alias.get(&n) {
+            let kind = match st.alias(n) {
                 Some(Alias {
                     root: Root::N(m), ..
                 }) => self.body.names[m.index()]
@@ -1486,9 +1414,8 @@ impl<'b> Kernel<'b> {
         // (`movecheck::refuse_projected_arg`), and for any other taker copy
         // alone. Only an element path has `[`; an alias's path has `.[]`
         // where the reader's text has none (`b.name` after `let b = ps[1]`).
-        let element =
-            path.contains('[') || st.alias.get(&n).is_some_and(|a| a.path.contains(".[]"));
-        let root = match st.alias.get(&n) {
+        let element = path.contains('[') || st.alias(n).is_some_and(|a| a.path.contains(".[]"));
+        let root = match st.alias(n) {
             Some(Alias {
                 root: Root::N(m), ..
             }) if self.body.names[n.index()].path.is_some() || self.src(n).starts_with('@') => {
@@ -1518,7 +1445,7 @@ impl<'b> Kernel<'b> {
     /// take is an answer rather than a second refusal.
     fn root_owns(&self, st: &State, n: Name) -> bool {
         matches!(
-            st.alias.get(&n),
+            st.alias(n),
             Some(Alias { root: Root::N(m), .. })
                 if self.body.names[m.index()].borrow_kind.is_none()
         )
@@ -1613,7 +1540,7 @@ impl<'b> Kernel<'b> {
         let s = self.src(n);
         let read = format!("{s}{}", path.replace(".[]", "[..]"));
         let here = self.here;
-        match st.taker.get(&n) {
+        match st.taker(n) {
             // A declared `consume` parameter and a `drop` carry no `.copy()`
             // menu; every other taker does, a builtin sink included. A linear
             // value is worded as `consume` even under a builtin (`close(s)`)
@@ -1659,10 +1586,7 @@ impl<'b> Kernel<'b> {
         n: Name,
         path: &str,
     ) -> Option<&'s (Name, String, usize, Vec<Fix>)> {
-        st.taken_at
-            .iter()
-            .rev()
-            .find(|(h, p, ..)| *h == n && p == path)
+        st.hole_take(n, path)
     }
 
     /// Every name in `names` still held is a leak where the scope ends:
@@ -1773,7 +1697,7 @@ impl<'b> Kernel<'b> {
             // A `for x in consume xs` loop's take lands on the
             // container's release, so it is worded as the loop, not a `drop`
             // ([`NameInfo::for_consume`]).
-            if st.alias.contains_key(&n) {
+            if st.alias(n).is_some() {
                 let form = if self.body.names[n.index()].for_consume {
                     By::ForConsume
                 } else {
@@ -1853,8 +1777,8 @@ impl<'b> Kernel<'b> {
 
     /// Refuses a use of `n` as a whole while a `consume` hole is open in it.
     fn whole(&self, st: &State, n: Name) -> Result<(), Refusal> {
-        match st.holes.iter().find(|(h, _)| *h == n) {
-            Some((_, path)) => {
+        match st.holes(n).first() {
+            Some(path) => {
                 let (l, here) = (self.hole_line(st, n, path), self.here);
                 let r = self.refuse(l, rule!(WholeWithHole, s = self.src(n), path, here, l));
                 Err(self.copying_hole(st, n, path, r))
@@ -1890,7 +1814,7 @@ impl<'b> Kernel<'b> {
             let (what, fixes) = match &self.body.names[c.index()].borrow_kind {
                 Some(b) => (b.what(s), b.fixes(s)),
                 None => (
-                    match st.alias.get(c) {
+                    match st.alias(*c) {
                         Some(Alias {
                             root: Root::N(m), ..
                         }) => self.body.names[m.index()]
@@ -1995,7 +1919,7 @@ impl<'b> Kernel<'b> {
                     return Err(self.param_take(*n, b));
                 }
             }
-            if st.alias.contains_key(n) {
+            if st.alias(*n).is_some() {
                 self.alias_read(st, *n, "used")?;
                 if self.moves(*n, consume) && !self.gives(st, *n) {
                     return Err(self.alias_take(st, *n, write_back));
@@ -2033,11 +1957,7 @@ impl<'b> Kernel<'b> {
         };
         self.read_at(st, &Val::Name(n), &path)?;
         if self.owned(n) {
-            if let Some((_, h)) = st
-                .holes
-                .iter()
-                .find(|(h, hp)| *h == n && overlaps(hp, &path))
-            {
+            if let Some(h) = st.holes(n).iter().find(|hp| overlaps(hp, &path)) {
                 // Both lines name the storage that moved, not the longer path
                 // read, as in `used_after` and `movecheck::check_use`.
                 let (s, here) = (self.src(n), self.here);
@@ -2065,14 +1985,13 @@ impl<'b> Kernel<'b> {
         if let Some((n, path)) = root_of(p) {
             if self.owned(n) && !path.is_empty() {
                 let fixes = self.body.consumes.get(&(self.stmt, n, path.clone()));
-                st.taken_at.push((
+                st.hole_taken((
                     n,
                     path.clone(),
                     self.here,
                     fixes.cloned().unwrap_or_default(),
                 ));
-                st.holes.push((n, path));
-                st.holes.sort();
+                st.add_hole(n, path);
             }
         }
         Ok(())
@@ -2113,10 +2032,8 @@ impl<'b> Kernel<'b> {
     /// The holes inside the place `path` of `n`, relative to it: `""` when
     /// the place is itself a hole, `.g` for a hole at `path.g`.
     fn holes_in(st: &State, n: Name, path: &str) -> Vec<String> {
-        st.holes
-            .iter()
-            .filter(|(h, _)| *h == n)
-            .filter_map(|(_, hp)| hp.strip_prefix(path))
+        (st.holes(n).iter())
+            .filter_map(|hp| hp.strip_prefix(path))
             .filter(|rest| rest.is_empty() || rest.starts_with('.'))
             .map(str::to_string)
             .collect()
@@ -2135,17 +2052,15 @@ impl<'b> Kernel<'b> {
         if !self.owned(n) {
             return Ok(());
         }
-        if let Some((_, h)) = st.holes.iter().find(|(h, hp)| {
-            *h == n
-                && path
-                    .strip_prefix(hp.as_str())
-                    .is_some_and(|r| r.starts_with('.'))
+        if let Some(h) = (st.holes(n).iter()).find(|hp| {
+            path.strip_prefix(hp.as_str())
+                .is_some_and(|r| r.starts_with('.'))
         }) {
             let (s, here) = (self.src(n), self.here);
             let r = rule!(StoreUnderHole, s, h, here, path = &path);
             return Err(self.refuse(self.hole_line(st, n, h), r));
         }
-        st.holes.retain(|(h, hp)| !(*h == n && overlaps(hp, &path)));
+        st.keep_holes(n, |hp| !overlaps(hp, &path));
         Ok(())
     }
 
@@ -2302,7 +2217,7 @@ impl<'b> Kernel<'b> {
             // `scope_end` left each binding gone; `stmt` panics on a row that
             // names one before a `let` binds it again.
             for n in &bound_here {
-                st.taker.remove(n);
+                st.set_taker(*n, None);
                 self.ended[n.index()] = true;
             }
         }
@@ -2449,22 +2364,25 @@ impl<'b> Kernel<'b> {
                 }
                 // An alias: a borrow read out of a place, or a second name for
                 // a borrow, which is not a take of it.
-                st.dead.remove(n);
-                st.alias.remove(n);
+                st.set_dead(*n, None);
+                st.set_alias(*n, None);
                 match rhs {
                     Rhs::Read(p) if self.borrowed(*n) || self.read_out[n.index()] => {
-                        st.alias.insert(*n, self.src_of(st, p));
+                        let a = self.src_of(st, p);
+                        st.set_alias(*n, Some(a));
                     }
                     // A read of module state is an alias whatever it holds:
                     // the rule is about a global's lifetime, not heap.
                     Rhs::Read(p @ Place::Global(_)) if self.owned(*n) => {
-                        st.alias.insert(*n, self.src_of(st, p));
+                        let a = self.src_of(st, p);
+                        st.set_alias(*n, Some(a));
                     }
                     Rhs::Val(Val::Name(m))
                         if self.borrowed(*n) && self.borrowed(*m) && !self.gives(st, *m) =>
                     {
                         self.read(st, &Val::Name(*m))?;
-                        st.alias.insert(*n, self.src_of(st, &Place::Name(*m)));
+                        let a = self.src_of(st, &Place::Name(*m));
+                        st.set_alias(*n, Some(a));
                         return Ok(());
                     }
                     _ => {}
@@ -2473,7 +2391,7 @@ impl<'b> Kernel<'b> {
                 self.cancel(st, rhs)?;
                 if self.owned(*n) {
                     st.set_own(*n, if is_static { Own::Static } else { Own::Held });
-                    st.holes.retain(|(h, _)| h != n);
+                    st.keep_holes(*n, |_| false);
                     bound_here.push(*n);
                     if let Some(l) = self.loops.last_mut() {
                         l.bound_inside.push(*n);
@@ -2490,11 +2408,11 @@ impl<'b> Kernel<'b> {
                 // A borrow's binding rebound to another borrow (`t = d.title`
                 // after `let t = s.name`): the alias travels, as at a `let`.
                 if let (Place::Name(n), Val::Name(m)) = (place, value) {
-                    if self.borrowed(*n) && st.alias.contains_key(m) && !self.gives(st, *m) {
+                    if self.borrowed(*n) && st.alias(*m).is_some() && !self.gives(st, *m) {
                         self.read(st, value)?;
-                        let a = st.alias[m].clone();
-                        st.alias.insert(*n, a);
-                        st.dead.remove(n);
+                        let a = st.alias(*m).cloned();
+                        st.set_alias(*n, a);
+                        st.set_dead(*n, None);
                         return Ok(());
                     }
                 }
@@ -2505,12 +2423,12 @@ impl<'b> Kernel<'b> {
                 // of an alias, refused.
                 if let Val::Name(m) = value {
                     let into = self.src_of(st, place);
-                    let back = st.alias.get(m).is_some_and(|a| {
+                    let back = st.alias(*m).is_some_and(|a| {
                         a.root == into.root && a.path == into.path && !a.path.contains(".[]")
                     });
                     if back {
                         self.read(st, value)?;
-                        st.dead.insert(*m, (self.here, self.place_text(place)));
+                        st.set_dead(*m, Some((self.here, self.place_text(place))));
                         return Ok(());
                     }
                 }
@@ -2539,8 +2457,8 @@ impl<'b> Kernel<'b> {
                 if let Place::Name(n) = place {
                     // A borrow's binding given a fresh value is no alias.
                     if self.borrowed(*n) {
-                        st.alias.remove(n);
-                        st.dead.remove(n);
+                        st.set_alias(*n, None);
+                        st.set_dead(*n, None);
                     }
                 }
                 match place {
@@ -2578,7 +2496,7 @@ impl<'b> Kernel<'b> {
                         }
                         st.set_own(*n, if fresh_static { Own::Static } else { Own::Held });
                         // The new value is whole.
-                        st.holes.retain(|(h, _)| h != n);
+                        st.keep_holes(*n, |_| false);
                     }
                     // A `modify` parameter owes the release of the value it
                     // held, like one of its fields.
@@ -2649,13 +2567,13 @@ impl<'b> Kernel<'b> {
                 site,
             } => {
                 self.read(st, cond)?;
-                let mut a = st.clone();
-                self.stmts(then, &mut a)?;
-                let mut b = st.clone();
-                self.stmts(els, &mut b)?;
-                let mut edges = vec![a, b];
-                self.equalize(&mut edges, *site);
-                *st = self.join(&edges)?;
+                self.branch(st, |k, entry| {
+                    let mut a = entry.arm();
+                    k.stmts(then, &mut a)?;
+                    let mut b = entry.arm();
+                    k.stmts(els, &mut b)?;
+                    Ok((vec![a, b], *site))
+                })?;
             }
             St::Switch {
                 on,
@@ -2676,44 +2594,45 @@ impl<'b> Kernel<'b> {
                 } else {
                     self.read(st, on)?;
                 }
-                let mut outs = Vec::new();
-                for arm in arms {
-                    for r in arm.reads(on) {
-                        if let St::Let(b, _) = r {
-                            self.read_out[b.index()] = true;
+                self.branch(st, |k, entry| {
+                    let mut outs = Vec::new();
+                    for arm in arms {
+                        for r in arm.reads(on) {
+                            if let St::Let(b, _) = r {
+                                k.read_out[b.index()] = true;
+                            }
                         }
-                    }
-                    let Arm {
-                        binds,
-                        body,
-                        site,
-                        index,
-                        ..
-                    } = arm;
-                    let mut a = st.clone();
-                    for b in binds {
-                        if self.owned(*b) {
-                            a.set_own(*b, Own::Held);
+                        let Arm {
+                            binds,
+                            body,
+                            site,
+                            index,
+                            ..
+                        } = arm;
+                        let mut a = entry.arm();
+                        for b in binds {
+                            if k.owned(*b) {
+                                a.set_own(*b, Own::Held);
+                            }
                         }
+                        // The binders' scope is the arm: its `scope_end` checks them.
+                        if *carries {
+                            k.arms.push((*site, *index, binds.clone()));
+                        }
+                        let walked = k.stmts(body, &mut a);
+                        if *carries {
+                            k.arms.pop();
+                        }
+                        walked?;
+                        if !a.ended {
+                            k.scope_end(&mut a, binds, End::Arm(*site, *index))?;
+                        }
+                        outs.push(a);
                     }
-                    // The binders' scope is the arm: its `scope_end` checks them.
-                    if *carries {
-                        self.arms.push((*site, *index, binds.clone()));
-                    }
-                    let walked = self.stmts(body, &mut a);
-                    if *carries {
-                        self.arms.pop();
-                    }
-                    walked?;
-                    if !a.ended {
-                        self.scope_end(&mut a, binds, End::Arm(*site, *index))?;
-                    }
-                    outs.push(a);
-                }
-                self.mirror_payloads(st, on, arms, &mut outs);
-                let site = arms.first().map(|a| a.site).unwrap_or(NodeId::NONE);
-                self.equalize(&mut outs, site);
-                *st = self.join(&outs)?;
+                    k.mirror_payloads(entry.entry(), on, arms, &mut outs);
+                    let site = arms.first().map(|a| a.site).unwrap_or(NodeId::NONE);
+                    Ok((outs, site))
+                })?;
             }
             St::Block { site, body, .. } => {
                 self.stmts_at(body, st, *site)?;
@@ -2761,7 +2680,7 @@ impl<'b> Kernel<'b> {
                 if ctx.breaks.is_empty() {
                     st.ended = true;
                 } else {
-                    *st = self.join(&ctx.breaks)?;
+                    *st = self.join(&ctx.breaks)?.settle(&ctx.entry);
                 }
             }
             // Outside a loop the path ends; `typed::loops` refuses it.
@@ -2815,13 +2734,44 @@ impl<'b> Kernel<'b> {
     /// Rule N in placement mode: where one live edge of a join took
     /// a name another holds, the holding edges release it into the plan's
     /// edge table. In judging mode `join` refuses the disagreement.
+    /// Walks a branch's arms from `st` and joins them into `st`. `walk`
+    /// walks each arm from [`Fork::arm`] and returns the edges in arm order,
+    /// with the node that keys their rows. On a refusal, `st` is the entry,
+    /// as if no arm had run.
+    fn branch(
+        &mut self,
+        st: &mut State,
+        walk: impl FnOnce(&mut Self, &Fork) -> Result<(Vec<State>, NodeId), Refusal>,
+    ) -> Result<(), Refusal> {
+        let fork = Fork::new(st);
+        let joined = walk(self, &fork).and_then(|(mut edges, site)| {
+            self.equalize(&mut edges, site);
+            self.join(&edges)
+        });
+        match joined {
+            Ok(j) => {
+                *st = fork.join(j);
+                Ok(())
+            }
+            Err(r) => {
+                *st = fork.undo();
+                Err(r)
+            }
+        }
+    }
+
     fn equalize(&mut self, edges: &mut [State], site: NodeId) {
         if self.mode != Mode::Place {
             return;
         }
         let live: Vec<usize> = (0..edges.len()).filter(|i| !edges[*i].ended).collect();
-        let names: BTreeSet<Name> = (live.iter())
-            .flat_map(|i| edges[*i].held.keys().copied())
+        // A name every live edge has alike is owed nothing here, and only a
+        // must-use or a heap name is owed anything.
+        let owed = |n: &Name| self.releases(*n) || self.body.owes(*n).is_some();
+        let held = |n: &Name| live.iter().any(|i| edges[*i].own(*n) != Own::Gone);
+        let names: BTreeSet<Name> = (live.iter().skip(1))
+            .flat_map(|i| edges[live[0]].differs(&edges[*i]))
+            .filter(|n| owed(n) && held(n))
             .collect();
         // A must-use value disposed of on one edge only is refused, not
         // repaired, and the holding edges let it go.
@@ -2885,8 +2835,7 @@ impl<'b> Kernel<'b> {
                             holes: Vec::new(),
                         },
                     );
-                    edges[*i].holes.push((n, h.clone()));
-                    edges[*i].holes.sort();
+                    edges[*i].add_hole(n, h.clone());
                 }
             }
             let gone = live.iter().any(|i| edges[*i].own(n) == Own::Gone);
@@ -2927,7 +2876,7 @@ impl<'b> Kernel<'b> {
     /// Refuses a name bound outside the loop `ctx` that the back edge `at`
     /// does not have as the loop's entry has it.
     fn back(&self, at: &State, ctx: &LoopCtx) -> Result<(), Refusal> {
-        let outside = at.named(&ctx.entry).into_iter();
+        let outside = at.differs(&ctx.entry).into_iter();
         (outside.filter(|n| !ctx.bound_inside.contains(n)))
             .try_for_each(|n| self.agree(Point::Back, at, &ctx.entry, n))
     }
@@ -2955,7 +2904,7 @@ impl<'b> Kernel<'b> {
             return Err(self.obligation(n, false));
         }
         if let Some(g) = took {
-            return Err(match (g.taker.get(&n), point) {
+            return Err(match (g.taker(n), point) {
                 (Some((l, by, ..)), _) if *by != By::Nothing => {
                     let r = match point {
                         Point::Join => rule!(JoinMoved, s, by),
@@ -2996,11 +2945,7 @@ impl<'b> Kernel<'b> {
     }
 
     fn holes_of<'s>(&self, st: &'s State, n: Name) -> Vec<&'s str> {
-        st.holes
-            .iter()
-            .filter(|(h, _)| *h == n)
-            .map(|(_, p)| p.as_str())
-            .collect()
+        st.holes(n).iter().map(String::as_str).collect()
     }
 
     /// The state after a join, where every live edge agrees on every name
@@ -3011,20 +2956,14 @@ impl<'b> Kernel<'b> {
     fn join(&self, edges: &[State]) -> Result<State, Refusal> {
         let live: Vec<&State> = edges.iter().filter(|s| !s.ended).collect();
         let Some(first) = live.first() else {
-            return Ok(State {
-                ended: true,
-                ..edges[0].clone()
-            });
+            let mut out = edges[0].clone();
+            out.ended = true;
+            return Ok(out);
         };
         let mut joined = (*first).clone();
         for other in &live[1..] {
-            for (n, d) in &other.dead {
-                joined.dead.entry(*n).or_insert_with(|| d.clone());
-            }
-            for (n, a) in &other.alias {
-                joined.alias.entry(*n).or_insert_with(|| a.clone());
-            }
-            for n in first.named(other) {
+            joined.merge_aliases(other);
+            for n in first.differs(other) {
                 self.agree(Point::Join, first, other, n)?;
                 if !self.owned(n) {
                     continue;
@@ -3035,13 +2974,13 @@ impl<'b> Kernel<'b> {
                     }
                     continue;
                 }
-                let taken = live
-                    .iter()
-                    .find(|s| s.own(n) == Own::Gone && s.taker.contains_key(&n));
+                let taken = (live.iter())
+                    .filter(|s| s.own(n) == Own::Gone)
+                    .find_map(|s| s.taker(n));
                 match taken {
-                    Some(s) => {
+                    Some(t) => {
                         joined.set_own(n, Own::Gone);
-                        joined.taker.insert(n, s.taker[&n].clone());
+                        joined.set_taker(n, Some(t.clone()));
                     }
                     // An edge that never bound it does not count.
                     None if live.iter().any(|s| s.own(n) != Own::Gone) => {
@@ -3050,11 +2989,10 @@ impl<'b> Kernel<'b> {
                     None => {}
                 }
                 for h in self.holes_owned(other, n) {
-                    if !joined.holes.iter().any(|(m, p)| *m == n && *p == h) {
-                        joined.holes.push((n, h));
+                    if !joined.holes(n).contains(&h) {
+                        joined.add_hole(n, h);
                     }
                 }
-                joined.holes.sort();
             }
         }
         Ok(joined)
