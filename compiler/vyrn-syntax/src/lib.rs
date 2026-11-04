@@ -27,7 +27,7 @@ mod textmate;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-pub use gen::lexer;
+pub use gen::{bytes, lexer};
 pub use load::load;
 pub use parser::parser;
 pub use recognizer::recognizer;

@@ -1,0 +1,18 @@
+{
+  "anchor": "anchors (`^` and `$`) are not supported",
+  "backwards": "a character range that runs backwards",
+  "classBackslash": "a backslash at the end of a character class",
+  "classUnclosed": "a character class with no closing `]`",
+  "counted": "counted repetition (`'{m,n}'`) is not supported",
+  "emptyClass": "a character class with no members",
+  "emptyPattern": "an empty pattern",
+  "expected": "a pattern is expected to hold {token} here",
+  "groupUnclosed": "a group with no closing `)`",
+  "noCountTerm": "a counted repetition (`'{m,n}'`) with no term before it",
+  "noTerm": "a repeat (`*`, `+` or `?`) with no term before it",
+  "nonGreedy": "non-greedy repetition (`{op}?`) is not supported",
+  "patternBackslash": "a backslash at the end of the pattern",
+  "strayBrace": "a `'}'` with no `'{'` before it (a literal brace is `\\'}'`)",
+  "strayParen": "a `)` with no `(` before it",
+  "tooDeep": "a pattern that nests more than 250 levels deep"
+}
