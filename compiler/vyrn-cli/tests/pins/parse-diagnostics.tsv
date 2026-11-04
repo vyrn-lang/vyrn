@@ -1422,7 +1422,7 @@ std/contract.vyrn	0	cbf29ce484222325	20	16	da456f2304b2e45c
 std/diag.vyrn	0	cbf29ce484222325	20	16	97d44fb0f1eecd29
 std/fallible.vyrn	0	cbf29ce484222325	20	11	d00e84cb964cccd6
 std/fetch.vyrn	0	cbf29ce484222325	20	18	7d4ece66beaeb2f0
-std/graphql.vyrn	0	cbf29ce484222325	20	18	1545c3d4db2666a9
+std/graphql.vyrn	0	cbf29ce484222325	20	17	a7eac301fdcca43b
 std/hash.vyrn	0	cbf29ce484222325	20	19	7d00c4bc9c0ac6b4
 std/hints.vyrn	0	cbf29ce484222325	20	18	ff404a8bd2a62e4e
 std/html.vyrn	0	cbf29ce484222325	20	18	1afbb1136f293870

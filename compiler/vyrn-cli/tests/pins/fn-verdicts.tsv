@@ -2429,20 +2429,18 @@ std/graphql.vyrn	gqlNamed	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlRootMembers	no, it calls `gqlNullableMember`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/graphql.vyrn	gqlPlaceholderMember	yes	no, its effect set is alloc
 std/graphql.vyrn	sdl	no, it calls `gqlTypeSdl`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/graphql.vyrn	gqlScanner	yes	no, its effect set is alloc
-std/graphql.vyrn	gqlAt	yes	no, `sc` is Scanner, not an integer, Bool or a read array of one
-std/graphql.vyrn	gqlSetErr	yes	no, its effect set is alloc
-std/graphql.vyrn	gqlValErr	yes	no, its effect set is alloc
-std/graphql.vyrn	gqlIsNumByte	yes	yes, emulated Int64
-std/graphql.vyrn	gqlValue	no, it calls `ident`, which is not trap-free	no, its effect set is alloc, trap
-std/graphql.vyrn	gqlMaxDepth	yes	yes, emulated Int64
-std/graphql.vyrn	gqlTooDeep	yes	no, its effect set is alloc
-std/graphql.vyrn	gqlNumberValue	no, it calls `parseJson`, which is not trap-free	no, its effect set is alloc
-std/graphql.vyrn	gqlListValue	no, it calls `gqlValue`, which is not trap-free	no, its effect set is alloc, trap
-std/graphql.vyrn	gqlObjectValue	no, it calls `ident`, which is not trap-free	no, its effect set is alloc, trap
-std/graphql.vyrn	gqlArgList	no, it calls `ident`, which is not trap-free	no, its effect set is alloc, trap
-std/graphql.vyrn	gqlSelSet	no, it calls `ident`, which is not trap-free	no, its effect set is alloc, trap
-std/graphql.vyrn	gqlParseQuery	no, it calls `ident`, which is not trap-free	no, its effect set is alloc, trap
+std/graphql.vyrn	gqlSay	yes	no, its effect set is alloc
+std/graphql.vyrn	gqlValue	no, it calls `parseJson`, which is not trap-free	no, its effect set is alloc
+std/graphql.vyrn	gqlWord	yes	no, its effect set is alloc
+std/graphql.vyrn	gqlList	no, it calls `gqlValue`, which is not trap-free	no, its effect set is alloc
+std/graphql.vyrn	gqlObject	no, it calls `gqlValue`, which is not trap-free	no, its effect set is alloc
+std/graphql.vyrn	gqlScanned	yes	yes, emulated Int64
+std/graphql.vyrn	gqlArgTaken	yes	no, its effect set is alloc
+std/graphql.vyrn	gqlKeyTaken	yes	no, its effect set is alloc
+std/graphql.vyrn	gqlArgs	no, it calls `gqlValue`, which is not trap-free	no, its effect set is alloc
+std/graphql.vyrn	gqlSels	no, it calls `gqlArgs`, which is not trap-free	no, its effect set is alloc
+std/graphql.vyrn	gqlParseQuery	no, it keeps an index check	no, its effect set is alloc
+std/graphql.vyrn	gqlOperation	no, it calls `gqlSels`, which is not trap-free	no, its effect set is alloc
 std/graphql.vyrn	gqlFieldIndex	yes	no, `fields` is Array<JsonField>, not an integer, Bool or a read array of one
 std/graphql.vyrn	gqlCheckSel	no, it calls a function value	no, its effect set is alloc
 std/graphql.vyrn	gqlOk	yes	no, its effect set is alloc

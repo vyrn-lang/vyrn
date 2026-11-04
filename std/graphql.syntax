@@ -1,0 +1,43 @@
+// A GraphQL executable document as std/graphql reads it: one operation of fields,
+// aliases, arguments and selection sets, with no variable, fragment or directive.
+// Whitespace, commas and `#` comments are trivia, as GraphQL states. It states shape
+// only: a name compared with another, and a string or number decoded, are
+// std/graphql's.
+syntax Graphql
+
+expect ^GqlExpected(token=token)
+nest 128 ^GqlTooDeep
+
+// What std/graphql raises from the tree.
+row DuplicateKey(key)
+row DuplicateArgument(name)
+row MalformedString(why)
+row MalformedNumber(number)
+
+trivia = ([ \t\r\n,] / '#' (!'\n' .)*)*
+
+GqlDocument = GqlOperation (eof / ^ManyOperations)
+GqlOperation = (&eof ^NoQuery
+                / &'{'
+                / root:gqlOpType name:gqlName? (&'(' ^VariableDefinitions)?
+                / ^OperationType(found=found))
+               sels:GqlSelSet
+
+nest GqlSelSet = ('{' / ^SelSetOpen) (&'}' ^SelSetEmpty)? (!'}' !eof (sels:GqlSelection / ^FieldName))*
+                 ('}' / ^SelSetUnclosed)
+GqlSelection = key:gqlName (':' (name:gqlName / ^AliasField(alias=key)))? args:GqlArgs? (&'{' subs:GqlSelSet)?
+
+GqlArgs = '(' (!')' !eof (args:GqlArgument / ^ArgumentName))* (')' / ^ArgumentsUnclosed)
+GqlArgument = name:gqlName (':' / ^ArgumentColon(name=name)) value:GqlValue
+
+GqlValue = '$' ^Variable(name=found) / gqlString / GqlList / GqlObject / gqlNumber / gqlName / ^NoValue
+nest GqlList = '[' (!']' !eof items:GqlValue)* (']' / ^ListUnclosed)
+nest GqlObject = '{' (!'}' !eof (fields:GqlObjectField / ^ObjectFieldName))* ('}' / ^ObjectUnclosed)
+GqlObjectField = name:gqlName (':' / ^ObjectColon(field=name)) value:GqlValue
+
+gqlOpType = ('query' / 'mutation') ![_0-9A-Za-z]
+gqlName = [_A-Za-z] [_0-9A-Za-z]*
+// A string or a number is the text std/json reads, so it has one escape decoder and
+// one number grammar.
+gqlString = '"' ('\\' . / !'"' .)* '"'?
+gqlNumber = [0-9-] [0-9+.eE-]*

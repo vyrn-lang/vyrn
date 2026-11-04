@@ -139,7 +139,7 @@ Each of these is a library of `gen fn`s. The compiler knows none of their domain
 | `std/http` | Hand-written REST routes over the same procedures: `http(module)`, `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, server-sent events (`sse`) and WebSockets (`ws`). |
 | `std/connect` | `connectServer` and `connectClient`: Connect's unary JSON protocol over HTTP/1. |
 | `std/openapi` | `openapi(contract)`: an OpenAPI 3.1 document of the procedures. |
-| `std/graphql` | `sdl(contract)` writes the SDL; `graphqlServer` executes queries against the procedures. |
+| `std/graphql` | `sdl(contract)` writes the SDL; `graphqlServer` executes queries against the procedures. A query is read by `std/graphql.syntax`, at run time, and refused with its sentence from `std/graphql.errors`. |
 
 ### Generator support
 

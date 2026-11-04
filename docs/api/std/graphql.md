@@ -67,8 +67,8 @@ A parsed operation: its root (`"query"` or `"mutation"`), its fields, and `err !
 fn gqlParseQuery(src: String) -> GqlQuery
 ```
 
-One executable operation: an optional `query` or `mutation` keyword and name,
-then a selection set. A second operation is refused.
+One executable operation, read by `std/graphql.syntax`: an optional `query` or
+`mutation` keyword and name, then a selection set. `err` is the first refusal.
 
 ## GqlErr
 

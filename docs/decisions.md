@@ -387,6 +387,7 @@ pull request.
 - No single service description projected onto every transport. Each protocol has a hand-written `<stem>.<proto>.vyrn` in that protocol's vocabulary.
 - Connect, OpenAPI and GraphQL are generator libraries over `moduleInterface`. No gRPC, which would be a runtime project.
 - The GraphQL executor is generated beside the SDL from one reflection walk. A resolver's `Err` stays in `data`.
+- `std/graphql.syntax` is the query language: one operation, no variable, fragment or directive. Commas and `#` comments are trivia and a name starts with a letter or `_`, as GraphQL states. A response key or an argument written twice and a string or number `std/json` refuses are rows `std/graphql` raises from the tree.
 - A client disconnect is detected when a write fails. No keep-alive or ping; a finished producer answers 204.
 - WebSocket support is server push only.
 - An ETag is FNV-1a-64 of content type and body with no seed, so it survives a restart. Cache-Control is a bare `max-age`.
