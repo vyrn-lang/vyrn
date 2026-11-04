@@ -740,6 +740,30 @@ impl StdTool {
         self.write(rel, &text.replace(from, to));
     }
 
+    /// Sets the times of `rel`, or of every file under the tree, to `at`. An
+    /// hour back settles a stamp on Windows; a unix change time stays the
+    /// clock's, so there no stamp settles and the loader hashes every input.
+    fn set_times(&self, rel: &str, at: std::time::SystemTime) {
+        let path = self.dir.join(rel);
+        if path.is_dir() {
+            for e in std::fs::read_dir(&path).unwrap() {
+                let name = e.unwrap().file_name();
+                self.set_times(&format!("{rel}/{}", name.to_string_lossy()), at);
+            }
+            return;
+        }
+        let times = std::fs::FileTimes::new().set_modified(at);
+        #[cfg(windows)]
+        let times = std::os::windows::fs::FileTimesExt::set_created(times, at);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_times(times).unwrap();
+    }
+
+    fn age(&self) {
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        self.set_times(".", hour_ago);
+    }
+
     /// `vyrn <cmd> main.vyrn` with this tree's std and cache, as stdout, stderr
     /// and exit code.
     fn run(&self, cmd: &str, cached: bool) -> (String, String, Option<i32>) {
@@ -846,6 +870,75 @@ fn a_cached_generator_whose_body_stopped_checking_is_refused() {
         "let z: Int64 = \"no\"\n    let n = match",
     );
     assert!(t.refusal().contains("String"));
+}
+
+#[test]
+fn an_input_edited_at_its_size_reaches_the_next_compile() {
+    let t = StdTool::new("tool_same_size");
+    t.age();
+    assert!(t.written().contains("return 103"));
+    t.edit("std/tool.syntax", "[a-z]+", "[b-z]+");
+    assert!(t.written().contains("return 100"));
+}
+
+#[test]
+fn an_input_touched_with_its_bytes_kept_writes_the_same_module() {
+    let t = StdTool::new("tool_touched");
+    t.age();
+    let before = t.written();
+    t.set_times("std/tool.syntax", std::time::SystemTime::now());
+    assert_eq!(before, t.written());
+}
+
+/// A stamp inside the slack is not recorded, so a write that keeps the length
+/// and the times reaches the next compile. A time ahead of the clock stays
+/// inside the slack for the whole test.
+#[test]
+fn an_input_replaced_inside_the_slack_reaches_the_next_compile() {
+    let t = StdTool::new("tool_one_tick");
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    t.age();
+    t.set_times("std/tool.syntax", ahead);
+    assert!(t.written().contains("return 103"));
+    t.edit("std/tool.syntax", "[a-z]+", "[b-z]+");
+    t.set_times("std/tool.syntax", ahead);
+    assert!(t.written().contains("return 100"));
+}
+
+#[test]
+fn a_deleted_input_reaches_the_next_compile() {
+    let t = StdTool::new("tool_gone");
+    t.age();
+    t.written();
+    std::fs::remove_file(t.dir.join("std/toolhelp.vyrn")).unwrap();
+    assert!(t.refusal().contains("toolhelp"));
+}
+
+#[test]
+fn a_std_module_edited_in_a_checkout_reaches_the_next_compile() {
+    let t = StdTool::new("tool_std_edit");
+    t.age();
+    t.written();
+    t.edit("std/toolhelp.vyrn", "return 100", "return 200");
+    assert!(t.written().contains("return 203"));
+}
+
+/// An entry in the format before stamps is a silent miss, so the generator runs
+/// again and writes what a cold compile writes.
+#[test]
+fn an_entry_an_older_compiler_left_runs_the_generator_again() {
+    let t = StdTool::new("tool_older");
+    t.age();
+    let before = t.written();
+    for e in std::fs::read_dir(t.dir.join("cache")).unwrap() {
+        let path = e.unwrap().path();
+        if let Some(rest) = (std::fs::read_to_string(&path).ok())
+            .and_then(|text| text.strip_prefix("v6 ").map(str::to_string))
+        {
+            std::fs::write(&path, format!("v5 {rest}")).unwrap();
+        }
+    }
+    assert_eq!(before, t.written());
 }
 
 #[test]

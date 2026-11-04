@@ -741,49 +741,34 @@ pub type GenEngine = dyn Fn(
     + Sync;
 
 /// Identifies the running compiler build: the crate version, then the
-/// executable's size and mtime. A persisted generator output or artifact is
-/// reused only by the same build.
-///
-/// An executable written within [`crate::manifest::MTIME_SLACK`] of now is
-/// named by the hash of its bytes instead: a second build of the same size in
-/// that window can carry the same mtime. Later, no write can, so the stat
-/// suffices.
+/// executable's [`crate::manifest::settled_stamp`], else the hash of its bytes.
+/// A persisted generator output or artifact is reused only by the same build.
 pub fn compiler_identity() -> String {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ID.get_or_init(|| {
-        let exe = std::env::current_exe().ok();
-        let exe_id = match exe.as_ref().and_then(|p| std::fs::metadata(p).ok()) {
-            Some(m) => executable_id(m.len(), m.modified().ok(), || {
-                std::fs::read(exe.as_ref()?).ok()
-            }),
+        let exe_id = match std::env::current_exe() {
+            Ok(exe) => executable_id(&exe),
             // A build that cannot be identified must not reuse outputs across
             // processes. A page has no executable and no process id, and its
             // cache never leaves the page (`vyrn-play`).
-            None if cfg!(target_os = "unknown") => "page".to_string(),
-            None => format!("unknown-{}", std::process::id()),
+            Err(_) if cfg!(target_os = "unknown") => "page".to_string(),
+            Err(_) => format!("unknown-{}", std::process::id()),
         };
         format!("{}:{exe_id}", env!("CARGO_PKG_VERSION"))
     })
     .clone()
 }
 
-/// The executable part of [`compiler_identity`]: `len:mtime` once the mtime is
-/// settled, else the hash of `bytes()`.
-fn executable_id(
-    len: u64,
-    mtime: Option<std::time::SystemTime>,
-    bytes: impl FnOnce() -> Option<Vec<u8>>,
-) -> String {
-    let settled = mtime
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age >= crate::manifest::MTIME_SLACK);
-    let nanos = mtime.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
-    match (settled, nanos) {
-        (true, Some(d)) => format!("{len}:{}", d.as_nanos()),
-        _ => match bytes() {
-            Some(b) => format!("sha256:{}", crate::hash::sha256_hex(&b)),
-            None => format!("unknown-{}", std::process::id()),
-        },
+/// The executable part of [`compiler_identity`]: the file's settled stamp, else
+/// the hash of its bytes, because a second build of one size can carry the
+/// stamp of the first while its times lie inside the slack.
+fn executable_id(exe: &std::path::Path) -> String {
+    if let Some(stamp) = crate::manifest::settled_stamp(exe) {
+        return stamp.0;
+    }
+    match std::fs::read(exe) {
+        Ok(bytes) => format!("sha256:{}", crate::hash::sha256_hex(&bytes)),
+        Err(_) => format!("unknown-{}", std::process::id()),
     }
 }
 
@@ -1020,15 +1005,15 @@ fn adopt(src: &str, g: &str) -> Result<Derived, String> {
 mod tests {
     use super::*;
 
-    /// Two builds of one size written in one mtime tick differ by their bytes;
-    /// a settled mtime is trusted.
+    /// Two builds of one size written inside the slack differ by their bytes.
     #[test]
     fn a_fresh_executable_is_named_by_its_bytes() {
-        let now = Some(std::time::SystemTime::now());
-        let a = executable_id(4, now, || Some(b"bldA".to_vec()));
-        let b = executable_id(4, now, || Some(b"bldB".to_vec()));
-        assert_ne!(a, b);
-        let old = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000));
-        assert_eq!(executable_id(4, old, || None), "4:1000000000000000");
+        let dir = std::env::temp_dir().join(format!("vyrn-exe-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::write(&a, b"bldA").unwrap();
+        std::fs::write(&b, b"bldB").unwrap();
+        assert_ne!(executable_id(&a), executable_id(&b));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

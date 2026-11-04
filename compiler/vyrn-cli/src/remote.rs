@@ -253,6 +253,13 @@ impl vyrn_frontend::loader::ModuleResolver for RemoteResolver {
         self.note(resolved);
         DiskResolver.list_kinds(resolved)
     }
+    fn stamp(&self, resolved: &str) -> Option<vyrn_frontend::manifest::Stamp> {
+        if vyrn_frontend::loader::is_remote(resolved) {
+            return None;
+        }
+        self.note(resolved);
+        DiskResolver.stamp(resolved)
+    }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         DiskResolver.gen_cache_get(key)
     }

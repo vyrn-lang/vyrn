@@ -153,8 +153,10 @@ load read, validated against its inputs again. So an editor keystroke parses
 only the edited text. A host that is told of every file change keeps, in its
 `session::Session`, each file's text, each directory's listing and each
 canonical path under the directories it watches (`Session::watch`), until
-`Session::changed` names the path. Any other host reads every module and
-generator input on every load. Every load links the whole program again.
+`Session::changed` names the path. Any other host reads every module on every
+load. It stats each generator input whose entry holds a settled stamp
+(`manifest::settled_stamp`), and reads and hashes the rest. Every load links
+the whole program again.
 
 `vyrn_lower::check_and_synthesize` then runs, in order, the frontend's
 `check_and_synthesize` (steps 1 and 2) and the judgments in `vyrn-lower`:
