@@ -1,4 +1,5 @@
-//! Writes `vyrn-frontend`'s token table and scanner from a grammar.
+//! Writes `vyrn-frontend`'s token table and scanner from a grammar, and a byte
+//! parser from a grammar with no tokens.
 //!
 //! [`lexer`] writes `Tok` and its spellings from the `keyword` and `token` lines
 //! and the contextual words from the syntactic rules, and it lowers each lexical
@@ -8,6 +9,13 @@
 //! their values. The output is committed as
 //! `compiler/vyrn-frontend/src/lexer/grammar.rs`, and the test
 //! `the_lexer_is_fresh` fails when that file differs from a fresh run.
+//!
+//! [`bytes`] lowers every rule a start rule reaches the same way, and writes the
+//! rows they refuse with as a `Rule` enum, so the host's hooks build a value from
+//! the matches. A syntactic rule there reads bytes as a lexical one does: the
+//! grammar has no trivia, and every element after a sequence's first must fail
+//! only by a refusal, so no commit is lost. `regex::grammar` in `vyrn-frontend`
+//! is its output for `std/regex.syntax`, held by `the_regex_parser_is_fresh`.
 //!
 //! The lowering refuses what it cannot keep exact: a syntactic form in a lexical
 //! rule, a rule call or a refusal inside a predicate, a label no caller binds,
@@ -47,46 +55,105 @@ const TAKEN: &[&str] = &[
 /// rule, or why the grammar's lexical rules do not lower.
 pub fn lexer(g: &Grammar) -> Result<String, String> {
     let scan = g.scan_rule.ok_or("the grammar has no `scan` rule")?;
-    let rules = reachable(g, scan)?;
-    let mut l = Lower {
-        g,
-        fallible: fallible(g),
-        free: vec![BTreeSet::new(); g.rules.len()],
-    };
-    l.solve(&rules)?;
-    for &r in &rules {
-        let rule = g.body(r);
-        if rule.fail.is_some() || (rule.nest && g.nest_limit.is_none()) {
-            return Err(format!(
-                "lexical rule `{}` has `fail`, or `nest` and no limit",
-                rule.name
-            ));
-        }
-        if TAKEN.contains(&snake(&rule.name).as_str()) {
-            return Err(format!(
-                "rule `{}` takes a name the scanner uses",
-                rule.name
-            ));
-        }
-        l.undo_free(&rule.body)
-            .map_err(|e| format!("rule `{}`: {e}", rule.name))?;
-    }
+    let rules = reachable(g, scan, false)?;
+    let l = Lower::checked(g, &rules, "Box<Diagnostic>")?;
     if l.fallible[scan.0 as usize] || !l.free[scan.0 as usize].is_empty() {
         return Err("`scan` must end in a refusal or eof and read no label".into());
     }
     Ok(l.emit(&rules, scan))
 }
 
-/// The lexical rules `scan` reaches, in file order. An `embed` reaches its
-/// extent only, because the scan matches the island without parsing it.
-fn reachable(g: &Grammar, scan: RuleId) -> Result<Vec<RuleId>, String> {
+/// Returns the Rust source of a parser of `g` from its rule `start`, which `path`
+/// names in the file's first line, or why the grammar does not lower.
+pub fn bytes(g: &Grammar, start: &str, path: &str) -> Result<String, String> {
+    let root = g
+        .rule(start)
+        .ok_or_else(|| format!("the grammar has no `{start}` rule"))?;
+    if g.rule("trivia").is_some() {
+        return Err("a byte parser reads no trivia".into());
+    }
+    let rules = reachable(g, root, true)?;
+    let l = Lower::checked(g, &rules, "String")?;
+    for &r in &rules {
+        l.no_commit(r)?;
+    }
+    if !l.free[root.0 as usize].is_empty() {
+        return Err(format!("`{start}` reads a label"));
+    }
+    Ok(l.emit_bytes(&rules, root, path))
+}
+
+impl<'g> Lower<'g> {
+    /// The lowering of `rules`, or why one of them does not lower. A refusal is a
+    /// value of the Rust type `err`.
+    fn checked(g: &'g Grammar, rules: &[RuleId], err: &'static str) -> Result<Self, String> {
+        let mut l = Lower {
+            g,
+            fallible: fallible(g),
+            free: vec![BTreeSet::new(); g.rules.len()],
+            err,
+        };
+        l.solve(rules)?;
+        l.refuse_unlowerable(rules)?;
+        Ok(l)
+    }
+
+    fn refuse_unlowerable(&self, rules: &[RuleId]) -> Result<(), String> {
+        let g = self.g;
+        for &r in rules {
+            let rule = g.body(r);
+            if rule.fail.is_some() || (rule.nest && g.nest_limit.is_none()) {
+                return Err(format!(
+                    "rule `{}` has `fail`, or `nest` and no limit",
+                    rule.name
+                ));
+            }
+            if TAKEN.contains(&snake(&rule.name).as_str()) {
+                return Err(format!(
+                    "rule `{}` takes a name the scanner uses",
+                    rule.name
+                ));
+            }
+            self.undo_free(&rule.body)
+                .map_err(|e| format!("rule `{}`: {e}", rule.name))?;
+        }
+        Ok(())
+    }
+
+    /// Refuses a syntactic rule with a sequence whose element after the first that
+    /// moves can fail without a refusal: the rule would refuse there, and this
+    /// lowering backtracks.
+    fn no_commit(&self, r: RuleId) -> Result<(), String> {
+        let rule = self.g.body(r);
+        let mut bad = false;
+        walk(&rule.body, &mut |e| {
+            if let E::Seq(w) = e {
+                let first = (w.iter()).position(|x| !matches!(x, E::And(_) | E::Not(_)));
+                let rest = w.iter().skip(first.map_or(w.len(), |i| i + 1));
+                bad |= rest.into_iter().any(|y| self.can_fail(y));
+            }
+        });
+        match bad && rule.syntactic {
+            true => Err(format!(
+                "rule `{}` can fail after it moved without a refusal",
+                rule.name
+            )),
+            false => Ok(()),
+        }
+    }
+}
+
+/// The rules `root` reaches, in file order, each lexical unless `syntactic`. An
+/// `embed` reaches its extent only, because the scan matches the island without
+/// parsing it.
+fn reachable(g: &Grammar, root: RuleId, syntactic: bool) -> Result<Vec<RuleId>, String> {
     let mut seen = vec![false; g.rules.len()];
-    let mut todo = vec![scan];
+    let mut todo = vec![root];
     while let Some(r) = todo.pop() {
         if std::mem::replace(&mut seen[r.0 as usize], true) {
             continue;
         }
-        if g.body(r).syntactic {
+        if g.body(r).syntactic && !syntactic {
             return Err(format!(
                 "`scan` reaches syntactic rule `{}`",
                 g.body(r).name
@@ -178,6 +245,8 @@ struct Lower<'g> {
     g: &'g Grammar,
     /// Whether the rule can fail without a refusal.
     fallible: Vec<bool>,
+    /// The Rust type of a refusal.
+    err: &'static str,
     /// The labels the rule reads that it does not bind: its parameters.
     free: Vec<BTreeSet<Rc<str>>>,
 }
@@ -321,15 +390,7 @@ impl Lower<'_> {
         o.push_str(PRELUDE);
         self.tokens(&mut o);
         o.push_str(HOOKS_HEAD);
-        for &r in rules {
-            let name = snake(&self.g.body(r).name);
-            let params = self.params(r, ": usize");
-            let _ = writeln!(
-                o,
-                "    fn {name}(&mut self, start: usize, end: usize{params}) -> Result<(), Box<Diagnostic>> {{\n        Ok(())\n    }}"
-            );
-        }
-        o.push_str("}\n");
+        self.hook_trait(&mut o, rules);
         o.push_str(SCANNER);
         self.punct(&mut o);
         for &r in rules {
@@ -337,6 +398,58 @@ impl Lower<'_> {
         }
         o.push_str("}\n");
         o
+    }
+
+    fn emit_bytes(&self, rules: &[RuleId], root: RuleId, path: &str) -> String {
+        let mut o = format!(
+            "// Written by vyrn_syntax::bytes from {path}. Do not edit: the test\n// the_regex_parser_is_fresh fails when this file differs from a fresh run, and\n// VYRN_PIN=write rewrites it.\n\n//! The rules of `{path}` as Rust: one method of [`Scanner`] per rule, and the\n//! rows they refuse with. A rule that matches calls its hook in [`Hooks`].\n\n"
+        );
+        let mut rows: Vec<(Rc<str>, Vec<Rc<str>>)> = Vec::new();
+        let mut add = |t: &Throw| {
+            if !rows.iter().any(|r| r.0 == t.row) {
+                rows.push((t.row.clone(), t.holes.iter().map(|h| h.0.clone()).collect()));
+            }
+        };
+        for &r in rules {
+            walk(&self.g.body(r).body, &mut |e| {
+                if let E::Throw(t) = e {
+                    add(t);
+                }
+            });
+        }
+        if let Some((_, t)) = &self.g.nest_limit {
+            add(t);
+        }
+        rows.sort();
+        o.push_str("/// A row a rule refuses with, and the text of each of its holes.\n#[derive(Debug, Clone, PartialEq, Eq)]\npub enum Rule {\n");
+        for (row, holes) in &rows {
+            let fields: Vec<String> = holes.iter().map(|h| format!("{h}: String")).collect();
+            let _ = writeln!(o, "    {row} {{ {} }},", fields.join(", "));
+        }
+        o.push_str("}\n\nmacro_rules! rule {\n    ($row:ident $(, $hole:ident = $text:expr)*) => {\n        Rule::$row { $($hole: $text.to_string()),* }\n    };\n}\n\n");
+        o.push_str("/// What the host does when a rule matches `start..end`, a byte range of the\n/// source, and the refusal it answers with for a row.\n#[allow(unused_variables)]\npub(super) trait Hooks {\n    fn refuse(&mut self, at: usize, rule: Rule) -> String;\n");
+        self.hook_trait(&mut o, rules);
+        o.push_str(SCANNER);
+        for &r in rules {
+            self.rule(&mut o, r, r == root);
+        }
+        o.push_str("}\n");
+        o
+    }
+
+    /// Each rule's hook, which does nothing unless the host says otherwise, and the
+    /// end of the trait.
+    fn hook_trait(&self, o: &mut String, rules: &[RuleId]) {
+        for &r in rules {
+            let name = snake(&self.g.body(r).name);
+            let params = self.params(r, ": usize");
+            let _ = writeln!(
+                o,
+                "    fn {name}(&mut self, start: usize, end: usize{params}) -> Result<(), {}> {{\n        Ok(())\n    }}",
+                self.err
+            );
+        }
+        o.push_str("}\n");
     }
 
     /// `, q: usize` for each free label of `r`, in name order.
@@ -441,7 +554,8 @@ impl Lower<'_> {
         let ret = if fallible { "bool" } else { "()" };
         let _ = writeln!(
             o,
-            "\n    {vis}fn {name}(&mut self{params}) -> Result<{ret}, Box<Diagnostic>> {{"
+            "\n    {vis}fn {name}(&mut self{params}) -> Result<{ret}, {}> {{",
+            self.err
         );
         o.push_str("        let start = self.pos;\n");
         // A `nest` rule counts toward the limit while its body runs.
@@ -554,11 +668,17 @@ impl Lower<'_> {
             return "true".into();
         };
         match x {
-            E::Field(l, y) if !rest.is_empty() => format!(
-                "{{ let {l} = self.pos; {} && {} }}",
-                self.bool_expr(y, ind),
-                self.chain(rest, ind)
-            ),
+            E::Field(l, y) if !rest.is_empty() => {
+                // A block first in a block is a statement, so it needs parentheses.
+                let term = match self.bool_expr(y, ind) {
+                    t if t.starts_with('{') => format!("({t})"),
+                    t => t,
+                };
+                format!(
+                    "{{ let {l} = self.pos; {term} && {} }}",
+                    self.chain(rest, ind)
+                )
+            }
             _ if rest.is_empty() => self.bool_expr(x, ind),
             _ => format!("{} && {}", self.bool_expr(x, ind), self.chain(rest, ind)),
         }
@@ -896,25 +1016,60 @@ mod tests {
         assert_eq!(words.iter().map(|w| &**w).collect::<Vec<_>>(), ["as", "to"]);
     }
 
+    /// Fails when the committed `file` differs from `fresh`; `VYRN_PIN=write`
+    /// rewrites it.
+    fn pinned(file: &Path, fresh: &str, from: &str) {
+        if std::env::var("VYRN_PIN").as_deref() == Ok("write") {
+            std::fs::create_dir_all(file.parent().expect("the file has a directory"))
+                .expect("create the directory");
+            std::fs::write(file, fresh).expect("write the parser");
+            return;
+        }
+        let committed = std::fs::read_to_string(file).unwrap_or_default();
+        let first = (committed.lines().zip(fresh.lines()).enumerate())
+            .find(|(_, (a, b))| a != b)
+            .map(|(i, (a, b))| {
+                format!(
+                    "line {}:
+  committed {a}
+  fresh     {b}",
+                    i + 1
+                )
+            });
+        assert!(
+            committed == fresh,
+            "{} differs from {from}; rewrite it with VYRN_PIN=write
+{}",
+            file.display(),
+            first.unwrap_or_else(|| "the files differ in length".into())
+        );
+    }
+
     #[test]
     fn the_lexer_is_fresh() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let text = std::fs::read_to_string(dir.join("vyrn.syntax")).expect("vyrn.syntax reads");
         let g = crate::load(&text).expect("vyrn.syntax loads");
         let fresh = super::lexer(&g).expect("vyrn.syntax's lexical rules lower");
-        let file = dir.join("../vyrn-frontend/src/lexer/grammar.rs");
-        if std::env::var("VYRN_PIN").as_deref() == Ok("write") {
-            std::fs::write(&file, &fresh).expect("write the scanner");
-            return;
-        }
-        let committed = std::fs::read_to_string(&file).unwrap_or_default();
-        let first = (committed.lines().zip(fresh.lines()).enumerate())
-            .find(|(_, (a, b))| a != b)
-            .map(|(i, (a, b))| format!("line {}:\n  committed {a}\n  fresh     {b}", i + 1));
-        assert!(
-            committed == fresh,
-            "lexer/grammar.rs differs from vyrn.syntax; rewrite it with VYRN_PIN=write\n{}",
-            first.unwrap_or_else(|| "the files differ in length".into())
+        pinned(
+            &dir.join("../vyrn-frontend/src/lexer/grammar.rs"),
+            &fresh,
+            "vyrn.syntax",
+        );
+    }
+
+    #[test]
+    fn the_regex_parser_is_fresh() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(dir.join("../../std/regex.syntax"))
+            .expect("std/regex.syntax reads");
+        let g = crate::load(&text).expect("std/regex.syntax loads");
+        let fresh =
+            super::bytes(&g, "RegexPattern", "std/regex.syntax").expect("std/regex.syntax lowers");
+        pinned(
+            &dir.join("../vyrn-frontend/src/regex/grammar.rs"),
+            &fresh,
+            "std/regex.syntax",
         );
     }
 }

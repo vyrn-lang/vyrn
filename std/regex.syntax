@@ -33,12 +33,13 @@ RegexDot = '.'
 RegexLiteral = regexChar
 
 // A `]` first closes the class, and a `-` before the `]` is a member.
-RegexClass = '[' negate:'^'? (!(']' / eof) items:RegexItem)* (']' / ^ClassUnclosed)
+RegexClass = '[' negate:regexNegate? (!(']' / eof) items:RegexItem)* (']' / ^ClassUnclosed)
 RegexItem = RegexItemEscape / RegexMember
 RegexItemEscape = '\\' (regexChar / ^ClassBackslash)
 RegexMember = regexChar hi:regexHi?
 
 regexChar = .
 regexHi = '-' !']' .
+regexNegate = '^'
 regexInt = [0-9]+
 regexOp = '*' (&'?' ^NonGreedy(op='*'))? / '+' (&'?' ^NonGreedy(op='+'))? / '?'

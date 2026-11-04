@@ -3,17 +3,13 @@
 //! The compiler builds a DFA once; the code generator emits its transition
 //! table and a fixed runner, so nothing parses a pattern at run time.
 //!
-//! Grammar (anchored full match):
-//!   alt    = concat ( `|` concat )*
-//!   concat = quant*
-//!   quant  = atom ( `*` | `+` | `?` | `{m}` | `{m,}` | `{m,n}` )?
-//!   atom   = `(` alt `)` | literal | `.` | `\d \w \s \D \W \S` | `\<c>` | `[ ... ]`
-//!   class  = `[` `^`? ( range | char )+ `]`   (range = `a-z`; reversed = error)
-//! Groups have no backreferences, and counted repetition expands structurally
-//! with bounds capped at 255. Every construct means what ECMA-262 means on
-//! ASCII (`.` excludes `\n` and `\r`), so a pattern round-trips to a JSON Schema
-//! `pattern`. The engine is byte-wise: on multi-byte UTF-8 input, `.` and
-//! negated classes count bytes, not code points.
+//! The language is `std/regex.syntax`, which `std/regex` reads too, and the
+//! pattern is matched whole. [`grammar`] is its parser, and [`Build`] makes the
+//! tree from its matches. Groups have no backreferences, and counted repetition
+//! expands structurally with bounds capped at 255. Every construct means what
+//! ECMA-262 means on ASCII (`.` excludes `\n` and `\r`), so a pattern round-trips
+//! to a JSON Schema `pattern`. The engine is byte-wise: on multi-byte UTF-8 input,
+//! `.` and negated classes count bytes, not code points.
 
 /// A character class: one bit per byte value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,23 +47,16 @@ enum Re {
     Opt(Box<Re>),
 }
 
-struct ReParser<'a> {
-    b: &'a [u8],
-    i: usize,
-    /// Nodes copied by counted repetition so far.
-    expanded: usize,
-    /// Group nesting depth, one level per `(`.
-    depth: usize,
-}
+#[rustfmt::skip]
+#[allow(unused_variables, unused_parens, dead_code)]
+mod grammar;
+
+use grammar::{Hooks, Rule};
 
 /// Budget for nodes copied by counted repetition. Nested counts multiply
 /// (`(a{99}){99}` is about 10^4 nodes), so a pathological pattern is a compile
 /// error, not an out-of-memory hang.
 const EXPANSION_BUDGET: usize = 16_384;
-
-/// Nesting budget for groups. The parser and [`Nfa::frag`] recurse once per
-/// `(`, so thousands of parens are a compile error, not a stack overflow.
-const PARSE_DEPTH_BUDGET: usize = 250;
 
 /// Node count of `re`: the unit [`EXPANSION_BUDGET`] charges.
 fn re_size(re: &Re) -> usize {
@@ -78,102 +67,183 @@ fn re_size(re: &Re) -> usize {
     }
 }
 
-impl<'a> ReParser<'a> {
-    fn parse(pat: &str) -> Result<Re, String> {
-        let mut p = ReParser {
-            b: pat.as_bytes(),
-            i: 0,
-            expanded: 0,
-            depth: 0,
-        };
-        let re = p.alt()?;
-        if p.i < p.b.len() {
-            // Only a stray `)` can be left over.
-            return Err(format!("unmatched `{}` in pattern", p.b[p.i] as char));
+/// The tree of a pattern, built from its rules' matches. A rule's match closes after
+/// the matches inside it, and spans nest, so a branch or an alternation takes off
+/// the stack exactly the terms that started inside its own span.
+struct Build<'a> {
+    b: &'a [u8],
+    /// Each term with the byte its match starts at, in source order.
+    terms: Vec<(usize, Re)>,
+    /// The members of the class being read.
+    class: ByteClass,
+    negate: bool,
+    /// The offset of the `-` of the member being read.
+    hi: Option<usize>,
+    /// The counts of the counted repetition being read.
+    counts: Vec<u32>,
+    /// Nodes copied by counted repetition so far.
+    expanded: usize,
+}
+
+impl Build<'_> {
+    fn bytes(&mut self, at: usize, from: usize, to: usize) {
+        for &c in &self.b[from..to] {
+            let mut cl = ByteClass::empty();
+            cl.set(c);
+            self.terms.push((at, Re::Class(cl)));
         }
-        Ok(re)
     }
 
-    fn alt(&mut self) -> Result<Re, String> {
-        self.depth += 1;
-        if self.depth > PARSE_DEPTH_BUDGET {
-            // The parser is discarded on error, so `depth` needs no unwind.
+    fn members(&mut self, from: usize, to: usize) {
+        for &c in &self.b[from..to] {
+            self.class.set(c);
+        }
+    }
+
+    /// The terms that start at `start` or later, taken off the stack.
+    fn since(&mut self, start: usize) -> Vec<Re> {
+        let k = self.terms.partition_point(|t| t.0 < start);
+        self.terms.drain(k..).map(|t| t.1).collect()
+    }
+
+    /// The last term, which a repeat applies to. A repeat follows an atom, and
+    /// every atom pushes at least one term.
+    fn last(&mut self) -> (usize, Re) {
+        self.terms.pop().expect("a repeat follows an atom")
+    }
+}
+
+impl Hooks for Build<'_> {
+    fn refuse(&mut self, _at: usize, rule: Rule) -> String {
+        match rule {
+            Rule::ClassBackslash {} => "dangling `\\` in character class",
+            Rule::ClassUnclosed {} => "unterminated character class `[`",
+            Rule::CountForm {} => "malformed counted repetition (expected `}` or `,`)",
+            Rule::CountNumber {} => "counted repetition needs a number (`{m}`, `{m,}`, `{m,n}`)",
+            Rule::CountUnclosed {} => "unclosed counted repetition `{`",
+            Rule::GroupUnclosed {} => "unclosed group `(`",
+            Rule::NoCountTerm {} => "nothing to repeat before counted repetition `{..}`",
+            Rule::NoTerm {} | Rule::NonGreedy { .. } => "nothing to repeat before quantifier",
+            Rule::PatternBackslash {} => "dangling `\\` in pattern",
+            Rule::StrayBrace {} => "unmatched `}` (a literal brace is `\\}`)",
+            Rule::StrayParen {} => "unmatched `)` in pattern",
+            Rule::TooDeep {} => "pattern nests more than 250 levels deep",
+        }
+        .to_string()
+    }
+
+    fn _regex_literal(&mut self, start: usize, end: usize) -> Result<(), String> {
+        self.bytes(start, start, end);
+        Ok(())
+    }
+
+    fn _regex_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
+        self.terms
+            .push((start, Re::Class(escape_class(self.b[start + 1]))));
+        self.bytes(start, start + 2, end);
+        Ok(())
+    }
+
+    // `.` excludes LF and CR, as in ECMA-262. U+2028 and U+2029 are multi-byte in
+    // UTF-8, so a single `.` never matches them.
+    fn _regex_dot(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let mut nl = ByteClass::empty();
+        nl.set(b'\n');
+        nl.set(b'\r');
+        self.terms.push((start, Re::Class(nl.negated())));
+        Ok(())
+    }
+
+    fn regex_negate(&mut self, _start: usize, _end: usize) -> Result<(), String> {
+        self.negate = true;
+        Ok(())
+    }
+
+    fn _regex_item_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let ec = escape_class(self.b[start + 1]);
+        for (w, e) in self.class.0.iter_mut().zip(ec.0) {
+            *w |= e;
+        }
+        self.members(start + 2, end);
+        Ok(())
+    }
+
+    fn regex_hi(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        self.hi = Some(start);
+        Ok(())
+    }
+
+    /// A member's range runs between the bytes that touch its `-`.
+    fn _regex_member(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let Some(dash) = self.hi.take() else {
+            self.members(start, end);
+            return Ok(());
+        };
+        let (lo, hi) = (self.b[dash - 1], self.b[dash + 1]);
+        if lo > hi {
             return Err(format!(
-                "pattern nests more than {PARSE_DEPTH_BUDGET} levels deep"
+                "reversed range `{}-{}` in character class",
+                lo as char, hi as char
             ));
         }
-        let mut branches = vec![self.concat()?];
-        while self.i < self.b.len() && self.b[self.i] == b'|' {
-            self.i += 1;
-            branches.push(self.concat()?);
-        }
-        Ok(if branches.len() == 1 {
-            branches.pop().unwrap()
+        self.members(start, dash - 1);
+        self.class.add_range(lo, hi);
+        self.members(dash + 2, end);
+        Ok(())
+    }
+
+    fn _regex_class(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let cl = std::mem::replace(&mut self.class, ByteClass::empty());
+        let cl = if std::mem::take(&mut self.negate) {
+            cl.negated()
         } else {
-            Re::Alt(branches)
-        })
-    }
-
-    fn concat(&mut self) -> Result<Re, String> {
-        let mut parts = Vec::new();
-        while self.i < self.b.len() && self.b[self.i] != b'|' && self.b[self.i] != b')' {
-            parts.push(self.quant()?);
-        }
-        Ok(match parts.len() {
-            0 => Re::Empty,
-            1 => parts.pop().unwrap(),
-            _ => Re::Concat(parts),
-        })
-    }
-
-    fn quant(&mut self) -> Result<Re, String> {
-        let atom = self.atom()?;
-        let q = if self.i < self.b.len() {
-            match self.b[self.i] {
-                b'*' | b'+' | b'?' => {
-                    let c = self.b[self.i];
-                    self.i += 1;
-                    Some(c)
-                }
-                b'{' => return self.counted(atom),
-                _ => None,
-            }
-        } else {
-            None
+            cl
         };
-        Ok(match q {
-            Some(b'*') => Re::Star(Box::new(atom)),
-            Some(b'+') => Re::Plus(Box::new(atom)),
-            Some(b'?') => Re::Opt(Box::new(atom)),
-            _ => atom,
-        })
+        self.terms.push((start, Re::Class(cl)));
+        Ok(())
     }
 
-    /// Parses `{m}`, `{m,}` or `{m,n}` and expands it: `m` copies of `atom`, then
-    /// `n - m` optional copies, or one `*` for an open bound.
-    fn counted(&mut self, atom: Re) -> Result<Re, String> {
-        self.i += 1;
-        let m = self.int_in_braces()?;
-        let n = match self.b.get(self.i) {
-            Some(b'}') => Some(m),
-            Some(b',') => {
-                self.i += 1;
-                match self.b.get(self.i) {
-                    Some(b'}') => None, // `{m,}`: open upper bound
-                    _ => Some(self.int_in_braces()?),
-                }
-            }
-            _ => return Err("malformed counted repetition (expected `}` or `,`)".into()),
+    fn regex_op(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let (at, re) = self.last();
+        let re = Box::new(re);
+        let re = match self.b[start] {
+            b'*' => Re::Star(re),
+            b'+' => Re::Plus(re),
+            _ => Re::Opt(re),
         };
-        if self.b.get(self.i) != Some(&b'}') {
-            return Err("unclosed counted repetition `{`".into());
+        self.terms.push((at, re));
+        Ok(())
+    }
+
+    /// A count, at most 255.
+    fn regex_int(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let text = String::from_utf8_lossy(&self.b[start..end]);
+        let v: u32 = text
+            .parse()
+            .map_err(|_| format!("repetition count `{text}` too large"))?;
+        if v > 255 {
+            return Err(format!("repetition count {v} exceeds the maximum (255)"));
         }
-        self.i += 1;
+        self.counts.push(v);
+        Ok(())
+    }
+
+    /// Expands `{m}`, `{m,}` or `{m,n}`: `m` copies of the atom, then `n - m`
+    /// optional copies, or one `*` for an open bound.
+    fn _regex_count(&mut self, _start: usize, end: usize) -> Result<(), String> {
+        let counts = std::mem::take(&mut self.counts);
+        let m = counts[0];
+        let n = match counts.get(1) {
+            Some(&n) => Some(n),
+            None if self.b[end - 2] == b',' => None,
+            None => Some(m),
+        };
         if let Some(n) = n {
             if n < m {
                 return Err(format!("counted repetition `{{{m},{n}}}` has max < min"));
             }
         }
+        let (at, atom) = self.last();
         // Charge the budget before cloning: nesting multiplies the copies.
         let copies = m as usize
             + match n {
@@ -198,80 +268,50 @@ impl<'a> ReParser<'a> {
                 }
             }
         }
-        Ok(match parts.len() {
-            0 => Re::Empty,
-            1 => parts.pop().unwrap(),
-            _ => Re::Concat(parts),
-        })
+        self.terms.push((at, concat(parts)));
+        Ok(())
     }
 
-    /// Parses a decimal count inside `{..}`, at most 255.
-    fn int_in_braces(&mut self) -> Result<u32, String> {
-        let start = self.i;
-        while self.b.get(self.i).is_some_and(|c| c.is_ascii_digit()) {
-            self.i += 1;
-        }
-        if self.i == start {
-            return Err("counted repetition needs a number (`{m}`, `{m,}`, `{m,n}`)".into());
-        }
-        let text = std::str::from_utf8(&self.b[start..self.i]).unwrap();
-        let v: u32 = text
-            .parse()
-            .map_err(|_| format!("repetition count `{text}` too large"))?;
-        if v > 255 {
-            return Err(format!("repetition count {v} exceeds the maximum (255)"));
-        }
-        Ok(v)
+    fn _regex_branch(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let parts = self.since(start);
+        self.terms.push((start, concat(parts)));
+        Ok(())
     }
 
-    fn atom(&mut self) -> Result<Re, String> {
-        match self.b[self.i] {
-            b'(' => {
-                self.i += 1;
-                let inner = self.alt()?;
-                if self.i >= self.b.len() || self.b[self.i] != b')' {
-                    return Err("unclosed group `(`".into());
-                }
-                self.i += 1;
-                Ok(inner)
-            }
-            b'*' | b'+' | b'?' => Err("nothing to repeat before quantifier".into()),
-            // A literal brace is `\{`, as in ECMA-262 strict mode.
-            b'{' => Err("nothing to repeat before counted repetition `{..}`".into()),
-            b'}' => Err("unmatched `}` (a literal brace is `\\}`)".into()),
-            b')' => Err("unmatched `)`".into()),
-            _ => {
-                let (cl, ni) = parse_atom(self.b, self.i)?;
-                self.i = ni;
-                Ok(Re::Class(cl))
-            }
-        }
+    fn _regex_alt(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let mut branches = self.since(start);
+        let re = match branches.len() {
+            1 => branches.pop().expect("one branch"),
+            _ => Re::Alt(branches),
+        };
+        self.terms.push((start, re));
+        Ok(())
     }
 }
 
-fn parse_atom(b: &[u8], i: usize) -> Result<(ByteClass, usize), String> {
-    match b[i] {
-        b'\\' => {
-            if i + 1 >= b.len() {
-                return Err("dangling `\\` in pattern".into());
-            }
-            Ok((escape_class(b[i + 1]), i + 2))
-        }
-        // `.` excludes LF and CR, as in ECMA-262. U+2028 and U+2029 are multi-byte in
-        // UTF-8, so a single `.` never matches them.
-        b'.' => {
-            let mut nl = ByteClass::empty();
-            nl.set(b'\n');
-            nl.set(b'\r');
-            Ok((nl.negated(), i + 1))
-        }
-        b'[' => parse_class(b, i),
-        c => {
-            let mut cl = ByteClass::empty();
-            cl.set(c);
-            Ok((cl, i + 1))
-        }
+fn concat(mut parts: Vec<Re>) -> Re {
+    match parts.len() {
+        0 => Re::Empty,
+        1 => parts.pop().expect("one part"),
+        _ => Re::Concat(parts),
     }
+}
+
+/// Parses `pattern` by `std/regex.syntax` into its tree.
+fn parse(pattern: &str) -> Result<Re, String> {
+    let build = Build {
+        b: pattern.as_bytes(),
+        terms: Vec::new(),
+        class: ByteClass::empty(),
+        negate: false,
+        hi: None,
+        counts: Vec::new(),
+        expanded: 0,
+    };
+    let mut scanner = grammar::Scanner::new(pattern, build);
+    scanner._regex_pattern()?;
+    // The pattern is one alternation, which leaves one term.
+    Ok(scanner.hooks.terms.pop().map_or(Re::Empty, |t| t.1))
 }
 
 /// Returns the class of an escape: a shorthand (`\d \w \s` and negations), a
@@ -317,54 +357,6 @@ fn escape_class(e: u8) -> ByteClass {
         other => cl.set(other),
     }
     cl
-}
-
-fn parse_class(b: &[u8], start: usize) -> Result<(ByteClass, usize), String> {
-    let mut i = start + 1;
-    let mut cl = ByteClass::empty();
-    let mut negate = false;
-    if i < b.len() && b[i] == b'^' {
-        negate = true;
-        i += 1;
-    }
-    while i < b.len() && b[i] != b']' {
-        if b[i] == b'\\' {
-            if i + 1 >= b.len() {
-                return Err("dangling `\\` in character class".into());
-            }
-            let ec = escape_class(b[i + 1]);
-            for byte in 0..=255u8 {
-                if ec.contains(byte) {
-                    cl.set(byte);
-                }
-            }
-            i += 2;
-            continue;
-        }
-        // A range `a-z`; a `-` at either edge is a literal.
-        if i + 2 < b.len() && b[i + 1] == b'-' && b[i + 2] != b']' {
-            if b[i] > b[i + 2] {
-                return Err(format!(
-                    "reversed range `{}-{}` in character class",
-                    b[i] as char,
-                    b[i + 2] as char
-                ));
-            }
-            cl.add_range(b[i], b[i + 2]);
-            i += 3;
-        } else {
-            cl.set(b[i]);
-            i += 1;
-        }
-    }
-    if i >= b.len() {
-        return Err("unterminated character class `[`".into());
-    }
-    i += 1;
-    if negate {
-        cl = cl.negated();
-    }
-    Ok((cl, i))
 }
 
 struct NfaState {
@@ -1063,7 +1055,7 @@ pub fn compile(pattern: &str) -> Result<Dfa, String> {
 const DFA_STATE_BUDGET: usize = 8_192;
 
 fn compile_uncached(pattern: &str) -> Result<Dfa, String> {
-    let re = ReParser::parse(pattern)?;
+    let re = parse(pattern)?;
     let nfa = Nfa::build(&re);
 
     use std::collections::HashMap;
@@ -1286,6 +1278,16 @@ mod tests {
         let deep = format!("{}{}", "(".repeat(1000), ")".repeat(1000));
         let e = compile(&deep).unwrap_err();
         assert!(e.contains("deep"), "message: {e}");
+    }
+
+    #[test]
+    fn the_depth_budget_counts_nesting_not_groups() {
+        assert!(compile(&"(a)".repeat(250)).is_ok());
+        let past = format!("{}{}", "(".repeat(250), ")".repeat(250));
+        assert_eq!(
+            compile(&past).err().as_deref(),
+            Some("pattern nests more than 250 levels deep")
+        );
     }
 
     #[test]
