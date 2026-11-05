@@ -301,7 +301,9 @@ pub(crate) fn each_written_type(program: &mut Program, f: &mut dyn FnMut(&mut Ty
         if let Some(c) = &mut f.ret_clause {
             sites_expr(c, &mut HashSet::new(), &mut sites);
         }
-        sites_block(&mut f.body, &mut HashSet::new(), &mut sites);
+        if let Some(b) = f.body.written_mut() {
+            sites_block(b, &mut HashSet::new(), &mut sites);
+        }
     }
     for i in &mut program.impls {
         walk(&mut i.ty, 0, &mut sites);

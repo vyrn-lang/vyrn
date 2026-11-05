@@ -1,9 +1,9 @@
 file	kind	lines	diagnostics
-loader.rs	the file's own job	5421	11
+loader.rs	the file's own job	5458	11
 loader.rs	a rule stated a second time	0	0
 loader.rs	a path only a deleted route reached	0	0
 loader.rs	a copy of a table another module carries	0	0
-loader.rs	shared machinery	924	1
+loader.rs	shared machinery	1170	1
 loader.rs	tests	236	0
 symbols.rs	the file's own job	2868	0
 symbols.rs	a rule stated a second time	0	0
@@ -15,9 +15,9 @@ project.rs	the file's own job	723	0
 project.rs	a rule stated a second time	0	0
 project.rs	a path only a deleted route reached	0	0
 project.rs	a copy of a table another module carries	0	0
-project.rs	shared machinery	269	0
+project.rs	shared machinery	273	0
 project.rs	tests	215	0
-movecheck.rs	the file's own job	412	0
+movecheck.rs	the file's own job	416	0
 movecheck.rs	a rule stated a second time	0	0
 movecheck.rs	a path only a deleted route reached	0	0
 movecheck.rs	a copy of a table another module carries	0	0

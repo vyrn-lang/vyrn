@@ -564,7 +564,7 @@ fn substituted(
             args.len()
         ));
     }
-    let mut body = f.body.clone();
+    let mut body = f.body.written().expect("a projection is written").clone();
     // One tag per inline: the prologue lands in the caller's block, so
     // `s[j] = s[k]` would otherwise bind one name twice and read the wrong
     // element.
@@ -844,11 +844,15 @@ pub fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
 /// benches, module-state initializers and refinement predicates.
 pub(crate) fn walk_program(program: &mut Program, f: &mut impl FnMut(&mut Expr)) {
     for fun in &mut program.functions {
-        walk_block(&mut fun.body, f);
+        if let Some(b) = fun.body.written_mut() {
+            walk_block(b, f);
+        }
     }
     for imp in &mut program.impls {
         for m in imp.methods.iter_mut().chain(imp.places.iter_mut()) {
-            walk_block(&mut m.body, f);
+            if let Some(b) = m.body.written_mut() {
+                walk_block(b, f);
+            }
         }
     }
     for t in &mut program.tests {

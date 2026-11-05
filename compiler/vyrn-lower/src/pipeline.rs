@@ -103,30 +103,45 @@ fn check(
     pending: Option<floor::Pending>,
     linker: Option<symbols::Linker<'_>>,
 ) -> (symbols::Judged, Option<Arc<crate::World>>) {
+    // A load that took std as its interface reads each given body's row
+    // before the check: the generation fence reads it.
+    let mut given = match linker {
+        Some((_, opts, resolver)) if loader::std_given(opts) => {
+            match crate::stdrows::Given::read(program, opts, resolver, engine) {
+                Ok(given) => given,
+                Err(diagnostics) => {
+                    let judged = symbols::Judged {
+                        diagnostics,
+                        binders: Default::default(),
+                        memory: Default::default(),
+                        cost: Vec::new(),
+                        waits: Vec::new(),
+                    };
+                    return (judged, None);
+                }
+            }
+        }
+        _ => Default::default(),
+    };
+    program.fenced = Arc::new(std::mem::take(&mut given.fenced));
+    let mut sources = std::mem::take(&mut given.sources);
     let (mut diags, refused, binders, record) =
         vyrn_frontend::check_and_synthesize(program, engine, linker);
     // One type record for the readers below: the check's own, or a new one
-    // where the check made none. The synthesis is over, so no node moves under
-    // its keys.
-    let record = |p: &ast::Program| Arc::new(record.unwrap_or_else(|| checker::record(p)));
+    // where the check made none, with the function values the given bodies
+    // store and pass. The synthesis is over, so no node moves under its keys.
+    let record = |p: &ast::Program| {
+        let mut r = record.unwrap_or_else(|| checker::record(p));
+        r.stored.sources.append(&mut sources);
+        Arc::new(r)
+    };
     // The checker's ownership refusals and the kernel's form one list, in
     // source order. The core builds bodies only for a program that type-checks.
     let mut memory = Default::default();
     let mut judged = None;
     if diags.is_empty() {
         let _p = prof::phase("movecheck");
-        let record = record(program);
-        // `vyrn check` serves std's stored rows; a host with a session keeps
-        // its own memo, and an emitting host builds every body.
-        let given = match linker {
-            Some((_, opts, resolver))
-                if !movecheck::emitting() && program.session.get().is_none() =>
-            {
-                crate::stdrows::Given::read(program, &record, opts, resolver, engine)
-            }
-            _ => Default::default(),
-        };
-        let (found, world) = refusals(program, record, given);
+        let (found, world) = refusals(program, record(program), given);
         diags.extend(found);
         memory = world.ownership.memory.clone();
         judged = Some(world);
@@ -135,7 +150,7 @@ fn check(
         // Each typed refusal stands before the first of the checker's in its
         // file at a later line, so the list keeps the checker's own order.
         let record = record(program);
-        for d in lower_typed(program, refused, &record) {
+        for d in lower_typed(program, refused, &record, given) {
             let at = diags
                 .iter()
                 .position(|c| c.file == d.file && c.line > d.line)
@@ -253,6 +268,7 @@ fn lower_typed(
     program: &mut ast::Program,
     mut out: HashSet<String>,
     record: &checker::Recorded,
+    given: crate::stdrows::Given,
 ) -> Vec<Diagnostic> {
     // A method of a refused impl is reached by name, or by a call the checker
     // dispatched on its receiver's type key. A receiver typed by a type
@@ -294,8 +310,12 @@ fn lower_typed(
             .functions
             .iter()
             .filter(|f| {
+                // A given body calls no user function by name.
+                let Some(b) = f.body.written() else {
+                    return false;
+                };
                 !out.contains(&f.name)
-                    && (ast::names_any(&f.body, &f.params, &out) || dispatches(&f.body, &out))
+                    && (ast::names_any(b, &f.params, &out) || dispatches(b, &out))
             })
             .map(|f| f.name.clone());
         let globals = program
@@ -325,7 +345,8 @@ fn lower_typed(
                     .any(|m| out.contains(&types::impl_method_name(&i.protocol, &k, &m.name)));
                 !refused
                     && i.methods.iter().any(|m| {
-                        ast::names_any(&m.body, &m.params, &out) || dispatches(&m.body, &out)
+                        let b = m.body.written().expect("an impl method is written");
+                        ast::names_any(b, &m.params, &out) || dispatches(b, &out)
                     })
             })
         })
@@ -348,7 +369,10 @@ fn lower_typed(
     }
     // `record` typed the functions just moved out, so the analysis checks
     // again.
-    let typed = crate::analyze(program).typed_diagnostics().to_vec();
+    let record = Arc::new(checker::record(program));
+    let typed = crate::world::analyzed(program, record, false, given)
+        .typed_diagnostics()
+        .to_vec();
     let kept = std::mem::take(&mut program.functions);
     let mut back: Vec<(usize, ast::Function)> = at.into_iter().zip(kept).chain(gone).collect();
     back.sort_by_key(|(i, _)| *i);

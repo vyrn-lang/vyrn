@@ -275,7 +275,9 @@ pub fn global_append_candidates(program: &Program) -> std::collections::BTreeSet
         banned.extend(ban.into_iter().filter(|n| !shadowed.contains(n)));
     };
     for f in &program.functions {
-        one(&f.body, &f.params);
+        if let Some(b) = f.body.written() {
+            one(b, &f.params);
+        }
     }
     for t in &program.tests {
         one(&t.body, &[]);

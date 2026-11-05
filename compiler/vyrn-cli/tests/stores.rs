@@ -81,7 +81,7 @@ fn a_place_store_owns_what_it_displaces() {
                    return b.s.byteLength\n\
                }";
     let (p, facts) = analyze(src);
-    let sets = stores_in(&p.functions[0].body, |s| {
+    let sets = stores_in(p.functions[0].block(), |s| {
         matches!(
             s,
             Stmt::Store {
@@ -122,7 +122,7 @@ fn a_loop_local_store_owns_past_a_same_loop_take() {
                }";
     let (p, facts) = analyze(src);
     let assigns = stores_in(
-        &p.functions[1].body,
+        p.functions[1].block(),
         |s| matches!(s, Stmt::Assign { name, .. } if name == "name"),
     );
     assert_eq!(assigns.len(), 1);
@@ -153,7 +153,7 @@ fn a_lender_read_consumed_by_a_copy_does_not_stand_the_store_down() {
                fn main() -> Int64 { return go().byteLength }";
     let (p, facts) = analyze(src);
     let assigns = stores_in(
-        &p.functions[1].body,
+        p.functions[1].block(),
         |s| matches!(s, Stmt::Assign { name, .. } if name == "out"),
     );
     assert_eq!(assigns.len(), 1);
@@ -179,7 +179,7 @@ fn an_early_exiting_take_does_not_block_a_later_field_store() {
                }\n\
                fn main() -> Int64 { return go(true).body.byteLength }";
     let (p, facts) = analyze(src);
-    let sets = stores_in(&p.functions[1].body, |s| {
+    let sets = stores_in(p.functions[1].block(), |s| {
         matches!(
             s,
             Stmt::Store {
@@ -216,7 +216,7 @@ fn a_read_call_mention_lets_the_store_release_what_it_replaces() {
                fn main() -> Int64 { return go() }";
     let (p, facts) = analyze(src);
     let assigns = stores_in(
-        &p.functions[1].body,
+        p.functions[1].block(),
         |s| matches!(s, Stmt::Assign { name, .. } if name == "dec"),
     );
     assert_eq!(assigns.len(), 1);
@@ -251,7 +251,7 @@ fn a_struct_literal_store_with_scalar_mentions_releases_what_it_replaces() {
                fn main() -> Int64 { return go() }";
     let (p, facts) = analyze(src);
     let assigns = stores_in(
-        &p.functions[1].body,
+        p.functions[1].block(),
         |s| matches!(s, Stmt::Assign { name, .. } if name == "f"),
     );
     assert_eq!(assigns.len(), 2);

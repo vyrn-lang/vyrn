@@ -124,6 +124,9 @@ pub struct Instance<'a> {
     /// `examples/fnvalarg.vyrn` carries `Deep({ run: fn(P) -> T })` in a
     /// non-generic function. [`lint`] does not check steps for that reason.
     pub releases: Vec<Release>,
+    /// Each call the body's walk found, release dispatches included, with the
+    /// callee's solved type parameters: what the worklist followed.
+    pub calls: Vec<(String, HashMap<String, Type>)>,
 }
 
 /// The name an instance of `name` at `type_args` is built and emitted under:
@@ -307,28 +310,23 @@ pub fn lower_with<'a>(
     program: &'a Program,
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Lowered<'a> {
-    lowered(program, ownership, false)
+    lowered(program, ownership, false, &Default::default())
 }
 
-/// [`lower_with`] for the placer of a host that runs no emitter. An instance
-/// whose walk [`Walks`] holds takes the calls the walk found, and adds no
-/// facts and no lambda body; [`walked`] gives the facts to a reader that
-/// builds it.
-pub(crate) fn lower_reusing<'a>(
-    program: &'a Program,
-    ownership: &vyrn_frontend::own::Ownership,
-) -> Lowered<'a> {
-    lowered(program, ownership, true)
-}
-
-fn lowered<'a>(
+/// [`lower_with`] for the placer, where `given` holds the stored row of every
+/// given body ([`vyrn_frontend::ast::Body::Given`]). With `reuse`, for a host
+/// that runs no emitter, an instance whose walk [`Walks`] holds takes the
+/// calls the walk found, and adds no facts and no lambda body; [`walked`]
+/// gives the facts to a reader that builds it.
+pub(crate) fn lowered<'a>(
     program: &'a Program,
     ownership: &vyrn_frontend::own::Ownership,
     reuse: bool,
+    given: &crate::stdrows::Given,
 ) -> Lowered<'a> {
     let recorded = ownership.record.clone();
     let build_span = vyrn_frontend::prof::phase("lower: build");
-    let mut lowered = build(program, &recorded, ownership, reuse);
+    let mut lowered = build(program, &recorded, ownership, reuse, given);
     drop(build_span);
     // A spelling allocates, so only the instances of one generic, which tie on
     // the name, spell their type arguments, each once.
@@ -713,6 +711,25 @@ struct Walked<'a> {
     lambda_bodies: std::collections::HashSet<NodeId>,
 }
 
+/// [`walk`] of `f`'s body, or for a given body the calls its stored row
+/// keeps, with no facts and no lambda body.
+fn walk_of<'a>(
+    recorded: &checker::Recorded,
+    program: &'a Program,
+    f: &'a Function,
+    subst: HashMap<String, Type>,
+    given: &crate::stdrows::Given,
+) -> Walked<'a> {
+    match &f.body {
+        vyrn_frontend::ast::Body::Written(b) => walk(recorded, program, b, subst),
+        vyrn_frontend::ast::Body::Given => Walked {
+            facts: NodeTypes::default(),
+            calls: given.calls(program, f),
+            lambda_bodies: Default::default(),
+        },
+    }
+}
+
 fn walk<'a>(
     recorded: &checker::Recorded,
     program: &'a Program,
@@ -739,8 +756,11 @@ pub(crate) fn walked<'i, 'a>(
     if !inst.facts.exprs.is_empty() {
         return std::borrow::Cow::Borrowed(inst);
     }
+    let Some(body) = inst.func.body.written() else {
+        return std::borrow::Cow::Borrowed(inst);
+    };
     let subst = inst.subst.clone().into_iter().collect();
-    let facts = walk(recorded, program, &inst.func.body, subst).facts;
+    let facts = walk(recorded, program, body, subst).facts;
     std::borrow::Cow::Owned(Instance {
         facts,
         ..inst.clone()
@@ -819,6 +839,7 @@ fn build<'a>(
     recorded: &std::sync::Arc<checker::Recorded>,
     ownership: &vyrn_frontend::own::Ownership,
     reuse: bool,
+    given: &crate::stdrows::Given,
 ) -> Lowered<'a> {
     // Typing expanded every site a walk reads, so the lowering makes no
     // expansion tree, and its walks run on many threads.
@@ -830,9 +851,9 @@ fn build<'a>(
     let by_name = by_name(program);
     let decls = ownership.proto.types();
 
-    // The roots are every non-generic function with a body. A `std/mem`
-    // primitive, like an `extern`, has none: it lowers to one instruction at
-    // each call.
+    // The roots are every non-generic function with a body, given or
+    // written. A `std/mem` primitive, like an `extern`, has none: it lowers
+    // to one instruction at each call.
     let mut queue: VecDeque<(FnId, &Function, Vec<Type>)> = (program.functions.iter())
         .enumerate()
         .filter(|(_, f)| {
@@ -874,7 +895,8 @@ fn build<'a>(
     let place_fns: Vec<&Function> = (vyrn_frontend::project::all(program))
         .map(|(_, f)| f)
         .collect();
-    let blocks: Vec<&vyrn_frontend::ast::Block> = (place_fns.iter().map(|f| &f.body))
+    let blocks: Vec<&vyrn_frontend::ast::Block> = (place_fns.iter())
+        .map(|f| f.body.written().expect("a projection is written"))
         .chain(program.tests.iter().map(|t| &t.body))
         .chain(program.benches.iter().map(|b| &b.body))
         .collect();
@@ -913,7 +935,7 @@ fn build<'a>(
     }
     follow(
         "<module state>",
-        std::mem::take(&mut gw.calls),
+        &gw.calls,
         &by_name,
         decls,
         &mut seen,
@@ -948,7 +970,7 @@ fn build<'a>(
         }
         follow(
             "<teardown>",
-            teardown_calls,
+            &teardown_calls,
             &by_name,
             decls,
             &mut seen,
@@ -986,12 +1008,15 @@ fn build<'a>(
                 .collect();
             let fresh = vyrn_frontend::par::in_parallel(
                 &wave,
-                |(_, f, _, kept)| kept.as_ref().map_or(f.body.stmts.len(), |_| 0),
+                |(_, f, _, kept)| match (kept, f.body.written()) {
+                    (None, Some(b)) => b.stmts.len(),
+                    _ => 0,
+                },
                 || (),
                 |_, (_, f, args, kept)| {
                     let flat = || subst_of(f, args).into_iter().collect();
                     kept.is_none()
-                        .then(|| walk(recorded, program, &f.body, flat()))
+                        .then(|| walk_of(recorded, program, f, flat(), given))
                 },
             );
             for ((id, f, args, kept), fresh) in wave.into_iter().zip(fresh) {
@@ -1000,7 +1025,7 @@ fn build<'a>(
                     // `fresh` holds a walk for every body `kept` does not.
                     (None, fresh) => {
                         let flat = subst_of(f, args).into_iter().collect();
-                        let w = fresh.unwrap_or_else(|| walk(recorded, program, &f.body, flat));
+                        let w = fresh.unwrap_or_else(|| walk_of(recorded, program, f, flat, given));
                         if let Some(ws) = &mut walks {
                             ws.keep(id, args, &w);
                         }
@@ -1038,7 +1063,7 @@ fn build<'a>(
         );
         follow(
             &func.name,
-            calls,
+            &calls,
             &by_name,
             decls,
             &mut seen,
@@ -1054,6 +1079,7 @@ fn build<'a>(
             subst,
             facts: w.facts,
             releases,
+            calls,
         });
     }
 
@@ -1097,7 +1123,8 @@ pub fn as_written<'a>(
         .map(|(i, func)| {
             let func_id = FnId::nth(i);
             let type_args: Vec<Type> = func.type_params.iter().cloned().map(Type::Param).collect();
-            let facts = walk(&recorded, program, &func.body, HashMap::new()).facts;
+            let body = func.body.written().expect("a generic is written");
+            let facts = walk(&recorded, program, body, HashMap::new()).facts;
             Instance {
                 func,
                 func_id,
@@ -1114,6 +1141,7 @@ pub fn as_written<'a>(
                     .get(&func_id)
                     .cloned()
                     .unwrap_or_default(),
+                calls: Vec::new(),
             }
         })
         .collect()
@@ -1172,21 +1200,14 @@ pub(crate) fn dispatches_new(
 /// Adds the `isSuccess` twin of every `Fallible$Key$success` call: `?` on a
 /// `Fallible` emits both, and the checker records only `success`. Both are the
 /// same impl at the same instantiation.
-fn fallible_twins(
-    calls: Vec<(String, HashMap<String, Type>)>,
-) -> Vec<(String, HashMap<String, Type>)> {
+fn fallible_twin(callee: &str) -> Option<String> {
     let fallible = vyrn_frontend::types::FALLIBLE;
-    let mut out = Vec::with_capacity(calls.len());
-    for (callee, solved) in calls {
-        if let Some(key) = vyrn_frontend::types::impl_method_key(&callee, fallible, "success") {
-            out.push((
-                vyrn_frontend::types::impl_method_name(fallible, key, "isSuccess"),
-                solved.clone(),
-            ));
-        }
-        out.push((callee, solved));
-    }
-    out
+    let key = vyrn_frontend::types::impl_method_key(callee, fallible, "success")?;
+    Some(vyrn_frontend::types::impl_method_name(
+        fallible,
+        key,
+        "isSuccess",
+    ))
 }
 
 /// Turns the generic calls one body made into instantiations on the worklist,
@@ -1194,14 +1215,21 @@ fn fallible_twins(
 #[allow(clippy::too_many_arguments)]
 fn follow<'a>(
     caller: &str,
-    calls: Vec<(String, HashMap<String, Type>)>,
+    calls: &[(String, HashMap<String, Type>)],
     by_name: &HashMap<&str, (FnId, &'a Function)>,
     decls: &HashMap<String, vyrn_frontend::ast::TypeDecl>,
     seen: &mut Vec<(String, String)>,
     queue: &mut VecDeque<(FnId, &'a Function, Vec<Type>)>,
     unresolved: &mut Vec<Unresolved>,
 ) {
-    for (callee, solved) in fallible_twins(calls) {
+    // A call to a `Fallible` impl's `success` also calls its `isSuccess`,
+    // which the worklist follows first.
+    let twinned = (calls.iter()).flat_map(|(c, s)| {
+        let twin = fallible_twin(c).map(|t| (std::borrow::Cow::Owned(t), s));
+        twin.into_iter()
+            .chain([(std::borrow::Cow::Borrowed(c.as_str()), s)])
+    });
+    for (callee, solved) in twinned {
         let callee: &str = &callee;
         let mut stop = |why, line, args: Vec<Type>| {
             unresolved.push(Unresolved {

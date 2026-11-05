@@ -585,7 +585,7 @@ fn count_source(src: &str, into: &mut Uses) -> bool {
     let mut c = Counter(into);
     let mut locals = std::collections::HashSet::new();
     for f in &program.functions {
-        form_block(&f.body, &mut locals, &mut c);
+        form_block(f.block(), &mut locals, &mut c);
     }
     for t in &program.tests {
         form_block(&t.body, &mut locals, &mut c);

@@ -100,6 +100,24 @@ impl Skimmed {
         Some(&self.tokens[range.clone()])
     }
 
+    /// The line and column of `f`'s skimmed body's braces, or `None` when the
+    /// parse did not skim it.
+    pub fn braces(&self, f: &Function) -> Option<((usize, usize), (usize, usize))> {
+        let (open, close) = (self.tokens(f)?.first()?, self.tokens(f)?.last()?);
+        Some(((open.line, open.col), (close.line, close.col)))
+    }
+
+    /// Every identifier a skimmed body spells.
+    pub fn idents(&self) -> HashSet<String> {
+        (self.bodies.iter())
+            .flat_map(|(_, range)| &self.tokens[range.clone()])
+            .filter_map(|t| match &t.tok {
+                Tok::Ident(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Whether a skimmed body spells the identifier `name`.
     pub fn mentions(&self, name: &str) -> bool {
         (self.bodies.iter())
@@ -520,6 +538,7 @@ fn build(
         orders: Default::default(),
         prove: None,
         proved: Default::default(),
+        fenced: Default::default(),
         session: Default::default(),
     };
     let mut bodies = Vec::new();
@@ -1202,7 +1221,7 @@ impl<'a> Build<'a> {
                 params,
                 ret,
                 ret_clause: None,
-                body,
+                body: Body::Written(body),
                 line,
                 col,
                 is_extern: false,
@@ -1516,7 +1535,7 @@ impl<'a> Build<'a> {
             params,
             ret,
             ret_clause,
-            body,
+            body: Body::Written(body),
             line,
             col,
             is_extern: false,
@@ -1564,7 +1583,7 @@ impl<'a> Build<'a> {
             params,
             ret,
             ret_clause: None,
-            body,
+            body: Body::Written(body),
             line,
             col,
             is_extern: !exported,
@@ -3084,7 +3103,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
                 got.get_or_insert(name.clone());
             }
         };
-        let mut body = main.body.clone();
+        let mut body = main.block().clone();
         crate::project::walk_block(&mut body, &mut grab);
         got.unwrap_or_default()
     }
@@ -3154,7 +3173,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
                 names.push(name.clone());
             }
         };
-        let mut body = main.body.clone();
+        let mut body = main.block().clone();
         crate::project::walk_block(&mut body, &mut grab);
         assert!(names.contains(&"@copy".to_string()), "got {names:?}");
     }
@@ -3217,8 +3236,8 @@ test \"t\" {{ assert(c(1) == 1) }}"
              fn main() -> Int64 { let c = Circle(7)\n let Circle(r) = c\n return r }",
         );
         let f = p.functions.iter().find(|f| f.name == "main").unwrap();
-        let Stmt::Let { name, value, .. } = &f.body.stmts[1] else {
-            panic!("expected the desugared let, got {:?}", f.body.stmts[1]);
+        let Stmt::Let { name, value, .. } = &f.block().stmts[1] else {
+            panic!("expected the desugared let, got {:?}", f.block().stmts[1]);
         };
         assert_eq!(name, "r");
         let Expr::Match { arms, .. } = value else {
@@ -3247,7 +3266,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         let f = p.functions.iter().find(|f| f.name == "main").unwrap();
         // One `let` per binder; the positions a statement does not keep get
         // `@`-prefixed binders.
-        let lets: Vec<&String> = f.body.stmts[1..3]
+        let lets: Vec<&String> = f.block().stmts[1..3]
             .iter()
             .map(|s| match s {
                 Stmt::Let { name, .. } => name,
@@ -3281,7 +3300,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
     fn if_let_parses_to_a_match_with_a_default_arm() {
         let src = "fn main() -> Int64 {                    if let Some(v) = f() { return v } else { return 0 } }";
         let p = parse_src(src);
-        let (pat, _, _, els) = if_let(&p.functions[0].body.stmts[0]);
+        let (pat, _, _, els) = if_let(&p.functions[0].block().stmts[0]);
         assert!(matches!(pat, Pattern::Variant(v, _) if v == "Some"));
         assert!(matches!(els.stmts[0], Stmt::Return { .. }));
     }
@@ -3290,7 +3309,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
     fn while_let_desugars_to_while_true_with_if_let_else_break() {
         let src = "fn main() -> Int64 { while let Some(v) = f() { print(v) } return 0 }";
         let p = parse_src(src);
-        let Stmt::While { cond, body, .. } = &p.functions[0].body.stmts[0] else {
+        let Stmt::While { cond, body, .. } = &p.functions[0].block().stmts[0] else {
             panic!("expected a while loop");
         };
         assert_eq!(*cond, Expr::Bool(true, Id::NEW));
@@ -3302,7 +3321,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
     fn else_if_let_chains() {
         let src = "fn main() -> Int64 {                    if let Some(a) = f() { return a }                    else if let Ok(b) = g() { return b }                    else { return 0 } }";
         let p = parse_src(src);
-        let (_, _, _, els) = if_let(&p.functions[0].body.stmts[0]);
+        let (_, _, _, els) = if_let(&p.functions[0].block().stmts[0]);
         if_let(&els.stmts[0]);
     }
 
@@ -3317,11 +3336,11 @@ test \"t\" {{ assert(c(1) == 1) }}"
                    }";
         let p = parse_src(src);
         let f = &p.functions[0];
-        assert_eq!(f.body.stmts.len(), 4);
-        assert!(matches!(f.body.stmts[0], Stmt::Let { .. }));
-        assert!(matches!(f.body.stmts[2], Stmt::Assign { .. }));
+        assert_eq!(f.block().stmts.len(), 4);
+        assert!(matches!(f.block().stmts[0], Stmt::Let { .. }));
+        assert!(matches!(f.block().stmts[2], Stmt::Assign { .. }));
         assert!(matches!(
-            f.body.stmts[3],
+            f.block().stmts[3],
             Stmt::Return { value: Some(_), .. }
         ));
     }
@@ -3344,7 +3363,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         let Stmt::If {
             else_block: Some(eb),
             ..
-        } = &f.body.stmts[0]
+        } = &f.block().stmts[0]
         else {
             panic!("expected an if with an else");
         };
@@ -3403,7 +3422,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
             ty: Some(ty),
             value,
             ..
-        } = &p.functions[0].body.stmts[0]
+        } = &p.functions[0].block().stmts[0]
         else {
             panic!("let with type")
         };
@@ -3478,7 +3497,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         // A local `let mut` is untouched: `mut` starts a declaration only before `fn`
         // at the top level.
         assert!(
-            matches!(&p.functions.iter().find(|f| f.name == "main").unwrap().body.stmts[0],
+            matches!(&p.functions.iter().find(|f| f.name == "main").unwrap().block().stmts[0],
             Stmt::Let { name, mutable: true, .. } if name == "n")
         );
     }
@@ -3488,7 +3507,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         // `gen` as a variable name is unharmed.
         let p = parse_src("fn main() -> Int64 { let gen = 3 return gen }");
         let f = &p.functions[0];
-        assert!(matches!(&f.body.stmts[0], Stmt::Let { name, .. } if name == "gen"));
+        assert!(matches!(&f.block().stmts[0], Stmt::Let { name, .. } if name == "gen"));
     }
 
     #[test]
@@ -3540,7 +3559,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         // A variable named `as` is unharmed.
         let p = parse_src("fn main() -> Int64 { let as = 3 return as }");
         let f = &p.functions[0];
-        assert!(matches!(&f.body.stmts[0], Stmt::Let { name, .. } if name == "as"));
+        assert!(matches!(&f.block().stmts[0], Stmt::Let { name, .. } if name == "as"));
     }
 
     #[test]
@@ -3642,7 +3661,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         let src = "fn main() -> Int64 { let test = 5 return test }";
         let p = parse_src(src);
         assert!(p.tests.is_empty());
-        assert_eq!(p.functions[0].body.stmts.len(), 2);
+        assert_eq!(p.functions[0].block().stmts.len(), 2);
     }
 
     #[test]
@@ -3689,7 +3708,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         let src = "fn main() -> Int64 { let bench = 5 return bench }";
         let p = parse_src(src);
         assert!(p.benches.is_empty());
-        assert_eq!(p.functions[0].body.stmts.len(), 2);
+        assert_eq!(p.functions[0].block().stmts.len(), 2);
     }
 
     #[test]
@@ -3704,7 +3723,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         // A stray `;` after `if { .. }` is skipped.
         let src = "fn main() -> Int64 { if true { print(1) }; return 0 }";
         let p = parse_src(src);
-        assert_eq!(p.functions[0].body.stmts.len(), 2);
+        assert_eq!(p.functions[0].block().stmts.len(), 2);
     }
 
     #[test]
@@ -3713,7 +3732,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         let src = "fn main() -> Int64 { let x: Array<Int64>= [] return x.length }";
         let p = parse_src(src);
         assert!(matches!(
-            p.functions[0].body.stmts[0],
+            p.functions[0].block().stmts[0],
             Stmt::Let {
                 ty: Some(Type::Array(_)),
                 ..
@@ -3732,7 +3751,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
                    return 0\n\
                    }";
         let p = parse_src(src);
-        assert_eq!(p.functions[0].body.stmts.len(), 4);
+        assert_eq!(p.functions[0].block().stmts.len(), 4);
     }
 
     #[test]
@@ -3740,11 +3759,14 @@ test \"t\" {{ assert(c(1) == 1) }}"
         // Two lambdas in two holes get two keys (#471).
         let mut p = parse_src("fn main() -> Int64 {\n  print(\"\\{f(x -> x)} \\{f(x -> x)}\")\n}");
         let mut at = Vec::new();
-        crate::project::walk_block(&mut p.functions[0].body, &mut |e| {
-            if let Expr::Lambda { line, col, .. } = e {
-                at.push((*line, *col));
-            }
-        });
+        crate::project::walk_block(
+            p.functions[0].body.written_mut().expect("parsed"),
+            &mut |e| {
+                if let Expr::Lambda { line, col, .. } = e {
+                    at.push((*line, *col));
+                }
+            },
+        );
         assert_eq!(at, [(2, 14), (2, 27)]);
     }
 
@@ -3776,7 +3798,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         let src = "fn f(x: Int64) { if x > 0 { return } print(x) } fn main() -> Int64 { return 0 }";
         let p = parse_src(src);
         let f = p.functions.iter().find(|f| f.name == "f").unwrap();
-        match &f.body.stmts[0] {
+        match &f.block().stmts[0] {
             Stmt::If { then_block, .. } => {
                 assert!(matches!(
                     then_block.stmts[0],
@@ -3845,7 +3867,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         // 1 + 2 * 3 is Add(1, Mul(2, 3)).
         let p = parse_src("fn main() -> Int64 { return 1 + 2 * 3; }");
         let f = &p.functions[0];
-        match &f.body.stmts[0] {
+        match &f.block().stmts[0] {
             Stmt::Return {
                 value:
                     Some(Expr::Binary {
@@ -3866,7 +3888,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         // `x & mask == 0` is `(x & mask) == 0`: bitwise binds tighter than comparison.
         let p = parse_src("fn main() -> Int64 { let b = x & mask == 0; return 0; }");
         let f = &p.functions[0];
-        match &f.body.stmts[0] {
+        match &f.block().stmts[0] {
             Stmt::Let {
                 value: Expr::Binary {
                     op: BinOp::Eq, lhs, ..
@@ -3889,7 +3911,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
 
         // `a + b << c` is `(a + b) << c`.
         let p = parse_src("fn main() -> Int64 { let s = a + b << c; return 0; }");
-        match &p.functions[0].body.stmts[0] {
+        match &p.functions[0].block().stmts[0] {
             Stmt::Let {
                 value:
                     Expr::Binary {
@@ -3915,7 +3937,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
             "nested generic must parse as Array"
         );
         assert!(matches!(
-            f.body.stmts[0],
+            f.block().stmts[0],
             Stmt::Return {
                 value: Some(Expr::Binary { op: BinOp::Shr, .. }),
                 ..
@@ -3936,7 +3958,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
     fn parses_region_block() {
         let p = parse_src("fn main() -> Int64 { region { print(1); } return 0; }");
         let f = &p.functions[0];
-        match &f.body.stmts[0] {
+        match &f.block().stmts[0] {
             Stmt::Region { body, .. } => assert_eq!(body.stmts.len(), 1),
             other => panic!("expected region, got {other:?}"),
         }
@@ -3961,7 +3983,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         assert_eq!(errors[0].line, 2);
         assert_eq!(errors[1].line, 4);
         // The good statements around the bad ones are kept.
-        let body = &p.functions[0].body.stmts;
+        let body = &p.functions[0].block().stmts;
         assert!(body
             .iter()
             .any(|s| matches!(s, Stmt::Let { name, .. } if name == "good")));
@@ -4007,7 +4029,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         let (p, errors) = parse_accum(lex(src).unwrap());
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].line, 4);
-        let body = &p.functions[0].body.stmts;
+        let body = &p.functions[0].block().stmts;
         assert!(
             matches!(body.last(), Some(Stmt::Return { .. })),
             "return survives"
@@ -4028,7 +4050,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
 
     fn store(src: &str) -> (String, Vec<String>, String) {
         let body = parse_src(&format!("fn main() -> Int64 {{ {src} return 0 }}")).functions[0]
-            .body
+            .block()
             .stmts
             .clone();
         let [Stmt::Store {
@@ -4075,7 +4097,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
     fn store_target_walks_a_place_from_its_root() {
         let place = |src: &str| match &parse_src(&format!("fn main() -> Int64 {{ let _ = {src} }}"))
             .functions[0]
-            .body
+            .block()
             .stmts[0]
         {
             Stmt::Let { value, .. } => store_target(value),
@@ -4114,7 +4136,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
             "fn main() -> Int64 { let mut s: S = S { xs: [1] }  let x = s.xs.pop()  return 0 }",
         ] {
             let p = parse_src(src);
-            assert!(format!("{:?}", p.functions[0].body.stmts)
+            assert!(format!("{:?}", p.functions[0].block().stmts)
                 .contains(r#"Call { name: "@pop", args: [Field"#));
         }
     }
@@ -4126,7 +4148,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         // `sq.push(x)` becomes `sq = @push(sq, x)`.
         let p =
             parse_src("fn main() -> Int64 { let mut sq: Array<Int64> = []  sq.push(1)  return 0 }");
-        let stmts = &p.functions[0].body.stmts;
+        let stmts = &p.functions[0].block().stmts;
         match &stmts[1] {
             Stmt::Assign {
                 name,
@@ -4145,7 +4167,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         // `r.xs.push(x)` becomes `r.xs = @push(r.xs, x)`.
         let p =
             parse_src("fn main() -> Int64 { let mut r: R = R { xs: [] }  r.xs.push(1)  return 0 }");
-        let stmts = &p.functions[0].body.stmts;
+        let stmts = &p.functions[0].block().stmts;
         match &stmts[1] {
             Stmt::Store {
                 name,
@@ -4167,7 +4189,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         let p = parse_src(
             "fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].push(1)  return 0 }",
         );
-        let stmts = &p.functions[0].body.stmts;
+        let stmts = &p.functions[0].block().stmts;
         match &stmts[1] {
             Stmt::Store {
                 name,
@@ -4203,7 +4225,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
 
     fn only_arg(p: &Program) -> Expr {
         // The one call argument of `f(<arg>)` in `main`'s first statement.
-        match &p.functions.last().unwrap().body.stmts[0] {
+        match &p.functions.last().unwrap().block().stmts[0] {
             Stmt::Let {
                 value: Expr::Call { args, .. },
                 ..
@@ -4296,7 +4318,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
                            return x }",
         );
         let f = &p.functions[0];
-        match &f.body.stmts[0] {
+        match &f.block().stmts[0] {
             Stmt::Let {
                 value:
                     Expr::IfExpr {
@@ -4308,7 +4330,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
             other => panic!("expected IfExpr let-init, got {other:?}"),
         }
         assert!(
-            matches!(f.body.stmts[1], Stmt::If { .. }),
+            matches!(f.block().stmts[1], Stmt::If { .. }),
             "bare `if` stays a statement"
         );
     }
@@ -4328,7 +4350,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
                     ..
                 },
             ..
-        } = &f.body.stmts[0]
+        } = &f.block().stmts[0]
         else {
             panic!("expected chained IfExpr");
         };
@@ -4478,8 +4500,8 @@ impl Unwrap for Int64 { fn get(self) -> Output { return self }  type Output = In
     #[test]
     fn namespaced_fallible_construction_parses_as_one_tryconstruct() {
         let p = parse_src("fn main() -> Int64 { return ns.Age?(5) }");
-        assert_eq!(p.functions[0].body.stmts.len(), 1);
-        match &p.functions[0].body.stmts[0] {
+        assert_eq!(p.functions[0].block().stmts.len(), 1);
+        match &p.functions[0].block().stmts[0] {
             Stmt::Return {
                 value: Some(Expr::TryConstruct { name, args, .. }),
                 ..
@@ -4495,7 +4517,7 @@ impl Unwrap for Int64 { fn get(self) -> Output { return self }  type Output = In
     #[test]
     fn dotted_paths_without_the_question_stay_postfix() {
         let p = parse_src("fn main() -> Int64 { return ns.f(1) }");
-        match &p.functions[0].body.stmts[0] {
+        match &p.functions[0].block().stmts[0] {
             Stmt::Return {
                 value: Some(Expr::Call { name, args, .. }),
                 ..
@@ -4506,7 +4528,7 @@ impl Unwrap for Int64 { fn get(self) -> Output { return self }  type Output = In
             other => panic!("expected method-sugar call, got {other:?}"),
         }
         let p = parse_src("fn main() -> Int64 { return ns.f }");
-        match &p.functions[0].body.stmts[0] {
+        match &p.functions[0].block().stmts[0] {
             Stmt::Return {
                 value: Some(Expr::Field { field, expr, .. }),
                 ..

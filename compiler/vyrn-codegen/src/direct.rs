@@ -411,7 +411,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     let ck = vyrn_frontend::prof::phase("codegen: checks");
     vyrn_frontend::par::in_parallel(
         &user,
-        |f| f.body.stmts.len(),
+        |f| f.block().stmts.len(),
         || (),
         |(), f| {
             base.world.body_of(&f.name);
@@ -509,7 +509,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     let mut cx = Cx::new(base, Reg::default());
     let emitted = vyrn_frontend::par::in_parallel_keep(
         &user,
-        |f| f.body.stmts.len(),
+        |f| f.block().stmts.len(),
         || {
             crate::observe::follow(observing);
             Cx::new(base, Reg::default())
@@ -2154,7 +2154,7 @@ impl<'a> Cx<'a> {
             m,
             Key::Ho(f.name.clone(), type_args, targets),
             Arc::new(sf),
-            Body::Block(&f.body),
+            Body::Block(f.block()),
             subst,
             binds,
             core_key,
@@ -2174,7 +2174,7 @@ impl<'a> Cx<'a> {
             m,
             Key::Generic(f.name.clone(), type_args),
             Arc::new(instance_shell(f, &subst)),
-            Body::Block(&f.body),
+            Body::Block(f.block()),
             subst,
             HashMap::new(),
             core_key,
@@ -2676,10 +2676,10 @@ fn f_shell(line: usize) -> Function {
         params: Vec::new(),
         ret: Type::Unit,
         ret_clause: None,
-        body: Block {
+        body: vyrn_frontend::ast::Body::Written(Block {
             id: Id::NEW,
             stmts: Vec::new(),
-        },
+        }),
         line,
         col: 0,
         is_extern: false,
@@ -2896,7 +2896,15 @@ fn lower_globals_teardown(m: &mut Log, program: &Program, cx: &Cx<'_>) -> Result
 /// Lowers the declared function `f`, which [`Cx::sigs`] holds.
 fn lower_fn(m: &mut Log, f: &Function, cx: &Cx<'_>) -> Result<Frame, String> {
     let sig = &cx.sigs[&f.name];
-    lower_body(m, f, &f.name, Body::Block(&f.body), sig, cx, HashMap::new())
+    lower_body(
+        m,
+        f,
+        &f.name,
+        Body::Block(f.block()),
+        sig,
+        cx,
+        HashMap::new(),
+    )
 }
 
 /// Fills function `index` with `body` and, under `VYRN_WASM_NAMES` or an operation count, names

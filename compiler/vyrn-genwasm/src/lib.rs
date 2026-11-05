@@ -93,10 +93,11 @@ enum EngineError {
 /// speed, a false accept would run a generator outside its sandbox.
 fn reaches_unserved(program: &Program) -> Option<String> {
     program.functions.iter().find_map(|f| {
-        let mut hits: Vec<String> = vyrn_frontend::checker::fn_calls(&f.body, &Default::default())
-            .into_iter()
-            .filter(|c| UNSERVED.contains(&c.as_str()))
-            .collect();
+        let mut hits: Vec<String> =
+            vyrn_frontend::checker::fn_calls(f.block(), &Default::default())
+                .into_iter()
+                .filter(|c| UNSERVED.contains(&c.as_str()))
+                .collect();
         hits.sort();
         hits.into_iter().next()
     })
@@ -504,9 +505,9 @@ fn at_type(e: Expr, ty: &Type) -> Expr {
 /// `None` declines the whole run.
 fn reflect_entries(p: &mut Program) -> Option<()> {
     let reaches = |what: &str| {
-        p.functions
-            .iter()
-            .any(|f| vyrn_frontend::checker::fn_calls(&f.body, &Default::default()).contains(what))
+        p.functions.iter().any(|f| {
+            vyrn_frontend::checker::fn_calls(f.block(), &Default::default()).contains(what)
+        })
     };
     let named = |n: &str| Type::Named(n.to_string());
     let mut dec = Decoders::new(p);

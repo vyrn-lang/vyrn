@@ -191,6 +191,10 @@ pub struct Judgment {
     /// What a private function's result holds by the fact judgment's
     /// summary: a caller in the same module the placer builds reads it.
     pub summary: Vec<crate::core::check::Fact>,
+    /// Each call its walk found, release dispatches included, with the
+    /// callee's solved type parameters: what the lowering's worklist follows
+    /// out of a given body in place of walking it.
+    pub calls: Vec<(String, Vec<(String, crate::ast::Type)>)>,
 }
 
 thread_local! {

@@ -313,6 +313,10 @@ pub struct Program {
     /// The session of the host that analyses this program. The loader stamps
     /// the load's; a parsed program has none.
     pub session: crate::session::SessionRef,
+    /// What the generation fence reads of each [`Body::Given`] function, by
+    /// linked name: its module's stored row (`vyrn_lower::stdrows`), written
+    /// before the check. Empty for a program with no given body.
+    pub fenced: std::sync::Arc<std::collections::BTreeMap<String, crate::checker::Fenced>>,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only
@@ -828,7 +832,7 @@ pub struct Function {
     /// and the `read` parameters, which a check at every return states and
     /// every direct caller assumes ([`crate::core::check::ensures`]).
     pub ret_clause: Option<Expr>,
-    pub body: Block,
+    pub body: Body,
     pub line: usize,
     /// 1-based column of the NAME, in Unicode scalar values; `0` for a
     /// synthesized function. See [`crate::diagnostics`] for the convention.
@@ -852,7 +856,55 @@ pub struct Function {
     pub is_mut: bool,
 }
 
+/// A function's body as the load holds it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Body {
+    /// The parsed block, which the checker types and the core builds.
+    Written(Block),
+    /// A non-generic std function `vyrn check` neither parses nor types: its
+    /// module's stored row stands for it (`vyrn_lower::stdrows`).
+    Given,
+}
+
+impl Body {
+    /// The block, or `None` for a given body.
+    pub fn written(&self) -> Option<&Block> {
+        match self {
+            Body::Written(b) => Some(b),
+            Body::Given => None,
+        }
+    }
+
+    /// [`Body::written`], mutably.
+    pub fn written_mut(&mut self) -> Option<&mut Block> {
+        match self {
+            Body::Written(b) => Some(b),
+            Body::Given => None,
+        }
+    }
+}
+
 impl Function {
+    /// The written body of a function a host emits or runs.
+    ///
+    /// # Panics
+    ///
+    /// On a given body, which only a load that emits nothing holds
+    /// ([`crate::loader::std_given`]).
+    pub fn block(&self) -> &Block {
+        (self.body.written()).unwrap_or_else(|| panic!("`{}` is given and emitted", self.name))
+    }
+
+    /// [`Function::block`], mutably.
+    ///
+    /// # Panics
+    ///
+    /// On a given body, as [`Function::block`].
+    pub fn block_mut(&mut self) -> &mut Block {
+        let name = &self.name;
+        (self.body.written_mut()).unwrap_or_else(|| panic!("`{name}` is given and emitted"))
+    }
+
     /// Returns a function no source spells: line 0, column 0, in the root
     /// module, with no doc, type parameters or flags. A caller sets the rest
     /// with struct update.
@@ -868,7 +920,7 @@ impl Function {
             params,
             ret,
             ret_clause: None,
-            body: Block { id: Id::NEW, stmts },
+            body: Body::Written(Block { id: Id::NEW, stmts }),
             line: 0,
             col: 0,
             is_extern: false,
@@ -2232,7 +2284,9 @@ impl Numbering {
         for p in &mut f.params {
             self.next(&mut p.id);
         }
-        self.block(&mut f.body);
+        if let Body::Written(b) = &mut f.body {
+            self.block(b);
+        }
     }
 
     fn binders(&mut self, bs: Vec<&mut Binder>) {
@@ -2743,7 +2797,9 @@ pub fn lambdas<'a>(p: &'a Program) -> std::collections::HashMap<NodeId, (&'a str
     let mut locals = std::collections::HashSet::new();
     for f in &p.functions {
         v.0 = &f.name;
-        ast_block(&f.body, &mut locals, &mut v);
+        if let Some(b) = f.body.written() {
+            ast_block(b, &mut locals, &mut v);
+        }
     }
     v.0 = "";
     for g in &p.globals {

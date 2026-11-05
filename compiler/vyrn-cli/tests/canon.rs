@@ -237,7 +237,7 @@ fn rows_of(rel: &str) -> Found {
         }
         let ast = asts.entry(s).or_insert_with(|| {
             let mut a = Ast::default();
-            a.block(&func.body);
+            a.block(func.block());
             a
         });
         let lambda = vyrn_lower::core::lambda_at(&body.name);
@@ -247,7 +247,7 @@ fn rows_of(rel: &str) -> Found {
                 false => Kind::BoolLambda,
             }),
             None if func.ret == vyrn_frontend::ast::Type::Bool => {
-                Some(match &func.body.stmts[..] {
+                Some(match &func.block().stmts[..] {
                     [Stmt::Return { value: Some(_), .. }] => Kind::OneReturn,
                     _ => Kind::MoreStatements,
                 })

@@ -627,6 +627,10 @@ pub struct Nest {
     /// its own load, and `LoadOptions { .., ..Default::default() }` still
     /// builds.
     pub(crate) gen: Option<String>,
+    /// The std modules whose stored rows the loads enclosing this one are
+    /// writing, outermost first ([`rows_writer`]). This load takes each as
+    /// written, so a runtime module that injects another writes no cycle.
+    writing: Vec<String>,
 }
 
 /// Returns the objection, if any, to `importer` importing `imported`.
@@ -905,7 +909,9 @@ fn away_from_home(
             .iter()
             .flat_map(|im| im.methods.iter().chain(&im.places));
         for f in p.functions.iter().chain(methods) {
-            crate::ast::each_expr(&f.body, &mut visit);
+            if let Some(b) = f.body.written() {
+                crate::ast::each_expr(b, &mut visit);
+            }
         }
         for t in p.tests.iter().chain(&p.benches) {
             crate::ast::each_expr(&t.body, &mut visit);
@@ -1561,10 +1567,11 @@ fn load_with_origins_inner(
             let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
             // The floor's judgment reads the effects of every instance, so a
-            // load it still has to judge drops nothing.
-            let lazy = match pending {
-                Some(_) => HashSet::new(),
-                None => lazy_modules(&modules, &root_key, opts),
+            // load it still has to judge drops nothing, and a load that takes
+            // std as its interface has no body to reach through.
+            let lazy = match pending.is_some() || std_given(opts) {
+                true => HashSet::new(),
+                false => lazy_modules(&modules, &root_key, opts),
             };
             let linked = link(modules, &root_key, &lazy, opts).map(|mut p| {
                 p.expansions = opts.expansions.clone();
@@ -1807,6 +1814,7 @@ fn load_modules(
                     orders: Default::default(),
                     prove: None,
                     proved: Default::default(),
+                    fenced: Default::default(),
                     session: Default::default(),
                 },
                 import_targets: Vec::new(),
@@ -1824,7 +1832,13 @@ fn load_modules(
             w.states.insert(key.to_string(), true);
             return Ok(());
         }
-        let parsed = module_parse(key, &text, &hash, root_key, opts)?;
+        let owner = generated_importer(key).unwrap_or(key);
+        let parsed = match std_given(opts) && !is_root && in_std(owner, opts) {
+            true if !writes(owner, root_key, opts) => {
+                interface_parse(key, &text, &hash, root_key, opts, resolver)?
+            }
+            _ => module_parse(key, &text, &hash, root_key, opts)?,
+        };
         let mut program = {
             let _p = crate::prof::phase("parse (clone)");
             parsed.program.clone()
@@ -1846,6 +1860,9 @@ fn load_modules(
             for slot in decl_modules_mut(&mut program) {
                 *slot = Some(key.to_string());
             }
+        }
+        if let Some(s) = (parsed.skimmed.as_ref()).filter(|_| std_given(opts)) {
+            parse_skimmed(&mut program, s, key, root_key)?;
         }
 
         // Stamp every `panic` with its file and line, and every quote part with
@@ -2088,8 +2105,10 @@ fn load_modules(
         }
     }
 
-    if let Err(diags) = parse_reached(&mut w.modules, opts) {
-        return Err(failed(diags, w.origins));
+    if !std_given(opts) {
+        if let Err(diags) = parse_reached(&mut w.modules, opts) {
+            return Err(failed(diags, w.origins));
+        }
     }
     let away = away_from_home(&w.modules, &root_key, opts, &mut w.real_paths);
     if !away.is_empty() {
@@ -2172,6 +2191,9 @@ struct Parsed {
     /// The bodies a skimming parse left unparsed; `program` holds an empty
     /// block for each.
     skimmed: Option<parser::Skimmed>,
+    /// The identifiers of the bodies an [`interface_parse`] cut; empty for
+    /// every other parse.
+    mentions: HashSet<String>,
 }
 
 thread_local! {
@@ -2198,6 +2220,73 @@ fn text_hash(text: &str) -> String {
 /// Whether `key` is a module of the std tree.
 pub fn in_std(key: &str, opts: &LoadOptions) -> bool {
     import_specifier("", key, opts.std_root.as_deref()).starts_with("std/")
+}
+
+/// Whether this load takes an imported std module as its interface: each
+/// non-generic function a [`Body::Given`] its stored row stands for. Only the
+/// outermost load of a host that emits nothing does: an emitting host, a
+/// generator's load and the floor read bodies.
+pub fn std_given(opts: &LoadOptions) -> bool {
+    !crate::movecheck::emitting() && opts.nest.depth == 0 && opts.artifacts.is_none()
+}
+
+/// Whether `f`, a top-level function of an imported std module, is given: one
+/// body for every program. A generic is judged per instance, and an `extern`
+/// and a `std/mem` primitive have no body.
+pub fn is_given(f: &Function, key: &str, opts: &LoadOptions) -> bool {
+    f.type_params.is_empty()
+        && !f.is_extern
+        && import_specifier("", key, opts.std_root.as_deref()) != MEM_SPEC
+}
+
+/// The options of std module `m`'s own load, which writes its stored rows
+/// into `session`, inside a load under `opts`.
+pub fn rows_writer(
+    opts: &LoadOptions,
+    m: &str,
+    session: std::sync::Arc<crate::session::Session>,
+) -> LoadOptions {
+    let mut writing = opts.nest.writing.clone();
+    writing.push(m.to_string());
+    LoadOptions {
+        std_root: opts.std_root.clone(),
+        session: Some(session),
+        nest: Nest {
+            writing,
+            ..Nest::default()
+        },
+        ..LoadOptions::default()
+    }
+}
+
+/// Whether this load writes the rows of std module `owner`: the root, and
+/// each module on the writers' stack. Such a module is parsed whole.
+fn writes(owner: &str, root_key: &str, opts: &LoadOptions) -> bool {
+    owner == root_key || opts.nest.writing.iter().any(|w| w == owner)
+}
+
+/// Parses every body of module `key` the skim `s` left, so no body stays
+/// unparsed: a module this load writes the rows of ([`writes`]).
+fn parse_skimmed(
+    program: &mut Program,
+    s: &parser::Skimmed,
+    key: &str,
+    root_key: &str,
+) -> Result<(), Vec<Diagnostic>> {
+    for f in &mut program.functions {
+        if let Some(body) = s
+            .body(f)
+            .filter(|_| f.body.written().is_some_and(|b| b.stmts.is_empty()))
+        {
+            let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
+                ds.into_iter()
+                    .map(|d| in_module(d, key, root_key))
+                    .collect()
+            };
+            f.body = Body::Written(body.map_err(in_key)?);
+        }
+    }
+    Ok(())
 }
 
 /// Lexes and parses module `key`, memoized on its `text` and its [`text_hash`]:
@@ -2254,7 +2343,7 @@ fn module_parse(
         for f in &mut program.functions {
             if s.tokens(f).is_some_and(mentions_runtime) {
                 if let Some(body) = s.body(f) {
-                    f.body = body.map_err(in_key)?;
+                    f.body = Body::Written(body.map_err(in_key)?);
                 }
             }
         }
@@ -2263,6 +2352,7 @@ fn module_parse(
         refs: Rc::new(program_ref_names(&program)),
         program,
         skimmed,
+        mentions: HashSet::new(),
     });
     PARSE_CACHE.with(|c| {
         let mut c = c.borrow_mut();
@@ -2274,6 +2364,174 @@ fn module_parse(
         c.insert(cache_key, p.clone());
     });
     Ok(p)
+}
+
+/// The format word that opens a std module's interface entry.
+const INTERFACE_TAG: &str = "interface1";
+
+/// The parse of imported std module `key` as its interface ([`std_given`]):
+/// each given function ([`is_given`]) with a [`Body::Given`], every other
+/// body parsed. Read from the module's interface entry, beside the generator
+/// cache's entries, and written there on a miss; `VYRN_NO_GEN_CACHE` reads
+/// and writes none. Memoized as [`module_parse`] is.
+fn interface_parse(
+    key: &str,
+    text: &str,
+    hash: &str,
+    root_key: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Result<Rc<Parsed>, Vec<Diagnostic>> {
+    let cache_key = format!("{hash}:interface");
+    if let Some(p) = PARSE_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
+        return Ok(p);
+    }
+    let entry = {
+        let id = crate::gen::compiler_identity();
+        let seed = format!("{INTERFACE_TAG}\0{id}\0{key}\0{hash}");
+        format!("interface-{}", crate::hash::sha256_hex(seed.as_bytes()))
+    };
+    let stored = (!gen_cache_off())
+        .then(|| resolver.gen_cache_get(&entry))
+        .flatten()
+        .and_then(|t| Interface::read(&entry, &t));
+    let interface = match stored {
+        Some(i) => i,
+        None => {
+            let i = Interface::of(key, text, hash, root_key, opts)?;
+            if !gen_cache_off() {
+                resolver.gen_cache_put(&entry, &i.render(&entry));
+            }
+            i
+        }
+    };
+    let _p = crate::prof::phase("parse");
+    let in_key = |errors: Vec<Diagnostic>| -> Vec<Diagnostic> {
+        (errors.into_iter())
+            .map(|d| in_module(d, key, root_key))
+            .collect()
+    };
+    let scan = lexer::scan(&interface.text).map_err(|d| in_key(vec![d]))?;
+    let (mut program, errors, _) = parser::parse_imported(lexer::tokens(scan), false);
+    if !errors.is_empty() {
+        return Err(in_key(errors));
+    }
+    let owner = generated_importer(key).unwrap_or(key);
+    for f in (program.functions.iter_mut()).filter(|f| is_given(f, owner, opts)) {
+        f.body = Body::Given;
+    }
+    let p = Rc::new(Parsed {
+        program,
+        refs: Rc::new(interface.refs),
+        skimmed: None,
+        mentions: interface.mentions,
+    });
+    PARSE_CACHE.with(|c| c.borrow_mut().insert(cache_key, p.clone()));
+    Ok(p)
+}
+
+/// What a load reads of a std module it takes as its interface: the module's
+/// text with each given body's statements cut and its newlines kept, so
+/// every other line and column stands, and the names the cut bodies would
+/// add to [`Parsed::refs`] and [`Parsed::mentions`].
+struct Interface {
+    refs: HashSet<String>,
+    mentions: HashSet<String>,
+    text: String,
+}
+
+impl Interface {
+    /// The interface of module `key`'s `text`, from its skimming parse.
+    fn of(
+        key: &str,
+        text: &str,
+        hash: &str,
+        root_key: &str,
+        opts: &LoadOptions,
+    ) -> Result<Interface, Vec<Diagnostic>> {
+        let full = module_parse(key, text, hash, root_key, opts)?;
+        let s = (full.skimmed.as_ref()).expect("an imported std module's parse skims");
+        let owner = generated_importer(key).unwrap_or(key);
+        // Each line's byte offset, and a column's within it.
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let at = |(line, col): (usize, usize)| -> Option<usize> {
+            let start = *starts.get(line.checked_sub(1)?)?;
+            let (i, _) = text[start..].char_indices().nth(col.checked_sub(1)?)?;
+            Some(start + i)
+        };
+        let mut cuts: Vec<(usize, usize)> = (full.program.functions.iter())
+            .filter(|f| is_given(f, owner, opts))
+            .filter_map(|f| {
+                let (open, close) = s.braces(f)?;
+                let (a, b) = (at(open)?, at(close)?);
+                (text.as_bytes().get(a) == Some(&b'{') && text.as_bytes().get(b) == Some(&b'}'))
+                    .then_some((a + 1, b))
+            })
+            .collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut out = String::with_capacity(text.len() / 4);
+        let mut from = 0;
+        for (a, b) in cuts {
+            out.push_str(&text[from..a]);
+            out.extend(text[a..b].chars().filter(|c| *c == '\n'));
+            from = b;
+        }
+        out.push_str(&text[from..]);
+        Ok(Interface {
+            refs: (*full.refs).clone(),
+            mentions: s.idents(),
+            text: out,
+        })
+    }
+
+    /// The entry as text: the tag line, the counted refs and mentions, then
+    /// the cut text.
+    fn render(&self, key: &str) -> String {
+        let mut body = String::new();
+        for names in [&self.refs, &self.mentions] {
+            let mut names: Vec<&String> = names.iter().collect();
+            names.sort();
+            body.push_str(&format!("{}\n", names.len()));
+            for n in names {
+                body.push_str(n);
+                body.push('\n');
+            }
+        }
+        body.push_str(&self.text);
+        let tag = gen_cache_tag(key, body.as_bytes());
+        format!("{INTERFACE_TAG} {tag}\n{body}")
+    }
+
+    /// Reads what [`Interface::render`] wrote under `key`; `None` for a
+    /// foreign, damaged or other-format entry.
+    fn read(key: &str, text: &str) -> Option<Interface> {
+        let (head, body) = text.split_once('\n')?;
+        let tag = head.strip_prefix(INTERFACE_TAG)?.strip_prefix(' ')?;
+        if gen_cache_tag(key, body.as_bytes()) != tag {
+            return None;
+        }
+        let mut rest = body;
+        let mut names = || -> Option<HashSet<String>> {
+            let (n, tail) = rest.split_once('\n')?;
+            rest = tail;
+            (0..n.parse::<usize>().ok()?)
+                .map(|_| {
+                    let (name, tail) = rest.split_once('\n')?;
+                    rest = tail;
+                    Some(name.to_string())
+                })
+                .collect()
+        };
+        let (refs, mentions) = (names()?, names()?);
+        Some(Interface {
+            refs,
+            mentions,
+            text: rest.to_string(),
+        })
+    }
 }
 
 /// The `gen fn` `name` that program `p` exports.
@@ -2367,6 +2625,7 @@ fn unlinked_import(
             && bindings(name) == 1
             && !parsed.refs.contains(name)
             && !parsed.skimmed.as_ref().is_some_and(|s| s.mentions(name))
+            && !parsed.mentions.contains(name)
             && !decls(program).any(|d| d.name == name)
     });
     if !only_named || !in_std(target, opts) {
@@ -4441,7 +4700,9 @@ fn bound_names(p: &Program, out: &mut HashSet<String>) {
         .flat_map(|i| i.methods.iter().chain(&i.places));
     for f in p.functions.iter().chain(fns) {
         out.extend(f.params.iter().map(|q| q.name.clone()));
-        body_block(&f.body, &mut HashSet::new(), &mut Binders(out));
+        if let Some(b) = f.body.written() {
+            body_block(b, &mut HashSet::new(), &mut Binders(out));
+        }
     }
     for b in p
         .tests
@@ -4515,7 +4776,9 @@ impl NsResolver<'_> {
         for f in &mut p.functions {
             let mut locals: HashSet<String> = f.params.iter().map(|pm| pm.name.clone()).collect();
             self.walk_type_positions_fn(f, &locals.clone());
-            body_block_mut(&mut f.body, &mut locals, self);
+            if let Some(b) = f.body.written_mut() {
+                body_block_mut(b, &mut locals, self);
+            }
         }
         for im in &mut p.impls {
             self.rewrite_type(&mut im.ty);
@@ -4523,7 +4786,9 @@ impl NsResolver<'_> {
                 let mut locals: HashSet<String> =
                     m.params.iter().map(|pm| pm.name.clone()).collect();
                 self.walk_type_positions_fn(m, &locals.clone());
-                body_block_mut(&mut m.body, &mut locals, self);
+                if let Some(b) = m.body.written_mut() {
+                    body_block_mut(b, &mut locals, self);
+                }
             }
             // A projection is an ordinary body the loader never flattened, so
             // its `ns.member` uses resolve like any other.
@@ -4531,7 +4796,9 @@ impl NsResolver<'_> {
                 let mut locals: HashSet<String> =
                     pl.params.iter().map(|pm| pm.name.clone()).collect();
                 self.walk_type_positions_fn(pl, &locals.clone());
-                body_block_mut(&mut pl.body, &mut locals, self);
+                if let Some(b) = pl.body.written_mut() {
+                    body_block_mut(b, &mut locals, self);
+                }
             }
         }
         for t in &mut p.type_decls {
@@ -5392,13 +5659,17 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             );
         }
         for f in m.program.functions.iter().filter(|f| !unparsed(mi, f)) {
-            crate::ast::spelled(&f.body, &mut names);
+            if let Some(b) = f.body.written() {
+                crate::ast::spelled(b, &mut names);
+            }
         }
         for t in m.program.tests.iter().chain(&m.program.benches) {
             crate::ast::spelled(&t.body, &mut names);
         }
         for f in (m.program.impls.iter()).flat_map(|im| im.methods.iter().chain(&im.places)) {
-            crate::ast::spelled(&f.body, &mut names);
+            if let Some(b) = f.body.written() {
+                crate::ast::spelled(b, &mut names);
+            }
         }
         for g in &m.program.globals {
             crate::ast::expr_spelled(&g.init, &mut names);
@@ -5436,7 +5707,7 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             let m = &modules[mi];
             let f = &m.program.functions[fi];
             let parse = m.skimmed.as_ref().and_then(|p| p.skimmed.as_ref());
-            let parse = parse.filter(|_| f.body.stmts.is_empty());
+            let parse = parse.filter(|_| f.body.written().is_some_and(|b| b.stmts.is_empty()));
             let body = match parse.and_then(|s| s.body(f)) {
                 Some(body) => {
                     let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
@@ -5450,7 +5721,9 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
                 None => None,
             };
             let mut names: Vec<&str> = Vec::new();
-            crate::ast::spelled(body.as_ref().unwrap_or(&f.body), &mut names);
+            if let Some(b) = body.as_ref().or(f.body.written()) {
+                crate::ast::spelled(b, &mut names);
+            }
             derive |= names.contains(&"derive");
             for n in names {
                 work.extend(waiting.remove(n).into_iter().flatten());
@@ -5459,7 +5732,7 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
                 }
             }
             if let Some(body) = body {
-                modules[mi].program.functions[fi].body = body;
+                modules[mi].program.functions[fi].body = Body::Written(body);
             }
         }
         // A `derive` generator writes calls after the check, to any function.
@@ -5470,7 +5743,7 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     }
     for (mi, fi) in waiting.into_values().flatten() {
         let f = &modules[mi].program.functions[fi];
-        if f.body.stmts.is_empty() {
+        if f.body.written().is_some_and(|b| b.stmts.is_empty()) {
             let at = (f.line, f.col);
             modules[mi].unparsed.push(at);
         }
@@ -5670,7 +5943,9 @@ fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str>
         crate::ast::expr_spelled(d, &mut work);
     }
     for m in (program.impls.iter()).flat_map(|i| i.methods.iter().chain(&i.places)) {
-        crate::ast::spelled(&m.body, &mut work);
+        if let Some(b) = m.body.written() {
+            crate::ast::spelled(b, &mut work);
+        }
     }
     let mut keep: HashSet<&str> = HashSet::new();
     while let Some(n) = work.pop() {
@@ -5681,7 +5956,9 @@ fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str>
             work.push(r);
         }
         if let Some(f) = by_name.get(n) {
-            crate::ast::spelled(&f.body, &mut work);
+            if let Some(b) = f.body.written() {
+                crate::ast::spelled(b, &mut work);
+            }
         } else if let Some(init) = state.get(n) {
             crate::ast::expr_spelled(init, &mut work);
         }
@@ -5851,7 +6128,9 @@ fn fn_body_ref_names(f: &Function) -> Vec<(String, usize)> {
         amb: None,
     };
     let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
-    body_block(&f.body, &mut locals, &mut v);
+    if let Some(b) = f.body.written() {
+        body_block(b, &mut locals, &mut v);
+    }
     v.out
 }
 
@@ -6111,7 +6390,9 @@ fn rewrite_function(f: &mut Function, rn: &mut Renamer) {
         }
     }
     let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
-    body_block_mut(&mut f.body, &mut locals, rn);
+    if let Some(b) = f.body.written_mut() {
+        body_block_mut(b, &mut locals, rn);
+    }
 }
 
 /// Rewrites every reference (types, calls, variables, bounds) in one module
@@ -6247,12 +6528,14 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
             add_type(&pm.ty, &mut out, &mut totals);
         }
         add_type(&f.ret, &mut out, &mut totals);
-        add_scoped_block(
-            &f.body,
-            &mut f.params.iter().map(|p| p.name.clone()),
-            &mut out,
-            &mut totals,
-        );
+        if let Some(b) = f.body.written() {
+            add_scoped_block(
+                b,
+                &mut f.params.iter().map(|p| p.name.clone()),
+                &mut out,
+                &mut totals,
+            );
+        }
     }
     for im in &p.impls {
         *totals.entry(im.protocol.clone()).or_default() += 1;
@@ -6264,7 +6547,7 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
             }
             add_type(&m.ret, &mut out, &mut totals);
             add_scoped_block(
-                &m.body,
+                m.body.written().expect("an impl method is written"),
                 &mut m.params.iter().map(|p| p.name.clone()),
                 &mut out,
                 &mut totals,
@@ -6278,7 +6561,7 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
             }
             add_type(&pl.ret, &mut out, &mut totals);
             add_scoped_block(
-                &pl.body,
+                pl.body.written().expect("a projection is written"),
                 &mut pl.params.iter().map(|p| p.name.clone()),
                 &mut out,
                 &mut totals,

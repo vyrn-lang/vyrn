@@ -64,7 +64,7 @@ pub fn json_of(gen_source: &str) -> Option<String> {
         .functions
         .iter()
         .find(|f| f.name.starts_with("symbolMap"))?;
-    match f.body.stmts.first() {
+    match f.body.written()?.stmts.first() {
         Some(Stmt::Return {
             value: Some(Expr::Str(s, _)),
             ..
