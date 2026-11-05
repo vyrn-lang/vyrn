@@ -1591,6 +1591,7 @@ impl<'a> Builder<'a> {
             walked: None,
             linear,
             bound_by_let: false,
+            annotation: None,
             implicit_copy: false,
             mutable: false,
             closure_reads: None,
@@ -1762,8 +1763,14 @@ impl<'a> Builder<'a> {
     /// [`Builder::keyed`] for a `let` the reader wrote.
     fn keyed_let(&mut self, n: Name, s: &Stmt) {
         self.keyed(n, s.id());
-        self.body.names[n.index()].bound_by_let = true;
-        self.body.names[n.index()].mutable = matches!(s, Stmt::Let { mutable: true, .. });
+        let info = &mut self.body.names[n.index()];
+        info.bound_by_let = true;
+        (info.mutable, info.annotation) = match s {
+            Stmt::Let { mutable, ty, .. } => {
+                (*mutable, ty.as_ref().filter(|t| **t != info.ty).cloned())
+            }
+            _ => (false, None),
+        };
     }
 
     /// Records the plan's key for a name, and the name for the key.

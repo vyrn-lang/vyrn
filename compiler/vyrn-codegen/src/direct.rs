@@ -27,8 +27,7 @@ use std::sync::Arc;
 
 use vyrn_frontend::ast::*;
 use vyrn_frontend::core::check::{integer_rule, Check, Guard, Raises, Verdict};
-/// The core's statements and values. `Body` stays qualified at each use,
-/// because this file defines its own `Body`.
+/// The core's statements and values.
 use vyrn_frontend::core::{
     Arg, Arm, Await, Callee, Ctor, Fork, Form, Lit, Name, NameInfo, NotOwned, Op, Rhs, St, Target,
     Test, Val,
@@ -564,7 +563,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             }
             cx.subst = p.subst.clone();
             let body = emit_here(&mut m, &cx, |log| {
-                lower_body(log, &p.f, &p.core_key, p.body, &p.sig, &cx, p.binds.clone())
+                lower_body(log, &p.f, &p.core_key, &p.sig, &cx, p.binds.clone())
             });
             cx.subst = HashMap::new();
             cx.reg.borrow_mut().mono.done += 1;
@@ -1266,28 +1265,13 @@ enum Key {
     Lambda(NodeId, Vec<Type>, Vec<(String, Type)>),
 }
 
-/// The statements a queued body walks. Each is the program's own AST, because a walk over a copy
-/// asks about nodes no recorded type can reach.
-#[derive(Clone, Copy)]
-enum Body<'a> {
-    /// A block the program holds: a generic instance's or specialization's callee, or a
-    /// `|x| { .. }` literal's body.
-    Block(&'a Block),
-    /// A `|x| e` literal's expression. A block would need a copy of `e` for its `return`, so the
-    /// core's rows state the body, and [`lower_body`] refuses one they do not carry.
-    Value,
-}
-
 /// One body discovered while another was being emitted, with its promised function index.
 #[derive(Clone)]
-struct Pending<'a> {
+struct Pending {
     key: Key,
-    /// The shell: the name, line and signature the body is lowered under. It carries the
-    /// synthesized block for a [`Key::Lambda`] and no statements otherwise. An `Arc`, so a
-    /// drain turn shares the shell instead of copying it.
+    /// The shell: the name, line and signature the body is lowered under, with no statements.
+    /// An `Arc`, so a drain turn shares the shell instead of copying it.
     f: Arc<Function>,
-    /// The statements to walk, borrowed from the checked program.
-    body: Body<'a>,
     sig: Sig,
     /// The monomorphization the body is lowered under; empty for a lifted lambda
     /// outside any generic.
@@ -1304,8 +1288,8 @@ struct Pending<'a> {
 /// pre-pass would be a second traversal that must agree with lowering. One queue holds all three
 /// [`Key`] kinds, so "they feed each other" means appending to the list being read.
 #[derive(Clone, Default)]
-struct Mono<'a> {
-    insts: Vec<Pending<'a>>,
+struct Mono {
+    insts: Vec<Pending>,
     done: usize,
 }
 
@@ -1410,8 +1394,8 @@ impl Sites {
 /// The module's registries: what the bodies discover, which a later body or the drain reads.
 /// Each list only grows, so the entries past a [`Lens`] are the ones an emission added.
 #[derive(Clone, Default)]
-struct Reg<'a> {
-    mono: Mono<'a>,
+struct Reg {
+    mono: Mono,
     /// The stored-closure variant registry, module-global so a tag means the same thing in
     /// every body that builds one.
     fnvals: Vec<FnVal>,
@@ -1433,14 +1417,14 @@ struct Lens {
 }
 
 /// The entries one emission added to a [`Reg`], each list in the order they were added.
-struct Added<'a> {
-    insts: Vec<Pending<'a>>,
+struct Added {
+    insts: Vec<Pending>,
     fnvals: Vec<FnVal>,
     dispatch: Vec<(Type, Sig)>,
     shapes: Vec<(u32, ShapeKey, usize)>,
 }
 
-impl<'a> Reg<'a> {
+impl Reg {
     fn lens(&self) -> Lens {
         Lens {
             insts: self.mono.insts.len(),
@@ -1451,7 +1435,7 @@ impl<'a> Reg<'a> {
     }
 
     /// Takes the entries added past `at`.
-    fn split_off(&mut self, at: Lens) -> Added<'a> {
+    fn split_off(&mut self, at: Lens) -> Added {
         Added {
             insts: self.mono.insts.split_off(at.insts),
             fnvals: self.fnvals.split_off(at.fnvals),
@@ -1553,10 +1537,10 @@ impl Log {
 }
 
 /// One body emitted against a [`Cx`]'s view and not yet applied to the module.
-struct Emitted<'p> {
+struct Emitted {
     frame: Result<Frame, String>,
     log: Log,
-    added: Added<'p>,
+    added: Added,
     /// The registry the body read: the list lengths of its view.
     seen: Lens,
     queries: Vec<Query>,
@@ -1564,7 +1548,7 @@ struct Emitted<'p> {
 }
 
 /// Emits one body with `body` against `cx`, and leaves `cx`'s registries as they were.
-fn emit<'p>(cx: &Cx<'p>, body: impl FnOnce(&mut Log) -> Result<Frame, String>) -> Emitted<'p> {
+fn emit(cx: &Cx<'_>, body: impl FnOnce(&mut Log) -> Result<Frame, String>) -> Emitted {
     let seen = cx.reg.borrow().lens();
     let at = crate::observe::mark();
     let mut log = Log::default();
@@ -1585,7 +1569,7 @@ fn emit<'p>(cx: &Cx<'p>, body: impl FnOnce(&mut Log) -> Result<Frame, String>) -
 ///
 /// Returns `None` when an entry added since `e`'s view answers one of its [`Query`]s. The body
 /// may then differ, and the caller emits it again against `cx`, which is never stale.
-fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame, String>> {
+fn merge(m: &mut Module, cx: &Cx<'_>, e: Emitted) -> Option<Result<Frame, String>> {
     let mut reg = cx.reg.borrow_mut();
     if (e.queries.iter()).any(|q| reg.answers_since(q, &e.seen)) {
         return None;
@@ -1917,7 +1901,7 @@ struct Cx<'a> {
     /// The monomorphization whose body is being lowered; empty for an ordinary
     /// function.
     subst: HashMap<String, Type>,
-    reg: RefCell<Reg<'a>>,
+    reg: RefCell<Reg>,
     /// The lookups [`merge`] checks, made since the last [`emit`] began.
     queries: RefCell<Vec<Query>>,
 }
@@ -1932,7 +1916,7 @@ impl<'a> std::ops::Deref for Cx<'a> {
 
 impl<'a> Cx<'a> {
     /// A view of `base` with empty caches and the registries `reg`.
-    fn new(base: &'a Base<'a>, reg: Reg<'a>) -> Self {
+    fn new(base: &'a Base<'a>, reg: Reg) -> Self {
         Cx {
             base,
             caches: RefCell::default(),
@@ -2057,7 +2041,6 @@ impl<'a> Cx<'a> {
         m: &mut Log,
         key: Key,
         f: Arc<Function>,
-        body: Body<'a>,
         subst: HashMap<String, Type>,
         binds: HashMap<String, FnBinding>,
         core_key: String,
@@ -2074,7 +2057,6 @@ impl<'a> Cx<'a> {
         self.reg.borrow_mut().mono.insts.push(Pending {
             key,
             f,
-            body,
             sig: sig.clone(),
             subst,
             binds,
@@ -2154,7 +2136,6 @@ impl<'a> Cx<'a> {
             m,
             Key::Ho(f.name.clone(), type_args, targets),
             Arc::new(sf),
-            Body::Block(f.block()),
             subst,
             binds,
             core_key,
@@ -2174,7 +2155,6 @@ impl<'a> Cx<'a> {
             m,
             Key::Generic(f.name.clone(), type_args),
             Arc::new(instance_shell(f, &subst)),
-            Body::Block(f.block()),
             subst,
             HashMap::new(),
             core_key,
@@ -2690,9 +2670,6 @@ fn f_shell(line: usize) -> Function {
 }
 
 /// The declaration a specialization is lowered under, with no statements in it.
-///
-/// A specialization differs from its callee only in its signature, so [`Pending::body`] points
-/// at the callee's own block, the one the checker typed and `vyrn-lower` recorded.
 fn shell_of(f: &Function) -> Function {
     Function {
         name: f.name.clone(),
@@ -2851,7 +2828,7 @@ fn lower_globals_init(m: &mut Log, program: &Program, cx: &Cx<'_>) -> Result<Fra
     let from_core = cx.world.body_of("").filter(|core| {
         f.core = Some(core);
         f.core_enter(core);
-        f.core_walkable(None)
+        f.core_walkable()
     });
     match &from_core {
         Some(_) => f.core_body(m, &mut b)?,
@@ -2911,15 +2888,7 @@ fn lower_globals_teardown(m: &mut Log, program: &Program, cx: &Cx<'_>) -> Result
 /// Lowers the declared function `f`, which [`Cx::sigs`] holds.
 fn lower_fn(m: &mut Log, f: &Function, cx: &Cx<'_>) -> Result<Frame, String> {
     let sig = &cx.sigs[&f.name];
-    lower_body(
-        m,
-        f,
-        &f.name,
-        Body::Block(f.block()),
-        sig,
-        cx,
-        HashMap::new(),
-    )
+    lower_body(m, f, &f.name, sig, cx, HashMap::new())
 }
 
 /// Fills function `index` with `body` and, under `VYRN_WASM_NAMES` or an operation count, names
@@ -2932,25 +2901,18 @@ fn fill_named(m: &mut Module, index: u32, body: Frame, name: &str) -> Result<(),
     Ok(())
 }
 
-/// `f` is the declaration, `key` the name the core built the body under. `f` and `body` are
-/// separate because a specialization borrows the callee's statements ([`Pending::body`]).
-/// `sig` is passed because a specialization has no entry in `Cx::sigs`: several instances
+/// `f` is the declaration, `key` the name the core built the body under, whose rows the walk
+/// reads. `sig` is passed because a specialization has no entry in `Cx::sigs`: several instances
 /// share one `Function`. `binds` is non-empty only for a specialization; its keys are the
 /// callee's `fn`-typed parameter names, which the synthesized signature replaces with captures.
 fn lower_body(
     m: &mut Log,
     f: &Function,
     key: &str,
-    body: Body<'_>,
     sig: &Sig,
     cx: &Cx<'_>,
     binds: HashMap<String, FnBinding>,
 ) -> Result<Frame, String> {
-    // A `|x| e` literal has no statements to walk at all; everything else does.
-    let stmts = match body {
-        Body::Block(b) => Some(b),
-        Body::Value => None,
-    };
     let sig = sig.clone();
     let (params, results) = cx.wasm_sig(&sig, f.line)?;
     // An aggregate result goes out through the hidden leading pointer, or stays in the
@@ -3133,7 +3095,7 @@ fn lower_body(
     if let Some(core) = cx_fn.core {
         cx_fn.core_lift_targets(m, &core.stmts);
     }
-    if cx_fn.core.is_none() || !cx_fn.core_walkable(stmts) {
+    if cx_fn.core.is_none() || !cx_fn.core_walkable() {
         let what = format!("the body of `{}` the core did not state", cx_fn.owner);
         return unsupported(&what, f.line);
     }
@@ -6079,11 +6041,6 @@ impl<'p> Fn_<'_, 'p> {
             cap_tys.push(self.cx.sub(&t).into_owned());
         }
         let ret = expected_ret.clone();
-        // The queue walks the literal's own nodes, so every answer is about a program node.
-        let queued = match body {
-            LambdaBody::Block(b) => Body::Block(b),
-            LambdaBody::Expr(_) => Body::Value,
-        };
         let mut sf = f_shell(line);
         sf.name = format!("{LAMBDA} {}", self.owner);
         sf.params = cap_names
@@ -6118,7 +6075,6 @@ impl<'p> Fn_<'_, 'p> {
             m,
             key,
             Arc::new(sf),
-            queued,
             self.cx.subst.clone(),
             HashMap::new(),
             vyrn_lower::core::lambda_spelling(&self.core_key, *at_line, *at_col),
@@ -10016,37 +9972,6 @@ fn cmp_i32(op: BinOp) -> Option<Instruction<'static>> {
             signed: true,
         },
     )
-}
-
-vyrn_frontend::body_scope_descent!(HoistVisit, hoist_block, hoist_stmt, hoist_expr);
-
-/// The hoist's visitor: hands each node to `fe` or `fs` and stops at a lambda. It ignores scope.
-struct Hoist<'e, 's> {
-    fe: &'e mut dyn FnMut(&Expr),
-    fs: &'s mut dyn FnMut(&Stmt),
-}
-
-impl HoistVisit<'_> for Hoist<'_, '_> {
-    const SCOPED: bool = false;
-
-    fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
-        (self.fs)(s)
-    }
-
-    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
-        (self.fe)(e);
-        // A lambda is a leaf: its body lowers as its own function, and `header_invariant`
-        // refuses a lambda that mentions the binding.
-        !matches!(e, Expr::Lambda { .. })
-    }
-}
-
-fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
-    hoist_block(
-        blk,
-        &mut std::collections::HashSet::new(),
-        &mut Hoist { fe, fs },
-    );
 }
 
 /// A scalar spilled for a `modify` call: its local and the load of its slot from the frame
@@ -14885,7 +14810,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
 
     /// Whether the core's rows carry this whole body, so this walk may emit it. A screen, not a
     /// judgement: a refused body is emitted from the AST.
-    fn core_walkable(&self, stmts: Option<&Block>) -> bool {
+    fn core_walkable(&self) -> bool {
         let body = self.body();
         // An aggregate result crosses through the caller's out-pointer ([`Fn_::core_lands`]).
         // A result checked where it is returned is refused, because the row states no check;
@@ -14905,13 +14830,6 @@ impl<'a, 'p> Fn_<'a, 'p> {
             core_lets(st, &mut lets);
             core_switched(st, false, &mut binders);
         }
-        // A made layout is built into the annotation's layout, and this walk builds into the
-        // value's type. A made layout whose `let` annotates another type stays in the arm.
-        // The key is the node the plan keys the binding by, that `Stmt::Let`.
-        let annotated = match stmts {
-            Some(blk) => self.annotations(|fs| each_block(blk, &mut |_| {}, fs)),
-            None => Vec::new(),
-        };
         let occurs = body.occurrences();
         for (n, info) in body.names.iter().enumerate() {
             // Every name a row names needs a place. It is one of: a wasm local (a `where` type
@@ -14928,7 +14846,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     || self.core_unit(&info.ty)
                     || (body.params.contains(&Name(n as u32))
                         && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
-                && !(!self.annotated_apart(&annotated, info)
+                && !(!self.annotated_apart(info)
                     && lets.iter().any(|(b, rhs)| {
                         b.index() == n
                             && (self.core_makes( &self.core_made_ty( *b), rhs)
@@ -14954,51 +14872,26 @@ impl<'a, 'p> Fn_<'a, 'p> {
         }
         // The core types a `let` by its value except where it states the annotation's check,
         // so an annotated check on a binding of another type is one the rows do not state.
-        if stmts.is_some_and(|blk| self.annotates_a_check(blk)) {
+        if self.annotates_a_check() {
             return false;
         }
         let reads = body.reads();
         self.core_readable(&body.stmts, &reads, &[])
     }
 
-    /// The annotation of each annotated `let` `walk` reaches, keyed as the plan keys a binding.
-    fn annotations(&self, walk: impl FnOnce(&mut dyn FnMut(&Stmt))) -> Vec<(NodeId, Type)> {
-        let mut out = Vec::new();
-        walk(&mut |s| {
-            if let Stmt::Let { ty: Some(t), .. } = s {
-                let at = s.id();
-                out.push((at, t.clone()));
-            }
-        });
-        out
+    /// Whether a name's `let` annotates a type that is not the name's own as is
+    /// ([`Fn_::core_as_is`]). A made layout is built into the annotation's layout, and this walk
+    /// builds into the value's type, so the row does not state the annotation's layout.
+    fn annotated_apart(&self, info: &NameInfo) -> bool {
+        (info.annotation.as_ref()).is_some_and(|t| !self.core_as_is(&info.ty, t))
     }
 
-    /// Whether a name is bound by a `let` of `annotated` whose annotation is not the name's type
-    /// as is ([`Fn_::core_as_is`]). The row then does not state the annotation's layout.
-    fn annotated_apart(&self, annotated: &[(NodeId, Type)], info: &NameInfo) -> bool {
-        info.binding.is_some_and(|at| {
-            annotated
-                .iter()
-                .any(|(a, t)| *a == at && !self.core_as_is(&info.ty, t))
+    /// Whether a `let` annotates a `where` type and binds a name of another type: a check the
+    /// rows do not state.
+    fn annotates_a_check(&self) -> bool {
+        (self.body().names.iter()).any(|i| {
+            (i.annotation.as_ref()).is_some_and(|t| self.checks(t) && i.ty != *self.cx.sub(t))
         })
-    }
-
-    /// Whether a `let` of `blk` is annotated with a `where` type and binds a name of another
-    /// type: a check the rows do not state.
-    fn annotates_a_check(&self, blk: &Block) -> bool {
-        let body = self.body();
-        let mut found = false;
-        each_block(blk, &mut |_| {}, &mut |s| {
-            if let Stmt::Let { ty: Some(t), .. } = s {
-                let at = s.id();
-                found |= self.checks(t)
-                    && !body
-                        .names
-                        .iter()
-                        .any(|i| i.binding == Some(at) && i.ty == *self.cx.sub(t));
-            }
-        });
-        found
     }
 
     /// Whether a value of `from` lands in a place of `to` with no check: `to` has no `where`
