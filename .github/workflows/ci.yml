@@ -232,7 +232,7 @@ jobs:
         # stale target), rust-cache refreshes the saved target dir per run
         # and prunes stale artifacts.
         # Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           # `compiler` alone now: the LSP crate moved to the `checks` job, and a
           # workspace listed here that this job never builds is a target tree
@@ -375,7 +375,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: |
             compiler
@@ -524,7 +524,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: compiler
       - name: The linear judgment over the corpus
@@ -595,7 +595,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: compiler
           # Separate cache from the test job — different build graph (only
@@ -686,7 +686,7 @@ jobs:
       - name: Upload fnvalarg's route build (#444)
         if: failure()
         # actions/upload-artifact@v7.0.1
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: fnvalarg-route
           path: ${{ runner.temp }}/i444
@@ -768,7 +768,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: compiler
       - name: Every example's wasm hashes to the recorded manifest
@@ -805,7 +805,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: compiler
       - name: Every example prints what was recorded, as compiled wasm
@@ -822,7 +822,7 @@ jobs:
       - name: Upload fnvalarg's wasm (#444)
         if: failure()
         # actions/upload-artifact@v7.0.1
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: fnvalarg-${{ matrix.os }}
           path: ${{ runner.temp }}/i444
@@ -840,7 +840,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: compiler
           # Distinct build graph (vyrn-genwasm and its wasmtime tree) — its own
@@ -894,7 +894,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: compiler
           # Separate cache slot (only vyrn-cli, and a distinct build graph).
@@ -1003,7 +1003,7 @@ jobs:
         # That is the whole procedure — see the `_readme` in the placeholder.
         if: always()
         # actions/upload-artifact@v7.0.1
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: bench-json
           path: bench/out/*.json
@@ -1035,7 +1035,7 @@ jobs:
           path: base
       - name: Rust cache
         # Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: |
             compiler
@@ -1051,7 +1051,7 @@ jobs:
       - name: Upload the timing
         if: always()
         # actions/upload-artifact@v7.0.1
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: check-speed
           path: check-speed.txt
@@ -1078,7 +1078,7 @@ jobs:
           path: base
       - name: Rust cache
         # Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: |
             compiler
