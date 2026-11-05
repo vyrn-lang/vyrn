@@ -228,6 +228,8 @@ pub fn emitting() -> bool {
 /// body's other instances share its key's module and hash.
 pub struct Judgments<'a> {
     hashes: std::collections::BTreeMap<String, String>,
+    /// The root module's key where the session keys the root's bodies too.
+    root: Option<String>,
     /// The declaration fingerprint this analysis reads and writes under.
     fp: u64,
     memo: &'a std::sync::Mutex<Judged>,
@@ -237,23 +239,31 @@ impl<'a> Judgments<'a> {
     /// Opens the cache for `program`, or returns `None` where its session arms
     /// no memo. Drops every entry if the declaration fingerprint moved.
     pub fn open(program: &'a Program) -> Option<Judgments<'a>> {
-        let memo = program.session.get()?.judge_memo()?;
+        let (memo, keyed) = program.session.get()?.judge_memo()?;
         let fp = declaration_fingerprint(program);
         let mut j = locked(memo);
         if j.0 != fp {
             *j = (fp, HashMap::new());
         }
+        // The root has no hash of its own ([`Program::module_hashes`]); its
+        // bodies' keys hold an empty one.
+        let mut hashes = program.module_hashes.clone();
+        let root = (keyed == crate::session::Memo::Every).then(|| program.spellings.root.clone());
+        if let Some(r) = &root {
+            hashes.insert(r.clone(), String::new());
+        }
         Some(Judgments {
-            hashes: program.module_hashes.clone(),
+            hashes,
+            root,
             fp,
             memo,
         })
     }
 
-    /// Returns `None` for the root module, which a keystroke edits, and for a
-    /// module the loader recorded no hash for.
+    /// Returns `None` for the root module, which a keystroke edits, unless the
+    /// session keys every module, and for a module the loader recorded no hash for.
     pub fn key(&self, module: Option<&str>, spelling: &str) -> Option<JudgmentKey> {
-        let m = module?;
+        let m = module.or(self.root.as_deref())?;
         let h = self.hashes.get(m)?;
         Some((m.to_string(), h.clone(), spelling.to_string()))
     }

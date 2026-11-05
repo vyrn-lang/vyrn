@@ -2196,7 +2196,7 @@ fn text_hash(text: &str) -> String {
 }
 
 /// Whether `key` is a module of the std tree.
-fn in_std(key: &str, opts: &LoadOptions) -> bool {
+pub fn in_std(key: &str, opts: &LoadOptions) -> bool {
     import_specifier("", key, opts.std_root.as_deref()).starts_with("std/")
 }
 
@@ -2963,8 +2963,9 @@ pub(crate) fn generation(
     })
 }
 
-/// Whether `VYRN_NO_GEN_CACHE` turns the generator cache off.
-fn gen_cache_off() -> bool {
+/// Whether `VYRN_NO_GEN_CACHE` turns the generator cache off, and the std
+/// rows stored beside its entries (`vyrn_lower::stdrows`).
+pub fn gen_cache_off() -> bool {
     std::env::var("VYRN_NO_GEN_CACHE").is_ok()
 }
 
@@ -3352,10 +3353,7 @@ fn render_cache_entry(
 ) -> String {
     let mut body = format!("{}\n", inputs.len());
     for (p, h) in inputs {
-        match stamps.get(p) {
-            Some(s) => body.push_str(&format!("{p}\t{h}\t{}\n", s.0)),
-            None => body.push_str(&format!("{p}\t{h}\n")),
-        }
+        input_line(&mut body, p, h, stamps);
     }
     match gens {
         Some(gens) => body.push_str(&format!("{}\n", gens.len())),
@@ -3529,15 +3527,7 @@ fn read_cache_entry(
     let mut inputs = Vec::new();
     let mut stamps = Stamps::new();
     for _ in 0..n {
-        let (p, rest) = line()?.split_once('\t')?;
-        let h = match rest.split_once('\t') {
-            Some((h, stamp)) => {
-                stamps.insert(p.to_string(), crate::manifest::Stamp(stamp.to_string()));
-                h
-            }
-            None => rest,
-        };
-        inputs.push((p.to_string(), h.to_string()));
+        read_input_line(line()?, &mut inputs, &mut stamps)?;
     }
     let gens = match line()? {
         "-" => None,
@@ -3585,6 +3575,82 @@ fn warn_foreign_entry(key: &str, session: Option<&crate::session::Session>) {
          other than `vyrn` is writing to the generator cache (`VYRN_GEN_CACHE_DIR`, \
          else `~/.vyrn/cache/gen`)"
     );
+}
+
+/// Writes one input of a cache entry: `path<TAB>hash`, then `<TAB>stamp` where
+/// `stamps` holds one.
+fn input_line(out: &mut String, path: &str, hash: &str, stamps: &Stamps) {
+    match stamps.get(path) {
+        Some(s) => out.push_str(&format!("{path}\t{hash}\t{}\n", s.0)),
+        None => out.push_str(&format!("{path}\t{hash}\n")),
+    }
+}
+
+/// Reads one line [`input_line`] wrote into `inputs` and `stamps`.
+fn read_input_line(l: &str, inputs: &mut Vec<(String, String)>, stamps: &mut Stamps) -> Option<()> {
+    let (p, rest) = l.split_once('\t')?;
+    let h = match rest.split_once('\t') {
+        Some((h, stamp)) => {
+            stamps.insert(p.to_string(), crate::manifest::Stamp(stamp.to_string()));
+            h
+        }
+        None => rest,
+    };
+    inputs.push((p.to_string(), h.to_string()));
+    Some(())
+}
+
+/// What one load's validations of [`Inputs`] found, by path.
+#[derive(Default)]
+pub struct Seen(HashMap<String, Option<String>>);
+
+/// The files a cache entry other than a generation's was made from, each with
+/// its content hash and its settled stamp where it has one, recorded and
+/// validated as a generation's inputs are ([`all_fresh`]).
+pub struct Inputs {
+    hashes: Vec<(String, String)>,
+    stamps: Stamps,
+}
+
+impl Inputs {
+    /// The files `paths` as `resolver` serves them now; `None` if one cannot
+    /// be read.
+    pub fn now(
+        paths: impl IntoIterator<Item = String>,
+        resolver: &dyn ModuleResolver,
+    ) -> Option<Inputs> {
+        let hash = |p: String| Some((content_hash(&p, Some(resolver.read(&p).ok()?))?, p));
+        let hashes = (paths.into_iter())
+            .map(|p| hash(p).map(|(h, p)| (p, h)))
+            .collect::<Option<Vec<_>>>()?;
+        let stamps = vouched_stamps(&hashes, resolver);
+        Some(Inputs { hashes, stamps })
+    }
+
+    /// Whether every file still has its stamp, or else still hashes the same.
+    /// An entry that records no file describes nothing, so it is never fresh.
+    /// `seen` keeps each file's answer for the next entry one load validates.
+    pub fn fresh(&self, resolver: &dyn ModuleResolver, seen: &mut Seen) -> bool {
+        !self.hashes.is_empty() && all_fresh(&self.hashes, &self.stamps, resolver, &mut seen.0)
+    }
+
+    /// Appends the count, then one [`input_line`] per file.
+    pub fn render(&self, out: &mut String) {
+        out.push_str(&format!("{}\n", self.hashes.len()));
+        for (p, h) in &self.hashes {
+            input_line(out, p, h, &self.stamps);
+        }
+    }
+
+    /// Reads what [`Inputs::render`] wrote, a line at a time from `line`.
+    pub fn read<'t>(line: &mut impl FnMut() -> Option<&'t str>) -> Option<Inputs> {
+        let n: usize = line()?.parse().ok()?;
+        let (mut hashes, mut stamps) = (Vec::new(), Stamps::new());
+        for _ in 0..n {
+            read_input_line(line()?, &mut hashes, &mut stamps)?;
+        }
+        Some(Inputs { hashes, stamps })
+    }
 }
 
 fn entry_tag(key: &str, body: &str) -> String {

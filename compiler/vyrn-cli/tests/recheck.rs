@@ -94,7 +94,7 @@ fn instances(path: &str, e: &Edit, session: &Arc<Session>) -> Vec<String> {
         return Vec::new();
     };
     let record = std::sync::Arc::new(vyrn_frontend::checker::record(&p));
-    let world = vyrn_lower::refusals(&p, record).1;
+    let world = vyrn_lower::refusals(&p, record, Default::default()).1;
     (world.fn_rows().iter())
         .filter(|r| r.generic.is_some())
         .map(|r| r.name.clone())
