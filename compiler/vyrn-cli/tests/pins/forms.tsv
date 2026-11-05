@@ -30,8 +30,8 @@ Expr::ArrayLit	3	2	0	0	7	0	0	1	13
 Expr::MapLit	2	2	0	0	4	0	0	0	8
 Expr::Lambda	1	7	0	0	14	0	5	0	27
 Expr::Consume	1	2	0	0	11	0	0	0	14
-Pattern::Variant	10	2	0	0	3	0	2	0	17
-Pattern::Success	1	3	0	0	4	0	1	0	9
+Pattern::Variant	10	2	0	0	3	0	0	0	15
+Pattern::Success	1	3	0	0	4	0	0	0	8
 Pattern::Failure	1	2	0	0	2	0	0	0	5
-Pattern::Other	2	3	0	0	2	0	1	0	8
-all	85	131	0	0	277	0	12	9	514
+Pattern::Other	2	3	0	0	2	0	0	0	7
+all	85	131	0	0	277	0	8	9	510

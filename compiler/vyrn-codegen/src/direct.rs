@@ -6834,12 +6834,12 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::Call(dsig.index));
         let sum = crate::sum_variants_of(&opt, &self.cx.types).unwrap_or_default();
-        let some = Pattern::Variant("Some".into(), vec![Binder::synthetic("")]);
+        let tag = (sum.iter().position(|v| v.name == "Some"))
+            .ok_or_else(|| gap("the variant `Some`", line))?;
         // A step that hands its parts over is read off them: the tag word, then the payload's.
         let got = if let Ret::Words(fl) = &dsig.ret {
             let w = fl.locals(b);
             fl.set(b, w);
-            let tag = tag_of(&sum, &some, line)?.unwrap_or(1);
             b.ins(&Instruction::LocalGet(w));
             b.ins(&Instruction::I64Const(tag as i64));
             b.ins(&Instruction::I64Eq);
@@ -6853,7 +6853,7 @@ impl<'p> Fn_<'_, 'p> {
             let oaddr = b.local(ValType::I32);
             b.slot(ooff);
             b.ins(&Instruction::LocalSet(oaddr));
-            self.tag_test(b, oaddr, &sum, &some, line)?;
+            Self::tag_is(b, oaddr, Some(tag as u64));
             b.ins(&Instruction::If(BlockType::Empty));
             let o = std::slice::from_ref(elem);
             self.bind_payload(b, oaddr, &ol, o, 0, elem, line, false)?
@@ -7765,22 +7765,6 @@ impl<'p> Fn_<'_, 'p> {
 /// slot of its widest variant.
 type Sum = Vec<EnumVariant>;
 
-/// Returns the tag an arm tests, or `None` for `Pattern::Other`, which tests nothing
-/// ([`crate::two_way`]).
-fn tag_of(sum: &Sum, pat: &Pattern, line: usize) -> Result<Option<usize>, String> {
-    Ok(match pat {
-        Pattern::Other => None,
-        Pattern::Variant(name, _) => Some(
-            sum.iter()
-                .position(|v| v.name == *name)
-                .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?,
-        ),
-        // `??`'s parser desugar names a tag, not a variant, because it has no type.
-        // Tag 1 is the success side of every built-in sum.
-        _ => Some(usize::from(matches!(pat, Pattern::Success(_)))),
-    })
-}
-
 /// How one payload travels inside a sum's `i64` word.
 #[derive(PartialEq)]
 enum Word {
@@ -8427,20 +8411,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(ty)
     }
 
-    /// Pushes whether the sum at `addr` is `pat`'s variant. `match`, `if let` and `?` share
-    /// it, so the tag is read at one width in one place.
-    fn tag_test(
-        &self,
-        b: &mut Frame,
-        addr: u32,
-        sum: &Sum,
-        pat: &Pattern,
-        line: usize,
-    ) -> Result<(), String> {
-        Self::tag_is(b, addr, tag_of(sum, pat, line)?.map(|t| t as u64));
-        Ok(())
-    }
-
     /// Opens a switch chain: one `block` whose arms each branch out of it. A switch of one tag
     /// and a default becomes an `if`/`else` instead ([`crate::two_way`]). `bt` is the join's
     /// type. [`Fn_::core_switch`] drives it over the row's arms.
@@ -8530,8 +8500,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Pushes whether the sum at `addr` carries `tag`, or constant truth for an arm no tag
-    /// chooses. Pattern arms ([`Fn_::tag_test`]) and the core walk
-    /// ([`Test`]) share it, so the tag is read in one place.
+    /// chooses. The core walk ([`Test`]) and a stream's step share it, so the tag is read in
+    /// one place.
     fn tag_is(b: &mut Frame, addr: u32, tag: Option<u64>) {
         b.ins(&Instruction::LocalGet(addr));
         // `None` is the refutable-`let` default arm: drop the address and
