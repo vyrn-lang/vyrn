@@ -1,0 +1,16 @@
+// The kernel reads `Json`'s `MustUse` in every std/json body that holds one,
+// so an impl in another module would change std/json's own verdicts.
+import { Json, sortKeys, emit } from "std/json"
+
+protocol MustUse {}
+
+impl MustUse for Json {}
+
+fn main() -> Int64 {
+    let j = JStr("a")
+    let s = sortKeys(j)
+    print(emit(s))
+    drop s
+    drop j
+    return 0
+}

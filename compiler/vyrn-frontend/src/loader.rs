@@ -4,7 +4,8 @@
 //! loader refuses import cycles, an imported name that is missing or not
 //! exported, a top-level name defined twice, a foreign name used without an
 //! import (importing an enum or protocol brings its variants or methods), a
-//! `logging` block outside the root, and two impls of one `(protocol, type)`.
+//! `logging` block outside the root, two impls of one `(protocol, type)`, and an
+//! impl of `MustUse`, `Owned` or `Copy` outside its type's module.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -12,7 +13,7 @@ use std::rc::Rc;
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
 use crate::gen::{Author, Pos, Report, Shown, SpanRow, Written};
-use crate::rules::{refuse, rule, Rule};
+use crate::rules::{refuse, rule, DeclName, Rule};
 use crate::{lexer, parser};
 
 /// Provides module source text for a resolved specifier: a normalized,
@@ -932,6 +933,52 @@ fn away_from_home(
                     rule!(AwayFromHome, name, home),
                 ));
             }
+        }
+    }
+    out
+}
+
+/// Refuses an impl of `MustUse`, `Owned` or `Copy` outside the module that
+/// declares its type. The kernel reads these three in every body that holds
+/// the type, the declaring module's included, so a foreign impl would change
+/// verdicts that module's own load gave. A type key no module declares is a
+/// built-in's, which no program may implement them for. `owner` is the link's
+/// flat namespace after [`resolve_aliases`], whose `spellings` the sentence
+/// speaks; a `clashed` name is refused already.
+fn foreign_kernel_impls(
+    modules: &[Module],
+    owner: &HashMap<String, (String, bool)>,
+    clashed: &HashSet<&str>,
+    spellings: &Spellings,
+    opts: &LoadOptions,
+) -> Vec<Diagnostic> {
+    use crate::types::{COPY, MUST_USE, OWNED};
+    let mut out = Vec::new();
+    for m in modules {
+        let kernel =
+            (m.program.impls.iter()).filter(|i| [MUST_USE, OWNED, COPY].contains(&&*i.protocol));
+        for imp in kernel {
+            let (protocol, ty) = (&imp.protocol, &imp.ty);
+            let Some(key) = crate::types::type_key(ty) else {
+                continue;
+            };
+            let rule = match owner.get(&key) {
+                Some((home, _)) if *home == m.key || clashed.contains(key.as_str()) => continue,
+                Some((home, _)) => {
+                    let home = import_specifier(dir_of(&m.key), home, opts.std_root.as_deref());
+                    rule!(ImplAwayFromType, protocol, ty, home, key = DeclName(&key))
+                }
+                None if !matches!(ty, Type::Named(_) | Type::App(..)) => {
+                    rule!(ImplOfBuiltinType, protocol, ty, key)
+                }
+                None => continue,
+            };
+            let mut d = load_error(&m.key, &spellings.root, imp.line, rule);
+            d.speak(spellings);
+            out.push(d.with_note(format!(
+                "the kernel reads a type's `{MUST_USE}`, `{OWNED}` and `{COPY}` in every body \
+                 that holds it, so only the type's own module may declare them"
+            )));
         }
     }
     out
@@ -4813,6 +4860,9 @@ fn link(
     // must not report that half as its own error: `map` is defined in
     // `std/stream` even when it lost the flat namespace to `std/arrays`.
     let clashed: HashSet<&str> = clashes.iter().map(|(n, _, _)| n.as_str()).collect();
+    errors.extend(foreign_kernel_impls(
+        &modules, &owner, &clashed, &spellings, opts,
+    ));
     drop(index_span);
     let visible_span = crate::prof::phase("link: visibility");
 
