@@ -657,8 +657,8 @@ impl World {
 
     /// Whether the module emitted from this World may run the function
     /// emitted under `name`: false only for a function [`unreached`] names.
-    /// The emitter marks each such function (`vyrn_codegen::wasm::Module::unreached`),
-    /// and its sweep panics on one it keeps.
+    /// The emitter lowers no such function, so a call into one fails the
+    /// build.
     pub fn runs(&self, name: &str) -> bool {
         self.fn_id(name)
             .is_none_or(|f| !self.unreached.contains(&f))

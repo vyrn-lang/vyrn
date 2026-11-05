@@ -78,8 +78,6 @@ pub struct Module {
     /// [`Module::export_entry_state`]'s.
     exports: Vec<(String, u32)>,
     sweep: bool,
-    /// The functions [`Module::unreached`] names, which the sweep must drop.
-    unreached: Vec<u32>,
     /// The single data segment, packed at [`DATA_BASE`]; `pool_at` deduplicates
     /// identical contents.
     pool: Vec<u8>,
@@ -121,7 +119,6 @@ impl Module {
             bodies: Vec::new(),
             exports: Vec::new(),
             sweep: false,
-            unreached: Vec::new(),
             pool: Vec::new(),
             pool_at: HashMap::new(),
             spans: Vec::new(),
@@ -184,13 +181,6 @@ impl Module {
     /// last [`Module::fill`].
     pub fn sweep(&mut self) {
         self.sweep = true;
-    }
-
-    /// Records that no entry reaches the function at `index` over the
-    /// World's calls, so the sweep must drop it: the World walks no such body
-    /// for its summaries (`vyrn_lower::World::runs`).
-    pub fn unreached(&mut self, index: u32) {
-        self.unreached.push(index);
     }
 
     /// Declares an imported function and returns its index.
@@ -390,12 +380,6 @@ impl Module {
     /// appears; `reachable` panics on any other.
     fn prune(&mut self) {
         let keep = self.reachable();
-        for &i in &self.unreached {
-            assert!(
-                !keep[i as usize],
-                "function {i} survived the sweep, and no entry reaches it over the World's calls"
-            );
-        }
         let n_imports = self.n_imports() as usize;
         let mut map = vec![u32::MAX; keep.len()];
         let mut next = 0u32;

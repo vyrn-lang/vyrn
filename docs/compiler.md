@@ -297,8 +297,8 @@ effect judgment says may write the global ends that (`elide::Walk::stale`).
 when an emitter first reads it. A direct call's result takes the facts every
 return of its callee proves (`elide::summaries`, keyed by `FnId`, solved once
 per World by `fixpoint::descend` over the bodies the emitted module may run,
-`World::runs`: those an entry reaches over the World's calls, which the
-emitter's sweep holds it to); a call through a value, a method, a
+`World::runs`: those an entry reaches over the World's calls, the only
+ones the emitter lowers); a call through a value, a method, a
 projection or a generic instance takes none. A result exactly as long as a
 `consume` parameter takes the argument's length as it was before the call
 (`elide::Walk::same_length`). For an `Option` of an integer
