@@ -7397,9 +7397,9 @@ fn reads_place(vars: &[&Expr], base: &str) -> bool {
 /// order: names read in the body that are not in `locals` (the lambda's
 /// parameters and its own bindings) and that `is_local` answers for as an
 /// enclosing local. This is the one statement of the capture order: the
-/// closure row lists its captures in it, and the emitter lifts the signature
-/// in it.
-pub fn lambda_captures(
+/// closure row lists its captures in it, and the lambda's frame takes them as
+/// its first parameters in it.
+fn lambda_captures(
     body: &LambdaBody,
     locals: std::collections::HashSet<String>,
     is_local: &dyn Fn(&str) -> bool,

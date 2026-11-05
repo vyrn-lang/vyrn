@@ -208,6 +208,7 @@ pull request.
 - A flow-free ownership or typed rule (shape E) filters every row, including rows after an ended path: a dead row is still a program the language refuses. The flow solver judges only reachable rows. Both read their sentences from one table, `vyrn_lower::rules`.
 - A whole-program analysis over the call graph runs on `fixpoint::solve` in `vyrn-lower`: components bottom-up, a join the analysis supplies, widening by round number. No analysis writes its own fixpoint loop.
 - Releases are placed once, from the core, by one liveness pass. No emitter places a release.
+- The emitter reads a function body only from the core, never its source statements. A question the emitter would ask the source becomes a fact the core states (`NameInfo::annotation`, a lambda frame's parameters).
 - What one analysis decided about a program (the kernel's placement, the checker's record) lives on that program's `own::Ownership`, and a pass reads the one it is handed. A thread-local keyed by a program's address answered for another program.
 - Program state lives in one value, the World, owned above the front end by `vyrn-lower`. The front end declares no slot for lowering to fill, and no thread-local or global holds a program's state.
 - The load returns the World its check judged (`vyrn_lower::load_warned`), and the host passes it to every pass over that program. A host that changes the program analyses it again (`vyrn_lower::analyze`); no memo hands a World or a record to the next pass.

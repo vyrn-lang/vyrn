@@ -98,7 +98,7 @@ const fn sec(at: &'static str, kind: Kind, reads: Reads) -> Section {
 fn sections() -> Vec<Section> {
     use Kind::*;
     #[allow(clippy::enum_glob_use)]
-    use Reads::{Both, Core, Neither, Source};
+    use Reads::{Core, Neither};
     vec![
         sec("fn unsupported", Shared, Neither),
         sec("struct Wasi", Encoding, Neither),
@@ -137,7 +137,7 @@ fn sections() -> Vec<Section> {
         sec("fn core_mem", Mapping, Neither),
         sec("fn log_write", Builtin, Neither),
         sec("fn out_ptr", Builtin, Neither),
-        sec("fn emit_call_with", Mapping, Source),
+        sec("fn emit_call_with", Mapping, Core),
         sec("fn length_of", Builtin, Neither),
         sec("struct Walk", Builtin, Neither),
         sec("fn walk", Mapping, Neither),
@@ -161,7 +161,7 @@ fn sections() -> Vec<Section> {
         sec("const SHDR", Runtime, Neither),
         sec("fn runtime", Runtime, Neither),
         sec("const RIGHT_FD_WRITE", Shared, Neither),
-        sec("fn builtin_spec", Mapping, Both),
+        sec("fn builtin_spec", Mapping, Core),
         sec("#[cfg(test)]", Tests, Neither),
     ]
 }

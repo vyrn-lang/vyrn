@@ -29,8 +29,8 @@ use vyrn_frontend::ast::*;
 use vyrn_frontend::core::check::{integer_rule, Check, Guard, Raises, Verdict};
 /// The core's statements and values.
 use vyrn_frontend::core::{
-    Arg, Arm, Await, Callee, Ctor, Fork, Form, Lit, Name, NameInfo, NotOwned, Op, Rhs, St, Target,
-    Test, Val,
+    Arg, Arm, Await, BorrowKind, Callee, Ctor, Fork, Form, Lit, Name, NameInfo, NotOwned, Op, Rhs,
+    St, Target, Test, Val,
 };
 use vyrn_frontend::gen::GenError;
 use vyrn_frontend::loader::{RtWord, RuntimeCalls, RUNTIME_CALLS, TASK_PREFIX};
@@ -375,7 +375,6 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     let profile = vyrn_frontend::loader::profile_build(program.host.gen);
     let mut base = Base {
         types: analysis.ownership.proto.types(),
-        lambdas: vyrn_frontend::ast::lambdas(program),
         oracle,
         sigs: HashMap::new(),
         rt,
@@ -1259,10 +1258,10 @@ enum Key {
     /// A specialization over `fn`-typed parameters: the callee, its type arguments, and each `fn` parameter's
     /// target. A different lambda makes a different function.
     Ho(String, Vec<Type>, Vec<FnTarget>),
-    /// A lifted lambda: the literal's node, its concrete shape (captures, parameters,
-    /// return), and its substitution. One literal in a generic body lifts once per
-    /// instantiation, even when the shape does not differ.
-    Lambda(NodeId, Vec<Type>, Vec<(String, Type)>),
+    /// A lifted lambda: the literal's core key ([`vyrn_lower::core::lambda_spelling`]), its
+    /// concrete shape (captures, parameters, return), and its substitution. One literal in a
+    /// generic body lifts once per instantiation, even when the shape does not differ.
+    Lambda(String, Vec<Type>, Vec<(String, Type)>),
 }
 
 /// One body discovered while another was being emitted, with its promised function index.
@@ -1691,9 +1690,6 @@ fn emit_here<'p>(
 /// addresses fixed before the first body.
 struct Base<'a> {
     types: &'a HashMap<String, TypeDecl>,
-    /// Every lambda literal the program holds, by node address and the function that holds it,
-    /// so [`Fn_::lift_lambda`] queues the literal's own body instead of a clone.
-    lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
     /// The check oracle's host imports and its row labels, under
     /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
     oracle: Option<Oracle>,
@@ -5960,67 +5956,51 @@ impl<'p> Fn_<'_, 'p> {
         Ok((l, self.cx.load(ty, off)))
     }
 
-    /// This body's lambda literal under a closure row's key
-    /// ([`vyrn_lower::core::lambda_spelling`]).
-    fn literal(&self, key: &str) -> Option<&'p Expr> {
-        self.cx.lambdas.values().find_map(|(o, e)| match e {
-            Expr::Lambda { line, col, .. }
-                if *o == self.owner
-                    && vyrn_lower::core::lambda_spelling(&self.core_key, *line, *col) == key =>
-            {
-                Some(*e)
-            }
-            _ => None,
-        })
+    /// The line of this body's lambda literal under a closure row's key
+    /// ([`vyrn_lower::core::lambda_spelling`]). `None` for a key another body spells.
+    fn literal(&self, key: &str) -> Option<usize> {
+        let (line, col) = vyrn_lower::core::lambda_at(key)?;
+        (vyrn_lower::core::lambda_spelling(&self.core_key, line, col) == key).then_some(line)
     }
 
-    /// Lifts a lambda literal to a top-level function `(captures.., params..) -> ret`, indexed
-    /// here and lowered when the queue reaches it. Captures are ordinary read parameters, so
-    /// they are by-value snapshots.
-    #[allow(clippy::too_many_arguments)]
+    /// The spellings of the lambda frame `key` names: its captures, which it borrows, and then
+    /// its own parameters, each in the frame's order.
+    fn lambda_frame(&self, key: &str) -> Option<(Vec<String>, Vec<String>)> {
+        let body = self.cx.world.body_of(key)?;
+        let (caps, params): (Vec<&NameInfo>, Vec<&NameInfo>) = (body.params.iter())
+            .map(|n| &body.names[n.index()])
+            .partition(|i| i.borrow_kind == Some(BorrowKind::Capture));
+        let spell = |v: Vec<&NameInfo>| v.iter().map(|i| i.source.clone()).collect();
+        Some((spell(caps), spell(params)))
+    }
+
+    /// Lifts the lambda literal at `line` that `key` names to a top-level function
+    /// `(captures.., params..) -> ret`, indexed here and lowered when the queue reaches it.
+    /// Captures are ordinary read parameters, so they are by-value snapshots.
     fn lift_lambda(
         &mut self,
         m: &mut Log,
-        at: &'p Expr,
+        key: &str,
+        line: usize,
         ptys: &[Type],
         expected_ret: &Type,
         caps: Option<&[(String, Type)]>,
-        line: usize,
     ) -> Result<FnTarget, String> {
-        assert_ne!(
-            at.id(),
-            NodeId::NONE,
-            "a lambda lifted from an unnumbered tree"
-        );
-        let Expr::Lambda {
-            params,
-            body,
-            line: at_line,
-            col: at_col,
-            id: _,
-        } = at
-        else {
-            return unsupported("a lambda lifted from another expression", line);
+        let Some((own_caps, params)) = self.lambda_frame(key) else {
+            return unsupported("a lambda the core did not state", line);
         };
         if params.len() != ptys.len() {
             return unsupported("a lambda with the wrong number of parameters", line);
         }
-        // The free locals in first-seen order, from the shared walk: the capture list is part
-        // of the lifted signature. A core row names its captures, because the frame lifts the
-        // literal before its first statement, where no capture is in scope.
+        // The capture list is part of the lifted signature. A call row names its captures with
+        // their types, because the frame lifts the literal before its first statement, where no
+        // capture is in scope.
         let (cap_names, mut cap_tys) = match caps {
             Some(c) => (
                 c.iter().map(|(n, _)| n.clone()).collect(),
                 c.iter().map(|(_, t)| self.cx.sub(t).into_owned()).collect(),
             ),
-            None => (
-                vyrn_lower::core::lambda_captures(
-                    body,
-                    params.iter().map(|p| p.name.clone()).collect(),
-                    &|n| self.scope.iter().any(|(s, _, _)| s == n) || self.fn_binds.contains_key(n),
-                ),
-                Vec::new(),
-            ),
+            None => (own_caps, Vec::new()),
         };
         for cn in cap_names.iter().skip(cap_tys.len()) {
             // A captured `fn`-typed parameter lives in `fn_binds`, not a slot. It is captured
@@ -6046,19 +6026,11 @@ impl<'p> Fn_<'_, 'p> {
         sf.params = cap_names
             .iter()
             .zip(&cap_tys)
+            .chain(params.iter().zip(ptys))
             .map(|(n, t)| Param::synth(n, t.clone()))
-            .chain(params.iter().zip(ptys).map(|(n, t)| Param {
-                id: Id::NEW,
-                name: n.name.clone(),
-                capability: Capability::Read,
-                ty: t.clone(),
-                line: n.line,
-                col: n.col,
-                clause: None,
-            }))
             .collect();
         sf.ret = ret.clone();
-        // Keyed by node, shape and substitution: a literal in a generic body lifts once per
+        // Keyed by literal, shape and substitution: a literal in a generic body lifts once per
         // instantiation, even when the type parameter appears only in a statement.
         let mut shape: Vec<Type> = cap_tys.clone();
         shape.extend(ptys.iter().cloned());
@@ -6070,14 +6042,13 @@ impl<'p> Fn_<'_, 'p> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         under.sort_by(|a, b| a.0.cmp(&b.0));
-        let key = Key::Lambda(at.id(), shape, under);
         let sig = self.cx.enqueue(
             m,
-            key,
+            Key::Lambda(key.to_string(), shape, under),
             Arc::new(sf),
             self.cx.subst.clone(),
             HashMap::new(),
-            vyrn_lower::core::lambda_spelling(&self.core_key, *at_line, *at_col),
+            key.to_string(),
         )?;
         Ok(FnTarget {
             sig,
@@ -6195,14 +6166,17 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Returns the target a stored lambda calls.
-    fn lift_stored(&mut self, m: &mut Log, e: &'p Expr, sig_ty: &Type) -> Result<FnTarget, String> {
-        let Expr::Lambda { line, .. } = e else {
-            return unsupported("a function value from a non-lambda", Expr::line(e));
-        };
+    fn lift_stored(
+        &mut self,
+        m: &mut Log,
+        key: &str,
+        line: usize,
+        sig_ty: &Type,
+    ) -> Result<FnTarget, String> {
         let Type::Fn(ptys, ret) = sig_ty else {
-            return unsupported("a lambda in a non-function position", *line);
+            return unsupported("a lambda in a non-function position", line);
         };
-        self.lift_lambda(m, e, ptys, ret, None, *line)
+        self.lift_lambda(m, key, line, ptys, ret, None)
     }
 
     /// Returns the dispatcher for one signature, reserving its index on first use.
@@ -10713,10 +10687,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
             if self.cx.lambda_sig(key).is_some() || vyrn_frontend::types::mentions_param(slot) {
                 continue;
             }
-            let Some(lit) = self.literal(key) else {
+            let Some(line) = self.literal(key) else {
                 continue;
             };
-            let _ = self.lift_lambda(m, lit, ptys, ret, Some(caps), lit.line());
+            let _ = self.lift_lambda(m, key, line, ptys, ret, Some(caps));
         }
     }
 
@@ -13525,7 +13499,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             let Some(at) = self.literal(key) else {
                 return unsupported("a lambda this walk does not find", line);
             };
-            let target = self.lift_stored(m, at, &sig_ty)?;
+            let target = self.lift_stored(m, key, at, &sig_ty)?;
             return self.fnval_into(m, b, dest, &sig_ty, target, vs, line);
         }
         dest.addr(b, 0);
@@ -14587,12 +14561,13 @@ impl<'a, 'p> Fn_<'a, 'p> {
     }
 
     /// Whether this walk makes the lambda `key` at `ty` ([`Fn_::core_make`]'s screen). The row
-    /// lists the captures in the lifted signature's order
-    /// ([`vyrn_lower::core::lambda_captures`]), and each is a name this walk reads.
+    /// lists the captures in the lifted signature's order, its frame's ([`Fn_::lambda_frame`]),
+    /// and each is a name this walk reads.
     fn core_lambda(&self, key: &str, ty: &Type, vs: &[Val]) -> bool {
         let body = self.body();
         let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
-        let (Type::Fn(ptys, _), Some(Expr::Lambda { params, .. })) = (&sig_ty, self.literal(key))
+        let (Type::Fn(ptys, _), Some(_), Some((_, params))) =
+            (&sig_ty, self.literal(key), self.lambda_frame(key))
         else {
             return false;
         };
@@ -16086,7 +16061,6 @@ mod tests {
             world: Default::default(),
             erased: Default::default(),
             types: Box::leak(Box::default()),
-            lambdas: HashMap::new(),
             oracle: None,
             sigs: HashMap::new(),
             gen: None,
