@@ -30,7 +30,8 @@ use vyrn_frontend::core::check::{integer_rule, Check, Guard, Raises, Verdict};
 /// The core's statements and values. `Body` stays qualified at each use,
 /// because this file defines its own `Body`.
 use vyrn_frontend::core::{
-    Arg, Arm, Await, Callee, Ctor, Fork, Form, Lit, Name, NameInfo, Op, Rhs, St, Target, Test, Val,
+    Arg, Arm, Await, Callee, Ctor, Fork, Form, Lit, Name, NameInfo, NotOwned, Op, Rhs, St, Target,
+    Test, Val,
 };
 use vyrn_frontend::gen::GenError;
 use vyrn_frontend::loader::{RtWord, RuntimeCalls, RUNTIME_CALLS, TASK_PREFIX};
@@ -475,12 +476,11 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     // One ownership word per module-state accumulator, in static memory because the helper writes
     // it back and wasm has no pass-by-reference. Reserved zeroed; the initializer sets it.
     //
-    // A reservation moves every reservation after it, so `global_append_candidates` returns an
-    // ordered set.
+    // A reservation moves every reservation after it, so the accumulators are an ordered set.
     let mut gappend = HashMap::new();
-    for name in vyrn_lower::append::global_append_candidates(program) {
-        if (globals.get(&name)).is_some_and(|(_, ty)| cx.resolve(ty) == Type::Str) {
-            gappend.insert(name, m.reserve(4, 4));
+    for name in &cx.world.ownership.accumulators {
+        if (globals.get(name)).is_some_and(|(_, ty)| cx.resolve(ty) == Type::Str) {
+            gappend.insert(name.clone(), m.reserve(4, 4));
         }
     }
     base.seed = cx.caches.into_inner();
@@ -1739,7 +1739,7 @@ struct Base<'a> {
     /// caller's storage during the call. [`lower_body`] reads it.
     aliasing: std::collections::HashSet<String>,
     /// Module-state `String` accumulators: name -> the address of its ownership word. Present only
-    /// for a global [`vyrn_lower::append::global_append_candidates`] cleared, so `g = g + ...`
+    /// for a global [`vyrn_frontend::own::Ownership::accumulators`] holds, so `g = g + ...`
     /// grows in place. The local twin is [`Fn_::str_append`]; a global has no local, so its word
     /// is static.
     gappend: HashMap<String, u32>,
@@ -2861,11 +2861,26 @@ fn lower_globals_init(m: &mut Log, program: &Program, cx: &Cx<'_>) -> Result<Fra
             }
         }
     }
+    // The accumulator owns its buffer unless its initializer's row stores a static value: a
+    // literal, or a checked one, which lives in the data segment.
+    let stores_static = |g: &str| {
+        from_core.is_some_and(|c| {
+            c.stmts.iter().any(|s| match s {
+                St::Store {
+                    place: vyrn_frontend::core::Place::Global(n),
+                    value,
+                    ..
+                } if n == g => match value {
+                    Val::Lit(l) => matches!(l, Lit::Str(_)),
+                    Val::Name(t) => matches!(c.names[t.index()].not_owned, Some(NotOwned::Static)),
+                },
+                _ => false,
+            })
+        })
+    };
     for g in &program.globals {
-        // The accumulator owns its buffer unless the initializer is a literal, which lives in
-        // the data segment.
         if let Some(&at) = cx.gappend.get(&g.name) {
-            let owns = !matches!(g.init, Expr::Str(_, _));
+            let owns = !stores_static(&g.name);
             b.ins(&Instruction::I32Const(at as i32))
                 .ins(&Instruction::I32Const(owns as i32))
                 .ins(&Instruction::I32Store(word()));

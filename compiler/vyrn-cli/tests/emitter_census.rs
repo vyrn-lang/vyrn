@@ -116,7 +116,7 @@ fn sections() -> Vec<Section> {
         sec("impl Place", Mapping, Neither),
         sec("const LAMBDA", Shared, Neither),
         sec("struct Fn_", Shared, Neither),
-        sec("fn lower_globals_init", Shared, Both),
+        sec("fn lower_globals_init", Shared, Core),
         sec("fn lower_body", Mapping, Core),
         sec("fn frame_fits", Decision, Neither),
         sec("fn lower_fnval_copy", Shared, Neither),
