@@ -8,8 +8,8 @@
         "settings": { "label": "Налаштування" }
     },
     "cart": {
-        "items": "{count, plural, one {# товар} few {# товари} many {# товарів} other {# товару}}"
+        "items": ".input {$count :number}\n.match $count\none {{{$count} товар}}\nfew {{{$count} товари}}\nmany {{{$count} товарів}}\n* {{{$count} товару}}"
     },
-    "greeting": "Привіт, {name}!",
-    "status": "{state, select, active {Активний} paused {Призупинено} other {Невідомо}}"
+    "greeting": "Привіт, {$name}!",
+    "status": ".input {$state :string}\n.match $state\nactive {{Активний}}\npaused {{Призупинено}}\n* {{Невідомо}}"
 }

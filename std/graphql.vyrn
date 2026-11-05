@@ -38,7 +38,11 @@ import { fromBytesOr, trim } from "std/strings"
 import { importBlock, procImports } from "std/imports"
 import { Json, JsonField, copyJson, copyJsonArray, emit } from "std/json"
 import { parseJson } from "std/jsonread"
-import { Scanner, scanner, skipWs, ident, peek, advance, atEnd, quotedString } from "std/scan"
+import { syntax } from "std/syntax"
+import { catalogue } from "std/i18n"
+// Each by a namespace: a written module's names, such as `Row`, are program-wide.
+import * as gq from syntax("./graphql.syntax")
+import * as say from catalogue("./graphql.errors")
 
 // The executor encodes with `toJson`, so it applies `std/rpc`'s serializability rule.
 import { validateContract } from "std/rpc"
@@ -509,327 +513,198 @@ impl Owned for GqlSel {
     }
 }
 
-/// A parsed selection set; `err != ""` when it did not parse.
-type GqlSet = { sels: Array<GqlSel>, err: String }
-
 /// A parsed operation: its root (`"query"` or `"mutation"`), its fields, and `err != ""` when it did not parse.
 export type GqlQuery = { root: String, sels: Array<GqlSel>, err: String }
 
-/// The shared cursor with GraphQL's lexical rules: `#` line comments
-/// and `"` strings with `\` escapes, so a `{` in a string is never structure.
-fn gqlScanner(src: String) -> Scanner {
-    return scanner(src, "#", "", "", 34, -1, 92)
-}
-
-fn gqlAt(sc: Scanner, b: UInt8) -> Bool {
-    return peek(sc) == Int64(b)
-}
-
-fn gqlSetErr(why: String) -> GqlSet {
-    return GqlSet { sels: [], err: why.copy() }
-}
-
-type GqlVal = { value: Json, err: String }
-
-type GqlArgs = { args: Array<JsonField>, err: String }
-
-fn gqlValErr(why: String) -> GqlVal {
-    return GqlVal { value: JNull, err: why.copy() }
-}
-
-fn gqlIsNumByte(b: Int64) -> Bool {
-    return (b >= 48 && b <= 57) || b == 45 || b == 43 || b == 46 || b == 101 || b == 69
-}
-
-/// One GraphQL input value as a JSON tree, which `fromJson` decodes. Structure
-/// is read here; a string or number token goes to `std/json`'s reader over its
-/// source span, so there is one escape decoder and one number grammar.
-fn gqlValue(sc: modify Scanner, depth: Int64) -> GqlVal {
-    skipWs(sc)
-    if atEnd(sc) {
-        return gqlValErr("expected a value")
-    }
-    if gqlAt(sc, '$') {
-        advance(sc)
-        return gqlValErr("variable `$" + ident(sc) + "`: variables are not supported")
-    }
-    if gqlAt(sc, '"') {
-        let start = sc.pos
-        let _ = quotedString(sc)
-        let lit = slice(sc.src, start, sc.pos) ?? ""
-        return match parseJson(lit) {
-            Ok(v) => GqlVal { value: v, err: "" },
-            Err(e) => gqlValErr("malformed string value: " + e),
-        }
-    }
-    if gqlAt(sc, '[') || gqlAt(sc, '{') {
-        if depth >= gqlMaxDepth() {
-            return gqlValErr(gqlTooDeep())
-        }
-    }
-    if gqlAt(sc, '[') {
-        return gqlListValue(sc, depth + 1)
-    }
-    if gqlAt(sc, '{') {
-        return gqlObjectValue(sc, depth + 1)
-    }
-    let b = peek(sc)
-    if b == 45 || (b >= 48 && b <= 57) {
-        return gqlNumberValue(sc)
-    }
-    let word = ident(sc)
-    if word == "" {
-        return gqlValErr("expected a value")
-    }
-    if word == "true" {
-        return GqlVal { value: JBool(true), err: "" }
-    }
-    if word == "false" {
-        return GqlVal { value: JBool(false), err: "" }
-    }
-    if word == "null" {
-        return GqlVal { value: JNull, err: "" }
-    }
-    // An enum value is its own name on the wire.
-    return GqlVal { value: JStr(word), err: "" }
-}
-
-/// The deepest nesting a query may have: selection sets, lists and input
-/// objects. The parser recurses per level, and a client's `{a{a{a...}}}` would
-/// otherwise hit the engine's call cap and trap the process. Same limit as
-/// `std/jsonread`'s `maxDepth`.
-fn gqlMaxDepth() -> Int64 {
-    return 128
-}
-
-fn gqlTooDeep() -> String {
-    return "nesting deeper than " + gqlMaxDepth().toString() + " levels"
-}
-
-fn gqlNumberValue(sc: modify Scanner) -> GqlVal {
-    let start = sc.pos
-    while atEnd(sc) == false && gqlIsNumByte(peek(sc)) {
-        advance(sc)
-    }
-    let tok = slice(sc.src, start, sc.pos) ?? ""
-    return match parseJson(tok) {
-        Ok(v) => GqlVal { value: v, err: "" },
-        Err(e) => gqlValErr("malformed number `" + tok + "`"),
+/// The sentence of `row`, the one place a refusal is said.
+fn gqlSay(row: gq.Row) -> String {
+    return match row {
+        AliasField(alias) => say.tAliasField__En(alias),
+        ArgumentColon(name) => say.tArgumentColon__En(name),
+        ArgumentName => say.tArgumentName__En(),
+        ArgumentsUnclosed => say.tArgumentsUnclosed__En(),
+        DuplicateArgument(name) => say.tDuplicateArgument__En(name),
+        DuplicateKey(key) => say.tDuplicateKey__En(key),
+        GqlExpected(token) => say.tGqlExpected__En(token),
+        FieldName => say.tFieldName__En(),
+        ListUnclosed => say.tListUnclosed__En(),
+        MalformedNumber(number) => say.tMalformedNumber__En(number),
+        MalformedString(why) => say.tMalformedString__En(why),
+        ManyOperations => say.tManyOperations__En(),
+        NoQuery => say.tNoQuery__En(),
+        ObjectColon(field) => say.tObjectColon__En(field),
+        ObjectFieldName => say.tObjectFieldName__En(),
+        ObjectUnclosed => say.tObjectUnclosed__En(),
+        OperationType(found) => say.tOperationType__En(found),
+        SelSetEmpty => say.tSelSetEmpty__En(),
+        SelSetOpen => say.tSelSetOpen__En(),
+        SelSetUnclosed => say.tSelSetUnclosed__En(),
+        GqlTooDeep => say.tGqlTooDeep__En(),
+        NoValue => say.tNoValue__En(),
+        Variable(name) => say.tVariable__En(name),
+        VariableDefinitions => say.tVariableDefinitions__En(),
     }
 }
 
-/// A list value `[a, b]`; commas are insignificant.
-fn gqlListValue(sc: modify Scanner, depth: Int64) -> GqlVal {
-    advance(sc)
+/// One GraphQL input value as a JSON tree, which `fromJson` decodes. A string or
+/// a number goes to `std/json`'s reader over its text, so there is one escape
+/// decoder and one number grammar.
+fn gqlValue(v: gq.GqlValue) -> Result<Json, gq.Row> {
+    return match v {
+        GqlValueGqlString(s) => match parseJson(s.text) {
+            Ok(j) => Ok(j),
+            Err(e) => Err(MalformedString(e)),
+        },
+        GqlValueGqlNumber(n) => match parseJson(n.text) {
+            Ok(j) => Ok(j),
+            Err(e) => Err(MalformedNumber(n.text.copy())),
+        },
+        GqlValueGqlList(l) => gqlList(l),
+        GqlValueGqlObject(o) => gqlObject(o),
+        GqlValueGqlName(w) => Ok(gqlWord(w.text)),
+    }
+}
+
+/// A name in a value: a Boolean, `null`, or an enum value, which is its own name
+/// on the wire.
+fn gqlWord(w: String) -> Json {
+    if w == "true" {
+        return JBool(true)
+    }
+    if w == "false" {
+        return JBool(false)
+    }
+    if w == "null" {
+        return JNull
+    }
+    return JStr(w.copy())
+}
+
+fn gqlList(l: gq.GqlList) -> Result<Json, gq.Row> {
     let mut items: Array<Json> = []
-    skipWs(sc)
-    while atEnd(sc) == false && gqlAt(sc, ']') == false {
-        if gqlAt(sc, ',') {
-            advance(sc)
-            skipWs(sc)
-            continue
-        }
-        let v = gqlValue(sc, depth)
-        if v.err != "" {
-            return v
-        }
-        items.push(consume v.value)
-        skipWs(sc)
+    for it in l.items {
+        items.push(gqlValue(it)?)
     }
-    if gqlAt(sc, ']') == false {
-        return gqlValErr("unterminated list value: expected `]`")
-    }
-    advance(sc)
-    return GqlVal { value: JArr(items), err: "" }
+    return Ok(JArr(items))
 }
 
-/// An input-object value `{ a: 1, b: "x" }` with unquoted keys.
-fn gqlObjectValue(sc: modify Scanner, depth: Int64) -> GqlVal {
-    advance(sc)
+fn gqlObject(o: gq.GqlObject) -> Result<Json, gq.Row> {
     let mut fields: Array<JsonField> = []
-    skipWs(sc)
-    while atEnd(sc) == false && gqlAt(sc, '}') == false {
-        if gqlAt(sc, ',') {
-            advance(sc)
-            skipWs(sc)
-            continue
-        }
-        let key = ident(sc)
-        if key == "" {
-            return gqlValErr("expected a field name in an input object")
-        }
-        skipWs(sc)
-        if gqlAt(sc, ':') == false {
-            return gqlValErr("input object field `" + key + "`: expected `:`")
-        }
-        advance(sc)
-        let v = gqlValue(sc, depth)
-        if v.err != "" {
-            return v
-        }
-        fields.push(JsonField { key: key, value: consume v.value })
-        skipWs(sc)
+    for f in o.fields {
+        fields.push(JsonField { key: f.name.text.copy(), value: gqlValue(f.value)? })
     }
-    if gqlAt(sc, '}') == false {
-        return gqlValErr("unterminated input object: expected `}`")
-    }
-    advance(sc)
-    return GqlVal { value: JObj(fields), err: "" }
+    return Ok(JObj(fields))
 }
 
-/// An argument list, the cursor on its `(`. The caller moves the list out with
-/// `consume parsed.args`: `Json` has no structural copy.
-fn gqlArgList(sc: modify Scanner, depth: Int64) -> GqlArgs {
-    advance(sc)
+/// The fields a selection set or an argument list scans for a name written twice.
+/// Past it a Map holds every name, so a large query stays linear; below it a scan
+/// is cheaper than hashing and copying each name.
+fn gqlScanned() -> Int64 {
+    return 8
+}
+
+/// Whether an argument of `out` has `name`. `names` is empty until `out` holds
+/// `gqlScanned()` arguments, and then holds every name in `out`.
+fn gqlArgTaken(out: Array<JsonField>, name: String, names: modify Map<String, Bool>) -> Bool {
+    if out.length < gqlScanned() {
+        for f in out {
+            if f.key == name {
+                return true
+            }
+        }
+        return false
+    }
+    if names.length == 0 {
+        for f in out {
+            names[f.key.copy()] = true
+        }
+    }
+    if let Some(_) = names[name] {
+        return true
+    }
+    names[name.copy()] = true
+    return false
+}
+
+/// Whether a field of `out` answers under `key`, as gqlArgTaken.
+fn gqlKeyTaken(out: Array<GqlSel>, key: String, keys: modify Map<String, Bool>) -> Bool {
+    if out.length < gqlScanned() {
+        for s in out {
+            if s.key == key {
+                return true
+            }
+        }
+        return false
+    }
+    if keys.length == 0 {
+        for s in out {
+            keys[s.key.copy()] = true
+        }
+    }
+    if let Some(_) = keys[key] {
+        return true
+    }
+    keys[key.copy()] = true
+    return false
+}
+
+/// An argument list as JSON fields. A name written twice is refused.
+fn gqlArgs(a: gq.GqlArgs) -> Result<Array<JsonField>, gq.Row> {
     let mut out: Array<JsonField> = []
-    // A Map, so the duplicate test is one hashed lookup.
     let mut names: Map<String, Bool> = [:]
-    skipWs(sc)
-    while atEnd(sc) == false && gqlAt(sc, ')') == false {
-        if gqlAt(sc, ',') {
-            advance(sc)
-            skipWs(sc)
-            continue
+    for arg in a.args {
+        if gqlArgTaken(out, arg.name.text, names) {
+            return Err(DuplicateArgument(arg.name.text.copy()))
         }
-        let name = ident(sc)
-        if name == "" {
-            return GqlArgs { args: [], err: "expected an argument name" }
-        }
-        if let Some(_) = names[name] {
-            return GqlArgs { args: [], err: "duplicate argument `" + name + "`" }
-        }
-        names[name.copy()] = true
-        skipWs(sc)
-        if gqlAt(sc, ':') == false {
-            return GqlArgs { args: [], err: "argument `" + name + "`: expected `:`" }
-        }
-        advance(sc)
-        let v = gqlValue(sc, depth)
-        if v.err != "" {
-            return GqlArgs { args: [], err: consume v.err }
-        }
-        out.push(JsonField { key: name, value: consume v.value })
-        skipWs(sc)
+        out.push(JsonField { key: arg.name.text.copy(), value: gqlValue(arg.value)? })
     }
-    if gqlAt(sc, ')') == false {
-        return GqlArgs { args: [], err: "unterminated argument list: expected `)`" }
-    }
-    advance(sc)
-    return GqlArgs { args: out, err: "" }
+    return Ok(out)
 }
 
-/// A selection set, the cursor on its `{`. Commas are insignificant.
-fn gqlSelSet(sc: modify Scanner, depth: Int64) -> GqlSet {
-    if gqlAt(sc, '{') == false {
-        return gqlSetErr("expected `{` to open a selection set")
-    }
-    advance(sc)
+/// The fields of a selection set. GraphQL refuses a response key written twice
+/// (`{ x: a x: b }`); an alias renames the answer only.
+fn gqlSels(set: gq.GqlSelSet) -> Result<Array<GqlSel>, gq.Row> {
     let mut out: Array<GqlSel> = []
-    // A Map, as `gqlArgList`'s `names`.
     let mut keys: Map<String, Bool> = [:]
-    skipWs(sc)
-    while atEnd(sc) == false && gqlAt(sc, '}') == false {
-        if gqlAt(sc, ',') {
-            advance(sc)
-            skipWs(sc)
-            continue
+    for s in set.sels {
+        if gqlKeyTaken(out, s.key.text, keys) {
+            return Err(DuplicateKey(s.key.text.copy()))
         }
-        let first = ident(sc)
-        if first == "" {
-            return gqlSetErr("expected a field name in a selection set")
+        let name = match s.name {
+            Some(n) => n.text.copy(),
+            None => s.key.text.copy(),
         }
-        skipWs(sc)
-        // `key: field`: the alias renames the answer only.
-        let mut name = first.copy()
-        if gqlAt(sc, ':') {
-            advance(sc)
-            skipWs(sc)
-            name = ident(sc)
-            if name == "" {
-                return gqlSetErr("alias `" + first + "`: expected the field it renames")
-            }
-            skipWs(sc)
+        let args = match s.args {
+            Some(x) => gqlArgs(x)?,
+            None => [],
         }
-        // GraphQL refuses a response key written twice (`{ x: a x: b }`).
-        if let Some(_) = keys[first] {
-            return gqlSetErr("duplicate response key `" + first + "` in a selection set")
+        let subs = match s.subs {
+            Some(x) => gqlSels(x)?,
+            None => [],
         }
-        keys[first.copy()] = true
-        let mut args: Array<JsonField> = []
-        if gqlAt(sc, '(') {
-            let parsed = gqlArgList(sc, depth)
-            if parsed.err != "" {
-                return gqlSetErr("field `" + name + "`: " + parsed.err)
-            }
-            args = consume parsed.args
-            skipWs(sc)
-        }
-        let mut subs: Array<GqlSel> = []
-        if gqlAt(sc, '{') {
-            if depth >= gqlMaxDepth() {
-                return gqlSetErr(gqlTooDeep())
-            }
-            let inner = gqlSelSet(sc, depth + 1)
-            if inner.err != "" {
-                return inner
-            }
-            subs = consume inner.sels
-        }
-        out.push(GqlSel { key: first, name: name, args: args, subs: subs })
-        skipWs(sc)
+        out.push(GqlSel { key: s.key.text.copy(), name: name, args: args, subs: subs })
     }
-    if gqlAt(sc, '}') == false {
-        return gqlSetErr("unterminated selection set: expected `}`")
-    }
-    advance(sc)
-    if out.length == 0 {
-        return gqlSetErr("a selection set must select at least one field")
-    }
-    return GqlSet { sels: out, err: "" }
+    return Ok(out)
 }
 
-/// One executable operation: an optional `query` or `mutation` keyword and name,
-/// then a selection set. A second operation is refused.
+/// One executable operation, read by `std/graphql.syntax`: an optional `query` or
+/// `mutation` keyword and name, then a selection set. `err` is the first refusal.
 export fn gqlParseQuery(src: String) -> GqlQuery {
-    let mut sc = gqlScanner(src)
-    skipWs(sc)
-    let mut root = "query"
-    if gqlAt(sc, '{') == false {
-        let kw = ident(sc)
-        if kw == "" {
-            return GqlQuery { root: root, sels: [], err: "the request carried no query" }
-        }
-        if kw != "query" && kw != "mutation" {
-            return GqlQuery {
-                root: root,
-                sels: [],
-                err: "expected `{`, `query` or `mutation`, found `" + kw + "`",
-            }
-        }
-        root = kw
-        skipWs(sc)
-        // The operation name, which nothing selects on.
-        let _ = ident(sc)
-        skipWs(sc)
-        // Nothing substitutes `variables`, so a definition list is refused
-        // here rather than leaving each `$id` a bare enum value.
-        if gqlAt(sc, '(') {
-            return GqlQuery { root: root, sels: [], err: "variable definitions are not supported" }
-        }
+    return match gq.parseGqlDocument(src) {
+        Ok(op) => gqlOperation(op),
+        Err(errors) => GqlQuery { root: "query", sels: [], err: gqlSay(errors[0].row) },
     }
-    let set = gqlSelSet(sc, 1)
-    if set.err != "" {
-        return GqlQuery { root: root, sels: [], err: consume set.err }
+}
+
+fn gqlOperation(op: gq.GqlOperation) -> GqlQuery {
+    let root = match op.root {
+        Some(r) => r.text.copy(),
+        None => "query",
     }
-    skipWs(sc)
-    if atEnd(sc) == false {
-        return GqlQuery {
-            root: root,
-            sels: [],
-            err: "a document with more than one operation is not supported",
-        }
+    return match gqlSels(op.sels) {
+        Ok(sels) => GqlQuery { root: root, sels: sels, err: "" },
+        Err(row) => GqlQuery { root: root, sels: [], err: gqlSay(row) },
     }
-    return GqlQuery { root: root, sels: consume set.sels, err: "" }
 }
 
 /// The index of `key` among `fields`, or -1, so the projection reads the member in place.
@@ -1857,6 +1732,14 @@ test "a response key may be selected once" {
 test "an argument may be written once" {
     assert(gqlParseQuery("{ f(a: 1, a: 2) { b } }").err.contains("duplicate argument `a`"))
     assertEq(gqlParseQuery("{ f(a: 1) { b } }").err, "")
+}
+
+test "a name written twice past gqlScanned is refused through the Map" {
+    assert(gqlParseQuery("{ a b c d e f g h i j a }").err.contains("duplicate response key `a`"))
+    assertEq(gqlParseQuery("{ a b c d e f g h i j k }").err, "")
+    let args = "a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8, i: 9"
+    assert(gqlParseQuery("{ f(" + args + ", a: 10) }").err.contains("duplicate argument `a`"))
+    assertEq(gqlParseQuery("{ f(" + args + ", j: 10) }").err, "")
 }
 
 /// The graph of a contract with no query procedures: `Query` holds only `_placeholder`.

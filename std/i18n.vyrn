@@ -4,7 +4,7 @@
 ///   import { t, setLocale, locale, Locale, TransKey, tCartItems } from i18n("./locales")
 ///
 /// `i18n(dir)` reads every `<locale>.json` under `dir` at compile time, checks
-/// that the locales agree, compiles each ICU message to a Vyrn function body
+/// that the locales agree, compiles each message to a Vyrn function body
 /// and returns the module as `Code` (`vyrn emit-gen <file>` shows it). The
 /// module holds `Locale` (one variant per file), `setLocale`/`locale`,
 /// `TransKey` (the finite type of every dotted key), one function per key with
@@ -17,53 +17,26 @@
 /// generator can call it at generation, naming its locale, and two catalogues link in
 /// one program, where two `En` variants would clash.
 ///
-/// The ICU subset: plain text; `{name}` (String); `{n, plural, ...}` (Int64,
-/// `#` is the number, `other` required); `{k, select, ...}` (a finite string
-/// type of the branch names). `''` is a literal apostrophe, `'{'` and `'}'`
-/// literal braces. An argument name may not start with `__`. Numbers,
-/// booleans and null in a locale file, and a plural or select nested in a
-/// branch, fail generation.
+/// A message is Unicode MessageFormat 2, read by `std/i18n.syntax`: text, where
+/// a backslash escapes `\`, `{`, `|` and `}`; a placeholder `{$name}` (String);
+/// `.input` and `.local` declarations; and one `.match` selector with a `*`
+/// variant. `:number` makes an Int64, selected by an integer key, then by the
+/// locale's plural category; `:string` selects a finite string type of its keys;
+/// `:list` joins an `Array<String>` as the locale does. Markup, options,
+/// attributes and other functions fail generation, as do numbers, booleans and
+/// null in a locale file. An argument name may not start with `__`.
 
 import { Json, JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
-import { joinWith, split, substring, fromBytesOr, trim } from "std/strings"
+import { joinWith, split, substring, fromBytesOr } from "std/strings"
 import { includes } from "std/arrays"
 import { contains, endsWith, startsWith } from "std/strpred"
 import { report, reportHere, Severity } from "std/diag"
 import { arm, ifChainOr, join } from "std/code"
 import { parseInt64 } from "std/num"
-
-// The ICU scanners work on byte arrays and thread byte indices, so these byte
-// helpers stay local.
-
-/// The bytes `ba[s..e)` as a String; "" if not valid UTF-8, which a slice of
-/// validated input never is.
-gen fn sliceStr(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
-    let mut out: Array<UInt8> = []
-    let mut i = s
-    while i < e {
-        out.push(ba[i])
-        i = i + 1
-    }
-    return fromBytesOr(out, "")
-}
-
-gen fn isWs(b: UInt8) -> Bool {
-    return b == ' ' || b == '\t' || b == '\n' || b == '\r'
-}
-
-/// The first non-whitespace index at or after `i`.
-gen fn skipJsonSpace(ba: Array<UInt8>, i: Int64, e: Int64) -> Int64 {
-    let mut j = i
-    while j < e {
-        if isWs(ba[j]) {
-            j = j + 1
-        } else {
-            return j
-        }
-    }
-    return j
-}
+import { syntax } from "std/syntax"
+// Each by a namespace: a written module's names, such as `Row`, are program-wide.
+import * as mf from syntax("./i18n.syntax")
 
 gen fn upperFirst(s: String) -> String {
     let ba = bytes(s)
@@ -255,395 +228,536 @@ gen fn hasKey(d: LocaleData, key: String) -> Bool {
     return false
 }
 
-// The ICU message reader: brace and quote scanning shared by the argument
-// scanner and the body compiler.
+// The message reader: `std/i18n.syntax` parses a message, and this walk checks what
+// the grammar cannot and compiles it.
 
-/// The resolution of an apostrophe under ICU quoting: whether a literal `'` byte
-/// is produced, the resulting quote mode, and how many bytes were consumed.
-type IcuQuote = { emit: Bool, quoted: Bool, advance: Int64 }
+/// One argument of a message: its name, what it holds (`string`, `number`, `select`
+/// or `list`), and the keys a `select` picks among, in source order.
+type Arg = { name: String, kind: String, keys: Array<String> }
 
-/// Resolve an apostrophe at `ba[j]` under ICU quoting, for every quote-aware
-/// scanner here:
-///   - `''` is always one literal apostrophe;
-///   - a lone `'` opens a quote only when not quoting and the next byte is
-///     `{`, `}` or `#`;
-///   - a `'` while quoting closes the quote;
-///   - any other lone `'` (as in `It's`) is a literal apostrophe.
-gen fn icuApostrophe(ba: Array<UInt8>, j: Int64, e: Int64, quoted: Bool) -> IcuQuote {
-    if j + 1 < e && ba[j + 1] == '\x27' {
-        return IcuQuote { emit: true, quoted: quoted, advance: 2 }
+/// A name a declaration binds: the argument it reads and the function on it, or "".
+type Decl = { name: String, arg: String, func: String }
+
+/// The sentence of `row`, the one place a refusal of a message is said.
+gen fn mfSay(row: mf.Row) -> String {
+    return match row {
+        ArgName(name) => "`$\{name}` is no parameter name: an argument is letters, digits and `_`, and does not start with `__`",
+        Attribute => "an attribute (`@name`) is not supported",
+        BadNumberKey(key) => "`\{key}` is no key of a `:number` selector: a key is an integer, `zero`, `one`, `two`, `few`, `many`, `other` or `*`",
+        DuplicateDeclaration(name) => "`$\{name}` is declared twice, or declared after a declaration reads it",
+        DuplicateVariant => "two variants have the same keys",
+        Escape => "a backslash escapes only `\\`, `{`, `|` or `}`",
+        ExpressionForm => "a placeholder holds a variable, `{$name}` or `{$name :function}`",
+        ExpressionUnclosed => "a placeholder is not closed: `{` needs a matching `}`",
+        FunctionAlone => "a function needs a variable before it: `{$name :function}`",
+        FunctionOption => "a function option is not supported",
+        KeyCount => "a variant needs one key per selector",
+        KindClash(name) => "`$\{name}` is read by two different functions",
+        LiteralAlone => "a literal placeholder is not supported; a literal brace is written `\\{`",
+        ManySelectors => "`.match` takes one selector",
+        MarkupPlaceholder => "markup (`{#name}`, `{/name}`) is not supported",
+        MessageBody => "a complex message ends in a quoted pattern `{{...}}` or a `.match`",
+        MessageBrace => "a `}` closes nothing; a literal brace is written `\\}`",
+        MessageExpected(token) => "the message is expected to hold \{token} here",
+        MessageTrailing => "text follows the end of a complex message",
+        MissingAnnotation(name) => "the selector `$\{name}` needs a declaration with a function, as `.input {$\{name} :number}`",
+        MissingFallback => "`.match` needs a variant whose keys are all `*`",
+        QuotedLiteral => "a quoted literal is not closed: `|` needs a matching `|`",
+        QuotedOpen => "a quoted pattern `{{...}}` is expected here",
+        QuotedUnclosed => "a quoted pattern is not closed: `{{` needs a matching `}}`",
+        Selector => "`.match` needs a selector, as `.match $count`",
+        SelectorFunction(name) => "`:\{name}` does not select; a selector uses `:number` or `:string`",
+        UnknownFunction(name) => "`:\{name}` is not a function std/i18n knows: it knows `:number`, `:string` and `:list`",
     }
-    if quoted {
-        return IcuQuote { emit: false, quoted: false, advance: 1 }
-    }
-    if j + 1 < e && (ba[j + 1] == '{' || ba[j + 1] == '}' || ba[j + 1] == '#') {
-        return IcuQuote { emit: false, quoted: true, advance: 1 }
-    }
-    return IcuQuote { emit: true, quoted: false, advance: 1 }
 }
 
-/// A literal run: decoded text and the next index. `hash` is true when the
-/// run stopped at an unquoted `#`.
-type LitRead = { text: String, next: Int64, hash: Bool }
+/// `line L, column C: ` of the byte `at` of `msg`.
+gen fn mfAt(msg: String, at: Int64) -> String {
+    let mut line = 1
+    let mut col = 1
+    let mut i = 0
+    while i < at && i < msg.byteLength {
+        if msg[i] == '\n' {
+            line = line + 1
+            col = 1
+        } else {
+            col = col + 1
+        }
+        i = i + 1
+    }
+    return "line \{line}, column \{col}: "
+}
 
-/// Read a literal run over `ba[i..e)`, resolving quoting, up to an unquoted
-/// `{`, `}`, or (when `stopHash`) `#`.
-gen fn readLiteral(ba: Array<UInt8>, i: Int64, e: Int64, stopHash: Bool) -> LitRead {
+/// The text of a text part or a quoted literal: each backslash gives the byte after it.
+gen fn mfUnescape(s: String) -> String {
+    let ba = bytes(s)
     let mut out: Array<UInt8> = []
-    let mut j = i
-    let mut quoted = false
-    while j < e {
-        let b = ba[j]
-        if b == '\x27' {
-            let q = icuApostrophe(ba, j, e, quoted)
-            if q.emit {
-                out.push('\x27')
-            }
-            quoted = q.quoted
-            j = j + q.advance
-        } else if quoted {
-            out.push(b)
-            j = j + 1
-        } else {
-            if b == '{' || b == '}' {
-                return LitRead { text: fromBytesOr(out, ""), next: j, hash: false }
-            }
-            if stopHash && b == '#' {
-                return LitRead { text: fromBytesOr(out, ""), next: j, hash: true }
-            }
-            out.push(b)
-            j = j + 1
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == '\\' && i + 1 < ba.length {
+            i = i + 1
         }
+        out.push(ba[i])
+        i = i + 1
     }
-    return LitRead { text: fromBytesOr(out, ""), next: j, hash: false }
+    return fromBytesOr(out, s)
 }
 
-/// The index just past the `}` matching the `{` at `open`, quote-aware.
-gen fn matchBrace(ba: Array<UInt8>, open: Int64, e: Int64) -> Int64 {
-    let mut depth = 0
-    let mut i = open
-    let mut quoted = false
-    while i < e {
-        let b = ba[i]
-        if b == '\x27' {
-            let q = icuApostrophe(ba, i, e, quoted)
-            quoted = q.quoted
-            i = i + q.advance
-        } else if quoted {
-            i = i + 1
-        } else if b == '{' {
-            depth = depth + 1
-            i = i + 1
-        } else if b == '}' {
-            depth = depth - 1
-            i = i + 1
-            if depth == 0 {
-                return i
-            }
-        } else {
-            i = i + 1
-        }
+/// The value of a variant key: `*`, a quoted literal's text, or the name as written.
+gen fn mfKey(k: mf.I18nKey) -> String {
+    return match k {
+        I18nKeyI18nStar(s) => "*",
+        I18nKeyI18nLiteral(l) => mfUnescape(substring(l.text, 1, l.text.byteLength - 1)),
+        I18nKeyI18nUnquoted(u) => u.text.copy(),
     }
-    return i
 }
 
-/// Split `ba[s..e)` on commas at brace depth 0, quote-aware; parts are
-/// trimmed.
-gen fn splitTopCommas(ba: Array<UInt8>, s: Int64, e: Int64) -> Array<String> {
-    let mut parts: Array<String> = []
-    let mut depth = 0
-    let mut quoted = false
-    let mut segStart = s
-    let mut i = s
-    while i < e {
-        let b = ba[i]
-        if b == '\x27' {
-            let q = icuApostrophe(ba, i, e, quoted)
-            quoted = q.quoted
-            i = i + q.advance
-        } else if quoted {
-            i = i + 1
-        } else if b == '{' {
-            depth = depth + 1
-            i = i + 1
-        } else if b == '}' {
-            depth = depth - 1
-            i = i + 1
-        } else if b == ',' && depth == 0 {
-            parts.push(trim(sliceStr(ba, segStart, i)))
-            i = i + 1
-            segStart = i
-        } else {
-            i = i + 1
-        }
-    }
-    parts.push(trim(sliceStr(ba, segStart, e)))
-    return parts
-}
-
-/// One selector/text pair of a plural or select body (`one {...}`).
-type Branch = { selector: String, text: String }
-
-type Branches = { branches: Array<Branch> }
-
-gen fn parseBranches(blob: String) -> Branches {
-    let ba = bytes(blob)
-    let e = ba.length
-    let mut items: Array<Branch> = []
-    let mut i = skipJsonSpace(ba, 0, e)
-    while i < e {
-        let mut selEnd = i
-        while selEnd < e && isWs(ba[selEnd]) == false && ba[selEnd] != '{' {
-            selEnd = selEnd + 1
-        }
-        let sel = sliceStr(ba, i, selEnd)
-        let braceAt = skipJsonSpace(ba, selEnd, e)
-        if braceAt >= e || ba[braceAt] != '{' {
-            return Branches { branches: items }
-        }
-        let close = matchBrace(ba, braceAt, e)
-        let inner = sliceStr(ba, braceAt + 1, close - 1)
-        items.push(Branch { selector: sel, text: inner })
-        i = skipJsonSpace(ba, close, e)
-    }
-    return Branches { branches: items }
-}
-
-/// The text of the branch named `sel`, falling back to `other`.
-gen fn branchText(br: Branches, sel: String) -> String {
-    for b in br.branches {
-        if b.selector == sel {
-            return b.text.copy()
-        }
-    }
-    for b in br.branches {
-        if b.selector == "other" {
-            return b.text.copy()
-        }
+/// The kind of argument a function makes, or "" when std/i18n knows no such function.
+gen fn mfKind(func: String) -> String {
+    if func == "number" || func == "string" || func == "list" {
+        return func.copy()
     }
     return ""
 }
 
-gen fn hasBranch(br: Branches, sel: String) -> Bool {
-    for b in br.branches {
-        if b.selector == sel {
-            return true
-        }
-    }
-    return false
-}
-
-// Argument scanning: the name, kind and branches of every placeholder, for
-// drift checks, signatures and select types.
-
-/// The arguments of one message. `kind` is "string", "plural" or "select";
-/// `branches` is the comma-joined selector set of a select (else ""). `ok =
-/// false` flags unsupported syntax.
-type ArgScan = {
-    ok: Bool,
-    error: String,
-    names: Array<String>,
-    kinds: Array<String>,
-    branches: Array<String>,
-}
-
-gen fn argError(msg: String) -> ArgScan {
-    return ArgScan { ok: false, error: msg.copy(), names: [], kinds: [], branches: [] }
-}
-
-/// Whether an argument name starts with `__`, the prefix of the generated
-/// accumulator `__acc`; `scanArgs` refuses such a message.
-fn argReserved(name: String) -> Bool {
-    return startsWith(name, "__")
-}
-
-/// Sorted, comma-joined selector names, so the signature ignores order.
-gen fn joinSortedSelectors(br: Branches) -> String {
-    let mut names: Array<String> = []
-    for b in br.branches {
-        names.push(b.selector.copy())
-    }
-    let mut i = 1
-    while i < names.length {
-        let mut j = i
-        while j > 0 && names[j - 1] > names[j] {
-            let tmp = names[j - 1].copy()
-            names[j - 1] = names[j].copy()
-            names[j] = tmp
-            j = j - 1
+/// The index of the declaration binding `name`, or -1.
+gen fn declIndex(decls: Array<Decl>, name: String) -> Int64 {
+    let mut i = 0
+    while i < decls.length {
+        if decls[i].name == name {
+            return i
         }
         i = i + 1
     }
-    return joinWith(names, ",")
+    return -1
 }
 
-/// Scan a message's arguments, recursing one level into branch texts for
-/// simple `{name}` arguments; a nested plural or select is unsupported.
-gen fn scanArgs(msg: String) -> ArgScan {
-    let ba = bytes(msg)
-    let e = ba.length
-    let mut names: Array<String> = []
-    let mut kinds: Array<String> = []
-    let mut branches: Array<String> = []
+/// The index of argument `name`, or -1.
+gen fn argIndex(args: Array<Arg>, name: String) -> Int64 {
     let mut i = 0
-    while i < e {
-        let lit = readLiteral(ba, i, e, false)
-        i = lit.next
-        if i >= e {
-            i = e
-        } else if ba[i] == '}' {
-            i = i + 1
-        } else if ba[i] == '{' {
-            let close = matchBrace(ba, i, e)
-            let parts = splitTopCommas(ba, i + 1, close - 1)
-            if parts.length == 1 {
-                if argReserved(parts[0]) {
-                    return argError("argument name `\{parts[0]}` uses the reserved `__` prefix — rename the argument")
+    while i < args.length {
+        if args[i].name == name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// The argument and the function a variable reads, through the declarations.
+gen fn mfResolve(decls: Array<Decl>, name: String, func: String) -> Decl {
+    let d = declIndex(decls, name)
+    if d < 0 {
+        return Decl { name: name.copy(), arg: name.copy(), func: func.copy() }
+    }
+    let f = if func == "" { decls[d].func.copy() } else { func.copy() }
+    return Decl { name: name.copy(), arg: decls[d].arg.copy(), func: f }
+}
+
+/// Whether `name` is an argument std/i18n can make a parameter of.
+gen fn argNameOk(name: String) -> Bool {
+    let ba = bytes(name)
+    if ba.length == 0 || (ba[0] >= '0' && ba[0] <= '9') || startsWith(name, "__") {
+        return false
+    }
+    for b in ba {
+        if !(b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')) {
+            return false
+        }
+    }
+    return true
+}
+
+/// Records that `use` reads its argument under its function, or why it cannot. An
+/// argument's kind is "" until a function claims it; a `select` is a `string`.
+gen fn mfUse(args: modify Array<Arg>, use: Decl) -> Option<mf.Row> {
+    let kind = mfKind(use.func)
+    if use.func != "" && kind == "" {
+        return Some(UnknownFunction(use.func.copy()))
+    }
+    if !argNameOk(use.arg) {
+        return Some(ArgName(use.arg.copy()))
+    }
+    let i = argIndex(args, use.arg)
+    if i < 0 {
+        args.push(Arg { name: use.arg.copy(), kind: kind, keys: [] })
+        return None
+    }
+    let held = args[i].kind.copy()
+    if kind == "" || kind == held || (kind == "string" && held == "select") {
+        return None
+    }
+    if held != "" {
+        return Some(KindClash(use.arg.copy()))
+    }
+    args[i].kind = kind
+    return None
+}
+
+/// A refusal of a message and the byte it points at.
+type Miss = { row: mf.Row, at: Int64 }
+
+/// The function an expression names, or "".
+gen fn mfFunc(e: mf.I18nExpression) -> String {
+    return match e.func {
+        Some(f) => f.name.text.copy(),
+        None => "",
+    }
+}
+
+/// Records the arguments the placeholders of `p` read.
+gen fn mfPatternUses(p: mf.I18nPattern, decls: Array<Decl>, args: modify Array<Arg>) -> Option<Miss> {
+    for part in p.parts {
+        match part {
+            I18nPartI18nExpression(e) => {
+                if let Some(row) = mfUse(args, mfResolve(decls, e.var.name.text, mfFunc(e))) {
+                    return Some(Miss { row: row, at: e.start })
                 }
-                names.push(parts[0].copy())
-                kinds.push("string")
-                branches.push("")
-            } else {
-                let kw = parts[1]
-                if kw == "plural" || kw == "select" {
-                    let blobStart = i + 1
-                    let blob = branchBlob(ba, blobStart, close - 1)
-                    let br = parseBranches(blob)
-                    if argReserved(parts[0]) {
-                        return argError("argument name `\{parts[0]}` uses the reserved `__` prefix — rename the argument")
-                    }
-                    names.push(parts[0].copy())
-                    if kw == "plural" {
-                        for b in br.branches {
-                            let exact = match parseInt64(substring(b.selector, 1, b.selector.byteLength)) {
-                                Some(v) => true,
-                                None => false,
-                            }
-                            if startsWith(b.selector, "=") && exact == false {
-                                return argError("plural selector `\{b.selector}` is not `=` and an integer — write an exact count such as `=0`")
-                            }
-                        }
-                        kinds.push("plural")
-                        branches.push("")
-                    } else {
-                        // Refuse a selector containing ',': the branch set is
-                        // comma-joined and split back, so the type would admit
-                        // each part while the code compares the whole token.
-                        for b in br.branches {
-                            if contains(b.selector, ",") {
-                                return argError("select selector `\{b.selector}` contains `,`, but branch names are serialized comma-joined — rename the branch")
-                            }
-                        }
-                        kinds.push("select")
-                        branches.push(joinSortedSelectors(br))
-                    }
-                    for b in br.branches {
-                        let sub = scanArgs(b.text)
-                        if sub.ok == false {
-                            return sub
-                        }
-                        let mut si = 0
-                        while si < sub.names.length {
-                            if sub.kinds[si] != "string" {
-                                return argError("nested plural/select is not supported (v1)")
-                            }
-                            names.push(sub.names[si].copy())
-                            kinds.push(sub.kinds[si].copy())
-                            branches.push(sub.branches[si].copy())
-                            si = si + 1
-                        }
-                    }
+            }
+            I18nPartI18nText(t) => {}
+        }
+    }
+    return None
+}
+
+/// Records what one declaration binds, or why it cannot. An `.input` reads the name
+/// it binds; a `.local` binds a new name.
+gen fn mfDeclare(
+    name: String,
+    e: mf.I18nExpression,
+    at: Int64,
+    input: Bool,
+    decls: modify Array<Decl>,
+    read: modify Array<String>,
+    args: modify Array<Arg>,
+) -> Option<Miss> {
+    let src = e.var.name.text
+    if declIndex(decls, name) >= 0 || includes(read, name) || (name == src && !input) {
+        return Some(Miss { row: DuplicateDeclaration(name.copy()), at: at })
+    }
+    let use = mfResolve(decls, src, mfFunc(e))
+    if let Some(row) = mfUse(args, use) {
+        return Some(Miss { row: row, at: e.start })
+    }
+    read.push(src.copy())
+    decls.push(Decl { name: name.copy(), arg: use.arg.copy(), func: use.func.copy() })
+    return None
+}
+
+/// Whether `k` can be a key of a `:number` selector.
+gen fn mfNumberKey(k: String) -> Bool {
+    if k == "*" || k == "zero" || k == "one" || k == "two" || k == "few" || k == "many" || k == "other" {
+        return true
+    }
+    return match parseInt64(k) {
+        Some(n) => true,
+        None => false,
+    }
+}
+
+/// Checks the selector and the variants of `m`, and records what they read.
+gen fn mfMatcher(m: mf.I18nMatcher, decls: Array<Decl>, args: modify Array<Arg>) -> Option<Miss> {
+    if m.sels.length != 1 {
+        return Some(Miss { row: ManySelectors, at: m.start })
+    }
+    let s = m.sels[0].name.text
+    let d = declIndex(decls, s)
+    if d < 0 {
+        return Some(Miss { row: MissingAnnotation(s.copy()), at: m.sels[0].start })
+    }
+    if decls[d].func == "" {
+        return Some(Miss { row: MissingAnnotation(s.copy()), at: m.sels[0].start })
+    }
+    let func = decls[d].func.copy()
+    if func == "list" {
+        return Some(Miss { row: SelectorFunction(func), at: m.sels[0].start })
+    }
+    let mut keys: Array<String> = []
+    for v in m.variants {
+        if v.keys.length != 1 {
+            return Some(Miss { row: KeyCount, at: v.start })
+        }
+        let k = mfKey(v.keys[0])
+        if func == "number" && !mfNumberKey(k) {
+            return Some(Miss { row: BadNumberKey(k), at: v.start })
+        }
+        if includes(keys, k) {
+            return Some(Miss { row: DuplicateVariant, at: v.start })
+        }
+        if let Some(miss) = mfPatternUses(v.pattern.pattern, decls, args) {
+            return Some(miss)
+        }
+        keys.push(k)
+    }
+    if !includes(keys, "*") {
+        return Some(Miss { row: MissingFallback, at: m.start })
+    }
+    if func == "string" {
+        let mut picked: Array<String> = []
+        for k in keys {
+            if k != "*" {
+                picked.push(k.copy())
+            }
+        }
+        let i = argIndex(args, decls[d].arg)
+        args[i].kind = "select"
+        args[i].keys = picked
+    }
+    return None
+}
+
+/// What a message reads: its arguments, or the first refusal. `decls` receives the
+/// names its declarations bind.
+gen fn mfArgs(tree: mf.I18nMessage, decls: modify Array<Decl>) -> Result<Array<Arg>, Miss> {
+    let mut args: Array<Arg> = []
+    let mut read: Array<String> = []
+    if let Some(p) = tree.simple {
+        if let Some(miss) = mfPatternUses(p, decls, args) {
+            return Err(miss)
+        }
+    }
+    if let Some(c) = tree.complex {
+        for d in c.decls {
+            let miss = match d {
+                I18nDeclarationI18nInput(i) => mfDeclare(i.expr.var.name.text, i.expr, i.start, true, decls, read, args),
+                I18nDeclarationI18nLocal(l) => mfDeclare(l.var.name.text, l.expr, l.start, false, decls, read, args),
+            }
+            if let Some(m) = miss {
+                return Err(m)
+            }
+        }
+        if let Some(q) = c.body {
+            if let Some(miss) = mfPatternUses(q.pattern, decls, args) {
+                return Err(miss)
+            }
+        }
+        if let Some(m) = c.matcher {
+            if let Some(miss) = mfMatcher(m, decls, args) {
+                return Err(miss)
+            }
+        }
+    }
+    let mut i = 0
+    while i < args.length {
+        if args[i].kind == "" {
+            args[i].kind = "string"
+        }
+        i = i + 1
+    }
+    return Ok(args)
+}
+
+/// A message read and checked: its arguments, the names its declarations bind, its
+/// tree, its text when it reads no argument, and whether it selects on a `:number`.
+type Message = { args: Array<Arg>, decls: Array<Decl>, tree: mf.I18nMessage, text: String, plural: Bool }
+
+/// Reads the message `msg`, or says where and why std/i18n cannot.
+gen fn readMessage(msg: String) -> Result<Message, String> {
+    return match mf.parseI18nMessage(msg) {
+        Ok(tree) => checkMessage(msg, tree),
+        Err(errors) => Err("line \{errors[0].line}, column \{errors[0].col}: " + mfSay(errors[0].row)),
+    }
+}
+
+gen fn checkMessage(msg: String, tree: consume mf.I18nMessage) -> Result<Message, String> {
+    let mut decls: Array<Decl> = []
+    return match mfArgs(tree, decls) {
+        Ok(args) => Ok(checked(tree, decls, args)),
+        Err(miss) => Err(mfAt(msg, miss.at) + mfSay(miss.row)),
+    }
+}
+
+gen fn checked(tree: consume mf.I18nMessage, decls: consume Array<Decl>, args: consume Array<Arg>) -> Message {
+    let mut text = ""
+    let mut plural = false
+    if let Some(p) = tree.simple {
+        text = mfText(p)
+    }
+    if let Some(c) = tree.complex {
+        if let Some(q) = c.body {
+            text = mfText(q.pattern)
+        }
+        if let Some(m) = c.matcher {
+            plural = decls[declIndex(decls, m.sels[0].name.text)].func == "number"
+        }
+    }
+    return Message { args: args, decls: decls, tree: tree, text: text, plural: plural }
+}
+
+/// The statements appending message `m` to `__acc` in locale `tag`.
+gen fn mfBody(m: Message, tag: String) -> Code {
+    let mut n = 0
+    if let Some(p) = m.tree.simple {
+        return mfPattern(p, m.decls, m.args, tag, n)
+    }
+    if let Some(c) = m.tree.complex {
+        if let Some(q) = c.body {
+            return mfPattern(q.pattern, m.decls, m.args, tag, n)
+        }
+        if let Some(x) = c.matcher {
+            return mfMatch(x, m.decls, m.args, tag, n)
+        }
+    }
+    return vyrn""
+}
+
+/// The text of a pattern with no placeholder.
+gen fn mfText(p: mf.I18nPattern) -> String {
+    let mut out = ""
+    for part in p.parts {
+        match part {
+            I18nPartI18nText(t) => {
+                out = out + mfUnescape(t.text)
+            }
+            I18nPartI18nExpression(e) => {}
+        }
+    }
+    return out
+}
+
+/// The statements appending `p` to `__acc`. `n` numbers the loops a `:list` writes.
+gen fn mfPattern(p: mf.I18nPattern, decls: Array<Decl>, args: Array<Arg>, tag: String, n: modify Int64) -> Code {
+    let mut stmts: Array<Code> = []
+    for part in p.parts {
+        match part {
+            I18nPartI18nText(t) => {
+                stmts.push(vyrn"__acc = __acc + \{mfUnescape(t.text)}")
+            }
+            I18nPartI18nExpression(e) => {
+                let a = args[argIndex(args, mfResolve(decls, e.var.name.text, "").arg)]
+                let v = name(a.name)
+                if a.kind == "number" {
+                    stmts.push(vyrn"__acc = __acc + \{v}.toString()")
+                } else if a.kind == "list" {
+                    n = n + 1
+                    stmts.push(mfList(v, tag, n))
                 } else {
-                    return argError("unknown argument type (expected `plural` or `select`)")
+                    stmts.push(vyrn"__acc = __acc + \{v}")
                 }
             }
-            i = close
-        } else {
-            i = i + 1
         }
     }
-    return dedupeArgs(names, kinds, branches)
+    return join(stmts, vyrn"\n")
 }
 
-/// The remainder of `ba[s..e)` after the leading `name, kw,`.
-gen fn branchBlob(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
-    let mut depth = 0
-    let mut quoted = false
-    let mut commas = 0
-    let mut i = s
-    while i < e {
-        let b = ba[i]
-        if b == '\x27' {
-            let q = icuApostrophe(ba, i, e, quoted)
-            quoted = q.quoted
-            i = i + q.advance
-        } else if quoted {
-            i = i + 1
-        } else if b == '{' {
-            depth = depth + 1
-            i = i + 1
-        } else if b == '}' {
-            depth = depth - 1
-            i = i + 1
-        } else if b == ',' && depth == 0 {
-            commas = commas + 1
-            i = i + 1
-            if commas == 2 {
-                return sliceStr(ba, i, e)
+/// The CLDR conjunction of a list in locale `tag`: between two items, between the
+/// earlier items of a longer list, and before its last item. Empty when the table has
+/// no such locale.
+gen fn listSeparators(tag: String) -> Array<String> {
+    if tag == "en" {
+        return [" and ", ", ", ", and "]
+    }
+    if tag == "uk" {
+        return [" \u{456} ", ", ", " \u{456} "]
+    }
+    return []
+}
+
+/// The statements appending the items of list `v` to `__acc`, joined as locale `tag`
+/// joins a list.
+gen fn mfList(v: Name, tag: String, n: Int64) -> Code {
+    let seps = listSeparators(tag)
+    let i = name("__i\{n}")
+    return vyrn"""
+        let mut \{i} = 0
+        while \{i} < \{v}.length {
+            if \{i} > 0 {
+                if \{i} < \{v}.length - 1 {
+                    __acc = __acc + \{seps[1]}
+                } else if \{v}.length == 2 {
+                    __acc = __acc + \{seps[0]}
+                } else {
+                    __acc = __acc + \{seps[2]}
+                }
             }
-        } else {
-            i = i + 1
+            __acc = __acc + \{v}[\{i}]
+            \{i} = \{i} + 1
         }
-    }
-    return ""
+        """
 }
 
-/// Drop duplicate argument names (one can appear in several branches),
-/// keeping the first kind and branches.
-gen fn dedupeArgs(names: Array<String>, kinds: Array<String>, branches: Array<String>) -> ArgScan {
-    let mut on: Array<String> = []
-    let mut ok2: Array<String> = []
-    let mut ob: Array<String> = []
+/// The index of `k` in `keys`, or -1.
+gen fn keyIndex(keys: Array<String>, k: String) -> Int64 {
     let mut i = 0
-    while i < names.length {
-        let mut seen = false
-        let mut j = 0
-        while j < on.length {
-            if on[j] == names[i] {
-                seen = true
-            }
-            j = j + 1
-        }
-        if seen == false {
-            on.push(names[i].copy())
-            ok2.push(kinds[i].copy())
-            ob.push(branches[i].copy())
+    while i < keys.length {
+        if keys[i] == k {
+            return i
         }
         i = i + 1
     }
-    return ArgScan { ok: true, error: "", names: on, kinds: ok2, branches: ob }
+    return -1
 }
 
-/// An order-independent signature of an argument set, for drift equality.
-gen fn argSignature(sc: ArgScan) -> String {
-    let mut items: Array<String> = []
+/// A `.match` as an `if` chain. A `:number` selector tries its integer keys first,
+/// comparing the count as written, then the locale's plural categories over its
+/// absolute value, then `*`: a category with no variant falls to `*`, not `other`.
+/// A `:string` selector compares its keys.
+gen fn mfMatch(m: mf.I18nMatcher, decls: Array<Decl>, args: Array<Arg>, tag: String, n: modify Int64) -> Code {
+    let d = decls[declIndex(decls, m.sels[0].name.text)]
+    let v = name(d.arg)
+    let mut keys: Array<String> = []
+    let mut bodies: Array<Code> = []
+    for variant in m.variants {
+        keys.push(mfKey(variant.keys[0]))
+        bodies.push(mfPattern(variant.pattern.pattern, decls, args, tag, n))
+    }
+    let star = keyIndex(keys, "*")
+    let other = keyIndex(keys, "other")
+    let mut arms: Array<Code> = []
     let mut i = 0
-    while i < sc.names.length {
-        items.push(sc.names[i] + ":" + sc.kinds[i] + ":" + sc.branches[i])
+    if d.func == "string" {
+        while i < keys.length {
+            if keys[i] != "*" {
+                arms.push(arm(vyrn"\{v} == \{keys[i]}", bodies[i]))
+            }
+            i = i + 1
+        }
+        return ifChainOr(arms, bodies[star])
+    }
+    while i < keys.length {
+        if let Some(exact) = parseInt64(keys[i]) {
+            arms.push(arm(vyrn"\{v} == \{exact}", bodies[i]))
+        }
         i = i + 1
+    }
+    for cat in pluralCategories(tag) {
+        let k = keyIndex(keys, cat)
+        if k >= 0 {
+            arms.push(arm(pluralCondition(tag, cat, v), bodies[k]))
+        } else if other >= 0 {
+            arms.push(arm(pluralCondition(tag, cat, v), bodies[star]))
+        }
+    }
+    return ifChainOr(arms, if other >= 0 { bodies[other] } else { bodies[star] })
+}
+
+/// `items` in ascending order.
+gen fn sorted(items: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    for s in items {
+        out.push(s.copy())
     }
     let mut a = 1
-    while a < items.length {
+    while a < out.length {
         let mut b = a
-        while b > 0 && items[b - 1] > items[b] {
-            let tmp = items[b - 1].copy()
-            items[b - 1] = items[b].copy()
-            items[b] = tmp
+        while b > 0 && out[b - 1] > out[b] {
+            let tmp = out[b - 1].copy()
+            out[b - 1] = out[b].copy()
+            out[b] = tmp
             b = b - 1
         }
         a = a + 1
     }
-    return joinWith(items, ";")
+    return out
+}
+
+/// An order-independent signature of an argument set, for drift equality.
+gen fn argSignature(args: Array<Arg>) -> String {
+    let mut items: Array<String> = []
+    for a in args {
+        items.push(a.name + ":" + a.kind + ":" + joinWith(sorted(a.keys), ","))
+    }
+    return joinWith(sorted(items), ";")
 }
 
 // CLDR cardinal plural rules for the covered locales, compiled into the
@@ -710,125 +824,12 @@ gen fn pluralCondition(tag: String, cat: String, v: Name) -> Code {
     return vyrn"\{a} != 1 && ((\{a} % 10 >= 0 && \{a} % 10 <= 1) || (\{a} % 10 >= 5 && \{a} % 10 <= 9) || (\{a} % 100 >= 12 && \{a} % 100 <= 14))"
 }
 
-// The body compiler: one message, for one locale, as Vyrn statements that
-// append to `__acc`. `scanArgs` has already accepted the message.
-
-/// The statements building `__acc` for `msg`. `pluralVar` names the number
-/// argument inside a plural branch, so `#` resolves; it is "" elsewhere.
-gen fn compileBody(msg: String, tag: String, pluralVar: String) -> Code {
-    let ba = bytes(msg)
-    let e = ba.length
-    let mut stmts: Array<Code> = []
-    let mut i = 0
-    while i < e {
-        let lit = readLiteral(ba, i, e, pluralVar != "")
-        if lit.text.byteLength > 0 {
-            stmts.push(vyrn"__acc = __acc + \{lit.text}")
-        }
-        i = lit.next
-        if i >= e {
-            i = e
-        } else {
-            let b = ba[i]
-            if b == '#' && pluralVar != "" {
-                stmts.push(vyrn"__acc = __acc + \{name(pluralVar)}.toString()")
-                i = i + 1
-            } else if b == '}' {
-                i = i + 1
-            } else if b == '{' {
-                let close = matchBrace(ba, i, e)
-                let parts = splitTopCommas(ba, i + 1, close - 1)
-                if parts.length == 1 {
-                    stmts.push(vyrn"__acc = __acc + \{name(parts[0])}")
-                } else {
-                    let br = parseBranches(branchBlob(ba, i + 1, close - 1))
-                    if parts[1] == "plural" {
-                        stmts.push(compilePlural(br, tag, parts[0]))
-                    } else {
-                        stmts.push(compileSelect(br, tag, parts[0]))
-                    }
-                }
-                i = close
-            } else {
-                i = i + 1
-            }
-        }
-    }
-    return join(stmts, vyrn"\n")
-}
-
-/// A plural placeholder as an `if` chain over the locale's categories, each
-/// branch compiled with `#` bound to `argName`.
-gen fn compilePlural(br: Branches, tag: String, argName: String) -> Code {
-    let n = name(argName)
-    // Exact `=N` selectors come first and compare the count as written, not
-    // |count|: ICU's explicit value is a separate selector form without plural
-    // operands. `=1` on |count| would say "one file" for -1.
-    let mut arms: Array<Code> = []
-    for b in br.branches {
-        if startsWith(b.selector, "=") {
-            // scanArgs refuses a selector that is not `=` and an integer.
-            if let Some(v) = parseInt64(substring(b.selector, 1, b.selector.byteLength)) {
-                arms.push(arm(vyrn"\{n} == \{v}", compileBody(b.text, tag, argName)))
-            }
-        }
-    }
-    for cat in pluralCategories(tag) {
-        arms.push(arm(pluralCondition(tag, cat, n), compileBody(branchText(br, cat), tag, argName)))
-    }
-    return ifChainOr(arms, compileBody(branchText(br, "other"), tag, argName))
-}
-
-/// A select placeholder as an equality chain over the branch names.
-gen fn compileSelect(br: Branches, tag: String, argName: String) -> Code {
-    let n = name(argName)
-    let mut arms: Array<Code> = []
-    for b in br.branches {
-        if b.selector != "other" {
-            arms.push(arm(vyrn"\{n} == \{b.selector}", compileBody(b.text, tag, "")))
-        }
-    }
-    return ifChainOr(arms, compileBody(branchText(br, "other"), tag, ""))
-}
-
 // Drift errors: one `std/diag` report per issue, anchored in the locale file.
 
 /// A report anchored at line 1, column 1 of a locale file: a flattened entry
 /// keeps no offset into its JSON.
 gen fn localeErr(dir: String, tag: String, message: String) -> Code {
     return report(Error, dir + "/" + tag + ".json", 1, 1, message)
-}
-
-/// Whether a message has an unmatched `{` or a stray `}`, quote-aware. An
-/// unbalanced brace would otherwise invent a parameter or drop text.
-gen fn icuBadBrace(msg: String) -> Bool {
-    let ba = bytes(msg)
-    let e = ba.length
-    let mut depth = 0
-    let mut quoted = false
-    let mut i = 0
-    while i < e {
-        let b = ba[i]
-        if b == '\x27' {
-            let q = icuApostrophe(ba, i, e, quoted)
-            quoted = q.quoted
-            i = i + q.advance
-        } else if quoted {
-            i = i + 1
-        } else if b == '{' {
-            depth = depth + 1
-            i = i + 1
-        } else if b == '}' {
-            if depth == 0 {
-                return true
-            }
-            depth = depth - 1
-            i = i + 1
-        } else {
-            i = i + 1
-        }
-    }
-    return depth != 0
 }
 
 /// Key-collision messages for the base locale, each naming the colliding keys
@@ -960,22 +961,39 @@ gen fn checkedLocales(dir: String, functionsOnly: Bool) -> Code {
         return join(errs, vyrn"")
     }
 
-    // An unbalanced brace in any locale fails, naming the key.
-    let mut bi = 0
-    while bi < tags.length {
-        let bd = datas[bi]
-        let mut bk = 0
-        while bk < bd.entries.length {
-            if icuBadBrace(bd.entries[bk].value) {
-                errs.push(localeErr(
-                    dir,
-                    tags[bi],
-                    "key `\{bd.entries[bk].key}` has an unbalanced brace — every `{` needs a matching `}`, and a literal brace is written `'{'`",
-                ))
+    // Each message of each locale is read once. A list or a `:number` selector needs
+    // the locale in its table.
+    let mut msgs: Array<Array<Message>> = []
+    let mut li = 0
+    while li < tags.length {
+        let tag = tags[li]
+        let mut read: Array<Message> = []
+        for e in datas[li].entries {
+            match readMessage(e.value) {
+                Ok(m) => {
+                    if m.plural && pluralSupported(tag) == false {
+                        errs.push(localeErr(
+                            dir,
+                            tag,
+                            "key `\{e.key}` selects on a `:number`, and locale `\{tag}` has no plural rule in this generator's table: select without `:number`, or drop the locale",
+                        ))
+                    }
+                    if listed(m.args) && listSeparators(tag).length == 0 {
+                        errs.push(localeErr(
+                            dir,
+                            tag,
+                            "key `\{e.key}` formats a `:list`, and locale `\{tag}` has no list pattern in this generator's table: write the items out, or drop the locale",
+                        ))
+                    }
+                    read.push(m)
+                }
+                Err(why) => {
+                    errs.push(localeErr(dir, tag, "key `\{e.key}` is not a message std/i18n reads: \{why}"))
+                }
             }
-            bk = bk + 1
         }
-        bi = bi + 1
+        msgs.push(read)
+        li = li + 1
     }
     if errs.length > 0 {
         return join(errs, vyrn"")
@@ -986,7 +1004,7 @@ gen fn checkedLocales(dir: String, functionsOnly: Bool) -> Code {
     // signatures and types.
     let base = datas[0]
     let baseTag = tags[0]
-    let mut li = 0
+    li = 0
     while li < tags.length {
         let d = datas[li]
         let tag = tags[li]
@@ -1017,35 +1035,17 @@ gen fn checkedLocales(dir: String, functionsOnly: Bool) -> Code {
     let mut ki = 0
     while ki < base.entries.length {
         let key = base.entries[ki].key
-        let baseScan = scanArgs(base.entries[ki].value)
-        if baseScan.ok == false {
-            // A base the scanner refuses is reported as that refusal, not as a
-            // mismatch against every locale.
-            return localeErr(
-                dir,
-                baseTag,
-                "key `\{key}` uses ICU this generator does not support — \{baseScan.error}",
-            )
-        }
-        let baseSig = argSignature(baseScan)
+        let baseSig = argSignature(msgs[0][ki].args)
         let mut lj = 1
         while lj < tags.length {
-            let d = datas[lj]
-            let vi = entryIndex(d, key)
+            let vi = entryIndex(datas[lj], key)
             if vi >= 0 {
-                let sc = scanArgs(d.entries[vi].value)
-                if sc.ok == false {
-                    return localeErr(
-                        dir,
-                        tags[lj],
-                        "key `\{key}` uses ICU this generator does not support — \{sc.error}",
-                    )
-                }
-                if argSignature(sc) != baseSig {
+                let sig = argSignature(msgs[lj][vi].args)
+                if sig != baseSig {
                     errs.push(localeErr(
                         dir,
                         tags[lj],
-                        "key `\{key}` takes `\{argSignature(sc)}` here and `\{baseSig}` in `\{baseTag}` — one key has one signature across every locale",
+                        "key `\{key}` takes `\{sig}` here and `\{baseSig}` in `\{baseTag}` — one key has one signature across every locale",
                     ))
                 }
             }
@@ -1056,56 +1056,38 @@ gen fn checkedLocales(dir: String, functionsOnly: Bool) -> Code {
     if errs.length > 0 {
         return join(errs, vyrn"")
     }
+    return if functionsOnly { buildCatalogue(tags, datas, msgs) } else { buildModule(tags, datas, msgs) }
+}
 
-    ki = 0
-    while ki < base.entries.length {
-        let sc = scanArgs(base.entries[ki].value)
-        if sc.ok == false {
-            return localeErr(
-                dir,
-                baseTag,
-                "key `\{base.entries[ki].key}` uses ICU this generator does not support — \{sc.error}",
-            )
+/// Whether a message formats a `:list`.
+gen fn listed(args: Array<Arg>) -> Bool {
+    for a in args {
+        if a.kind == "list" {
+            return true
         }
-        // A plural argument needs a covered plural rule in every locale.
-        let mut ai = 0
-        while ai < sc.kinds.length {
-            if sc.kinds[ai] == "plural" {
-                let mut lj = 0
-                while lj < tags.length {
-                    if pluralSupported(tags[lj]) == false {
-                        return localeErr(
-                            dir,
-                            tags[lj],
-                            "key `\{base.entries[ki].key}` uses `plural`, and locale `\{tags[lj]}` has no plural rule in this generator's table — write the key without `plural`, or drop the locale",
-                        )
-                    }
-                    lj = lj + 1
-                }
-            }
-            ai = ai + 1
-        }
-        ki = ki + 1
     }
-
-    return if functionsOnly { buildCatalogue(tags, datas) } else { buildModule(tags, datas) }
+    return false
 }
 
 /// What a `catalogue` writes.
-gen fn buildCatalogue(tags: Array<String>, datas: Array<LocaleData>) -> Code {
-    let mut decls: Array<Code> = [buildSelectTypes(datas[0])]
-    for e in datas[0].entries {
+gen fn buildCatalogue(tags: Array<String>, datas: Array<LocaleData>, msgs: Array<Array<Message>>) -> Code {
+    let mut decls: Array<Code> = [buildSelectTypes(datas[0], msgs[0])]
+    let mut ki = 0
+    while ki < datas[0].entries.length {
+        let key = datas[0].entries[ki].key
         let mut li = 0
         while li < tags.length {
-            decls.push(vyrn"export " + buildLocaleFn(e.key, tags[li], datas[li], scanArgs(e.value)))
+            let m = msgs[li][entryIndex(datas[li], key)]
+            decls.push(vyrn"export " + buildLocaleFn(key, tags[li], m, msgs[0][ki].args))
             li = li + 1
         }
+        ki = ki + 1
     }
     return join(decls, vyrn"\n") + vyrn"\n"
 }
 
 /// The whole generated module.
-gen fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> Code {
+gen fn buildModule(tags: Array<String>, datas: Array<LocaleData>, msgs: Array<Array<Message>>) -> Code {
     let base = datas[0]
     let mut locales: Array<Code> = []
     for tag in tags {
@@ -1126,32 +1108,33 @@ gen fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> Code {
         export fn locale() -> Locale { return currentLocale }
         export type TransKey = String where value =~ \{keySet}
         """)
-    decls.push(buildSelectTypes(base))
-    for e in base.entries {
-        decls.push(buildKeyFns(e.key, e.value, tags, datas))
+    decls.push(buildSelectTypes(base, msgs[0]))
+    let mut ki = 0
+    while ki < base.entries.length {
+        decls.push(buildKeyFns(ki, tags, datas, msgs))
+        ki = ki + 1
     }
-    decls.push(buildT(tags, datas))
+    decls.push(buildT(tags, datas, msgs))
     decls.push(buildTransKey(base))
     return join(decls, vyrn"\n") + vyrn"\n"
 }
 
-/// One finite string type per `select` argument of a key in `base`.
-gen fn buildSelectTypes(base: LocaleData) -> Code {
+/// One finite string type per `select` argument of a key in `base`: its keys but `*`.
+gen fn buildSelectTypes(base: LocaleData, read: Array<Message>) -> Code {
     let mut decls: Array<Code> = []
-    for e in base.entries {
-        let sc = scanArgs(e.value)
-        let mut ai = 0
-        while ai < sc.names.length {
-            if sc.kinds[ai] == "select" {
+    let mut ki = 0
+    while ki < base.entries.length {
+        for a in read[ki].args {
+            if a.kind == "select" {
                 let mut sels: Array<String> = []
-                for sel in splitCsv(sc.branches[ai]) {
-                    sels.push(regexEscapeKey(sel))
+                for k in sorted(a.keys) {
+                    sels.push(regexEscapeKey(k))
                 }
                 let selSet = "(" + joinWith(sels, "|") + ")"
-                decls.push(vyrn"export type \{selectType(e.key, sc.names[ai])} = String where value =~ \{selSet}")
+                decls.push(vyrn"export type \{selectType(base.entries[ki].key, a.name)} = String where value =~ \{selSet}")
             }
-            ai = ai + 1
         }
+        ki = ki + 1
     }
     return join(decls, vyrn"\n")
 }
@@ -1176,76 +1159,59 @@ gen fn buildTransKey(base: LocaleData) -> Code {
         """
 }
 
-/// Split a comma-joined string (no quoting) into parts.
-gen fn splitCsv(s: String) -> Array<String> {
-    let ba = bytes(s)
-    let mut parts: Array<String> = []
-    let mut start = 0
-    let mut i = 0
-    while i < ba.length {
-        if ba[i] == ',' {
-            parts.push(sliceStr(ba, start, i))
-            start = i + 1
-        }
-        i = i + 1
-    }
-    if ba.length > 0 {
-        parts.push(sliceStr(ba, start, ba.length))
-    }
-    return parts
-}
-
 /// The type of select argument `arg` of `key`: `TStatusState`.
 gen fn selectType(key: String, arg: String) -> Name {
     return name("T" + keyTypeBase(key) + upperFirst(arg))
 }
 
 /// The parameters `count: Int64, name: String` of a key's arguments.
-gen fn paramList(key: String, sc: ArgScan) -> Code {
+gen fn paramList(key: String, args: Array<Arg>) -> Code {
     let mut params: Array<Code> = []
-    let mut i = 0
-    while i < sc.names.length {
-        params.push(vyrn"\{name(sc.names[i])}: \{argType(key, sc.names[i], sc.kinds[i])}")
-        i = i + 1
+    for a in args {
+        params.push(vyrn"\{name(a.name)}: \{argType(key, a)}")
     }
     return join(params, vyrn", ")
 }
 
 /// The arguments `count, name` that forward a key's parameters.
-gen fn argList(sc: ArgScan) -> Code {
-    let mut args: Array<Code> = []
-    for n in sc.names {
-        args.push(vyrn"\{name(n)}")
+gen fn argList(args: Array<Arg>) -> Code {
+    let mut out: Array<Code> = []
+    for a in args {
+        out.push(vyrn"\{name(a.name)}")
     }
-    return join(args, vyrn", ")
+    return join(out, vyrn", ")
 }
 
-gen fn argType(key: String, arg: String, kind: String) -> Code {
-    if kind == "plural" {
+gen fn argType(key: String, a: Arg) -> Code {
+    if a.kind == "number" {
         return vyrn"Int64"
     }
-    if kind == "select" {
-        return vyrn"\{selectType(key, arg)}"
+    if a.kind == "select" {
+        return vyrn"\{selectType(key, a.name)}"
+    }
+    if a.kind == "list" {
+        return vyrn"Array<String>"
     }
     return vyrn"String"
 }
 
-/// The functions of one key: a private helper per locale and the exported
-/// dispatcher over `currentLocale`, documented with the base message.
-gen fn buildKeyFns(key: String, baseVal: String, tags: Array<String>, datas: Array<LocaleData>) -> Code {
-    let sc = scanArgs(baseVal)
+/// The functions of the key at `ki` of the base locale: a private helper per locale
+/// and the exported dispatcher over `currentLocale`, documented with the base message.
+gen fn buildKeyFns(ki: Int64, tags: Array<String>, datas: Array<LocaleData>, msgs: Array<Array<Message>>) -> Code {
+    let key = datas[0].entries[ki].key
+    let args = msgs[0][ki].args
     let f = name(keyFnName(key))
     let plain = name(keyPlainName(key))
-    let params = paramList(key, sc)
-    let args = argList(sc)
-    let doc = docComment(baseVal)
+    let params = paramList(key, args)
+    let forward = argList(args)
+    let doc = docComment(datas[0].entries[ki].value)
     let mut helpers: Array<Code> = []
     let mut arms: Array<Code> = []
     let mut li = 0
     while li < tags.length {
         let helper = name(keyFnName(key) + "__" + upperFirst(tags[li]))
-        helpers.push(buildLocaleFn(key, tags[li], datas[li], sc))
-        arms.push(vyrn"\{name(upperFirst(tags[li]))} => \{helper}(\{args})")
+        helpers.push(buildLocaleFn(key, tags[li], msgs[li][entryIndex(datas[li], key)], args))
+        arms.push(vyrn"\{name(upperFirst(tags[li]))} => \{helper}(\{forward})")
         li = li + 1
     }
     let fns = join(helpers, vyrn"\n")
@@ -1259,20 +1225,20 @@ gen fn buildKeyFns(key: String, baseVal: String, tags: Array<String>, datas: Arr
         }
         /// \{doc}
         export fn \{plain}(\{params}) -> String {
-            return \{f}(\{args})
+            return \{f}(\{forward})
         }
         """
 }
 
-/// The function of `key` in the locale `tag`, whose data is `d`.
-gen fn buildLocaleFn(key: String, tag: String, d: LocaleData, sc: ArgScan) -> Code {
+/// The function of `key` in the locale `tag`: the message `m`, under the base
+/// locale's arguments `args`.
+gen fn buildLocaleFn(key: String, tag: String, m: Message, args: Array<Arg>) -> Code {
     let helper = name(keyFnName(key) + "__" + upperFirst(tag))
-    let params = paramList(key, sc)
-    let body = compileBody(d.entries[entryIndex(d, key)].value, tag, "")
+    let params = paramList(key, args)
     return vyrn"""
         fn \{helper}(\{params}) -> String {
             let mut __acc = ""
-            \{body}
+            \{mfBody(m, tag)}
             return __acc
         }
         """
@@ -1294,18 +1260,18 @@ gen fn docComment(msg: String) -> String {
 
 /// Emits `t(key)`: the current locale's text of an argument-less key, and the
 /// raw pattern of a key that takes arguments.
-gen fn buildT(tags: Array<String>, datas: Array<LocaleData>) -> Code {
+gen fn buildT(tags: Array<String>, datas: Array<LocaleData>, msgs: Array<Array<Message>>) -> Code {
     let base = datas[0]
     let mut tests: Array<Code> = []
-    for e in base.entries {
-        if scanArgs(e.value).names.length == 0 {
+    let mut ki = 0
+    while ki < base.entries.length {
+        let e = base.entries[ki]
+        if msgs[0][ki].args.length == 0 {
             let mut arms: Array<Code> = []
             let mut li = 0
             while li < tags.length {
-                let d = datas[li]
-                let msg = bytes(d.entries[entryIndex(d, e.key)].value)
-                let lit = readLiteral(msg, 0, msg.length, false)
-                arms.push(vyrn"\{name(upperFirst(tags[li]))} => \{lit.text}")
+                let text = msgs[li][entryIndex(datas[li], e.key)].text
+                arms.push(vyrn"\{name(upperFirst(tags[li]))} => \{text}")
                 li = li + 1
             }
             let texts = join(arms, vyrn", ")
@@ -1321,6 +1287,7 @@ gen fn buildT(tags: Array<String>, datas: Array<LocaleData>) -> Code {
                 }
                 """)
         }
+        ki = ki + 1
     }
     let body = join(tests, vyrn"\n")
     return vyrn"""
@@ -1333,9 +1300,93 @@ gen fn buildT(tags: Array<String>, datas: Array<LocaleData>) -> Code {
 
 // The tests feed the pure helpers source strings; no file I/O.
 
-/// The statements `compileBody` writes for `msg`, which a test can read.
+/// The statements `readMessage` writes for `msg`, or its refusal, which a test can read.
 gen fn bodyText(msg: String, tag: String) -> String {
-    return render(compileBody(msg, tag, ""))
+    return match readMessage(msg) {
+        Ok(m) => render(mfBody(m, tag)),
+        Err(why) => why,
+    }
+}
+
+/// The arguments of `msg` as `name:kind:keys`, or its refusal.
+gen fn argsText(msg: String) -> String {
+    return match readMessage(msg) {
+        Ok(m) => argSignature(m.args),
+        Err(why) => why,
+    }
+}
+
+test "readMessage finds a plain string arg" {
+    assertEq(argsText("Hello, {$name}!"), "name:string:")
+}
+
+test "readMessage finds a number selector" {
+    assertEq(argsText(".input {$count :number}\n.match $count\none {{{$count} item}}\n* {{{$count} items}}"), "count:number:")
+}
+
+test "readMessage finds a string selector with its keys" {
+    assertEq(argsText(".input {$state :string}\n.match $state\nactive {{A}}\npaused {{P}}\n* {{O}}"), "state:select:active,paused")
+}
+
+test "argSignature is order-independent for drift" {
+    let a = argsText(".input {$count :number}\n.match $count\none {{{$name}: {$count}}}\n* {{{$name}: {$count}}}")
+    let b = argsText(".input {$name :string}\n.input {$count :number}\n.match $count\n* {{{$count} for {$name}}}")
+    assertEq(a, b)
+}
+
+test "a number selector compiles to an if-chain over the absolute value" {
+    let code = bodyText(".input {$count :number}\n.match $count\none {{{$count} item}}\n* {{{$count} items}}", "en")
+    assert(code.contains("(if count < 0 { 0 - count } else { count }) == 1"))
+    assert(code.contains("count.toString()"))
+}
+
+test "an integer key matches the count itself, not its absolute value" {
+    let code = bodyText(".input {$n :number}\n.match $n\n1 {{one file}}\n* {{{$n} files}}", "en")
+    assert(code.contains("if n == 1"))
+}
+
+test "a category with no variant falls to the catch-all, not to other" {
+    let code = bodyText(".input {$n :number}\n.match $n\none {{one}}\nother {{other}}\n* {{star}}", "uk")
+    assert(code.contains("star"))
+}
+
+test "a quoted key may hold any text" {
+    assertEq(argsText(".input {$state :string}\n.match $state\n|on, off| {{X}}\n* {{Y}}"), "state:select:on, off")
+}
+
+test "a number key that is neither an integer nor a category is refused" {
+    assert(argsText(".input {$n :number}\n.match $n\n1.5 {{x}}\n* {{y}}").contains("is no key of a `:number` selector"))
+}
+
+test "an apostrophe is text, and a backslash escapes a brace" {
+    assertEq(argsText("It's {$name}!"), "name:string:")
+    assertEq(mfUnescape("x \\{ y \\} \\\\"), "x { y } \\")
+}
+
+test "readMessage refuses an unmatched or stray brace" {
+    assert(argsText("50% off { sale").contains("line 1, column 11: a literal placeholder"))
+    assert(argsText("a } b").contains("closes nothing"))
+    assertEq(argsText("x \\{ y"), "")
+}
+
+test "readMessage refuses what MessageFormat 2 has and std/i18n does not" {
+    assert(argsText("{#b}bold{/b}").contains("markup"))
+    assert(argsText("{$n :number minimumFractionDigits=2}").contains("option"))
+    assert(argsText("{$n :datetime}").contains("not a function std/i18n knows"))
+    assert(argsText(".match $n\n* {{x}}").contains("needs a declaration with a function"))
+    assert(argsText(".input {$a :number}\n.input {$b :number}\n.match $a $b\n* * {{x}}").contains("one selector"))
+    assert(argsText(".input {$n :number}\n.match $n\none {{x}}").contains("all `*`"))
+    assert(argsText(".input {$n :number}\n.input {$n :number}\n{{x}}").contains("declared twice"))
+    assert(argsText("{$a-b}").contains("no parameter name"))
+}
+
+test "a local reads its argument under its function" {
+    assertEq(argsText(".local $c = {$count :number}\n.match $c\none {{one}}\n* {{{$c}}}"), "count:number:")
+}
+
+test "a list joins its items as the locale does" {
+    assertEq(argsText("{$xs :list}"), "xs:list:")
+    assert(bodyText("{$xs :list}", "en").contains(", and "))
 }
 
 /// The condition `pluralCondition` writes over `count`, which a test can read.
@@ -1364,46 +1415,11 @@ test "parseLocaleJson decodes escapes" {
     assertEq(d.entries[0].value.byteLength, 3)
 }
 
-test "scanArgs finds a plain string arg" {
-    let sc = scanArgs("Hello, {name}!")
-    assert(sc.ok)
-    assertEq(sc.names.length, 1)
-    assertEq(sc.names[0], "name")
-    assertEq(sc.kinds[0], "string")
-}
-
-test "scanArgs finds a plural arg" {
-    let sc = scanArgs("{count, plural, one {# item} other {# items}}")
-    assert(sc.ok)
-    assertEq(sc.names.length, 1)
-    assertEq(sc.kinds[0], "plural")
-}
-
-test "scanArgs finds a select arg with branch names" {
-    let sc = scanArgs("{state, select, active {A} paused {P} other {O}}")
-    assert(sc.ok)
-    assertEq(sc.kinds[0], "select")
-    assertEq(sc.branches[0], "active,other,paused")
-}
-
-test "argSignature is order-independent for drift" {
-    let a = argSignature(scanArgs("{name}: {count, plural, one {#} other {#}}"))
-    let b = argSignature(scanArgs("{count, plural, one {#} other {#}} for {name}"))
-    assertEq(a, b)
-}
-
 test "plural categories cover the Slavic locales" {
     assertEq(pluralCategories("uk").length, 3)
     assertEq(pluralCategories("en").length, 1)
     assertEq(pluralCategories("ja").length, 0)
     assertEq(pluralSupported("xx"), false)
-}
-
-test "compileBody turns a plural into an if-chain" {
-    let code = bodyText("{count, plural, one {# item} other {# items}}", "en")
-    // Categories use |count|; `#` still prints the raw count.
-    assert(code.contains("(if count < 0 { 0 - count } else { count }) == 1"))
-    assert(code.contains("count.toString()"))
 }
 
 test "plural conditions take the absolute value, so negatives pick the CLDR branch" {
@@ -1417,24 +1433,6 @@ test "plural conditions take the absolute value, so negatives pick the CLDR bran
     assert(many.contains("(if count < 0 { 0 - count } else { count }) % 100 >= 11"))
 }
 
-test "an exact `=N` selector matches the count itself, not its absolute value" {
-    // An explicit value compares the count as written: `=1` must not fire on
-    // -1.
-    let code = bodyText("{n, plural, =1 {one file} other {# files}}", "en")
-    // `en` also emits its `one` category, so check that the explicit clause is
-    // the plain comparison.
-    assert(code.contains("if n == 1"))
-    assert(code.contains("(if n < 0 { 0 - n } else { n }) == 1"))
-}
-
-test "a select selector containing a comma is refused at scan time" {
-    // A comma in a selector would break the comma-joined branch set, so it is
-    // refused.
-    let sc = scanArgs("{state, select, on,off {X} other {Y}}")
-    assert(sc.ok == false)
-    assert(sc.error.contains("serialized comma-joined"))
-}
-
 test "keyFnName pascalizes dotted keys" {
     assertEq(keyFnName("cart.items"), "tCartItems")
     assertEq(keyFnName("home.title"), "tHomeTitle")
@@ -1442,42 +1440,6 @@ test "keyFnName pascalizes dotted keys" {
 
 test "regexEscapeKey escapes a dot" {
     assertEq(regexEscapeKey("a.b"), "a\\.b")
-}
-
-test "an exact selector that is not an integer is refused at scan time" {
-    let sc = scanArgs("{n, plural, =one {x} other {y}}")
-    assert(sc.ok == false)
-    assert(sc.error.contains("plural selector `=one` is not `=` and an integer"))
-}
-
-test "readLiteral keeps a lone apostrophe and does not swallow the placeholder" {
-    // "It's " must survive with its apostrophe, and stop AT the `{`.
-    let lit = readLiteral(bytes("It's {name}!"), 0, bytes("It's {name}!").length, false)
-    assertEq(lit.text, "It's ")
-    // The scanner stopped at the `{`, so the placeholder is still to come.
-    assertEq(bytes("It's {name}!")[lit.next], 123)
-}
-
-test "readLiteral: paired '' is one apostrophe, '{' is a literal brace" {
-    let a = readLiteral(bytes("b''c"), 0, bytes("b''c").length, false)
-    assertEq(a.text, "b'c")
-    let d = readLiteral(bytes("x '{' y"), 0, bytes("x '{' y").length, false)
-    assertEq(d.text, "x { y")
-}
-
-test "scanArgs sees the arg through an apostrophe-bearing literal" {
-    let sc = scanArgs("It's {name}!")
-    assert(sc.ok)
-    assertEq(sc.names.length, 1)
-    assertEq(sc.names[0], "name")
-}
-
-test "icuBadBrace flags an unmatched or stray brace, quote-aware" {
-    assert(icuBadBrace("50% off { sale"))
-    assert(icuBadBrace("a } b"))
-    assertEq(icuBadBrace("Hello, {name}!"), false)
-    // A quoted brace is a literal, not a delimiter.
-    assertEq(icuBadBrace("x '{' y"), false)
 }
 
 test "keyCollisionErrors names every collision class" {

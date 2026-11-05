@@ -8,13 +8,13 @@
         "about": { "label": "About" }
     },
     "bin": {
-        "count": "{n, plural, one {# paste} other {# pastes}}",
+        "count": ".input {$n :number}\n.match $n\none {{{$n} paste}}\n* {{{$n} pastes}}",
         "empty": "No pastes yet — create one below.",
         "untitled": "(untitled)",
         "raw": "raw",
         "viewRaw": "view raw →",
         "backHome": "← new paste",
-        "created": "created {n} UTC",
+        "created": "created {$n} UTC",
         "langLabel": "Language",
         "create": "New paste",
         "titleField": "Title (optional)",

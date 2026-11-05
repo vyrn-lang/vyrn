@@ -8,13 +8,13 @@
         "about": { "label": "Про застосунок" }
     },
     "bin": {
-        "count": "{n, plural, one {# вставка} few {# вставки} many {# вставок} other {# вставки}}",
+        "count": ".input {$n :number}\n.match $n\none {{{$n} вставка}}\nfew {{{$n} вставки}}\nmany {{{$n} вставок}}\n* {{{$n} вставки}}",
         "empty": "Ще немає вставок — створіть нижче.",
         "untitled": "(без назви)",
         "raw": "сирий",
         "viewRaw": "сирий текст →",
         "backHome": "← нова вставка",
-        "created": "створено {n} UTC",
+        "created": "створено {$n} UTC",
         "langLabel": "Мова коду",
         "create": "Нова вставка",
         "titleField": "Назва (необовʼязково)",

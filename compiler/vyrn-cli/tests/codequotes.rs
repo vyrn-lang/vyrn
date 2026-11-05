@@ -293,7 +293,7 @@ fn i18n_translation_with_quotes_and_backslashes_bakes_losslessly() {
     std::fs::create_dir_all(dir.join("locales")).unwrap();
     write(
         &dir.join("locales/en.json"),
-        r#"{ "quote.msg": "say \"hi\" \\ ok" }"#,
+        r#"{ "quote.msg": "say \"hi\" \\\\ ok" }"#,
     );
     let app = "import { i18n } from \"std/i18n\"\n\
                import { tQuoteMsg } from i18n(\"./locales\")\n\

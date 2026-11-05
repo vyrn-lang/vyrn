@@ -134,12 +134,12 @@ Each of these is a library of `gen fn`s. The compiler knows none of their domain
 | `std/ui` | `pages(dir)` turns a routes directory into `route(req) -> Response` with a typed URL helper per route. A page module exports what the `Page` contract allows: `head`, `data` (`Query` or `Lazy`), `Params`. |
 | `std/tw` | `tw("theme.json")` generates the utility stylesheet and the `Tw` class type, so a misspelled class is a compile error. |
 | `std/icons` | `icons(collection, names)` generates one function per glyph from an Iconify collection pinned in the lock. A misspelled glyph fails the build with the nearest name. |
-| `std/i18n` | `i18n(dir)` reads every `<locale>.json`, checks that the locales agree, compiles each ICU message to a function, and exports `Locale`, `TransKey` (a finite string type) and `t`. |
+| `std/i18n` | `i18n(dir)` reads every `<locale>.json`, checks that the locales agree, compiles each message, Unicode MessageFormat 2 read by `std/i18n.syntax`, to a function, and exports `Locale`, `TransKey` (a finite string type) and `t`. |
 | `std/rpc` | Typed RPC from a module of procedures: `rpc(dir)`, `client(dir)`, `clientInProcess(dir)`, and the single-module forms `rpcServer`, `rpcClient`, `rpcInProcess`. A rejection carries its `Issue`s. |
 | `std/http` | Hand-written REST routes over the same procedures: `http(module)`, `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, server-sent events (`sse`) and WebSockets (`ws`). |
 | `std/connect` | `connectServer` and `connectClient`: Connect's unary JSON protocol over HTTP/1. |
 | `std/openapi` | `openapi(contract)`: an OpenAPI 3.1 document of the procedures. |
-| `std/graphql` | `sdl(contract)` writes the SDL; `graphqlServer` executes queries against the procedures. |
+| `std/graphql` | `sdl(contract)` writes the SDL; `graphqlServer` executes queries against the procedures. A query is read by `std/graphql.syntax`, at run time, and refused with its sentence from `std/graphql.errors`. |
 
 ### Generator support
 

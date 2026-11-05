@@ -1124,8 +1124,8 @@ fn an_unchanged_rebuild_regenerates_no_provider() {
     let after_first = stamp(&cache);
     assert_eq!(
         after_first.len(),
-        5,
-        "one entry for the template, one per tag, and std/vyx's grammar and catalogue: {after_first:?}"
+        6,
+        "one entry for the template, one per tag, std/vyx's grammar and catalogue, and the message grammar the catalogue reads: {after_first:?}"
     );
     let second = build();
     assert_eq!(first, second, "the cached rebuild rendered differently");

@@ -8,7 +8,7 @@
         "about": { "label": "About" }
     },
     "shelf": {
-        "count": "{n, plural, one {# book} other {# books}}",
+        "count": ".input {$n :number}\n.match $n\none {{{$n} book}}\n* {{{$n} books}}",
         "empty": "No books yet — add one below.",
         "tags": "Tags",
         "add": "Add a book",
@@ -29,8 +29,8 @@
         "web": "Web"
     },
     "book": {
-        "notFound": "No book with id {id}.",
-        "reserved": "Id {id} is reserved and cannot be shown."
+        "notFound": "No book with id {$id}.",
+        "reserved": "Id {$id} is reserved and cannot be shown."
     },
     "lang": {
         "switch": "Мова: українська"
