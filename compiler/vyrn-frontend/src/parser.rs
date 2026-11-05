@@ -540,6 +540,7 @@ fn build(
         proved: Default::default(),
         fenced: Default::default(),
         session: Default::default(),
+        lazy: None,
     };
     let mut bodies = Vec::new();
     let events = std::mem::take(&mut run.events);

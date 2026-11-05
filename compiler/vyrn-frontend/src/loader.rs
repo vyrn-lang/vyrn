@@ -1816,6 +1816,7 @@ fn load_modules(
                     proved: Default::default(),
                     fenced: Default::default(),
                     session: Default::default(),
+                    lazy: None,
                 },
                 import_targets: Vec::new(),
                 generated: None,
@@ -5812,6 +5813,7 @@ fn drop_unreached(
         return;
     }
     let is_lazy = |m: &Option<String>| m.as_ref().is_some_and(|k| lazy.contains(k));
+    program.lazy = Some(std::sync::Arc::new(lazy.iter().cloned().collect()));
     let calls: Vec<String> = (RUNTIME_CALLS.iter())
         .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
         .collect();
@@ -5843,6 +5845,8 @@ fn drop_unreached(
             unparsed.is_empty(),
             "`derive` reached and a body is unparsed"
         );
+        drop(keep);
+        program.lazy = None;
         return;
     }
     assert_parsed(program, &keep, unparsed);

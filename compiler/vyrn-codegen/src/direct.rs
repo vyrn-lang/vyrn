@@ -432,6 +432,9 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             Some(reserved) => reserved,
             None => m.reserve_func(wp, wr),
         };
+        if !cx.world.runs(&f.name) {
+            m.unreached(index);
+        }
         sigs.insert(f.name.clone(), Sig { index, ..s });
     }
     vyrn_rt.check()?;
@@ -1620,6 +1623,11 @@ fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame
                     None => {
                         p.sig.index = m.reserve_func(params, results);
                         let index = p.sig.index;
+                        if let Key::Generic(g, _) | Key::Ho(g, ..) = &p.key {
+                            if !cx.world.runs(g) {
+                                m.unreached(index);
+                            }
+                        }
                         reg.mono.insts.push(p);
                         index
                     }

@@ -74,8 +74,13 @@ pub struct World {
     /// `extern`, `gen`, `main`, synthesized, an `impl` method or derived
     /// function (two `$` in its spelling), or `std/runtime`'s, which the
     /// emitter calls by name, or has a type parameter or a `fn`-typed
-    /// parameter. [`World::summaries`] keeps those whose every caller it walks.
+    /// parameter. [`World::summaries`] keeps those whose every caller that may
+    /// run it walks.
     private: HashSet<FnId>,
+    /// The functions no entry of the emitted module reaches over `calls`
+    /// ([`unreached`]): what [`World::runs`] answers. Empty but on a host
+    /// that folds facts and loaded std lazily.
+    pub(crate) unreached: HashSet<FnId>,
     /// What [`World::summaries`] infers record facts from besides the bodies
     /// ([`crate::elide::Records`]).
     records: crate::elide::Records,
@@ -368,6 +373,47 @@ pub(crate) fn add_callees(top: &Body, fns: &HashMap<&str, (FnId, &Function)>, ou
     }
 }
 
+/// The functions of `program` no entry of its emitted module reaches over
+/// `w`'s calls ([`World::callees`]). An entry is a function of a module
+/// [`Program::lazy`] does not name, an `extern` or `export extern` function,
+/// a function the emitter, a desugar or dispatch enters by its reserved
+/// spelling (a `$` in its name), a function a `fn` value may be
+/// ([`checker::StoredFnEffects::every_source`]), and every row that is no
+/// function: a projection, a test, a bench, a module-state initializer, a
+/// type's check, an instance, a lambda frame. A gen fn is none: it runs only
+/// in its own load. Empty where `program.lazy` is `None`.
+pub(crate) fn unreached(program: &Program, w: &World) -> HashSet<FnId> {
+    let Some(lazy) = &program.lazy else {
+        return HashSet::new();
+    };
+    let lazy = |m: &Option<String>| m.as_ref().is_some_and(|k| lazy.contains(k));
+    let fns = program.functions.len();
+    let entry = |f: &Function| {
+        (!f.is_gen && (!lazy(&f.module) || f.name.contains('$')))
+            || f.is_extern
+            || f.is_export_extern
+    };
+    let mut work: Vec<FnId> = (0..fns)
+        .filter(|&i| entry(&program.functions[i]))
+        .map(FnId::nth)
+        .collect();
+    work.extend((fns..w.fns.rows.len()).map(FnId::nth));
+    let stored = &w.ownership.record.stored;
+    work.extend(
+        stored
+            .every_source()
+            .filter_map(|s| w.fn_id(s.named.as_deref()?)),
+    );
+    // Each row's callees are pushed once, so the walk ends.
+    let mut seen = vec![false; w.fns.rows.len()];
+    while let Some(f) = work.pop() {
+        if !std::mem::replace(&mut seen[f.index()], true) {
+            work.extend(w.callees(f));
+        }
+    }
+    (0..fns).filter(|&i| !seen[i]).map(FnId::nth).collect()
+}
+
 /// One body with its check rows stated, and the same body decided
 /// (`elide::decide`) when an emitter first reads it, so `vyrn check` decides
 /// none of these; it walks its own copy of a body with a group of stores.
@@ -491,12 +537,15 @@ impl World {
     }
 
     /// The callee summaries every decided body reads, over every body
-    /// [`World::body_at`] serves but a generic function's. A call to a generic
+    /// [`World::body_at`] serves that the emitted module may run
+    /// ([`World::runs`]) but a generic function's. A call to a generic
     /// function reads the summary of the instance row its solved type
     /// arguments spell, the body the emitter runs.
     ///
     /// A body may assume facts at its entry only when it is `private` and
-    /// every caller [`World::callers`] names is such a body: a module-state
+    /// every caller [`World::callers`] names that may run is such a body. A
+    /// caller that never runs makes no call, so leaving it out keeps every
+    /// fact the solve proves of the rest. A module-state
     /// initializer, a `where` predicate, a projection and a generic
     /// function's instances count under a row with no body here. No body may
     /// when the judgment memo served a body, whose rows are unknown, or when
@@ -507,17 +556,25 @@ impl World {
             let generic: HashSet<FnId> = (self.fns.rows.iter())
                 .filter_map(|r| Some(r.generic.as_ref()?.0))
                 .collect();
-            let walked =
-                |f: &FnId| !generic.contains(f) && matches!(self.bodies.get(f), Some(Some(_)));
+            let source = |f: &FnId| match &self.fns.rows[f.index()].generic {
+                Some((g, _)) => *g,
+                None => *f,
+            };
+            let runs = |f: &FnId| !self.unreached.contains(&source(f));
+            let walked = |f: &FnId| {
+                !generic.contains(f) && runs(f) && matches!(self.bodies.get(f), Some(Some(_)))
+            };
             let shared = (self.bodies.iter())
                 .any(|(f, s)| s.is_none() && self.fns.rows[f.index()].generic.is_none());
             let known = self.facts.is_some() && !shared;
             let closed: HashSet<FnId> = (self.private.iter())
-                .filter(|f| known && walked(f) && self.callers(**f).iter().all(walked))
+                .filter(|f| {
+                    known && walked(f) && self.callers(**f).iter().filter(|c| runs(c)).all(walked)
+                })
                 .copied()
                 .collect();
             let bodies = (self.bodies.iter())
-                .filter(|(f, _)| !generic.contains(f))
+                .filter(|(f, _)| !generic.contains(f) && runs(f))
                 .filter_map(|(f, s)| Some((*f, &s.as_ref()?.body)));
             let records = known.then_some(&self.records);
             let mut instances: HashMap<FnId, Vec<(Vec<(String, Type)>, FnId)>> = HashMap::new();
@@ -596,6 +653,15 @@ impl World {
     /// allocate: its effect set holds `alloc`.
     pub fn allocating_file(&self, f: FnId) -> Option<&str> {
         self.allocating.get(&f).map(|f| &**f)
+    }
+
+    /// Whether the module emitted from this World may run the function
+    /// emitted under `name`: false only for a function [`unreached`] names.
+    /// The emitter marks each such function (`vyrn_codegen::wasm::Module::unreached`),
+    /// and its sweep panics on one it keeps.
+    pub fn runs(&self, name: &str) -> bool {
+        self.fn_id(name)
+            .is_none_or(|f| !self.unreached.contains(&f))
     }
 
     /// The functions `f`'s bodies call, in source order.

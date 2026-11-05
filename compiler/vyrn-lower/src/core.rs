@@ -8956,6 +8956,9 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         dispatches = crate::dispatches_new(&placed, &by_name, &had);
     }
     w.calls.replace(calls);
+    if folds {
+        w.unreached = crate::world::unreached(program, w);
+    }
     w.facts = folds.then_some(facts);
     (w.refusals, w.typed) = (r.kernel, r.typed);
 }

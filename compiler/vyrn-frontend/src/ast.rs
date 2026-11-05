@@ -317,6 +317,12 @@ pub struct Program {
     /// linked name: its module's stored row (`vyrn_lower::stdrows`), written
     /// before the check. Empty for a program with no given body.
     pub fenced: std::sync::Arc<std::collections::BTreeMap<String, crate::checker::Fenced>>,
+    /// The modules whose unreached functions the load dropped: every `std/`
+    /// module but the root. `None` where the load dropped nothing, as a
+    /// generator's own load and a program that calls `derive` do. An emitted
+    /// module runs a function of one only where an entry calls it
+    /// (`vyrn_lower::World::runs`).
+    pub lazy: Option<std::sync::Arc<std::collections::BTreeSet<String>>>,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only
