@@ -32,9 +32,12 @@ use std::fmt::Write;
 use std::rc::Rc;
 
 use crate::gen::walk;
+use crate::load::first;
 use crate::lower::{can_miss, fallible, free_labels, miss, Miss};
 use crate::shape::{shapes, type_name, Field, Mult, Shape, Ty};
-use crate::{At, Builtin, Embed, Grammar, HoleSrc, Level, Lit, Recover, Refused, RuleId, Throw, E};
+use crate::{
+    At, Builtin, ByteSet, Embed, Grammar, HoleSrc, Level, Lit, Recover, Refused, RuleId, Throw, E,
+};
 
 /// The rules a file may define that no rule has to read: a host's lexer starts at
 /// `scan`, and `trivia` and `token` serve the parser itself.
@@ -335,6 +338,79 @@ fn char_test(e: &E) -> Option<(String, bool)> {
     })
 }
 
+/// A test that the byte `b` is in `set`, one term per run of bytes.
+fn set_test(set: &ByteSet, b: &str) -> String {
+    let has = |c: usize| set[c >> 6] >> (c & 63) & 1 == 1;
+    let mut terms = Vec::new();
+    let mut c = 0;
+    while c < 256 {
+        if !has(c) {
+            c += 1;
+            continue;
+        }
+        let lo = c;
+        while c + 1 < 256 && has(c + 1) {
+            c += 1;
+        }
+        let (l, h) = (byte_lit(lo as u8), byte_lit(c as u8));
+        terms.push(match (lo, c) {
+            _ if lo == c => format!("{b} == {l}"),
+            (0, _) => format!("{b} <= {h}"),
+            (_, 255) => format!("{b} >= {l}"),
+            _ => format!("({b} >= {l} && {b} <= {h})"),
+        });
+        c += 1;
+    }
+    terms.join(" || ")
+}
+
+/// A test of the byte `c` under which `e` matches the one character there and keeps
+/// and refuses nothing, with whether it can hold outside ASCII. An alternative that
+/// has one is reached only past the guards of those before it.
+fn run_test(g: &Grammar, e: &E) -> Option<(String, bool)> {
+    if let Some(t) = char_test(e) {
+        return Some(t);
+    }
+    match e {
+        E::Seq(v) => {
+            let (last, nots) = v.split_last()?;
+            let mut terms = Vec::new();
+            for x in nots {
+                let E::Not(y) = x else { return None };
+                terms.push(format!("!({})", char_test(y)?.0));
+            }
+            let (test, wide) = run_test(g, last)?;
+            terms.push(format!("({test})"));
+            Some((terms.join(" && "), wide))
+        }
+        E::Alt(v) => {
+            let mut terms = Vec::new();
+            for x in v {
+                if let Some((test, wide)) = run_test(g, x) {
+                    terms.push(format!("({test})"));
+                    return Some((terms.join(" && "), wide));
+                }
+                let E::Guard(set, _) = x else { return None };
+                terms.push(format!("!({})", set_test(set, "c")));
+            }
+            None
+        }
+        E::Ref(r) if !g.body(*r).syntactic && !g.body(*r).nest => run_test(g, &g.body(*r).body),
+        _ => None,
+    }
+}
+
+/// Whether `e` tests its first byte before it moves or calls: a guard on it would
+/// test that byte twice.
+fn tests_first(e: &E) -> bool {
+    match e {
+        E::Lit(_) | E::Split(_) => true,
+        E::Seq(v) => v.first().is_some_and(tests_first),
+        E::Field(_, x) | E::Guard(_, x) => tests_first(x),
+        _ => char_test(e).is_some(),
+    }
+}
+
 /// The tests that `s` stands in the text from `k` bytes past the cursor.
 fn bytes_at(s: &[u8], k: usize) -> Vec<String> {
     (s.iter().enumerate())
@@ -593,12 +669,12 @@ impl Writer<'_> {
     fn choice(&mut self, v: &[E], variants: &[Option<String>]) -> Result<String, Refused> {
         let h = self.local("h");
         self.line(format!("let mut {h} = false"));
-        for (i, (x, variant)) in v.iter().zip(variants).enumerate() {
+        for (i, variant) in variants.iter().enumerate() {
             if i > 0 {
                 self.open(format!("if !{h} && !p.refused {{"));
             }
             self.take = variant.clone();
-            self.put_into(&h, x)?;
+            self.put_alt(&h, v, i)?;
             self.take = None;
             if i > 0 {
                 self.close();
@@ -853,6 +929,55 @@ impl Writer<'_> {
         Ok(())
     }
 
+    /// The bytes that guard alternative `i` of `v`, and what they guard. Outside them
+    /// the alternative fails and refuses nothing, so it need not run. A guard pays
+    /// only where a byte outside it starts a later alternative: before refusals alone
+    /// it would speed only the refusal, and before alternatives that start inside it,
+    /// only a mistake.
+    fn guard_of<'e>(&self, v: &'e [E], i: usize) -> Option<(ByteSet, &'e E)> {
+        if tests_first(&v[i]) {
+            return None;
+        }
+        let set = self.first_bytes(&v[i])?;
+        let pays = |x: &E| match (x, self.first_bytes(x)) {
+            (E::Throw(_), _) => false,
+            (_, Some(later)) => later.iter().zip(set).any(|(l, s)| l & !s != 0),
+            (_, None) => true,
+        };
+        if !v[i + 1..].iter().any(pays) {
+            return None;
+        }
+        match &v[i] {
+            E::Guard(_, x) => Some((set, &**x)),
+            x => Some((set, x)),
+        }
+    }
+
+    /// The bytes alternative `e` can start with: the loader's guard in a lexical
+    /// rule, the first bytes in a syntactic one.
+    fn first_bytes(&self, e: &E) -> Option<ByteSet> {
+        match e {
+            E::Guard(set, _) => Some(**set),
+            _ if self.syntactic() => first(self.g, e, &mut Vec::new()),
+            _ => None,
+        }
+    }
+
+    /// Writes alternative `i` of `v` so that the flag `h`, declared and false, says
+    /// whether it matched, behind its guard.
+    fn put_alt(&mut self, h: &str, v: &[E], i: usize) -> Result<(), Refused> {
+        let Some((set, x)) = self.guard_of(v, i) else {
+            return self.put_into(h, &v[i]);
+        };
+        self.open(format!(
+            "if p.pos < p.stop && ({}) {{",
+            set_test(&set, "text[p.pos]")
+        ));
+        self.put_into(h, x)?;
+        self.close();
+        Ok(())
+    }
+
     /// Writes `e` so that the flag `h`, declared and false, says whether it matched.
     /// A call of a syntactic rule sets `h` itself.
     fn put_into(&mut self, h: &str, e: &E) -> Result<(), Refused> {
@@ -942,10 +1067,18 @@ impl Writer<'_> {
             E::Seq(v) if v.is_empty() => "true".into(),
             E::Seq(v) => self.seq(v, true)?,
             E::Alt(v) => {
-                let h = self.flag(&v[0])?;
-                for x in &v[1..] {
+                let h = match self.guard_of(v, 0) {
+                    Some(_) => {
+                        let h = self.local("h");
+                        self.line(format!("let mut {h} = false"));
+                        self.put_alt(&h, v, 0)?;
+                        h
+                    }
+                    None => self.flag(&v[0])?,
+                };
+                for i in 1..v.len() {
                     self.open(format!("if !{h} && !p.refused {{"));
-                    self.put_into(&h, x)?;
+                    self.put_alt(&h, v, i)?;
                     self.close();
                 }
                 h
@@ -1313,20 +1446,20 @@ impl Writer<'_> {
 
     /// `e*`: stops when `e` fails or matches empty.
     fn star(&mut self, x: &E) -> Result<String, Refused> {
-        if let (false, Some((test, wide))) = (self.syntactic(), char_test(x)) {
-            self.open("while p.pos < p.stop {");
-            self.line("let c = text[p.pos]");
-            if test != "true" {
-                self.open(format!("if !({test}) {{"));
-                self.line("break");
-                self.close();
-            }
-            let width = if wide { "charWidth(c)" } else { "1" };
-            self.line(format!("p.pos = p.pos + {width}"));
-            self.close();
+        if let (false, Some((test, _))) = (self.syntactic(), char_test(x)) {
+            self.run(&test);
             return Ok("true".into());
         }
         self.open("while true {");
+        // Each byte the test passes is one round of `x`, so a run of them comes before
+        // the round that reads the rest. A round that tests the run's byte first
+        // costs the run's test, and a run would only test that byte twice.
+        let first_tests = matches!(x, E::Alt(v) if char_test(&v[0]).is_some());
+        if let (false, false, Some((test, _))) =
+            (self.syntactic(), first_tests, run_test(self.g, x))
+        {
+            self.run(&test);
+        }
         let q = self.local("q");
         self.line(format!("let {q} = p.pos"));
         let hit = self.hit(x)?;
@@ -1335,6 +1468,21 @@ impl Writer<'_> {
         self.close();
         self.close();
         Ok("!p.refused".into())
+    }
+
+    /// The loop that passes the bytes `test` holds for. A test answers alike for
+    /// every byte outside ASCII, a character's continuation bytes included, so the
+    /// loop steps one byte and stops on a character's boundary.
+    fn run(&mut self, test: &str) {
+        self.open("while p.pos < p.stop {");
+        self.line("let c = text[p.pos]");
+        if test != "true" {
+            self.open(format!("if !({test}) {{"));
+            self.line("break");
+            self.close();
+        }
+        self.line("p.pos = p.pos + 1");
+        self.close();
     }
 
     /// `&e` as an expression: whether `e` matches here, moving nothing and refusing

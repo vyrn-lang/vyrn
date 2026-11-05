@@ -329,9 +329,10 @@ fn set_byte(s: &mut ByteSet, b: u8) {
 }
 
 /// The bytes `e` can start with after trivia, or `None` when it may match empty
-/// or the set is not worth stating. `seen` holds the rules on the path, so a
-/// rule is entered once per path.
-fn first(g: &Grammar, e: &E, seen: &mut Vec<RuleId>) -> Option<ByteSet> {
+/// or the set is not worth stating. Outside the set `e` fails and refuses nothing.
+/// A `nest` rule refuses at its limit before it reads a byte, so it has no set.
+/// `seen` holds the rules on the path, so a rule is entered once per path.
+pub(crate) fn first(g: &Grammar, e: &E, seen: &mut Vec<RuleId>) -> Option<ByteSet> {
     let mut s = [0u64; 4];
     match e {
         E::Lit(l) => set_byte(&mut s, *l.s.as_bytes().first()?),
@@ -365,7 +366,7 @@ fn first(g: &Grammar, e: &E, seen: &mut Vec<RuleId>) -> Option<ByteSet> {
             }
         }
         E::Ref(r) => {
-            if seen.contains(r) {
+            if seen.contains(r) || g.body(*r).nest {
                 return None;
             }
             seen.push(*r);
