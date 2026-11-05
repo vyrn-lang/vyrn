@@ -115,7 +115,18 @@ fn check(
     let mut judged = None;
     if diags.is_empty() {
         let _p = prof::phase("movecheck");
-        let (found, world) = refusals(program, record(program));
+        let record = record(program);
+        // `vyrn check` serves std's stored rows; a host with a session keeps
+        // its own memo, and an emitting host builds every body.
+        let given = match linker {
+            Some((_, opts, resolver))
+                if !movecheck::emitting() && program.session.get().is_none() =>
+            {
+                crate::stdrows::Given::read(program, &record, opts, resolver, engine)
+            }
+            _ => Default::default(),
+        };
+        let (found, world) = refusals(program, record, given);
         diags.extend(found);
         memory = world.ownership.memory.clone();
         judged = Some(world);
@@ -161,10 +172,11 @@ fn check(
 pub fn refusals(
     program: &ast::Program,
     record: Arc<checker::Recorded>,
+    given: crate::stdrows::Given,
 ) -> (Vec<Diagnostic>, Arc<crate::World>) {
     // The placer judges a core body for every instance. Only this analysis
-    // may reuse a judgment (`movecheck::Judgments`).
-    let world = crate::world::analyzed(program, record, true);
+    // may reuse a judgment (`movecheck::Judgments`) or serve a stored row.
+    let world = crate::world::analyzed(program, record, true, given);
     // A program the typed judgment refuses gets those refusals alone.
     let mut diags = match world.typed_diagnostics() {
         [] => world.refusal_diagnostics(),

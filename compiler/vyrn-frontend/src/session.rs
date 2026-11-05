@@ -17,9 +17,8 @@ use crate::loader::{DiskResolver, ModuleResolver};
 
 /// What one host keeps between its analyses.
 pub struct Session {
-    /// Whether the placer serves an unchanged imported body its last verdict
-    /// ([`crate::movecheck::Judgments`]).
-    judge_memo: bool,
+    /// Which bodies the placer keeps a judgment of ([`crate::movecheck::Judgments`]).
+    judge_memo: Memo,
     /// What [`Session::read`], [`Session::list_kinds`] and
     /// [`Session::real_path`] answered under the watched roots; `None` before
     /// [`Session::watch`], and every read goes to the disk.
@@ -52,6 +51,18 @@ struct Disk {
     forgets: u64,
 }
 
+/// Which bodies a session's judgment memo keys.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Memo {
+    /// None: the placer builds every body.
+    Off,
+    /// An imported module's: the editor serves an unchanged one its last verdict.
+    Imports,
+    /// Every module's, the root's included: the load that writes a std module's
+    /// stored rows reads them back ([`Session::rows_writer`]).
+    Every,
+}
+
 /// Locks `m`. A panic under the lock leaves every cache a set of whole
 /// entries, so a poisoned lock still holds valid data.
 pub fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -62,6 +73,16 @@ impl Session {
     /// An empty session. `judge_memo` arms the judgment memo, which only a
     /// host that reads refusals and lowers nothing (the editor) may arm.
     pub fn new(judge_memo: bool) -> Arc<Session> {
+        Session::with(if judge_memo { Memo::Imports } else { Memo::Off })
+    }
+
+    /// A session whose one load judges a std module as its own root and keeps
+    /// every body's judgment, for [`Session::take_judgments`].
+    pub fn rows_writer() -> Arc<Session> {
+        Session::with(Memo::Every)
+    }
+
+    fn with(judge_memo: Memo) -> Arc<Session> {
         Arc::new(Session {
             judge_memo,
             disk: Mutex::new(None),
@@ -72,9 +93,16 @@ impl Session {
         })
     }
 
-    /// The judgment memo, if armed.
-    pub(crate) fn judge_memo(&self) -> Option<&Mutex<crate::movecheck::Judged>> {
-        self.judge_memo.then_some(&self.judged)
+    /// The judgment memo and which bodies it keys, if armed.
+    pub(crate) fn judge_memo(&self) -> Option<(&Mutex<crate::movecheck::Judged>, Memo)> {
+        (self.judge_memo != Memo::Off).then_some((&self.judged, self.judge_memo))
+    }
+
+    /// Takes every judgment the memo kept.
+    pub fn take_judgments(
+        &self,
+    ) -> HashMap<crate::movecheck::JudgmentKey, crate::movecheck::Judgment> {
+        std::mem::take(&mut locked(&self.judged).1)
     }
 
     /// Keeps what this session reads and lists, and the real paths it asks

@@ -89,6 +89,10 @@ pub struct World {
     /// `None` where an armed judgment memo ended the placer before its
     /// fixpoint.
     pub unresolved: Option<Vec<crate::Unresolved>>,
+    /// The stored rows of std's non-generic functions, which the placer serves
+    /// in place of a build ([`crate::stdrows`]), until the placer takes them.
+    /// Empty but under `vyrn check`.
+    pub(crate) given: crate::stdrows::Given,
 }
 
 /// One row of the World's function table.
@@ -380,7 +384,11 @@ const _: () = {
 impl World {
     /// The World of `program`'s `ownership`, with the read relation of its
     /// checker's record.
-    pub(crate) fn new(program: &Program, ownership: Ownership) -> World {
+    pub(crate) fn new(
+        program: &Program,
+        ownership: Ownership,
+        given: crate::stdrows::Given,
+    ) -> World {
         let mut rows: HashMap<FnId, Vec<Key>> = HashMap::new();
         for (body, k) in &ownership.record.reads {
             let ks = rows.entry(program.source_id(*body)).or_default();
@@ -424,6 +432,7 @@ impl World {
             private,
             records,
             proved: program.proved.clone(),
+            given,
             ..World::default()
         };
         world.reads.replace(rows);
@@ -726,7 +735,12 @@ impl World {
 /// reads. It checks `program` again for the record; a host holding the
 /// check's World passes it on instead.
 pub fn analyze(program: &Program) -> Arc<World> {
-    analyzed(program, Arc::new(checker::record(program)), false)
+    analyzed(
+        program,
+        Arc::new(checker::record(program)),
+        false,
+        Default::default(),
+    )
 }
 
 /// [`analyze`] against `record`, the checker's record of `program`. `judging`
@@ -736,8 +750,9 @@ pub(crate) fn analyzed(
     program: &Program,
     record: Arc<checker::Recorded>,
     judging: bool,
+    given: crate::stdrows::Given,
 ) -> Arc<World> {
-    let mut world = World::new(program, own::analyze(program, record));
+    let mut world = World::new(program, own::analyze(program, record), given);
     crate::core::augment(program, &mut world, judging);
     #[cfg(debug_assertions)]
     world.check();

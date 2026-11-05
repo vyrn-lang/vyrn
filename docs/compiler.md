@@ -403,6 +403,15 @@ No later pass reads a fact, and the check prover takes none as a premise.
 (`movecheck::in_source_order`) and memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
 keystroke re-judges only the bodies whose key changed.
 
+`vyrn check` serves each non-generic std function its stored row
+(`vyrn_lower::stdrows`): the judgment the memo keeps of a body, written by
+the module's own load into the generator cache's directory. `stdrows::Given::read`
+builds the table before the placer runs and keeps a row only where every name
+it reads means what it meant in that load and every method call the check
+dispatched in the body goes to a std impl. The placer serves a row as it serves
+a memo entry. The checker still types every std body, so the generation fence
+and the function-value sources read the same record as before.
+
 ## The emitter
 
 `vyrn_codegen::direct::compile` writes a self-contained `wasm32-wasi` module:

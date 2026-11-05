@@ -8355,6 +8355,7 @@ struct Refused {
 /// refuses for another reason (a double free, a use after release), is left
 /// as the plan had it.
 pub fn augment(program: &Program, w: &mut World, judging: bool) {
+    let mut given = std::mem::take(&mut w.given);
     let own = &mut w.ownership;
     let mut r = Refused::default();
     let _p = vyrn_frontend::prof::phase("placer");
@@ -8396,7 +8397,10 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         .chain(lowered.bodies.iter().map(Job::Outside))
         .map(|job| {
             let key = memo.as_ref().and_then(|m| job.key(m));
-            let served = serve(memo.as_ref(), key.as_ref());
+            let served = serve(memo.as_ref(), key.as_ref()).or_else(|| match job {
+                Job::Inst(inst) => given.serve(inst.func, &inst.type_args),
+                Job::Outside(_) => None,
+            });
             Pending { job, key, served }
         })
         .collect();

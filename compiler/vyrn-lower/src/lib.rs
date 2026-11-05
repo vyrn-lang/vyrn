@@ -21,6 +21,7 @@ pub mod lastrun;
 mod pipeline;
 pub mod provenance;
 pub mod rules;
+pub mod stdrows;
 pub mod typed;
 pub mod verdict;
 mod world;
