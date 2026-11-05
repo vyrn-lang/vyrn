@@ -126,7 +126,7 @@ pub(super) enum Text<'a> {
 impl Text<'_> {
     fn unit(self) -> u32 {
         match self {
-            Text::Fn(f) => f.body.id.0.unit(),
+            Text::Fn(f) => f.body.written().map_or(0, |b| b.id.0.unit()),
             Text::Block(b) => b.body.id.0.unit(),
         }
     }

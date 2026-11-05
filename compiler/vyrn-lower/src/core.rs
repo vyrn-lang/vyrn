@@ -546,6 +546,7 @@ pub(crate) fn build_places<'l, 'a>(
                 subst: Default::default(),
                 facts: p.facts.clone(),
                 releases: Vec::new(),
+                calls: Vec::new(),
             };
             let mut body = build_in(program, &inst, own, &own.proto, fns, &mut names);
             if let Ok(b) = &mut body {
@@ -1197,9 +1198,14 @@ fn seeded<'a>(
                 b.body.ensures = vyrn_frontend::core::check::Ensures::of(f, b.proto.types(), &func)
                     .unwrap_or(None);
             }
-            b.frame.appends = crate::append::append_candidates(&f.body);
-            rebound(&f.body, &mut b.frame.rebound);
-            b.block(&f.body, &mut out)?;
+            // The placer serves every given body its stored row.
+            let body = f
+                .body
+                .written()
+                .unwrap_or_else(|| panic!("`{}` is given and built", f.name));
+            b.frame.appends = crate::append::append_candidates(body);
+            rebound(body, &mut b.frame.rebound);
+            b.block(body, &mut out)?;
             cut(&mut out);
             b.body.stmts = out;
             let name = b.body.spelled(&f.name).to_string();
@@ -8355,7 +8361,7 @@ struct Refused {
 /// refuses for another reason (a double free, a use after release), is left
 /// as the plan had it.
 pub fn augment(program: &Program, w: &mut World, judging: bool) {
-    let mut given = std::mem::take(&mut w.given);
+    let given = std::mem::take(&mut w.given);
     let own = &mut w.ownership;
     let mut r = Refused::default();
     let _p = vyrn_frontend::prof::phase("placer");
@@ -8371,10 +8377,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         .flatten();
     drop(js);
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
-    let mut lowered = match memo {
-        Some(_) => crate::lower_reusing(program, own),
-        None => crate::lower_with(program, own),
-    };
+    let mut lowered = crate::lowered(program, own, memo.is_some(), &given);
     drop(lw);
     w.unresolved = (memo.is_none()).then(|| std::mem::take(&mut lowered.unresolved));
     w.fns = Fns::lowered(&lowered);
@@ -8398,7 +8401,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         .map(|job| {
             let key = memo.as_ref().and_then(|m| job.key(m));
             let served = serve(memo.as_ref(), key.as_ref()).or_else(|| match job {
-                Job::Inst(inst) => given.serve(inst.func, &inst.type_args),
+                Job::Inst(inst) => given.serve(program, inst.func),
                 Job::Outside(_) => None,
             });
             Pending { job, key, served }
@@ -8578,7 +8581,9 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         let Made::Served(key, served) = &s.made else {
             continue;
         };
-        if served.state == rows {
+        // A given body has no block to build again: its row's verdict holds
+        // whatever the program's answer to its frames is.
+        if served.state == rows || s.job.given() {
             continue;
         }
         let (key, frames) = (key.clone(), served.frames.clone());
@@ -8688,7 +8693,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                 remember(
                     memo.as_ref(),
                     key,
-                    kept,
+                    (kept, j.calls()),
                     &r.kernel[refused_before..],
                     Vec::new,
                 );
@@ -8722,7 +8727,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         remember(
             memo.as_ref(),
             key,
-            kept,
+            (kept, j.calls()),
             &r.kernel[refused_before..],
             summary,
         );
@@ -8904,11 +8909,12 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // after one that built at least one of them, since only a new body's
     // placement adds to `placed`.
     while dispatches {
-        let mut again = crate::lower_with(program, own);
+        let mut again = crate::lowered(program, own, false, &given);
         w.unresolved = Some(std::mem::take(&mut again.unresolved));
         let mut placed: Vec<Release> = Vec::new();
         for inst in &again.instances {
-            if !had.insert(inst.spelling()) {
+            // A given body adds no row, as a served one does not.
+            if !had.insert(inst.spelling()) || inst.func.body.written().is_none() {
                 continue;
             }
             w.fns.instance(inst);
@@ -8962,6 +8968,26 @@ enum Job<'l, 'p> {
 }
 
 impl Job<'_, '_> {
+    /// Whether the body is given ([`vyrn_frontend::ast::Body::Given`]).
+    fn given(&self) -> bool {
+        matches!(self, Job::Inst(i) if i.func.body.written().is_none())
+    }
+
+    /// The calls the worklist followed out of the body, each callee's solved
+    /// parameters in name order, for [`Judgment::calls`].
+    fn calls(&self) -> impl FnOnce() -> Calls + '_ {
+        move || match self {
+            Job::Inst(inst) => (inst.calls.iter())
+                .map(|(c, s)| {
+                    let mut s: Vec<(String, Type)> = s.clone().into_iter().collect();
+                    s.sort_by(|a, b| a.0.cmp(&b.0));
+                    (c.clone(), s)
+                })
+                .collect(),
+            Job::Outside(_) => Vec::new(),
+        }
+    }
+
     /// The row the plan's tables and the call relation key the body by.
     fn id(&self) -> FnId {
         match self {
@@ -9113,7 +9139,7 @@ fn serve(
 fn remember(
     memo: Option<&vyrn_frontend::movecheck::Judgments<'_>>,
     key: Option<JudgmentKey>,
-    (frames, state): Kept,
+    ((frames, state), calls): (Kept, impl FnOnce() -> Calls),
     refused: &[Refusal],
     summary: impl FnOnce() -> Vec<vyrn_frontend::core::check::Fact>,
 ) {
@@ -9128,9 +9154,13 @@ fn remember(
             frames,
             state,
             summary: summary(),
+            calls: calls(),
         },
     );
 }
+
+/// A [`Judgment::calls`] list.
+type Calls = Vec<(String, Vec<(String, Type)>)>;
 
 /// The memory report for one frame, read by the editor's memory hints: one row per source `let`, in line order. Every word
 /// comes off the core: the type table says how the type is released, the

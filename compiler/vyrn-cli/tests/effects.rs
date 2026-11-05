@@ -165,7 +165,7 @@ fn floor_carries(
     if f.is_gen {
         return out;
     }
-    let mut body = f.body.clone();
+    let mut body = f.block().clone();
     vyrn_frontend::project::walk_block(&mut body, &mut |e| {
         if let vyrn_frontend::ast::Expr::Call { name, .. } = e {
             if let Some(cap) = floor::call_carrier(name, externs) {
@@ -340,6 +340,7 @@ fn run_corpus() {
                 subst: Default::default(),
                 facts: pr.facts.clone(),
                 releases: Vec::new(),
+                calls: Vec::new(),
             };
             match vyrn_lower::core::build(&program, &world, &inst) {
                 Ok(b) => place_bodies.push((pr.func.name.as_str(), b)),

@@ -1549,7 +1549,7 @@ fn string_constant(program: &ast::Program, name: &str) -> Option<String> {
         .functions
         .iter()
         .find(|f| f.name == name && f.params.is_empty())?;
-    for stmt in &f.body.stmts {
+    for stmt in &f.body.written()?.stmts {
         if let Stmt::Return {
             value: Some(Expr::Str(s, _)),
             ..

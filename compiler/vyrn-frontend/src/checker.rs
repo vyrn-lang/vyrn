@@ -231,7 +231,9 @@ pub(crate) fn local_index(
         for p in &f.params {
             v.row(&p.name, LocalKind::Param, p.line, p.col, Some(&p.ty));
         }
-        index_block(&f.body, &mut HashSet::new(), &mut v);
+        if let Some(b) = f.body.written() {
+            index_block(b, &mut HashSet::new(), &mut v);
+        }
     }
     // One row per position. An impl method `parse_accum` flattened into
     // `functions` is walked twice, and a refutable `let` binds the
@@ -1226,7 +1228,9 @@ fn weight(f: &Function) -> usize {
         }
     }
     let mut n = N(0);
-    count_block(&f.body, &mut HashSet::new(), &mut n);
+    if let Some(b) = f.body.written() {
+        count_block(b, &mut HashSet::new(), &mut n);
+    }
     n.0
 }
 
@@ -1237,17 +1241,15 @@ fn weight(f: &Function) -> usize {
 fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
     for (i, (_, f)) in (0..).zip(crate::project::all(program)) {
         checker.body(SourceBody::Place(i), Text::Fn(f), out, |out| {
+            let Some(body) = f.body.written() else { return };
             let mut push = |d: Diagnostic| out.push(d.in_file(f.module.clone()));
             if crate::project::is_optional(f) {
                 check_optional_place(checker, f, &mut push);
                 return;
             }
-            let yields = count_yields(&f.body);
+            let yields = count_yields(body);
             if yields != 1
-                || !matches!(
-                    f.body.stmts.last(),
-                    Some(Stmt::Return { value: Some(_), .. })
-                )
+                || !matches!(body.stmts.last(), Some(Stmt::Return { value: Some(_), .. }))
             {
                 push(cerr_at!(
                     f.line,
@@ -1257,10 +1259,10 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
                 ));
                 return;
             }
-            let Some(Stmt::Return { value: Some(y), .. }) = f.body.stmts.last() else {
+            let Some(Stmt::Return { value: Some(y), .. }) = body.stmts.last() else {
                 unreachable!("checked just above")
             };
-            if crate::project::has_try(&f.body) {
+            if crate::project::has_try(body) {
                 push(cerr_at!(
                     f.line,
                     f.name_span(),
@@ -1294,8 +1296,8 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
             // takes no prologue roots: a write through a copied handle can land
             // in the copy.
             let prologue = match modifies {
-                true => &f.body.stmts[..0],
-                false => &f.body.stmts[..f.body.stmts.len() - 1],
+                true => &body.stmts[..0],
+                false => &body.stmts[..body.stmts.len() - 1],
             };
             rooted_where_the_site_owns(f, y, prologue.iter(), &mut push);
             let r = checker.function(f);
@@ -1314,6 +1316,7 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
 /// `return Some(<place>)`. A second miss test is refused: statements between
 /// two would run after the first decided.
 fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(Diagnostic)) {
+    let Some(body) = f.body.written() else { return };
     // `a[i]`, `a[i] = v` and `for` consume a place unconditionally, so the
     // members their sugar dispatches cannot be the optional kind.
     if ["at", "atSet", "nth"].contains(&f.name.as_str()) {
@@ -1340,17 +1343,17 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
         OptionalProjectionShape,
         name = f.name
     );
-    let n = f.body.stmts.len();
-    if n < 2 || count_yields(&f.body) != 2 {
+    let n = body.stmts.len();
+    if n < 2 || count_yields(body) != 2 {
         push(shape);
         return;
     }
     // Statements after the miss exit run only on a hit, when the place exists.
-    let Some(at) = f.body.stmts.iter().position(crate::project::is_miss_return) else {
+    let Some(at) = body.stmts.iter().position(crate::project::is_miss_return) else {
         push(shape);
         return;
     };
-    let Some(Stmt::Return { value: Some(v), .. }) = f.body.stmts.last() else {
+    let Some(Stmt::Return { value: Some(v), .. }) = body.stmts.last() else {
         push(shape);
         return;
     };
@@ -1367,7 +1370,7 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
         return;
     }
     let y = &args[0];
-    if crate::project::has_try(&f.body) {
+    if crate::project::has_try(body) {
         push(cerr_at!(
             f.line,
             f.name_span(),
@@ -1387,7 +1390,7 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
     }
     // Roots trace through borrowing `let`s before and after the miss exit;
     // `tryField` binds its payload after it.
-    let prologue = f.body.stmts[..n - 1]
+    let prologue = body.stmts[..n - 1]
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != at)
@@ -3086,8 +3089,12 @@ impl<'a> Checker<'a> {
         diags
     }
 
+    /// Types `f`'s body. A given body was typed in its module's own load.
     fn function(&self, f: &Function) -> Result<(), Diagnostic> {
-        self.function_body(f, &f.body)
+        match &f.body {
+            Body::Written(b) => self.function_body(f, b),
+            Body::Given => Ok(()),
+        }
     }
 
     /// Records the binder the root's name occurrence `id` at `line` names
@@ -6975,12 +6982,15 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
 /// the effect and the chain. Every `gen fn` is checked, even one called only
 /// at run time, because any may be an import target.
 fn check_comptime_purity<'a>(
-    program: &Program,
-    through: &HashSet<NodeId>,
+    program: &'a Program,
+    through: &'a HashSet<NodeId>,
     dispatched: impl Iterator<Item = &'a (String, String)>,
     out: &mut Vec<Diagnostic>,
 ) {
-    let gen_fns: Vec<&Function> = program.functions.iter().filter(|f| f.is_gen).collect();
+    // A given gen fn's verdict is its module's own load's.
+    let gen_fns: Vec<&Function> = (program.functions.iter())
+        .filter(|f| f.is_gen && matches!(f.body, Body::Written(_)))
+        .collect();
     if gen_fns.is_empty() {
         return;
     }
@@ -6989,33 +6999,10 @@ fn check_comptime_purity<'a>(
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
-    // A call to a declared extern is refused by its declaration, so a
-    // function spelled like a host-boundary extern is an ordinary one.
-    let extern_refusals: HashMap<&str, String> = (program.functions.iter())
-        .filter_map(|f| Some((f.name.as_str(), crate::effects::extern_gen_refusal(f)?)))
-        .collect();
-    let global_names: std::collections::HashSet<String> =
-        program.globals.iter().map(|g| g.name.clone()).collect();
-    // A method call edge reaches the impl the check dispatched it to.
-    let mut impls_called: HashMap<&str, Vec<String>> = HashMap::new();
-    for (from, to) in dispatched {
-        impls_called.entry(from).or_default().push(to.clone());
-    }
-    let direct = |f: &Function| -> Option<String> {
-        if touches_globals(f, &global_names) {
-            return Some("reads or writes module state".to_string());
-        }
-        for c in fn_calls(&f.body, through) {
-            let why = extern_refusals.get(c.as_str()).cloned();
-            if let Some(why) = why.or_else(|| crate::effects::gen_refusal(&c)) {
-                return Some(why);
-            }
-        }
-        None
-    };
+    let cx = FenceCx::new(program, through, dispatched);
     // A function's own violation and call edges depend on its body alone, so
     // they are computed once and shared by every generator's search.
-    let mut facts: HashMap<String, (Option<String>, Vec<String>)> = HashMap::new();
+    let mut facts: HashMap<String, Fenced> = HashMap::new();
 
     for g in gen_fns {
         // Breadth-first, so the reported chain is the shortest.
@@ -7027,12 +7014,15 @@ fn check_comptime_purity<'a>(
             let cur = *path.last().unwrap();
             let Some(f) = fn_map.get(cur) else { continue };
             if !facts.contains_key(cur) {
-                let mut edges: Vec<String> = fn_calls(&f.body, through).into_iter().collect();
-                edges.extend(impls_called.get(cur).into_iter().flatten().cloned());
-                facts.insert(cur.to_string(), (direct(f), edges));
+                let row = match &f.body {
+                    Body::Written(body) => cx.row(f, body),
+                    Body::Given => (program.fenced.get(&f.name).cloned())
+                        .unwrap_or_else(|| panic!("the given `{}` has no stored row", f.name)),
+                };
+                facts.insert(cur.to_string(), row);
             }
-            let (violation, edges) = &facts[cur];
-            if let Some(reason) = violation.clone() {
+            let Fenced { impure, calls } = &facts[cur];
+            if let Some(reason) = impure.clone() {
                 let msg = if path.len() == 1 {
                     cerr!(g.line, GenImpure, name = DeclName(&g.name), reason)
                 } else {
@@ -7044,7 +7034,7 @@ fn check_comptime_purity<'a>(
                 out.push(msg.in_file(g.module.clone()));
                 break;
             }
-            for callee in edges.clone() {
+            for callee in calls.clone() {
                 if let Some(next) = fn_map.get(callee.as_str()) {
                     if seen.insert(next.name.as_str()) {
                         let mut np: Vec<&str> = path.clone();
@@ -7055,6 +7045,86 @@ fn check_comptime_purity<'a>(
             }
         }
     }
+}
+
+/// What the generation fence reads of each function of `program` with a
+/// body, by name, from `record`: the row a std module's own load stores for
+/// the functions its importers take as given.
+pub fn fenced(program: &Program, record: &Recorded) -> HashMap<String, Fenced> {
+    let cx = FenceCx::new(
+        program,
+        &record.stored.through,
+        record.stored.dispatched.iter(),
+    );
+    (program.functions.iter())
+        .filter_map(|f| Some((f.name.clone(), cx.row(f, f.body.written()?))))
+        .collect()
+}
+
+/// What the generation fence asks of every body: the program's externs and
+/// module state, the calls through a function value, and the impls each
+/// function's method calls dispatch to.
+struct FenceCx<'p> {
+    /// A call to a declared extern is refused by its declaration, so a
+    /// function spelled like a host-boundary extern is an ordinary one.
+    extern_refusals: HashMap<&'p str, String>,
+    globals: HashSet<String>,
+    through: &'p HashSet<NodeId>,
+    impls_called: HashMap<&'p str, Vec<String>>,
+}
+
+impl<'p> FenceCx<'p> {
+    fn new(
+        program: &'p Program,
+        through: &'p HashSet<NodeId>,
+        dispatched: impl Iterator<Item = &'p (String, String)>,
+    ) -> Self {
+        let mut impls_called: HashMap<&str, Vec<String>> = HashMap::new();
+        for (from, to) in dispatched {
+            impls_called.entry(from).or_default().push(to.clone());
+        }
+        FenceCx {
+            extern_refusals: (program.functions.iter())
+                .filter_map(|f| Some((f.name.as_str(), crate::effects::extern_gen_refusal(f)?)))
+                .collect(),
+            globals: program.globals.iter().map(|g| g.name.clone()).collect(),
+            through,
+            impls_called,
+        }
+    }
+
+    /// The fence's row of `f`, whose body is `body`. Its calls are sorted, so
+    /// the reason and the chain a sentence prints do not hang on hash order.
+    fn row(&self, f: &Function, body: &Block) -> Fenced {
+        let mut calls: Vec<String> = fn_calls(body, self.through).into_iter().collect();
+        calls.sort_unstable();
+        let impure = match touches_globals(&f.params, body, &self.globals) {
+            true => Some("reads or writes module state".to_string()),
+            false => (calls.iter()).find_map(|c| {
+                let why = self.extern_refusals.get(c.as_str()).cloned();
+                why.or_else(|| crate::effects::gen_refusal(c))
+            }),
+        };
+        // A method call edge reaches the impl the check dispatched it to.
+        calls.extend(
+            self.impls_called
+                .get(f.name.as_str())
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+        Fenced { impure, calls }
+    }
+}
+
+/// What the generation fence reads of one function: why its body is impure on
+/// its own, and every function it calls, the impls it dispatches to included.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Fenced {
+    /// The sentence's reason, from the first impure call in `calls` order or a
+    /// read or write of module state.
+    pub impure: Option<String>,
+    pub calls: Vec<String>,
 }
 
 /// One source of a stored function value: a named function or a lambda
@@ -7151,13 +7221,12 @@ pub fn fn_sigs_match(a: &Type, b: &Type) -> bool {
 
 /// Whether `f` reads or writes a global no local of the same name shadows.
 /// Conservative: a name shadowed in one scope and global in another counts.
-fn touches_globals(f: &Function, globals: &std::collections::HashSet<String>) -> bool {
+fn touches_globals(params: &[Param], body: &Block, globals: &HashSet<String>) -> bool {
     if globals.is_empty() {
         return false;
     }
-    let params: std::collections::HashSet<String> =
-        f.params.iter().map(|p| p.name.clone()).collect();
-    global_ref_block(&f.body, globals, &params)
+    let params: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    global_ref_block(body, globals, &params)
 }
 
 /// A name a global answers to and no local shadows is a reference, whether
@@ -7375,7 +7444,9 @@ impl BodyVisit<'_> for Refs<'_> {
 pub fn fn_refs(f: &Function) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut locals = f.params.iter().map(|p| p.name.clone()).collect();
-    body_block(&f.body, &mut locals, &mut Refs(&mut out));
+    if let Some(b) = f.body.written() {
+        body_block(b, &mut locals, &mut Refs(&mut out));
+    }
     out
 }
 

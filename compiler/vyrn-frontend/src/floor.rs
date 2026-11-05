@@ -222,11 +222,15 @@ pub fn carried(program: &mut Program) -> Vec<Carried> {
         if f.is_gen {
             continue;
         }
-        crate::project::walk_block(&mut f.body, &mut |e| visit(e, &mut out));
+        if let Some(b) = f.body.written_mut() {
+            crate::project::walk_block(b, &mut |e| visit(e, &mut out));
+        }
     }
     for im in &mut program.impls {
         for m in im.methods.iter_mut().chain(im.places.iter_mut()) {
-            crate::project::walk_block(&mut m.body, &mut |e| visit(e, &mut out));
+            if let Some(b) = m.body.written_mut() {
+                crate::project::walk_block(b, &mut |e| visit(e, &mut out));
+            }
         }
     }
     for g in &mut program.globals {

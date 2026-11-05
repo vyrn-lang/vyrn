@@ -119,11 +119,19 @@ the playground serves an embedded `std/`. The loader:
 - links the modules (`link`), so no later pass sees a module boundary, and
   refuses cycles, missing or unexported names, duplicates and two impls of
   one pair;
-- parses an imported `std/` module's top-level function bodies only where a
-  root can reach them by spelling (`parse_reached`), and drops each function,
-  test and bench of such a module that no root reaches by name
-  (`drop_unreached`), so an importer pays to lex the module and to parse and
-  check what it calls. A gen fn that only an import line or a `toJson` or
+- under `vyrn check`, takes an imported `std/` module as its interface
+  (`loader::std_given`): each non-generic top-level function's body is
+  `ast::Body::Given`, unparsed and untyped, and its module's stored row stands
+  for it (below); every other body is parsed, and nothing is dropped. The
+  load lexes and parses the module's interface entry (`loader::interface_parse`):
+  its text with each given body cut to its newlines, keyed by the compiler's
+  identity, the module's key and its text hash, in the generator cache's
+  directory;
+- in every other load, parses an imported `std/` module's top-level function
+  bodies only where a root can reach them by spelling (`parse_reached`), and
+  drops each function, test and bench of such a module that no root reaches
+  by name (`drop_unreached`), so an importer pays to lex the module and to
+  parse and check what it calls. A gen fn that only an import line or a `toJson` or
   `fromJson` site names is not reached, because it runs only in its own load.
   An injected runtime module's other functions are roots, because the emitter
   and the desugars call them by name, except `std/runtime`'s: its roots include
@@ -403,14 +411,20 @@ No later pass reads a fact, and the check prover takes none as a premise.
 (`movecheck::in_source_order`) and memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
 keystroke re-judges only the bodies whose key changed.
 
-`vyrn check` serves each non-generic std function its stored row
-(`vyrn_lower::stdrows`): the judgment the memo keeps of a body, written by
-the module's own load into the generator cache's directory. `stdrows::Given::read`
-builds the table before the placer runs and keeps a row only where every name
-it reads means what it meant in that load and every method call the check
-dispatched in the body goes to a std impl. The placer serves a row as it serves
-a memo entry. The checker still types every std body, so the generation fence
-and the function-value sources read the same record as before.
+`vyrn check` reads a stored row for each given std function
+(`vyrn_lower::stdrows`), written by its module's own load into the generator
+cache's directory: the judgment the memo keeps of a body, the calls the
+worklist follows out of it, and what the generation fence reads of it
+(`checker::Fenced`); each module adds the function values its bodies store and
+pass. `stdrows::Given::read` reads them before the check, and names each
+declaration by its written name and module, so a program that renames one
+apart reads it under the program's name. The fence reads `Program::fenced`,
+the effect judgment the stored sources in the record, the worklist roots a
+given function and follows its stored calls, and the placer serves its row as
+it serves a memo entry and never builds it. A module whose rows a load is
+writing, or whose generator import wrote the root, is written in that load
+(`loader::rows_writer`), so the runtime modules that inject each other write
+no cycle.
 
 ## The emitter
 

@@ -1258,10 +1258,10 @@ fn contract_verdict(
             "whyModule" => interface.take().expect("one whyModule"),
             _ => continue,
         };
-        f.body = Block {
+        f.body = vyrn_frontend::ast::Body::Written(Block {
             id: Id::NEW,
             stmts: vec![Stmt::ret(lit, 0)],
-        };
+        });
     }
     prog.number();
     let bytes = vyrn_codegen::direct::compile(&prog, vyrn_lower::analyze(&prog))?;
@@ -1422,7 +1422,7 @@ fn mounted_routes_wasm(
     let mut prog = program.clone();
     let mut calls: Vec<Vec<Expr>> = Vec::new();
     for f in &mut prog.functions {
-        vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
+        vyrn_frontend::project::walk_block(f.block_mut(), &mut |e| {
             // Top-level names are unique across a linked program, so `mount` is
             // `std/http`'s. Argument 0 is the request.
             if let Expr::Call { name, args, .. } = e {
@@ -2923,7 +2923,7 @@ fn synth_fn(
     door: bool,
 ) -> vyrn_frontend::ast::Function {
     vyrn_frontend::ast::Function {
-        body,
+        body: vyrn_frontend::ast::Body::Written(body),
         line,
         is_export_extern: door,
         ..vyrn_frontend::ast::Function::synth(name, Vec::new(), ret, Vec::new())
@@ -4142,7 +4142,7 @@ fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
         let shim = f.module.is_none()
             && ["vyrnServePark", "vyrnServeNext", "vyrnServeClose"].contains(&f.name.as_str());
         let door = f.module.is_none() && f.name == "vyrnServeHandle";
-        vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
+        vyrn_frontend::project::walk_block(f.block_mut(), &mut |e| {
             if let Expr::Call { name, args, .. } = e {
                 if name == "serveStream" && args.len() == 1 {
                     *name = "vyrnServePark".to_string();
@@ -4173,7 +4173,7 @@ fn serve_world(program: &mut vyrn_frontend::ast::Program) -> std::sync::Arc<vyrn
     for f in
         (program.functions.iter_mut()).filter(|f| f.module.is_none() && f.name == "vyrnServeHandle")
     {
-        vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
+        vyrn_frontend::project::walk_block(f.block_mut(), &mut |e| {
             if let Expr::Call { name, awaits, .. } = e {
                 *awaits |= name == "handle";
             }
@@ -4358,10 +4358,10 @@ fn serve_build(
         .iter_mut()
         .find(|f| f.name == "main" && f.module.is_none())
     {
-        main.body = Block {
+        main.body = vyrn_frontend::ast::Body::Written(Block {
             id: Id::NEW,
             stmts: vec![Stmt::ret(Expr::int(0), main.line)],
-        };
+        });
     }
     quiet.number();
     let quiet_world = vyrn_lower::analyze(&quiet);

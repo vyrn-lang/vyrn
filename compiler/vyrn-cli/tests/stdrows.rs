@@ -1,6 +1,7 @@
-//! `vyrn check` serves std's stored rows (`vyrn_lower::stdrows`). These pin
-//! that a stale or damaged entry is refused and written again, and that
-//! `VYRN_NO_GEN_CACHE` reads and writes none, with the same verdicts.
+//! `vyrn check` reads std's stored rows (`vyrn_lower::stdrows`) and
+//! interfaces (`loader::interface_parse`). These pin that a stale or damaged
+//! entry is refused and written again, and that `VYRN_NO_GEN_CACHE` reads and
+//! writes none, with the same verdicts.
 
 mod common;
 
@@ -72,14 +73,14 @@ impl Tree {
         )
     }
 
-    /// Each stored entry's name and text.
-    fn entries(&self) -> Vec<(String, String)> {
+    /// Each stored entry's name and text whose name starts with `kind`.
+    fn entries(&self, kind: &str) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = std::fs::read_dir(&self.cache)
             .into_iter()
             .flatten()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| n.starts_with("rows-"))
+            .filter(|n| n.starts_with(kind))
             .map(|n| {
                 let text = std::fs::read_to_string(self.cache.join(&n)).expect("read entry");
                 (n, text)
@@ -95,14 +96,14 @@ fn an_entry_whose_import_changed_is_written_again() {
     let t = tree("stdrows-stale");
     let first = t.check(false);
     assert_eq!(first.0, Some(0), "{}", first.1);
-    let before = t.entries();
+    let before = t.entries("rows-");
     assert!(!before.is_empty(), "the check wrote no entry");
     // `std/strings` imports `std/strpred`, so its entry records that file.
     let strpred = t.std.join("strpred.vyrn");
     let text = std::fs::read_to_string(&strpred).expect("read strpred");
     std::fs::write(&strpred, format!("{text}\n// an edit\n")).expect("edit strpred");
     assert_eq!(t.check(false), first, "the verdict moved with the entry");
-    let after = t.entries();
+    let after = t.entries("rows-");
     let rewritten = (before.iter())
         .filter(|(n, text)| after.iter().any(|(m, t2)| m == n && t2 != text))
         .count();
@@ -113,27 +114,47 @@ fn an_entry_whose_import_changed_is_written_again() {
 }
 
 #[test]
+fn a_changed_std_byte_misses_its_entry_and_the_verdict_holds() {
+    let t = tree("stdrows-byte");
+    let first = t.check(false);
+    assert_eq!(first.0, Some(0), "{}", first.1);
+    let before = t.entries("rows-");
+    // The root's `sleep` is given: its row comes from `std/task`'s entry.
+    let task = t.std.join("task.vyrn");
+    let text = std::fs::read_to_string(&task).expect("read task");
+    std::fs::write(&task, format!("{text}\n// an edit\n")).expect("edit task");
+    assert_eq!(t.check(false), first, "the verdict moved with the edit");
+    let after = t.entries("rows-");
+    assert!(
+        after.iter().any(|e| !before.contains(e)),
+        "no entry was written for the edited std/task"
+    );
+}
+
+#[test]
 fn a_damaged_entry_reads_as_a_miss_and_is_written_again() {
     let t = tree("stdrows-damaged");
     let first = t.check(false);
-    let (name, _) = t.entries().into_iter().next().expect("an entry");
-    std::fs::write(t.cache.join(&name), "stdrows1 0000\n1\n").expect("damage");
-    assert_eq!(t.check(false), first);
-    let text = std::fs::read_to_string(t.cache.join(&name)).expect("read");
-    assert!(
-        text.len() > 32,
-        "the damaged entry was not written again:\n{text}"
-    );
+    for kind in ["rows-", "interface-"] {
+        let (name, _) = t.entries(kind).into_iter().next().expect("an entry");
+        std::fs::write(t.cache.join(&name), "interface1 0000\n1\n").expect("damage");
+        assert_eq!(t.check(false), first);
+        let text = std::fs::read_to_string(t.cache.join(&name)).expect("read");
+        assert!(
+            text.len() > 32,
+            "the damaged entry was not written again:\n{text}"
+        );
+    }
 }
 
 #[test]
 fn no_gen_cache_reads_and_writes_no_entry_and_the_verdict_holds() {
     let t = tree("stdrows-off");
     let off = t.check(true);
-    assert!(t.entries().is_empty(), "VYRN_NO_GEN_CACHE wrote an entry");
+    assert!(t.entries("").is_empty(), "VYRN_NO_GEN_CACHE wrote an entry");
     let on = t.check(false);
     assert_eq!(off, on);
-    let (name, _) = t.entries().into_iter().next().expect("an entry");
+    let (name, _) = t.entries("rows-").into_iter().next().expect("an entry");
     std::fs::write(t.cache.join(&name), "damaged").expect("damage");
     assert_eq!(t.check(true), on);
     let text = std::fs::read_to_string(t.cache.join(&name)).expect("read");

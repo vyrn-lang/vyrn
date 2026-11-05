@@ -1492,7 +1492,7 @@ pub fn lends(name: &str) -> bool {
         return false;
     };
     matches!(
-        f.body.stmts.last(),
+        f.body.written().and_then(|b| b.stmts.last()),
         Some(Stmt::Return { value: Some(Expr::Call { name, args, .. }), .. })
             if name == ELEM
                 && matches!(args.first(), Some(Expr::Var { name: v, .. })

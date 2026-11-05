@@ -51,7 +51,7 @@ fn kepts(src: &str, which: &str) -> Vec<Option<DropKind>> {
     let f = p.functions.iter().find(|f| f.name == which).unwrap();
     let d = placed(&w, which);
     let mut lets = Vec::new();
-    let_stmts(&f.body, &mut lets);
+    let_stmts(f.block(), &mut lets);
     lets.iter().map(|s| d.get(&s.id()).cloned()).collect()
 }
 
@@ -74,7 +74,7 @@ fn reclaims(src: &str, name: &str) -> bool {
     let (w, p) = analyze_world(src);
     let f = p.functions.iter().find(|f| f.name == "main").unwrap();
     let mut lets = Vec::new();
-    let_stmts(&f.body, &mut lets);
+    let_stmts(f.block(), &mut lets);
     let s = lets
         .iter()
         .find(|s| matches!(s, Stmt::Let { name: n, .. } if n == name))
