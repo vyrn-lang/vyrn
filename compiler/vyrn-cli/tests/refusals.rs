@@ -533,6 +533,13 @@ fn census() -> Vec<Row> {
             "`self` may not be moved out of its `release` — a new owner would release it again",
             Kernel::Its,
         ),
+        row(
+            "r77_an_impl_of_a_kernel_protocol_outside_its_types_module.vyrn",
+            "an impl of MustUse, Owned or Copy is declared in its type's module",
+            "`impl MustUse for Json` must be declared in `std/json`, the module that declares \
+             `Json`",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

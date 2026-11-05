@@ -530,6 +530,8 @@ fn label<T: Show>(x: T) -> String {
 
 The compiler knows these protocol names, and a program implements them without declaring or importing them. The prelude declares `Show`, `Owned`, `MustUse`, `Hashable` and `Fallible`, so an impl of one is checked as an impl of any declared protocol is; a program's own declaration of the name replaces the prelude's. An impl of `Copy`, `Index` or `Iterate` is checked for each member's receiver and parameter capabilities only, because its members' types are the impl's own and `Index`'s members are each optional.
 
+An impl of `MustUse`, `Owned` or `Copy` is declared in the module that declares its type, so no program changes how another module's code treats it. A built-in type takes none.
+
 | Protocol | Members | Effect |
 |---|---|---|
 | `Show` | `fn show(self) -> String` | Renders the type in `print`, `toString()` and interpolation. A scalar always renders as the language renders it. |

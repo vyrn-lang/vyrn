@@ -951,6 +951,10 @@ rules! {
     AudienceRuntime { shown, fenced }
         "`{shown}` cannot import `{fenced}`, whose audience is the runtime";
     AwayFromHome { name, home } "only `{home}` may call `{name}`";
+    ImplAwayFromType { protocol, ty, home, key }
+        "`impl {protocol} for {ty}` must be declared in `{home}`, the module that declares `{key}`";
+    ImplOfBuiltinType { protocol, ty, key }
+        "`impl {protocol} for {ty}` is refused: the language declares `{key}`, so no module may";
     GenImportsDeep { max }
         "generator imports nest more than {max} deep — a generator \
         likely imports itself with a growing argument";
