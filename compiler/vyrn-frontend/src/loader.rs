@@ -1872,8 +1872,13 @@ fn load_modules(
         // generic per instantiation).
         //
         // After the parse cache: two files with identical text share one parse,
-        // and must not share one file name.
-        let site = site_file(key, root_key, opts.std_root.as_deref());
+        // and must not share one file name. A std module's own load writes the
+        // rows its importers read, so it names its sites as they do.
+        let site_root = match opts.nest.writing.last() {
+            Some(w) if w == root_key => "",
+            _ => root_key,
+        };
+        let site = site_file(key, site_root, opts.std_root.as_deref());
         stamp_sites(&mut program, &site, key);
 
         // `std/result` and `std/option` are validated no-op imports.
@@ -2241,7 +2246,9 @@ pub fn is_given(f: &Function, key: &str, opts: &LoadOptions) -> bool {
 }
 
 /// The options of std module `m`'s own load, which writes its stored rows
-/// into `session`, inside a load under `opts`.
+/// into `session`, inside a load under `opts`. Its rows stand for the bodies
+/// an importer would judge, so the load expands projections and names its
+/// sites as an importer's does.
 pub fn rows_writer(
     opts: &LoadOptions,
     m: &str,
@@ -2251,6 +2258,7 @@ pub fn rows_writer(
     writing.push(m.to_string());
     LoadOptions {
         std_root: opts.std_root.clone(),
+        expansions: crate::project::Expansions::shared(),
         session: Some(session),
         nest: Nest {
             writing,
