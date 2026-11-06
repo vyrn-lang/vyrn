@@ -341,8 +341,8 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     for f in &program.functions {
         // An `extern` is an import (declared above); a `gen fn` runs
         // only in the compiler's own interpreter and may use builtins with no
-        // lowering at all.
-        if f.is_extern || f.is_gen {
+        // lowering at all; no entry reaches a function the World says no run calls.
+        if f.is_extern || f.is_gen || !world.runs(&f.name) {
             continue;
         }
         // An entry point (`main`, an export, a lifted test or serve door) is never dropped.

@@ -127,6 +127,9 @@ enum InstRule {
     /// time and is never called in a shipped binary, so the emitter emits no
     /// body for it. The lowering has one, because the program does.
     GenFn,
+    /// No entry reaches the function over the World's calls
+    /// (`vyrn_lower::World::runs`), so the emitter lowers no body for it.
+    Unreached,
 }
 
 /// Which rule, if any, explains `a` against `b`. `None` means the gate fails.
@@ -347,7 +350,9 @@ fn gate() {
         }
 
         observe::start();
-        let wasm = vyrn_codegen::direct::compile(&program, vyrn_lower::analyze(&program));
+        let world = vyrn_lower::analyze(&program);
+        let runs = |f: &str| world.runs(f);
+        let wasm = vyrn_codegen::direct::compile(&program, world.clone());
         observe::stop();
         let insts = observe::take_insts();
         let crossings = observe::take_crossings();
@@ -426,6 +431,9 @@ fn gate() {
             // so a shell that shows up here is a real difference.
             match by_name.get(f) {
                 Some(f) if f.is_gen => *inst_rules.entry(InstRule::GenFn).or_insert(0) += 1,
+                Some(f) if !runs(&f.name) => {
+                    *inst_rules.entry(InstRule::Unreached).or_insert(0) += 1
+                }
                 _ => {
                     extra.entry(k.clone()).or_insert(name.clone());
                 }

@@ -2477,7 +2477,7 @@ std/graphql.vyrn	gqlRunner	yes	no, its effect set is alloc, gen-only
 std/graphql.vyrn	gqlResolverArm	yes	no, its effect set is alloc, gen-only
 std/graphql.vyrn	gqlSchemaTable	no, it calls `gqlMembers`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/graphql.vyrn	gqlSchemaArm	yes	no, its effect set is gen-only
-std/graphql.vyrn	graphqlServer	no, it calls `gqlServerModule`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/graphql.vyrn	graphqlServer	no, it calls `validateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/graphql.vyrn	gqlServerModule	no, it calls `gqlSchemaTable`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/graphql.vyrn	gqlTestValue	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlTestSchema	yes	no, its effect set is alloc
@@ -2641,7 +2641,7 @@ std/http.vyrn	httpNumericLit	yes	no, its effect set is alloc, gen-only
 std/http.vyrn	httpPathRegex	yes	no, its effect set is alloc
 std/http.vyrn	httpAdapter	yes	no, its effect set is alloc, gen-only
 std/http.vyrn	httpProcedure	no, it keeps an index check	no, its effect set is alloc, gen-only
-std/http.vyrn	http	no, it calls `httpModule`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/http.vyrn	http	no, it calls `validateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/http.vyrn	httpModule	no, it calls `httpBasePath`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/http.vyrn	mountedRows	yes	no, its effect set is alloc
 std/http.vyrn	Policy$Route$cacheFor	yes	no, its effect set is alloc
@@ -3065,7 +3065,7 @@ std/rpc.editor.vyrn	vyrnDevServerRpc	yes	no, the result is String, not an intege
 std/rpc.vyrn	capFirst	yes	no, its effect set is alloc
 std/rpc.vyrn	isNamedType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/rpc.vyrn	rpcWhyNotSerializable	yes	no, its effect set is alloc
-std/rpc.vyrn	validateContract	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/rpc.vyrn	validateContract	no, it calls `checkContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/rpc.vyrn	rpcReplyTypes	yes	no, its effect set is gen-only
 std/rpc.vyrn	rpcHandlerFn	yes	no, its effect set is alloc, gen-only
 std/rpc.vyrn	rpcSchemaEntry	yes	no, its effect set is gen-only
@@ -3092,7 +3092,7 @@ std/rpc.vyrn	rpcTemplatePath	no, it calls `replace`, which is not trap-free	no, 
 std/rpc.vyrn	rpcPathFor	no, it calls `rpcTemplatePath`, which is not trap-free	no, its effect set is alloc, trap
 std/rpc.vyrn	rpcRoutesOf	no, it calls `rpcPathFor`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/rpc.vyrn	rpcCollision	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/rpc.vyrn	rpcValidateAll	no, it calls `rpcQualifiedCollision`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/rpc.vyrn	rpcValidateAll	no, it calls `validateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/rpc.vyrn	rpcDefinedAs	yes	no, its effect set is alloc
 std/rpc.vyrn	rpcTypeCollision	no, it calls `report`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/rpc.vyrn	rpcQualified	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
@@ -3439,7 +3439,7 @@ std/ui.vyrn	uiHelperNameOf	yes	no, its effect set is alloc
 std/ui.vyrn	uiDynHelperBody	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiParamType	yes	no, its effect set is gen-only
 std/ui.vyrn	uiFieldsOf	no, it keeps an index check	no, its effect set is alloc
-std/ui.vyrn	uiFieldType	yes	no, its effect set is alloc
+std/ui.vyrn	uiFieldType	no, it keeps an index check	no, its effect set is alloc
 std/ui.vyrn	uiSupportedParamType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/ui.vyrn	uiSegRegex	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/ui.vyrn	uiHasFn	yes	no, `iface` is ModuleInterface, not an integer, Bool or a read array of one
@@ -3451,10 +3451,10 @@ std/ui.vyrn	uiPageErrAt	yes	no, its effect set is alloc
 std/ui.vyrn	uiErrHere	yes	no, its effect set is alloc
 std/ui.vyrn	uiContractErrs	no, it calls `checkContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/ui.vyrn	uiReports	no, it calls `report`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/ui.vyrn	uiInspectPage	no, it calls `matchedMember`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/ui.vyrn	uiInspectPage	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
 std/ui.vyrn	uiReadVyx	yes	no, its effect set is alloc, fs-read
 std/ui.vyrn	uiReadDirOf	yes	no, its effect set is alloc, fs-list
-std/ui.vyrn	uiInspectVyxPage	no, it calls `vyxPageShape`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/ui.vyrn	uiInspectVyxPage	no, it keeps an index check	no, its effect set is alloc, fs-read, trap, gen-only
 std/ui.vyrn	uiPageErr	no, it calls `uiUrlPatternOf`, which is not trap-free	no, its effect set is alloc
 std/ui.vyrn	uiScanAll	no, it calls `panic`	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/ui.vyrn	uiIsPrefixOf	yes	no, `a` is Array<String>, not an integer, Bool or a read array of one
@@ -3671,7 +3671,7 @@ std/vyx.editor.vyrn	vyxHasTemplate	no, it calls `vyxOutlineOf`, which is not tra
 std/vyx.editor.vyrn	vyxStemOf	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxComponentView	no, it calls `vyxParseScriptAt`, which is not trap-free	no, its effect set is alloc, gen-only
 std/vyx.editor.vyrn	vyrnSourceVyx	no, it calls `vyxStemOf`, which is not trap-free	no, its effect set is alloc, fs-read, gen-only
-std/vyx.editor.vyrn	vyrnDefinitionVyx	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, fs-read
+std/vyx.editor.vyrn	vyrnDefinitionVyx	no, it keeps an index check	no, its effect set is alloc, fs-read
 std/vyx.vyrn	vyxSlice	no, it keeps an index check	no, its effect set is alloc
 std/vyx.vyrn	vyxIsWs	yes	yes, packed UInt8
 std/vyx.vyrn	vyxIsIdent	yes	yes, packed UInt8
@@ -3780,7 +3780,7 @@ std/vyx.vyrn	vyxCompNames	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxNoSchema	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxNoOrigin	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxEmittedInterface	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxFinish	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/vyx.vyrn	vyxFinish	no, it calls `checkContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxCannotRead	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxReadDir	yes	no, its effect set is alloc, fs-list
 std/vyx.vyrn	vyxReadFileOf	yes	no, its effect set is alloc, fs-read
