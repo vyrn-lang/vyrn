@@ -1567,9 +1567,8 @@ fn load_with_origins_inner(
             let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
             // The floor's judgment reads the effects of every instance, so a
-            // load it still has to judge drops nothing, and a load that takes
-            // std as its interface has no body to reach through.
-            let lazy = match pending.is_some() || std_given(opts) {
+            // load it still has to judge drops nothing.
+            let lazy = match pending.is_some() {
                 true => HashSet::new(),
                 false => lazy_modules(&modules, &root_key, opts),
             };
@@ -2268,10 +2267,11 @@ pub fn rows_writer(
     }
 }
 
-/// Whether this load writes the rows of std module `owner`: the root, and
-/// each module on the writers' stack. Such a module is parsed whole.
+/// Whether this load writes the rows of std module `owner`: a load that takes
+/// std as its interface, for its root and each module on the writers' stack.
+/// Such a module is parsed whole and drops nothing.
 fn writes(owner: &str, root_key: &str, opts: &LoadOptions) -> bool {
-    owner == root_key || opts.nest.writing.iter().any(|w| w == owner)
+    std_given(opts) && (owner == root_key || opts.nest.writing.iter().any(|w| w == owner))
 }
 
 /// Parses every body of module `key` the skim `s` left, so no body stays
@@ -2376,7 +2376,7 @@ fn module_parse(
 }
 
 /// The format word that opens a std module's interface entry.
-const INTERFACE_TAG: &str = "interface1";
+const INTERFACE_TAG: &str = "interface2";
 
 /// The parse of imported std module `key` as its interface ([`std_given`]):
 /// each given function ([`is_given`]) with a [`Body::Given`], every other
@@ -2426,8 +2426,32 @@ fn interface_parse(
         return Err(in_key(errors));
     }
     let owner = generated_importer(key).unwrap_or(key);
+    // One line per given function, in source order: its name, then each
+    // name its body spells, each followed by a space.
+    let spells = &interface.spells;
+    let mut at = 0;
     for f in (program.functions.iter_mut()).filter(|f| is_given(f, owner, opts)) {
-        f.body = Body::Given;
+        let line = spells[at..].split_once('\n').map(|(l, _)| l);
+        let names = line.and_then(|l| l.strip_prefix(f.name.as_str())?.strip_prefix(' '));
+        let (Some(line), Some(names)) = (line, names) else {
+            let d = Diagnostic::error(
+                f.line,
+                0,
+                "load",
+                format!(
+                    "internal error: the interface of `{key}` holds no names for `{}`",
+                    f.name
+                ),
+            );
+            return Err(in_key(vec![d]));
+        };
+        let from = at + line.len() - names.len();
+        f.body = Body::Given(GivenNames::new(spells.clone(), from..from + names.len()));
+        at += line.len() + 1;
+    }
+    if at != spells.len() {
+        let d = Diagnostic::error(0, 0, "load", format!("internal error: the interface of `{key}` holds names for a function it does not declare"));
+        return Err(in_key(vec![d]));
     }
     let p = Rc::new(Parsed {
         program,
@@ -2442,10 +2466,12 @@ fn interface_parse(
 /// What a load reads of a std module it takes as its interface: the module's
 /// text with each given body's statements cut and its newlines kept, so
 /// every other line and column stands, and the names the cut bodies would
-/// add to [`Parsed::refs`] and [`Parsed::mentions`].
+/// add to [`Parsed::refs`] and [`Parsed::mentions`], and the names each cut
+/// body spells ([`Body::Given`]), a line per given function in source order.
 struct Interface {
     refs: HashSet<String>,
     mentions: HashSet<String>,
+    spells: std::sync::Arc<str>,
     text: String,
 }
 
@@ -2470,8 +2496,32 @@ impl Interface {
             let (i, _) = text[start..].char_indices().nth(col.checked_sub(1)?)?;
             Some(start + i)
         };
-        let mut cuts: Vec<(usize, usize)> = (full.program.functions.iter())
-            .filter(|f| is_given(f, owner, opts))
+        let given = || (full.program.functions.iter()).filter(|f| is_given(f, owner, opts));
+        let mut spells = String::new();
+        for f in given() {
+            let parsed = match f.body.written().filter(|b| !b.stmts.is_empty()) {
+                Some(b) => Some(b.clone()),
+                None => s.body(f).transpose().map_err(|ds| {
+                    ds.into_iter()
+                        .map(|d| in_module(d, key, root_key))
+                        .collect::<Vec<_>>()
+                })?,
+            };
+            let mut names: Vec<&str> = Vec::new();
+            if let Some(b) = &parsed {
+                crate::ast::spelled(b, &mut names);
+            }
+            names.sort_unstable();
+            names.dedup();
+            spells.push_str(&f.name);
+            spells.push(' ');
+            for n in names {
+                spells.push_str(n);
+                spells.push(' ');
+            }
+            spells.push('\n');
+        }
+        let mut cuts: Vec<(usize, usize)> = given()
             .filter_map(|f| {
                 let (open, close) = s.braces(f)?;
                 let (a, b) = (at(open)?, at(close)?);
@@ -2492,12 +2542,13 @@ impl Interface {
         Ok(Interface {
             refs: (*full.refs).clone(),
             mentions: s.idents(),
+            spells: spells.into(),
             text: out,
         })
     }
 
-    /// The entry as text: the tag line, the counted refs and mentions, then
-    /// the cut text.
+    /// The entry as text: the tag line, the counted refs and mentions, the
+    /// given bodies' names after their length in bytes, then the cut text.
     fn render(&self, key: &str) -> String {
         let mut body = String::new();
         for names in [&self.refs, &self.mentions] {
@@ -2509,6 +2560,8 @@ impl Interface {
                 body.push('\n');
             }
         }
+        body.push_str(&format!("{}\n", self.spells.len()));
+        body.push_str(&self.spells);
         body.push_str(&self.text);
         let tag = gen_cache_tag(key, body.as_bytes());
         format!("{INTERFACE_TAG} {tag}\n{body}")
@@ -2535,9 +2588,14 @@ impl Interface {
                 .collect()
         };
         let (refs, mentions) = (names()?, names()?);
+        let (n, tail) = rest.split_once('\n')?;
+        let n: usize = n.parse().ok()?;
+        let spells = tail.get(..n)?;
+        rest = tail.get(n..)?;
         Some(Interface {
             refs,
             mentions,
+            spells: spells.into(),
             text: rest.to_string(),
         })
     }
@@ -5769,7 +5827,8 @@ fn called_by_name(key: &str, opts: &LoadOptions) -> bool {
 }
 
 /// The modules whose unreached functions, tests and benches the link drops:
-/// every `std/` module but the root. A runtime module's other functions stay,
+/// every `std/` module but the root and a module this load writes the rows of
+/// ([`writes`]). A runtime module's other functions stay,
 /// because the emitter and the desugars call them by name ([`called_by_name`]);
 /// only its unreached gen fns leave. `std/runtime` keeps what [`RUNTIME_CALLS`]
 /// names.
@@ -5784,6 +5843,7 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
     let std_root = format!("{}/", normalize(std_root));
     (modules.iter())
         .filter(|m| m.key != root_key && !is_remote(&m.key))
+        .filter(|m| !writes(generated_importer(&m.key).unwrap_or(&m.key), root_key, opts))
         .filter(|m| normalize(generated_importer(&m.key).unwrap_or(&m.key)).starts_with(&std_root))
         .map(|m| m.key.clone())
         .collect()
@@ -5933,7 +5993,8 @@ fn assert_parsed(
 /// Returns every name `roots` reach in `program`: its functions and module
 /// state, each other name their bodies spell, a builtin's included, and the
 /// functions a reached builtin routes to. A local that shares a function's
-/// name reaches the function. Its implicit roots are every `$` name but
+/// name reaches the function. A given body's names reach by their written
+/// name too ([`Body::Given`]). Its implicit roots are every `$` name but
 /// `std/runtime`'s and a gen fn's (an injected runtime module's, which the
 /// emitter calls by name, and an impl's flattened method, which dispatch
 /// reaches by type) and every name a contract default, an impl method or a
@@ -5945,6 +6006,14 @@ fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str>
     let state: HashMap<&str, &Expr> = (program.globals.iter())
         .map(|s| (s.name.as_str(), &s.init))
         .collect();
+    // By written name, each declaration the link may have renamed
+    // ([`Spellings::decls`]), for a given body's names.
+    let mut written: Vec<(&str, &str)> = Vec::new();
+    if (program.functions.iter()).any(|f| matches!(f.body, Body::Given(_))) {
+        let decls = program.spellings.decls.iter();
+        written.extend(decls.map(|(linked, (w, _))| (w.as_str(), linked.as_str())));
+        written.sort_unstable();
+    }
     work.extend(
         (program.functions.iter())
             .filter(|f| f.name.contains('$') && !f.name.starts_with(RUNTIME_PREFIX) && !f.is_gen)
@@ -5968,8 +6037,15 @@ fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str>
             work.push(r);
         }
         if let Some(f) = by_name.get(n) {
-            if let Some(b) = f.body.written() {
-                crate::ast::spelled(b, &mut work);
+            f.body.spelled(&mut work);
+            // A given body's names are its module's spellings, which the
+            // link may have renamed apart.
+            if let Body::Given(names) = &f.body {
+                for n in names.iter() {
+                    let from = written.partition_point(|(w, _)| *w < n);
+                    let same = written[from..].iter().take_while(|(w, _)| *w == n);
+                    work.extend(same.map(|(_, linked)| *linked));
+                }
             }
         } else if let Some(init) = state.get(n) {
             crate::ast::expr_spelled(init, &mut work);

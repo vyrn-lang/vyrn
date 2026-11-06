@@ -122,11 +122,12 @@ the playground serves an embedded `std/`. The loader:
 - under `vyrn check`, takes an imported `std/` module as its interface
   (`loader::std_given`): each non-generic top-level function's body is
   `ast::Body::Given`, unparsed and untyped, and its module's stored row stands
-  for it (below); every other body is parsed, and nothing is dropped. The
-  load lexes and parses the module's interface entry (`loader::interface_parse`):
-  its text with each given body cut to its newlines, keyed by the compiler's
-  identity, the module's key and its text hash, in the generator cache's
-  directory;
+  for it (below); every other body is parsed. The load lexes and parses the
+  module's interface entry (`loader::interface_parse`): its text with each
+  given body cut to its newlines, and the names each cut body spells, keyed by
+  the compiler's identity, the module's key and its text hash, in the
+  generator cache's directory. The link drops what no root reaches, as below,
+  following a given body's stored names;
 - in every other load, parses an imported `std/` module's top-level function
   bodies only where a root can reach them by spelling (`parse_reached`), and
   drops each function, test and bench of such a module that no root reaches

@@ -868,8 +868,35 @@ pub enum Body {
     /// The parsed block, which the checker types and the core builds.
     Written(Block),
     /// A non-generic std function `vyrn check` neither parses nor types: its
-    /// module's stored row stands for it (`vyrn_lower::stdrows`).
-    Given,
+    /// module's stored row stands for it (`vyrn_lower::stdrows`). It holds
+    /// the names the body spells, which the link's reach follows.
+    Given(GivenNames),
+}
+
+/// The names a given body spells ([`spelled`]), as its module declares them:
+/// a range of its module's interface entry, which every given body of the
+/// module shares, so a load allocates nothing per body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GivenNames {
+    text: std::sync::Arc<str>,
+    at: std::ops::Range<usize>,
+}
+
+impl GivenNames {
+    /// The names `text[at]` holds, each followed by one space.
+    ///
+    /// # Panics
+    ///
+    /// If `at` is no range of `text` that ends on a character boundary.
+    pub fn new(text: std::sync::Arc<str>, at: std::ops::Range<usize>) -> GivenNames {
+        assert!(text.get(at.clone()).is_some(), "a range of the entry");
+        GivenNames { text, at }
+    }
+
+    /// Each name, in the entry's order.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.text[self.at.clone()].split_terminator(' ')
+    }
 }
 
 impl Body {
@@ -877,7 +904,15 @@ impl Body {
     pub fn written(&self) -> Option<&Block> {
         match self {
             Body::Written(b) => Some(b),
-            Body::Given => None,
+            Body::Given(_) => None,
+        }
+    }
+
+    /// Pushes onto `out` every name the body spells ([`spelled`]).
+    pub fn spelled<'a>(&'a self, out: &mut Vec<&'a str>) {
+        match self {
+            Body::Written(b) => spelled(b, out),
+            Body::Given(names) => out.extend(names.iter()),
         }
     }
 
@@ -885,7 +920,7 @@ impl Body {
     pub fn written_mut(&mut self) -> Option<&mut Block> {
         match self {
             Body::Written(b) => Some(b),
-            Body::Given => None,
+            Body::Given(_) => None,
         }
     }
 }

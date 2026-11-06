@@ -3093,7 +3093,7 @@ impl<'a> Checker<'a> {
     fn function(&self, f: &Function) -> Result<(), Diagnostic> {
         match &f.body {
             Body::Written(b) => self.function_body(f, b),
-            Body::Given => Ok(()),
+            Body::Given(_) => Ok(()),
         }
     }
 
@@ -7016,7 +7016,7 @@ fn check_comptime_purity<'a>(
             if !facts.contains_key(cur) {
                 let row = match &f.body {
                     Body::Written(body) => cx.row(f, body),
-                    Body::Given => (program.fenced.get(&f.name).cloned())
+                    Body::Given(_) => (program.fenced.get(&f.name).cloned())
                         .unwrap_or_else(|| panic!("the given `{}` has no stored row", f.name)),
                 };
                 facts.insert(cur.to_string(), row);
