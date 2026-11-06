@@ -84,7 +84,7 @@ impl Given {
             .map(|(l, (w, m))| ((w.as_str(), m.as_str()), l.as_str()))
             .collect();
         let mut seen = Seen::default();
-        let mut entries: HashMap<&str, Arc<Entry>> = HashMap::new();
+        let mut entries: BTreeMap<&str, Arc<Entry>> = BTreeMap::new();
         for f in &given {
             let m = f.module.as_deref().expect("a given function is imported");
             let owner = loader::generated_importer(m).unwrap_or(m);
