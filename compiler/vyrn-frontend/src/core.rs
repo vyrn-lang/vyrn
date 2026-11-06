@@ -117,6 +117,10 @@ pub struct NameInfo {
     /// Whether a `let` the reader wrote bound this name, which makes it a
     /// binding the memory report is about.
     pub bound_by_let: bool,
+    /// The type the `let` that binds this name declares, as written: before an
+    /// instance's substitution. `None` where it is [`NameInfo::ty`], the
+    /// value's type, for an unannotated `let` and for every other name.
+    pub annotation: Option<Type>,
     /// Whether this name holds a copy the core made where the reader wrote
     /// none (`vyrn_lower::core::Builder::copy_rhs`).
     pub implicit_copy: bool,

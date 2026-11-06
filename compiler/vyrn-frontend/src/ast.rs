@@ -2780,40 +2780,6 @@ macro_rules! body_scope_descent {
 
 crate::body_scope_descent!(AstVisit, ast_block, ast_stmt, ast_expr);
 
-/// Returns every lambda literal in function bodies and global initializers, by
-/// node, with the name of the function that holds it ("" for module state).
-///
-/// A backend walk has erased the program's lifetime; this gives it a borrow a
-/// worklist can hold, without copying the body.
-pub fn lambdas<'a>(p: &'a Program) -> std::collections::HashMap<NodeId, (&'a str, &'a Expr)> {
-    struct Lambdas<'a>(
-        &'a str,
-        std::collections::HashMap<NodeId, (&'a str, &'a Expr)>,
-    );
-    impl<'a> AstVisit<'a> for Lambdas<'a> {
-        const SCOPED: bool = false;
-        fn expr(&mut self, e: &'a Expr, _: &std::collections::HashSet<String>) -> bool {
-            if let Expr::Lambda { .. } = e {
-                self.1.insert(e.id(), (self.0, e));
-            }
-            true
-        }
-    }
-    let mut v = Lambdas("", std::collections::HashMap::new());
-    let mut locals = std::collections::HashSet::new();
-    for f in &p.functions {
-        v.0 = &f.name;
-        if let Some(b) = f.body.written() {
-            ast_block(b, &mut locals, &mut v);
-        }
-    }
-    v.0 = "";
-    for g in &p.globals {
-        ast_expr(&g.init, &locals, &mut v);
-    }
-    v.1
-}
-
 struct Ids<'o>(&'o mut Vec<NodeId>);
 
 impl AstVisit<'_> for Ids<'_> {

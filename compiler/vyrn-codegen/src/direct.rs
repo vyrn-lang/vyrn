@@ -27,10 +27,10 @@ use std::sync::Arc;
 
 use vyrn_frontend::ast::*;
 use vyrn_frontend::core::check::{integer_rule, Check, Guard, Raises, Verdict};
-/// The core's statements and values. `Body` stays qualified at each use,
-/// because this file defines its own `Body`.
+/// The core's statements and values.
 use vyrn_frontend::core::{
-    Arg, Arm, Await, Callee, Ctor, Fork, Form, Lit, Name, NameInfo, Op, Rhs, St, Target, Test, Val,
+    Arg, Arm, Await, BorrowKind, Callee, Ctor, Fork, Form, Lit, Name, NameInfo, NotOwned, Op, Rhs,
+    St, Target, Test, Val,
 };
 use vyrn_frontend::gen::GenError;
 use vyrn_frontend::loader::{RtWord, RuntimeCalls, RUNTIME_CALLS, TASK_PREFIX};
@@ -375,7 +375,6 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     let profile = vyrn_frontend::loader::profile_build(program.host.gen);
     let mut base = Base {
         types: analysis.ownership.proto.types(),
-        lambdas: vyrn_frontend::ast::lambdas(program),
         oracle,
         sigs: HashMap::new(),
         rt,
@@ -475,12 +474,11 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     // One ownership word per module-state accumulator, in static memory because the helper writes
     // it back and wasm has no pass-by-reference. Reserved zeroed; the initializer sets it.
     //
-    // A reservation moves every reservation after it, so `global_append_candidates` returns an
-    // ordered set.
+    // A reservation moves every reservation after it, so the accumulators are an ordered set.
     let mut gappend = HashMap::new();
-    for name in vyrn_lower::append::global_append_candidates(program) {
-        if (globals.get(&name)).is_some_and(|(_, ty)| cx.resolve(ty) == Type::Str) {
-            gappend.insert(name, m.reserve(4, 4));
+    for name in &cx.world.ownership.accumulators {
+        if (globals.get(name)).is_some_and(|(_, ty)| cx.resolve(ty) == Type::Str) {
+            gappend.insert(name.clone(), m.reserve(4, 4));
         }
     }
     base.seed = cx.caches.into_inner();
@@ -564,7 +562,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             }
             cx.subst = p.subst.clone();
             let body = emit_here(&mut m, &cx, |log| {
-                lower_body(log, &p.f, &p.core_key, p.body, &p.sig, &cx, p.binds.clone())
+                lower_body(log, &p.f, &p.core_key, &p.sig, &cx, p.binds.clone())
             });
             cx.subst = HashMap::new();
             cx.reg.borrow_mut().mono.done += 1;
@@ -1260,34 +1258,19 @@ enum Key {
     /// A specialization over `fn`-typed parameters: the callee, its type arguments, and each `fn` parameter's
     /// target. A different lambda makes a different function.
     Ho(String, Vec<Type>, Vec<FnTarget>),
-    /// A lifted lambda: the literal's node, its concrete shape (captures, parameters,
-    /// return), and its substitution. One literal in a generic body lifts once per
-    /// instantiation, even when the shape does not differ.
-    Lambda(NodeId, Vec<Type>, Vec<(String, Type)>),
-}
-
-/// The statements a queued body walks. Each is the program's own AST, because a walk over a copy
-/// asks about nodes no recorded type can reach.
-#[derive(Clone, Copy)]
-enum Body<'a> {
-    /// A block the program holds: a generic instance's or specialization's callee, or a
-    /// `|x| { .. }` literal's body.
-    Block(&'a Block),
-    /// A `|x| e` literal's expression. A block would need a copy of `e` for its `return`, so the
-    /// core's rows state the body, and [`lower_body`] refuses one they do not carry.
-    Value,
+    /// A lifted lambda: the literal's core key ([`vyrn_lower::core::lambda_spelling`]), its
+    /// concrete shape (captures, parameters, return), and its substitution. One literal in a
+    /// generic body lifts once per instantiation, even when the shape does not differ.
+    Lambda(String, Vec<Type>, Vec<(String, Type)>),
 }
 
 /// One body discovered while another was being emitted, with its promised function index.
 #[derive(Clone)]
-struct Pending<'a> {
+struct Pending {
     key: Key,
-    /// The shell: the name, line and signature the body is lowered under. It carries the
-    /// synthesized block for a [`Key::Lambda`] and no statements otherwise. An `Arc`, so a
-    /// drain turn shares the shell instead of copying it.
+    /// The shell: the name, line and signature the body is lowered under, with no statements.
+    /// An `Arc`, so a drain turn shares the shell instead of copying it.
     f: Arc<Function>,
-    /// The statements to walk, borrowed from the checked program.
-    body: Body<'a>,
     sig: Sig,
     /// The monomorphization the body is lowered under; empty for a lifted lambda
     /// outside any generic.
@@ -1304,8 +1287,8 @@ struct Pending<'a> {
 /// pre-pass would be a second traversal that must agree with lowering. One queue holds all three
 /// [`Key`] kinds, so "they feed each other" means appending to the list being read.
 #[derive(Clone, Default)]
-struct Mono<'a> {
-    insts: Vec<Pending<'a>>,
+struct Mono {
+    insts: Vec<Pending>,
     done: usize,
 }
 
@@ -1410,8 +1393,8 @@ impl Sites {
 /// The module's registries: what the bodies discover, which a later body or the drain reads.
 /// Each list only grows, so the entries past a [`Lens`] are the ones an emission added.
 #[derive(Clone, Default)]
-struct Reg<'a> {
-    mono: Mono<'a>,
+struct Reg {
+    mono: Mono,
     /// The stored-closure variant registry, module-global so a tag means the same thing in
     /// every body that builds one.
     fnvals: Vec<FnVal>,
@@ -1433,14 +1416,14 @@ struct Lens {
 }
 
 /// The entries one emission added to a [`Reg`], each list in the order they were added.
-struct Added<'a> {
-    insts: Vec<Pending<'a>>,
+struct Added {
+    insts: Vec<Pending>,
     fnvals: Vec<FnVal>,
     dispatch: Vec<(Type, Sig)>,
     shapes: Vec<(u32, ShapeKey, usize)>,
 }
 
-impl<'a> Reg<'a> {
+impl Reg {
     fn lens(&self) -> Lens {
         Lens {
             insts: self.mono.insts.len(),
@@ -1451,7 +1434,7 @@ impl<'a> Reg<'a> {
     }
 
     /// Takes the entries added past `at`.
-    fn split_off(&mut self, at: Lens) -> Added<'a> {
+    fn split_off(&mut self, at: Lens) -> Added {
         Added {
             insts: self.mono.insts.split_off(at.insts),
             fnvals: self.fnvals.split_off(at.fnvals),
@@ -1553,10 +1536,10 @@ impl Log {
 }
 
 /// One body emitted against a [`Cx`]'s view and not yet applied to the module.
-struct Emitted<'p> {
+struct Emitted {
     frame: Result<Frame, String>,
     log: Log,
-    added: Added<'p>,
+    added: Added,
     /// The registry the body read: the list lengths of its view.
     seen: Lens,
     queries: Vec<Query>,
@@ -1564,7 +1547,7 @@ struct Emitted<'p> {
 }
 
 /// Emits one body with `body` against `cx`, and leaves `cx`'s registries as they were.
-fn emit<'p>(cx: &Cx<'p>, body: impl FnOnce(&mut Log) -> Result<Frame, String>) -> Emitted<'p> {
+fn emit(cx: &Cx<'_>, body: impl FnOnce(&mut Log) -> Result<Frame, String>) -> Emitted {
     let seen = cx.reg.borrow().lens();
     let at = crate::observe::mark();
     let mut log = Log::default();
@@ -1585,7 +1568,7 @@ fn emit<'p>(cx: &Cx<'p>, body: impl FnOnce(&mut Log) -> Result<Frame, String>) -
 ///
 /// Returns `None` when an entry added since `e`'s view answers one of its [`Query`]s. The body
 /// may then differ, and the caller emits it again against `cx`, which is never stale.
-fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame, String>> {
+fn merge(m: &mut Module, cx: &Cx<'_>, e: Emitted) -> Option<Result<Frame, String>> {
     let mut reg = cx.reg.borrow_mut();
     if (e.queries.iter()).any(|q| reg.answers_since(q, &e.seen)) {
         return None;
@@ -1707,9 +1690,6 @@ fn emit_here<'p>(
 /// addresses fixed before the first body.
 struct Base<'a> {
     types: &'a HashMap<String, TypeDecl>,
-    /// Every lambda literal the program holds, by node address and the function that holds it,
-    /// so [`Fn_::lift_lambda`] queues the literal's own body instead of a clone.
-    lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
     /// The check oracle's host imports and its row labels, under
     /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
     oracle: Option<Oracle>,
@@ -1739,7 +1719,7 @@ struct Base<'a> {
     /// caller's storage during the call. [`lower_body`] reads it.
     aliasing: std::collections::HashSet<String>,
     /// Module-state `String` accumulators: name -> the address of its ownership word. Present only
-    /// for a global [`vyrn_lower::append::global_append_candidates`] cleared, so `g = g + ...`
+    /// for a global [`vyrn_frontend::own::Ownership::accumulators`] holds, so `g = g + ...`
     /// grows in place. The local twin is [`Fn_::str_append`]; a global has no local, so its word
     /// is static.
     gappend: HashMap<String, u32>,
@@ -1917,7 +1897,7 @@ struct Cx<'a> {
     /// The monomorphization whose body is being lowered; empty for an ordinary
     /// function.
     subst: HashMap<String, Type>,
-    reg: RefCell<Reg<'a>>,
+    reg: RefCell<Reg>,
     /// The lookups [`merge`] checks, made since the last [`emit`] began.
     queries: RefCell<Vec<Query>>,
 }
@@ -1932,7 +1912,7 @@ impl<'a> std::ops::Deref for Cx<'a> {
 
 impl<'a> Cx<'a> {
     /// A view of `base` with empty caches and the registries `reg`.
-    fn new(base: &'a Base<'a>, reg: Reg<'a>) -> Self {
+    fn new(base: &'a Base<'a>, reg: Reg) -> Self {
         Cx {
             base,
             caches: RefCell::default(),
@@ -2057,7 +2037,6 @@ impl<'a> Cx<'a> {
         m: &mut Log,
         key: Key,
         f: Arc<Function>,
-        body: Body<'a>,
         subst: HashMap<String, Type>,
         binds: HashMap<String, FnBinding>,
         core_key: String,
@@ -2074,7 +2053,6 @@ impl<'a> Cx<'a> {
         self.reg.borrow_mut().mono.insts.push(Pending {
             key,
             f,
-            body,
             sig: sig.clone(),
             subst,
             binds,
@@ -2154,7 +2132,6 @@ impl<'a> Cx<'a> {
             m,
             Key::Ho(f.name.clone(), type_args, targets),
             Arc::new(sf),
-            Body::Block(f.block()),
             subst,
             binds,
             core_key,
@@ -2174,7 +2151,6 @@ impl<'a> Cx<'a> {
             m,
             Key::Generic(f.name.clone(), type_args),
             Arc::new(instance_shell(f, &subst)),
-            Body::Block(f.block()),
             subst,
             HashMap::new(),
             core_key,
@@ -2690,9 +2666,6 @@ fn f_shell(line: usize) -> Function {
 }
 
 /// The declaration a specialization is lowered under, with no statements in it.
-///
-/// A specialization differs from its callee only in its signature, so [`Pending::body`] points
-/// at the callee's own block, the one the checker typed and `vyrn-lower` recorded.
 fn shell_of(f: &Function) -> Function {
     Function {
         name: f.name.clone(),
@@ -2851,7 +2824,7 @@ fn lower_globals_init(m: &mut Log, program: &Program, cx: &Cx<'_>) -> Result<Fra
     let from_core = cx.world.body_of("").filter(|core| {
         f.core = Some(core);
         f.core_enter(core);
-        f.core_walkable(None)
+        f.core_walkable()
     });
     match &from_core {
         Some(_) => f.core_body(m, &mut b)?,
@@ -2861,11 +2834,26 @@ fn lower_globals_init(m: &mut Log, program: &Program, cx: &Cx<'_>) -> Result<Fra
             }
         }
     }
+    // The accumulator owns its buffer unless its initializer's row stores a static value: a
+    // literal, or a checked one, which lives in the data segment.
+    let stores_static = |g: &str| {
+        from_core.is_some_and(|c| {
+            c.stmts.iter().any(|s| match s {
+                St::Store {
+                    place: vyrn_frontend::core::Place::Global(n),
+                    value,
+                    ..
+                } if n == g => match value {
+                    Val::Lit(l) => matches!(l, Lit::Str(_)),
+                    Val::Name(t) => matches!(c.names[t.index()].not_owned, Some(NotOwned::Static)),
+                },
+                _ => false,
+            })
+        })
+    };
     for g in &program.globals {
-        // The accumulator owns its buffer unless the initializer is a literal, which lives in
-        // the data segment.
         if let Some(&at) = cx.gappend.get(&g.name) {
-            let owns = !matches!(g.init, Expr::Str(_, _));
+            let owns = !stores_static(&g.name);
             b.ins(&Instruction::I32Const(at as i32))
                 .ins(&Instruction::I32Const(owns as i32))
                 .ins(&Instruction::I32Store(word()));
@@ -2896,15 +2884,7 @@ fn lower_globals_teardown(m: &mut Log, program: &Program, cx: &Cx<'_>) -> Result
 /// Lowers the declared function `f`, which [`Cx::sigs`] holds.
 fn lower_fn(m: &mut Log, f: &Function, cx: &Cx<'_>) -> Result<Frame, String> {
     let sig = &cx.sigs[&f.name];
-    lower_body(
-        m,
-        f,
-        &f.name,
-        Body::Block(f.block()),
-        sig,
-        cx,
-        HashMap::new(),
-    )
+    lower_body(m, f, &f.name, sig, cx, HashMap::new())
 }
 
 /// Fills function `index` with `body` and, under `VYRN_WASM_NAMES` or an operation count, names
@@ -2917,25 +2897,18 @@ fn fill_named(m: &mut Module, index: u32, body: Frame, name: &str) -> Result<(),
     Ok(())
 }
 
-/// `f` is the declaration, `key` the name the core built the body under. `f` and `body` are
-/// separate because a specialization borrows the callee's statements ([`Pending::body`]).
-/// `sig` is passed because a specialization has no entry in `Cx::sigs`: several instances
+/// `f` is the declaration, `key` the name the core built the body under, whose rows the walk
+/// reads. `sig` is passed because a specialization has no entry in `Cx::sigs`: several instances
 /// share one `Function`. `binds` is non-empty only for a specialization; its keys are the
 /// callee's `fn`-typed parameter names, which the synthesized signature replaces with captures.
 fn lower_body(
     m: &mut Log,
     f: &Function,
     key: &str,
-    body: Body<'_>,
     sig: &Sig,
     cx: &Cx<'_>,
     binds: HashMap<String, FnBinding>,
 ) -> Result<Frame, String> {
-    // A `|x| e` literal has no statements to walk at all; everything else does.
-    let stmts = match body {
-        Body::Block(b) => Some(b),
-        Body::Value => None,
-    };
     let sig = sig.clone();
     let (params, results) = cx.wasm_sig(&sig, f.line)?;
     // An aggregate result goes out through the hidden leading pointer, or stays in the
@@ -3118,7 +3091,7 @@ fn lower_body(
     if let Some(core) = cx_fn.core {
         cx_fn.core_lift_targets(m, &core.stmts);
     }
-    if cx_fn.core.is_none() || !cx_fn.core_walkable(stmts) {
+    if cx_fn.core.is_none() || !cx_fn.core_walkable() {
         let what = format!("the body of `{}` the core did not state", cx_fn.owner);
         return unsupported(&what, f.line);
     }
@@ -5983,67 +5956,51 @@ impl<'p> Fn_<'_, 'p> {
         Ok((l, self.cx.load(ty, off)))
     }
 
-    /// This body's lambda literal under a closure row's key
-    /// ([`vyrn_lower::core::lambda_spelling`]).
-    fn literal(&self, key: &str) -> Option<&'p Expr> {
-        self.cx.lambdas.values().find_map(|(o, e)| match e {
-            Expr::Lambda { line, col, .. }
-                if *o == self.owner
-                    && vyrn_lower::core::lambda_spelling(&self.core_key, *line, *col) == key =>
-            {
-                Some(*e)
-            }
-            _ => None,
-        })
+    /// The line of this body's lambda literal under a closure row's key
+    /// ([`vyrn_lower::core::lambda_spelling`]). `None` for a key another body spells.
+    fn literal(&self, key: &str) -> Option<usize> {
+        let (line, col) = vyrn_lower::core::lambda_at(key)?;
+        (vyrn_lower::core::lambda_spelling(&self.core_key, line, col) == key).then_some(line)
     }
 
-    /// Lifts a lambda literal to a top-level function `(captures.., params..) -> ret`, indexed
-    /// here and lowered when the queue reaches it. Captures are ordinary read parameters, so
-    /// they are by-value snapshots.
-    #[allow(clippy::too_many_arguments)]
+    /// The spellings of the lambda frame `key` names: its captures, which it borrows, and then
+    /// its own parameters, each in the frame's order.
+    fn lambda_frame(&self, key: &str) -> Option<(Vec<String>, Vec<String>)> {
+        let body = self.cx.world.body_of(key)?;
+        let (caps, params): (Vec<&NameInfo>, Vec<&NameInfo>) = (body.params.iter())
+            .map(|n| &body.names[n.index()])
+            .partition(|i| i.borrow_kind == Some(BorrowKind::Capture));
+        let spell = |v: Vec<&NameInfo>| v.iter().map(|i| i.source.clone()).collect();
+        Some((spell(caps), spell(params)))
+    }
+
+    /// Lifts the lambda literal at `line` that `key` names to a top-level function
+    /// `(captures.., params..) -> ret`, indexed here and lowered when the queue reaches it.
+    /// Captures are ordinary read parameters, so they are by-value snapshots.
     fn lift_lambda(
         &mut self,
         m: &mut Log,
-        at: &'p Expr,
+        key: &str,
+        line: usize,
         ptys: &[Type],
         expected_ret: &Type,
         caps: Option<&[(String, Type)]>,
-        line: usize,
     ) -> Result<FnTarget, String> {
-        assert_ne!(
-            at.id(),
-            NodeId::NONE,
-            "a lambda lifted from an unnumbered tree"
-        );
-        let Expr::Lambda {
-            params,
-            body,
-            line: at_line,
-            col: at_col,
-            id: _,
-        } = at
-        else {
-            return unsupported("a lambda lifted from another expression", line);
+        let Some((own_caps, params)) = self.lambda_frame(key) else {
+            return unsupported("a lambda the core did not state", line);
         };
         if params.len() != ptys.len() {
             return unsupported("a lambda with the wrong number of parameters", line);
         }
-        // The free locals in first-seen order, from the shared walk: the capture list is part
-        // of the lifted signature. A core row names its captures, because the frame lifts the
-        // literal before its first statement, where no capture is in scope.
+        // The capture list is part of the lifted signature. A call row names its captures with
+        // their types, because the frame lifts the literal before its first statement, where no
+        // capture is in scope.
         let (cap_names, mut cap_tys) = match caps {
             Some(c) => (
                 c.iter().map(|(n, _)| n.clone()).collect(),
                 c.iter().map(|(_, t)| self.cx.sub(t).into_owned()).collect(),
             ),
-            None => (
-                vyrn_lower::core::lambda_captures(
-                    body,
-                    params.iter().map(|p| p.name.clone()).collect(),
-                    &|n| self.scope.iter().any(|(s, _, _)| s == n) || self.fn_binds.contains_key(n),
-                ),
-                Vec::new(),
-            ),
+            None => (own_caps, Vec::new()),
         };
         for cn in cap_names.iter().skip(cap_tys.len()) {
             // A captured `fn`-typed parameter lives in `fn_binds`, not a slot. It is captured
@@ -6064,29 +6021,16 @@ impl<'p> Fn_<'_, 'p> {
             cap_tys.push(self.cx.sub(&t).into_owned());
         }
         let ret = expected_ret.clone();
-        // The queue walks the literal's own nodes, so every answer is about a program node.
-        let queued = match body {
-            LambdaBody::Block(b) => Body::Block(b),
-            LambdaBody::Expr(_) => Body::Value,
-        };
         let mut sf = f_shell(line);
         sf.name = format!("{LAMBDA} {}", self.owner);
         sf.params = cap_names
             .iter()
             .zip(&cap_tys)
+            .chain(params.iter().zip(ptys))
             .map(|(n, t)| Param::synth(n, t.clone()))
-            .chain(params.iter().zip(ptys).map(|(n, t)| Param {
-                id: Id::NEW,
-                name: n.name.clone(),
-                capability: Capability::Read,
-                ty: t.clone(),
-                line: n.line,
-                col: n.col,
-                clause: None,
-            }))
             .collect();
         sf.ret = ret.clone();
-        // Keyed by node, shape and substitution: a literal in a generic body lifts once per
+        // Keyed by literal, shape and substitution: a literal in a generic body lifts once per
         // instantiation, even when the type parameter appears only in a statement.
         let mut shape: Vec<Type> = cap_tys.clone();
         shape.extend(ptys.iter().cloned());
@@ -6098,15 +6042,13 @@ impl<'p> Fn_<'_, 'p> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         under.sort_by(|a, b| a.0.cmp(&b.0));
-        let key = Key::Lambda(at.id(), shape, under);
         let sig = self.cx.enqueue(
             m,
-            key,
+            Key::Lambda(key.to_string(), shape, under),
             Arc::new(sf),
-            queued,
             self.cx.subst.clone(),
             HashMap::new(),
-            vyrn_lower::core::lambda_spelling(&self.core_key, *at_line, *at_col),
+            key.to_string(),
         )?;
         Ok(FnTarget {
             sig,
@@ -6224,14 +6166,17 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Returns the target a stored lambda calls.
-    fn lift_stored(&mut self, m: &mut Log, e: &'p Expr, sig_ty: &Type) -> Result<FnTarget, String> {
-        let Expr::Lambda { line, .. } = e else {
-            return unsupported("a function value from a non-lambda", Expr::line(e));
-        };
+    fn lift_stored(
+        &mut self,
+        m: &mut Log,
+        key: &str,
+        line: usize,
+        sig_ty: &Type,
+    ) -> Result<FnTarget, String> {
         let Type::Fn(ptys, ret) = sig_ty else {
-            return unsupported("a lambda in a non-function position", *line);
+            return unsupported("a lambda in a non-function position", line);
         };
-        self.lift_lambda(m, e, ptys, ret, None, *line)
+        self.lift_lambda(m, key, line, ptys, ret, None)
     }
 
     /// Returns the dispatcher for one signature, reserving its index on first use.
@@ -6834,12 +6779,12 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::Call(dsig.index));
         let sum = crate::sum_variants_of(&opt, &self.cx.types).unwrap_or_default();
-        let some = Pattern::Variant("Some".into(), vec![Binder::synthetic("")]);
+        let tag = (sum.iter().position(|v| v.name == "Some"))
+            .ok_or_else(|| gap("the variant `Some`", line))?;
         // A step that hands its parts over is read off them: the tag word, then the payload's.
         let got = if let Ret::Words(fl) = &dsig.ret {
             let w = fl.locals(b);
             fl.set(b, w);
-            let tag = tag_of(&sum, &some, line)?.unwrap_or(1);
             b.ins(&Instruction::LocalGet(w));
             b.ins(&Instruction::I64Const(tag as i64));
             b.ins(&Instruction::I64Eq);
@@ -6853,7 +6798,7 @@ impl<'p> Fn_<'_, 'p> {
             let oaddr = b.local(ValType::I32);
             b.slot(ooff);
             b.ins(&Instruction::LocalSet(oaddr));
-            self.tag_test(b, oaddr, &sum, &some, line)?;
+            Self::tag_is(b, oaddr, Some(tag as u64));
             b.ins(&Instruction::If(BlockType::Empty));
             let o = std::slice::from_ref(elem);
             self.bind_payload(b, oaddr, &ol, o, 0, elem, line, false)?
@@ -7765,22 +7710,6 @@ impl<'p> Fn_<'_, 'p> {
 /// slot of its widest variant.
 type Sum = Vec<EnumVariant>;
 
-/// Returns the tag an arm tests, or `None` for `Pattern::Other`, which tests nothing
-/// ([`crate::two_way`]).
-fn tag_of(sum: &Sum, pat: &Pattern, line: usize) -> Result<Option<usize>, String> {
-    Ok(match pat {
-        Pattern::Other => None,
-        Pattern::Variant(name, _) => Some(
-            sum.iter()
-                .position(|v| v.name == *name)
-                .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?,
-        ),
-        // `??`'s parser desugar names a tag, not a variant, because it has no type.
-        // Tag 1 is the success side of every built-in sum.
-        _ => Some(usize::from(matches!(pat, Pattern::Success(_)))),
-    })
-}
-
 /// How one payload travels inside a sum's `i64` word.
 #[derive(PartialEq)]
 enum Word {
@@ -8427,20 +8356,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(ty)
     }
 
-    /// Pushes whether the sum at `addr` is `pat`'s variant. `match`, `if let` and `?` share
-    /// it, so the tag is read at one width in one place.
-    fn tag_test(
-        &self,
-        b: &mut Frame,
-        addr: u32,
-        sum: &Sum,
-        pat: &Pattern,
-        line: usize,
-    ) -> Result<(), String> {
-        Self::tag_is(b, addr, tag_of(sum, pat, line)?.map(|t| t as u64));
-        Ok(())
-    }
-
     /// Opens a switch chain: one `block` whose arms each branch out of it. A switch of one tag
     /// and a default becomes an `if`/`else` instead ([`crate::two_way`]). `bt` is the join's
     /// type. [`Fn_::core_switch`] drives it over the row's arms.
@@ -8530,8 +8445,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Pushes whether the sum at `addr` carries `tag`, or constant truth for an arm no tag
-    /// chooses. Pattern arms ([`Fn_::tag_test`]) and the core walk
-    /// ([`Test`]) share it, so the tag is read in one place.
+    /// chooses. The core walk ([`Test`]) and a stream's step share it, so the tag is read in
+    /// one place.
     fn tag_is(b: &mut Frame, addr: u32, tag: Option<u64>) {
         b.ins(&Instruction::LocalGet(addr));
         // `None` is the refutable-`let` default arm: drop the address and
@@ -10033,37 +9948,6 @@ fn cmp_i32(op: BinOp) -> Option<Instruction<'static>> {
     )
 }
 
-vyrn_frontend::body_scope_descent!(HoistVisit, hoist_block, hoist_stmt, hoist_expr);
-
-/// The hoist's visitor: hands each node to `fe` or `fs` and stops at a lambda. It ignores scope.
-struct Hoist<'e, 's> {
-    fe: &'e mut dyn FnMut(&Expr),
-    fs: &'s mut dyn FnMut(&Stmt),
-}
-
-impl HoistVisit<'_> for Hoist<'_, '_> {
-    const SCOPED: bool = false;
-
-    fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
-        (self.fs)(s)
-    }
-
-    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
-        (self.fe)(e);
-        // A lambda is a leaf: its body lowers as its own function, and `header_invariant`
-        // refuses a lambda that mentions the binding.
-        !matches!(e, Expr::Lambda { .. })
-    }
-}
-
-fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
-    hoist_block(
-        blk,
-        &mut std::collections::HashSet::new(),
-        &mut Hoist { fe, fs },
-    );
-}
-
 /// A scalar spilled for a `modify` call: its local and the load of its slot from the frame
 /// base ([`Fn_::spill`]).
 type Spill = (u32, Instruction<'static>);
@@ -10803,10 +10687,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
             if self.cx.lambda_sig(key).is_some() || vyrn_frontend::types::mentions_param(slot) {
                 continue;
             }
-            let Some(lit) = self.literal(key) else {
+            let Some(line) = self.literal(key) else {
                 continue;
             };
-            let _ = self.lift_lambda(m, lit, ptys, ret, Some(caps), lit.line());
+            let _ = self.lift_lambda(m, key, line, ptys, ret, Some(caps));
         }
     }
 
@@ -13615,7 +13499,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             let Some(at) = self.literal(key) else {
                 return unsupported("a lambda this walk does not find", line);
             };
-            let target = self.lift_stored(m, at, &sig_ty)?;
+            let target = self.lift_stored(m, key, at, &sig_ty)?;
             return self.fnval_into(m, b, dest, &sig_ty, target, vs, line);
         }
         dest.addr(b, 0);
@@ -14677,12 +14561,13 @@ impl<'a, 'p> Fn_<'a, 'p> {
     }
 
     /// Whether this walk makes the lambda `key` at `ty` ([`Fn_::core_make`]'s screen). The row
-    /// lists the captures in the lifted signature's order
-    /// ([`vyrn_lower::core::lambda_captures`]), and each is a name this walk reads.
+    /// lists the captures in the lifted signature's order, its frame's ([`Fn_::lambda_frame`]),
+    /// and each is a name this walk reads.
     fn core_lambda(&self, key: &str, ty: &Type, vs: &[Val]) -> bool {
         let body = self.body();
         let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
-        let (Type::Fn(ptys, _), Some(Expr::Lambda { params, .. })) = (&sig_ty, self.literal(key))
+        let (Type::Fn(ptys, _), Some(_), Some((_, params))) =
+            (&sig_ty, self.literal(key), self.lambda_frame(key))
         else {
             return false;
         };
@@ -14900,7 +14785,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
 
     /// Whether the core's rows carry this whole body, so this walk may emit it. A screen, not a
     /// judgement: a refused body is emitted from the AST.
-    fn core_walkable(&self, stmts: Option<&Block>) -> bool {
+    fn core_walkable(&self) -> bool {
         let body = self.body();
         // An aggregate result crosses through the caller's out-pointer ([`Fn_::core_lands`]).
         // A result checked where it is returned is refused, because the row states no check;
@@ -14920,13 +14805,6 @@ impl<'a, 'p> Fn_<'a, 'p> {
             core_lets(st, &mut lets);
             core_switched(st, false, &mut binders);
         }
-        // A made layout is built into the annotation's layout, and this walk builds into the
-        // value's type. A made layout whose `let` annotates another type stays in the arm.
-        // The key is the node the plan keys the binding by, that `Stmt::Let`.
-        let annotated = match stmts {
-            Some(blk) => self.annotations(|fs| each_block(blk, &mut |_| {}, fs)),
-            None => Vec::new(),
-        };
         let occurs = body.occurrences();
         for (n, info) in body.names.iter().enumerate() {
             // Every name a row names needs a place. It is one of: a wasm local (a `where` type
@@ -14943,7 +14821,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     || self.core_unit(&info.ty)
                     || (body.params.contains(&Name(n as u32))
                         && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
-                && !(!self.annotated_apart(&annotated, info)
+                && !(!self.annotated_apart(info)
                     && lets.iter().any(|(b, rhs)| {
                         b.index() == n
                             && (self.core_makes( &self.core_made_ty( *b), rhs)
@@ -14969,51 +14847,26 @@ impl<'a, 'p> Fn_<'a, 'p> {
         }
         // The core types a `let` by its value except where it states the annotation's check,
         // so an annotated check on a binding of another type is one the rows do not state.
-        if stmts.is_some_and(|blk| self.annotates_a_check(blk)) {
+        if self.annotates_a_check() {
             return false;
         }
         let reads = body.reads();
         self.core_readable(&body.stmts, &reads, &[])
     }
 
-    /// The annotation of each annotated `let` `walk` reaches, keyed as the plan keys a binding.
-    fn annotations(&self, walk: impl FnOnce(&mut dyn FnMut(&Stmt))) -> Vec<(NodeId, Type)> {
-        let mut out = Vec::new();
-        walk(&mut |s| {
-            if let Stmt::Let { ty: Some(t), .. } = s {
-                let at = s.id();
-                out.push((at, t.clone()));
-            }
-        });
-        out
+    /// Whether a name's `let` annotates a type that is not the name's own as is
+    /// ([`Fn_::core_as_is`]). A made layout is built into the annotation's layout, and this walk
+    /// builds into the value's type, so the row does not state the annotation's layout.
+    fn annotated_apart(&self, info: &NameInfo) -> bool {
+        (info.annotation.as_ref()).is_some_and(|t| !self.core_as_is(&info.ty, t))
     }
 
-    /// Whether a name is bound by a `let` of `annotated` whose annotation is not the name's type
-    /// as is ([`Fn_::core_as_is`]). The row then does not state the annotation's layout.
-    fn annotated_apart(&self, annotated: &[(NodeId, Type)], info: &NameInfo) -> bool {
-        info.binding.is_some_and(|at| {
-            annotated
-                .iter()
-                .any(|(a, t)| *a == at && !self.core_as_is(&info.ty, t))
+    /// Whether a `let` annotates a `where` type and binds a name of another type: a check the
+    /// rows do not state.
+    fn annotates_a_check(&self) -> bool {
+        (self.body().names.iter()).any(|i| {
+            (i.annotation.as_ref()).is_some_and(|t| self.checks(t) && i.ty != *self.cx.sub(t))
         })
-    }
-
-    /// Whether a `let` of `blk` is annotated with a `where` type and binds a name of another
-    /// type: a check the rows do not state.
-    fn annotates_a_check(&self, blk: &Block) -> bool {
-        let body = self.body();
-        let mut found = false;
-        each_block(blk, &mut |_| {}, &mut |s| {
-            if let Stmt::Let { ty: Some(t), .. } = s {
-                let at = s.id();
-                found |= self.checks(t)
-                    && !body
-                        .names
-                        .iter()
-                        .any(|i| i.binding == Some(at) && i.ty == *self.cx.sub(t));
-            }
-        });
-        found
     }
 
     /// Whether a value of `from` lands in a place of `to` with no check: `to` has no `where`
@@ -16208,7 +16061,6 @@ mod tests {
             world: Default::default(),
             erased: Default::default(),
             types: Box::leak(Box::default()),
-            lambdas: HashMap::new(),
             oracle: None,
             sigs: HashMap::new(),
             gen: None,

@@ -1591,6 +1591,7 @@ impl<'a> Builder<'a> {
             walked: None,
             linear,
             bound_by_let: false,
+            annotation: None,
             implicit_copy: false,
             mutable: false,
             closure_reads: None,
@@ -1762,8 +1763,14 @@ impl<'a> Builder<'a> {
     /// [`Builder::keyed`] for a `let` the reader wrote.
     fn keyed_let(&mut self, n: Name, s: &Stmt) {
         self.keyed(n, s.id());
-        self.body.names[n.index()].bound_by_let = true;
-        self.body.names[n.index()].mutable = matches!(s, Stmt::Let { mutable: true, .. });
+        let info = &mut self.body.names[n.index()];
+        info.bound_by_let = true;
+        (info.mutable, info.annotation) = match s {
+            Stmt::Let { mutable, ty, .. } => {
+                (*mutable, ty.as_ref().filter(|t| **t != info.ty).cloned())
+            }
+            _ => (false, None),
+        };
     }
 
     /// Records the plan's key for a name, and the name for the key.
@@ -7390,9 +7397,9 @@ fn reads_place(vars: &[&Expr], base: &str) -> bool {
 /// order: names read in the body that are not in `locals` (the lambda's
 /// parameters and its own bindings) and that `is_local` answers for as an
 /// enclosing local. This is the one statement of the capture order: the
-/// closure row lists its captures in it, and the emitter lifts the signature
-/// in it.
-pub fn lambda_captures(
+/// closure row lists its captures in it, and the lambda's frame takes them as
+/// its first parameters in it.
+fn lambda_captures(
     body: &LambdaBody,
     locals: std::collections::HashSet<String>,
     is_local: &dyn Fn(&str) -> bool,

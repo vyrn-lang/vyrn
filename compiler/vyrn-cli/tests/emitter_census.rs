@@ -98,7 +98,7 @@ const fn sec(at: &'static str, kind: Kind, reads: Reads) -> Section {
 fn sections() -> Vec<Section> {
     use Kind::*;
     #[allow(clippy::enum_glob_use)]
-    use Reads::{Both, Core, Neither, Source};
+    use Reads::{Core, Neither};
     vec![
         sec("fn unsupported", Shared, Neither),
         sec("struct Wasi", Encoding, Neither),
@@ -116,7 +116,7 @@ fn sections() -> Vec<Section> {
         sec("impl Place", Mapping, Neither),
         sec("const LAMBDA", Shared, Neither),
         sec("struct Fn_", Shared, Neither),
-        sec("fn lower_globals_init", Shared, Both),
+        sec("fn lower_globals_init", Shared, Core),
         sec("fn lower_body", Mapping, Core),
         sec("fn frame_fits", Decision, Neither),
         sec("fn lower_fnval_copy", Shared, Neither),
@@ -137,32 +137,31 @@ fn sections() -> Vec<Section> {
         sec("fn core_mem", Mapping, Neither),
         sec("fn log_write", Builtin, Neither),
         sec("fn out_ptr", Builtin, Neither),
-        sec("fn emit_call_with", Mapping, Source),
+        sec("fn emit_call_with", Mapping, Core),
         sec("fn length_of", Builtin, Neither),
-        sec("struct Walk", Builtin, Source),
+        sec("struct Walk", Builtin, Neither),
         sec("fn walk", Mapping, Neither),
         sec("fn trap_row", Mapping, Neither),
         sec("fn clause_check", Mapping, Core),
         sec("fn bounds_check", Mapping, Neither),
         sec("fn load_elem", Mapping, Neither),
         sec("fn fixed_elems", Builtin, Neither),
-        sec("type Sum", Shared, Source),
+        sec("type Sum", Shared, Neither),
         sec("fn owns_heap", Decision, Neither),
         sec("fn copy_word", Mapping, Neither),
         sec("fn try_construct", Decision, Neither),
-        sec("fn tag_test", Mapping, Neither),
+        sec("fn chain_open", Mapping, Neither),
         sec("fn map_into", Builtin, Neither),
         sec("fn sa_parts", Builtin, Neither),
         sec("fn at", Encoding, Neither),
         sec("struct Num", Mapping, Neither),
-        sec("vyrn_frontend::body_scope_descent!", Shared, Source),
         sec("type Spill", Mapping, Neither),
         sec("type Fns = RuntimeCalls", Runtime, Neither),
         sec("struct Rt", Runtime, Neither),
         sec("const SHDR", Runtime, Neither),
         sec("fn runtime", Runtime, Neither),
         sec("const RIGHT_FD_WRITE", Shared, Neither),
-        sec("fn builtin_spec", Mapping, Both),
+        sec("fn builtin_spec", Mapping, Core),
         sec("#[cfg(test)]", Tests, Neither),
     ]
 }

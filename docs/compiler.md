@@ -442,7 +442,9 @@ core built under the instance's key (`World::body_of`), and `Fn_::core_walkable`
 screens it; a body the screen rejects is refused with "the body of `f` the
 core did not state". The emitter places no release and derives no type: a
 `St::Drop` becomes a call, and an expression's type comes from the checker's
-record (`core::node_ty`).
+record (`core::node_ty`). It reads no statement of a function's source: a
+lambda's parameters and captures come from its frame, a `let`'s annotation
+from `NameInfo::annotation`.
 
 The declared functions are emitted on every thread, and the module is the same
 on any thread count. A body never touches the module. What it asks of the
