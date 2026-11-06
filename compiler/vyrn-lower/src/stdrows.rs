@@ -73,7 +73,7 @@ impl Given {
     ) -> Result<Given, Vec<Diagnostic>> {
         let mut out = Given::default();
         let given: Vec<&Function> = (program.functions.iter())
-            .filter(|f| matches!(f.body, Body::Given))
+            .filter(|f| matches!(f.body, Body::Given(_)))
             .collect();
         if given.is_empty() {
             return Ok(out);

@@ -540,6 +540,13 @@ fn census() -> Vec<Row> {
              `Json`",
             Kernel::Elsewhere,
         ),
+        row(
+            "r78_a_protocol_method_named_like_an_unreached_std_function.vyrn",
+            "a std function no reached body calls or spells leaves the link, so a method \
+             named like it collides with nothing",
+            "`alt` may not be returned — it is a `read` parameter, and a return is owned",
+            Kernel::Its,
+        ),
     ]
 }
 

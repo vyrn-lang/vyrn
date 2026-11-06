@@ -1,0 +1,25 @@
+// std/strings declares fromBytesOr, and nothing this program reaches calls or
+// spells it, so the link drops it and the method collides with nothing: the
+// program's own refusal is the one it gets.
+import { repeat } from "std/strings"
+
+type R = {
+    n: Int64
+}
+
+protocol Cut {
+    fn fromBytesOr(read self, alt: String) -> String
+}
+
+impl Cut for R {
+    fn fromBytesOr(read self, alt: String) -> String {
+        return alt
+    }
+}
+
+fn main() -> Int64 {
+    let r = R { n: 1 }
+    print(r.n)
+    print(repeat("ab", 2))
+    return 0
+}

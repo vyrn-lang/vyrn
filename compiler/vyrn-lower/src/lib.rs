@@ -722,7 +722,7 @@ fn walk_of<'a>(
 ) -> Walked<'a> {
     match &f.body {
         vyrn_frontend::ast::Body::Written(b) => walk(recorded, program, b, subst),
-        vyrn_frontend::ast::Body::Given => Walked {
+        vyrn_frontend::ast::Body::Given(_) => Walked {
             facts: NodeTypes::default(),
             calls: given.calls(program, f),
             lambda_bodies: Default::default(),
