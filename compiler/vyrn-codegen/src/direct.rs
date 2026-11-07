@@ -2752,6 +2752,7 @@ struct Fn_<'a, 'p> {
     /// Tables over [`Fn_::core`], built on first use. Empty again after [`Fn_::core_enter`].
     facts: std::cell::OnceCell<BodyFacts<'a>>,
     lists: std::cell::OnceCell<Vec<(Name, Name)>>,
+    handed: std::cell::OnceCell<Vec<bool>>,
     /// A waiting body's point locals; `None` in a body that does not wait.
     resume: Option<Resume>,
     /// The awaited call the row being walked makes, with its point: [`Fn_::core_user_call`] or
@@ -2771,12 +2772,45 @@ struct Started {
     spilled: Vec<Spill>,
 }
 
-/// What the per-name screens ask of the whole body, collected once.
-#[derive(Default)]
+/// What the per-name screens ask of the whole body, collected once and kept
+/// per name, so a screen reads its name's rows and scans no other's.
 struct BodyFacts<'a> {
-    lets: Vec<(Name, &'a Rhs)>,
-    written: Vec<(Name, Option<Capability>)>,
-    binders: Vec<Name>,
+    /// Every `let` row of the body, by name.
+    lets: ByName<&'a Rhs>,
+    /// Every name a row writes, hands to `consume` or `modify`, with the capability
+    /// ([`core_written`]).
+    written: ByName<Option<Capability>>,
+    /// Per name, whether a `switch` row switches on it or binds it ([`core_switched`]).
+    binders: Vec<bool>,
+    /// Per name, the rows that store a whole value into it.
+    stores: Vec<u32>,
+}
+
+/// A body's rows of one kind, each under a name, grouped by name.
+struct ByName<T> {
+    rows: Vec<(Name, T)>,
+    /// Per name, where its rows start in `rows`; the last entry is `rows.len()`.
+    at: Vec<u32>,
+}
+
+impl<T> ByName<T> {
+    /// Groups `rows` by name; a name's rows keep their order.
+    fn new(mut rows: Vec<(Name, T)>, names: usize) -> ByName<T> {
+        rows.sort_by_key(|r| r.0);
+        let mut at = vec![0; names + 1];
+        for (n, _) in &rows {
+            at[n.index() + 1] += 1;
+        }
+        for i in 0..names {
+            at[i + 1] += at[i];
+        }
+        ByName { rows, at }
+    }
+
+    /// The rows under `n`.
+    fn of(&self, n: Name) -> &[(Name, T)] {
+        &self.rows[self.at[n.index()] as usize..self.at[n.index() + 1] as usize]
+    }
 }
 
 /// A lowering context with nothing in scope and nothing to return to, for code outside any
@@ -2810,6 +2844,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         core_w: Walked::default(),
         facts: Default::default(),
         lists: Default::default(),
+        handed: Default::default(),
         resume: None,
         awaiting: None,
         branch: None,
@@ -10346,9 +10381,8 @@ struct Walked {
     reads: Vec<u32>,
     /// [`vyrn_frontend::core::Body::occurrences`], for the slot's extent.
     occurs: Vec<u32>,
-    /// The frame slot each name took, as the mark before it and its end,
-    /// until [`Fn_::core_give_back`] hands it back.
-    slot: Vec<Option<(u32, u32)>>,
+    /// The frame slot each name took, until [`Fn_::core_give_back`] hands it back.
+    slot: slots::Slots,
     /// The name the operand stack is holding, if any.
     held: Option<Name>,
     /// The scalar joins whose stores leave the value on the operand stack
@@ -10380,6 +10414,59 @@ struct Walked {
     checks: Vec<(Check, bool)>,
     /// Whether each name lives in wasm locals ([`Fn_::core_flats`]).
     flat: Vec<bool>,
+}
+
+mod slots {
+    use vyrn_frontend::core::Name;
+
+    /// Each name's frame slot, as the mark before it and its end, and the same slots in mark
+    /// order, so [`super::core_row_done`] reads the slots a row took and no other name's. Only
+    /// these methods write either table, so they agree.
+    #[derive(Default)]
+    pub(super) struct Slots {
+        of: Vec<Option<(u32, u32)>>,
+        by_mark: std::collections::BTreeSet<(u32, u32, Name)>,
+    }
+
+    impl Slots {
+        /// No slot for each of `names` names.
+        pub(super) fn new(names: usize) -> Slots {
+            Slots {
+                of: vec![None; names],
+                by_mark: Default::default(),
+            }
+        }
+
+        /// The slot `n` holds.
+        pub(super) fn get(&self, n: Name) -> Option<(u32, u32)> {
+            self.of[n.index()]
+        }
+
+        /// Gives `n` the slot `s`, or none, dropping the one it held.
+        pub(super) fn set(&mut self, n: Name, s: Option<(u32, u32)>) {
+            if let Some((from, to)) = std::mem::replace(&mut self.of[n.index()], s) {
+                self.by_mark.remove(&(from, to, n));
+            }
+            if let Some((from, to)) = s {
+                self.by_mark.insert((from, to, n));
+            }
+        }
+
+        /// Takes the slot `n` holds.
+        pub(super) fn take(&mut self, n: Name) -> Option<(u32, u32)> {
+            let s = self.of[n.index()].take();
+            if let Some((from, to)) = s {
+                self.by_mark.remove(&(from, to, n));
+            }
+            s
+        }
+
+        /// The greatest end of a slot that starts at `mark` or past it, and `mark` where none
+        /// does.
+        pub(super) fn top_from(&self, mark: u32) -> u32 {
+            (self.by_mark.range((mark, 0, Name(0))..)).fold(mark, |top, &(_, end, _)| top.max(end))
+        }
+    }
 }
 
 impl<'a, 'p> Fn_<'a, 'p> {
@@ -10633,11 +10720,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
     fn core_enter(&mut self, core: &vyrn_frontend::core::Body) {
         self.facts = Default::default();
         self.lists = Default::default();
+        self.handed = Default::default();
         self.core_w = Walked {
             at: vec![None; core.names.len()],
             reads: core.reads(),
             occurs: core.occurrences(),
-            slot: vec![None; core.names.len()],
+            slot: slots::Slots::new(core.names.len()),
             held: None,
             stacked: Vec::new(),
             landed: None,
@@ -10871,7 +10959,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         .is_none()
                         && !self.core_restored(*x)
                     {
-                        self.core_w.slot[n.index()] = self.core_w.slot[x.index()].take();
+                        let s = self.core_w.slot.take(*x);
+                        self.core_w.slot.set(*n, s);
                     }
                 }
                 // The head of a `for` over a stream: the element goes into a
@@ -11028,7 +11117,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     let Some((place, _)) = self.core_place(x) else {
                         return unsupported("a list of a literal with no place", info.line);
                     };
-                    self.core_w.slot[n.index()] = self.core_w.slot[x.index()].take();
+                    let s = self.core_w.slot.take(x);
+                    self.core_w.slot.set(*n, s);
                     self.core_bind(*n, place, info.ty.clone())?;
                 }
                 // A move of a layout: the name takes the moved name's place and slot extent.
@@ -11037,7 +11127,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     let Some((place, _)) = self.core_place(*x) else {
                         return unsupported("a move of a name with no place", info.line);
                     };
-                    self.core_w.slot[n.index()] = self.core_w.slot[x.index()].take();
+                    let s = self.core_w.slot.take(*x);
+                    self.core_w.slot.set(*n, s);
                     self.core_bind(*n, place, info.ty.clone())?;
                 }
                 St::Let(n, _) if self.core_copies(*n).is_some() => {
@@ -11096,7 +11187,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         (Some(d), Some(p))
                     } else if let Some((d, p, from)) = back {
                         if let Some(a) = from {
-                            self.core_w.slot[n.index()] = self.core_w.slot[a.index()].take();
+                            let s = self.core_w.slot.take(a);
+                            self.core_w.slot.set(*n, s);
                         }
                         (Some(d), Some(p))
                     } else if body.names[n.index()].source.starts_with('@') {
@@ -11151,7 +11243,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         // The name holds the call's own slot, to the end of
                         // its extent.
                         (None, _) => {
-                            self.core_w.slot[n.index()] = Some((from, b.mark()));
+                            self.core_w.slot.set(*n, Some((from, b.mark())));
                             let a = b.local(ValType::I32);
                             b.ins(&Instruction::LocalSet(a));
                             self.core_bind(*n, Place::Local(a), ty)?;
@@ -11191,7 +11283,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         _ => None,
                     };
                     if let Some([(Arg::Val(Val::Name(x)), _)]) = barrier {
-                        self.core_w.slot[n.index()] = self.core_w.slot[x.index()].take();
+                        let s = self.core_w.slot.take(*x);
+                        self.core_w.slot.set(*n, s);
                     }
                     // A temporary the next statement reads once, first, and nothing else reads
                     // stays on the operand stack. Every other name takes a local, in row order.
@@ -11984,7 +12077,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let Place::Slot(off) = self.place_for(b, r, line)? else {
             return unsupported("a layout with no slot", line);
         };
-        self.core_w.slot[n.index()] = Some((from, b.mark()));
+        self.core_w.slot.set(n, Some((from, b.mark())));
         Ok(off)
     }
 
@@ -11993,7 +12086,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     fn core_word(&mut self, b: &mut Frame, n: Name, l: u32, site: NodeId, literal: bool) {
         let from = b.mark();
         let at = b.alloc(4, 4);
-        self.core_w.slot[n.index()] = Some((from, b.mark()));
+        self.core_w.slot.set(n, Some((from, b.mark())));
         self.str_append_shadow(b, l, at, site, literal);
     }
 
@@ -12003,7 +12096,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         due.extend_from_slice(ended);
         if self.core_rows.is_empty() {
             for n in due.drain(..) {
-                if let Some((from, to)) = self.core_w.slot[n.index()].take() {
+                if let Some((from, to)) = self.core_w.slot.take(n) {
                     b.give_back(from, to);
                 }
             }
@@ -12906,22 +12999,18 @@ impl<'a, 'p> Fn_<'a, 'p> {
         // A take a rebuild hands back is the place it was taken from: the arm rebuilds the
         // field in place (`s.keys.push(k)`). So is a take the next row moves on
         // ([`core_moves_on`]).
-        if let Some(p) = core_taken(self.lets(), n) {
-            let moves_on = || core_moves_on(body, self.lets(), &self.core_w.occurs, n);
-            return (self.core_hands_back(&body.stmts, n) || moves_on()).then_some(p);
+        if let Some(p) = core_taken(self.one_let(n)) {
+            let moves_on = || core_moves_on(body, p, &self.core_w.occurs, n);
+            return (self.core_hands_back(n) || moves_on()).then_some(p);
         }
         let minted = info.source.starts_with('@') && !info.heap && !self.owns_heap(&info.ty);
         let owned = info.releases && !info.borrow;
         if !(info.borrow || minted || owned) {
             return None;
         }
-        let (lets, written) = (self.lets(), self.written());
-        let read = |m: Name| {
-            let mut at = lets.iter().filter(|(b, _)| *b == m);
-            match (at.next(), at.next()) {
-                (Some((_, Rhs::Read(p))), None) => Some(p),
-                _ => None,
-            }
+        let read = |m: Name| match self.one_let(m) {
+            Some(Rhs::Read(p)) => Some(p),
+            _ => None,
         };
         let place = read(n)?;
         let extent = core_extent(&body.stmts, n, &self.core_w.occurs)?;
@@ -12951,9 +13040,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         extent
             .iter()
             .for_each(|s| core_written(&body.names, s, &mut rebuilt));
-        if written
-            .iter()
-            .any(|(m, c)| *m == n && !(owned && *c == Some(Capability::Consume)))
+        if (self.written_of(n).iter()).any(|(_, c)| !(owned && *c == Some(Capability::Consume)))
             || matches!(place, vyrn_frontend::core::Place::Key(..))
             || (owned && !matches!(place, vyrn_frontend::core::Place::Elem(..)))
             || self
@@ -13002,13 +13089,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
             return None;
         }
         let value = !info.heap && !self.owns_heap(&info.ty);
-        let mut at = self.lets().iter().filter(|(b, _)| *b == n);
-        let p = match (at.next(), at.next()) {
-            (Some((_, Rhs::Take(p))), None) => p.clone(),
-            (Some((_, Rhs::Read(p))), None) if value => p.clone(),
+        let p = match self.one_let(n) {
+            Some(Rhs::Take(p)) => p.clone(),
+            Some(Rhs::Read(p)) if value => p.clone(),
             // A move [`Fn_::core_renames`] refuses takes the bytes, as a take
             // does: the kernel refuses a read of `x` before its next store.
-            (Some((_, Rhs::Val(Val::Name(x)))), None)
+            Some(Rhs::Val(Val::Name(x)))
                 if value || (info.heap && !info.borrow && !body.names[x.index()].borrow) =>
             {
                 vyrn_frontend::core::Place::Name(*x)
@@ -13034,7 +13120,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
         if !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
         }
-        let lets = self.lets();
+        // Only a move is a rename, so only a move pays for the rows after it.
+        let Some(Rhs::Val(Val::Name(x))) = self.one_let(n) else {
+            return None;
+        };
         let mut written = Vec::new();
         match core_after(&body.stmts, n) {
             Some(after) => after
@@ -13042,10 +13131,6 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 .for_each(|s| core_written(&body.names, s, &mut written)),
             None => (body.stmts.iter()).for_each(|s| core_written(&body.names, s, &mut written)),
         }
-        let mut at = lets.iter().filter(|(b, _)| *b == n);
-        let (Some((_, Rhs::Val(Val::Name(x)))), None) = (at.next(), at.next()) else {
-            return None;
-        };
         let from = &body.names[x.index()];
         let unwritten = |m: Name| !written.iter().any(|(w, _)| *w == m);
         // A join's stores are its branches', which run before the rename, so a borrow
@@ -13057,7 +13142,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let joins = self.core_joins(*x);
         let made = |r: &Rhs| matches!(r, Rhs::Make(Ctor::Closure(_), _));
         let param = from.borrow
-            && (body.params.contains(x) || lets.iter().any(|(b, r)| b == x && made(r)))
+            && (body.params.contains(x) || self.lets_of(*x).iter().any(|(_, r)| made(r)))
             && (info.source.starts_with('@') || info.borrow)
             && unwritten(n);
         ((joins || param || (!info.borrow && self.owns_heap(&info.ty) && !from.borrow))
@@ -13273,20 +13358,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
         {
             return false;
         }
-        let (lets, binders, written) = (self.lets(), self.binders(), self.written());
-        let mut whole = 0;
-        each_list(&body.stmts, &mut |ss| {
-            whole += ss
-                .iter()
-                .filter(|r| {
-                    matches!(r, St::Store { place: vyrn_frontend::core::Place::Name(m), .. } if *m == n)
-                })
-                .count();
-        });
+        let f = self.facts();
+        let whole = f.stores[n.index()] as usize;
         whole > 0
-            && !lets.iter().any(|(b, _)| *b == n)
-            && !binders.contains(&n)
-            && written.iter().filter(|(m, _)| *m == n).count() == whole
+            && self.lets_of(n).is_empty()
+            && !f.binders[n.index()]
+            && self.written_of(n).len() == whole
     }
 
     /// Whether `n` lives in locals ([`Fn_::core_flats`]).
@@ -13799,31 +13876,50 @@ impl<'a, 'p> Fn_<'a, 'p> {
         }
     }
 
-    /// Every `let` row of the body, in source order. Built once per body: the per-name
-    /// screens in [`Fn_::core_walkable`] read it, and a rebuild per name made the screen
-    /// quadratic in the body.
-    fn lets(&self) -> &[(Name, &'a Rhs)] {
-        &self.facts().lets
+    /// The `let` rows that bind `n`. Built once per body, as the tables below are: a
+    /// rebuild or a scan per name made the screens quadratic in the body.
+    fn lets_of(&self, n: Name) -> &[(Name, &'a Rhs)] {
+        self.facts().lets.of(n)
     }
 
-    /// Every name a row writes, hands to `consume` or `modify`, with the capability.
-    fn written(&self) -> &[(Name, Option<Capability>)] {
-        &self.facts().written
+    /// The value of the one `let` that binds `n`; `None` where none or two do.
+    fn one_let(&self, n: Name) -> Option<&'a Rhs> {
+        match self.lets_of(n) {
+            [(_, rhs)] => Some(*rhs),
+            _ => None,
+        }
     }
 
-    /// The scrutinees and arm binders of every `switch` row ([`core_switched`]).
-    fn binders(&self) -> &[Name] {
-        &self.facts().binders
+    /// Each capability a row writes `n` with ([`core_written`]).
+    fn written_of(&self, n: Name) -> &[(Name, Option<Capability>)] {
+        self.facts().written.of(n)
     }
 
     fn facts(&self) -> &BodyFacts<'a> {
         self.facts.get_or_init(|| {
             let body = self.body();
-            let mut f = BodyFacts::default();
+            let (mut lets, mut written, mut binders) = (Vec::new(), Vec::new(), Vec::new());
             for s in &body.stmts {
-                core_lets(s, &mut f.lets);
-                core_written(&body.names, s, &mut f.written);
-                core_switched(s, true, &mut f.binders);
+                core_lets(s, &mut lets);
+                core_written(&body.names, s, &mut written);
+                core_switched(s, true, &mut binders);
+            }
+            let names = body.names.len();
+            let mut f = BodyFacts {
+                lets: ByName::new(lets, names),
+                written: ByName::new(written, names),
+                binders: vec![false; names],
+                stores: vec![0; names],
+            };
+            binders.iter().for_each(|n| f.binders[n.index()] = true);
+            for (s, _) in vyrn_frontend::core::rows(&body.stmts) {
+                if let St::Store {
+                    place: vyrn_frontend::core::Place::Name(m),
+                    ..
+                } = s
+                {
+                    f.stores[m.index()] += 1;
+                }
             }
             f
         })
@@ -13838,8 +13934,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
 
     fn core_lists_of_body(&self) -> Vec<(Name, Name)> {
         let body = self.body();
-        let lets = self.lets();
-        lets.iter()
+        (self.facts().lets.rows.iter())
             .filter_map(|(a, rhs)| match rhs {
                 Rhs::Call {
                     kind: Callee::Reserved,
@@ -13855,8 +13950,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 _ => None,
             })
             .filter(|(l, a)| {
-                lets.iter()
-                    .any(|(m, r)| m == l && matches!(r, Rhs::Make(Ctor::Array, _)))
+                (self.lets_of(*l).iter()).any(|(_, r)| matches!(r, Rhs::Make(Ctor::Array, _)))
                     && matches!(
                         (self.cx.resolve(&body.names[l.index()].ty), self.cx.resolve(&body.names[a.index()].ty)),
                         (Type::ArrayN(e, _), Type::Array(g)) if e == g
@@ -14287,7 +14381,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }) if s == x && v == t
                 && body.names[t.index()].source.starts_with('@')
                 && self.core_w.reads[t.index()] == 1);
-        if !stored && !(ended.contains(x) && self.core_w.slot[x.index()].is_some()) {
+        if !stored && !(ended.contains(x) && self.core_w.slot.get(*x).is_some()) {
             return None;
         }
         let (place, _) = self.core_place(*x)?;
@@ -14334,7 +14428,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 },
                 Some((Place::Local(p), _)) if p < self.entry => Held::Param(p),
                 // A name that holds a call's own slot by address ([`Fn_::core_slot`]'s span).
-                Some((Place::Local(_), _)) => match self.core_w.slot[y.index()] {
+                Some((Place::Local(_), _)) => match self.core_w.slot.get(*y) {
                     Some((from, to)) => Held::Frame(from..to),
                     None => return false,
                 },
@@ -14947,12 +15041,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 return false;
             }
         }
-        let mut lets = Vec::new();
         let mut binders = Vec::new();
         for st in &body.stmts {
-            core_lets(st, &mut lets);
             core_switched(st, false, &mut binders);
         }
+        let mut binder = vec![false; body.names.len()];
+        binders.iter().for_each(|b| binder[b.index()] = true);
         let occurs = body.occurrences();
         for (n, info) in body.names.iter().enumerate() {
             // Every name a row names needs a place. It is one of: a wasm local (a `where` type
@@ -14970,9 +15064,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     || (body.params.contains(&Name(n as u32))
                         && matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_)))))
                 && !(!self.annotated_apart(info)
-                    && lets.iter().any(|(b, rhs)| {
-                        b.index() == n
-                            && (self.core_makes( &self.core_made_ty( *b), rhs)
+                    && self.lets_of(Name(n as u32)).iter().any(|(b, rhs)| {
+                        self.core_makes( &self.core_made_ty( *b), rhs)
                                 || self.core_agg_call( rhs)
                                 || self.core_take_part( rhs)
                                 || self.core_rebuild( rhs)
@@ -14980,13 +15073,13 @@ impl<'a, 'p> Fn_<'a, 'p> {
                                     if matches!(core_builtin(self.cx, callee, *kind), Some(Spec::Barrier))
                                         && matches!(args.as_slice(), [(Arg::Val(Val::Name(_)), _)]))
                                 || matches!(rhs, Rhs::Read(vyrn_frontend::core::Place::Elem(s, _))
-                                    if self.core_pulls( s)))
+                                    if self.core_pulls( s))
                     }))
                 && self.core_alias(Name(n as u32)).is_none()
                 && self.core_copies( Name(n as u32)).is_none()
                 && self.core_renames( Name(n as u32)).is_none()
                 && !self.core_lists().iter().any(|(_, a)| a.index() == n)
-                && !binders.contains(&Name(n as u32))
+                && !binder[n]
                 && !self.core_walked( Name(n as u32))
                 && !self.core_joins( Name(n as u32))
             {
@@ -15428,7 +15521,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             vyrn_frontend::core::Place::Global(g) if core_global(body, *r) == Some(g.as_str()) => {
                 true
             }
-            p => core_taken(self.lets(), *r) == Some(p),
+            p => core_taken(self.one_let(*r)) == Some(p),
         };
         (t == v && back && self.core_rebuild(rhs)).then_some((*r, *t))
     }
@@ -15447,13 +15540,22 @@ impl<'a, 'p> Fn_<'a, 'p> {
         found
     }
 
-    /// Whether a rebuild in `ss` hands `n` back to the place it was taken
-    /// from ([`Fn_::core_rebuilt`]).
-    fn core_hands_back(&self, ss: &[St], n: Name) -> bool {
-        (1..ss.len()).any(|i| {
-            matches!(ss[i], St::Store { .. })
-                && self.core_rebuilt(ss, i).is_some_and(|(r, _)| r == n)
-        }) || (ss.iter().flat_map(St::lists)).any(|l| self.core_hands_back(l, n))
+    /// Whether a rebuild hands `n` back to the place it was taken from
+    /// ([`Fn_::core_rebuilt`]). Built once per body.
+    fn core_hands_back(&self, n: Name) -> bool {
+        let handed = self.handed.get_or_init(|| {
+            let body = self.body();
+            let mut out = vec![false; body.names.len()];
+            each_list(&body.stmts, &mut |ss| {
+                for i in (1..ss.len()).filter(|&i| matches!(ss[i], St::Store { .. })) {
+                    if let Some((r, _)) = self.core_rebuilt(ss, i) {
+                        out[r.index()] = true;
+                    }
+                }
+            });
+            out
+        });
+        handed[n.index()]
     }
 
     /// Whether a value of `from` is one of `to` with no instruction ([`crate::coerce_plan`]):
@@ -15702,12 +15804,7 @@ fn core_row_done(b: &mut Frame, w: &Walked, s: &St, mark: u32) {
     ) {
         return;
     }
-    let from = w
-        .slot
-        .iter()
-        .flatten()
-        .filter(|&&(at, _)| at >= mark)
-        .fold(mark, |top, &(_, end)| top.max(end));
+    let from = w.slot.top_from(mark);
     if from < b.mark() {
         b.give_back(from, b.mark());
     }
@@ -15744,26 +15841,25 @@ fn thunk_of(ty: Type) -> Type {
     }
 }
 
-/// The place the name `n` was taken from, when its one `let` is a take.
-fn core_taken<'r>(lets: &[(Name, &'r Rhs)], n: Name) -> Option<&'r vyrn_frontend::core::Place> {
-    let mut at = lets.iter().filter(|(b, _)| *b == n);
-    match (at.next(), at.next()) {
-        (Some((_, Rhs::Take(p))), None) => Some(p),
+/// The place a name was taken from, when its one `let` ([`Fn_::one_let`]) is a take.
+fn core_taken(rhs: Option<&Rhs>) -> Option<&vyrn_frontend::core::Place> {
+    match rhs {
+        Some(Rhs::Take(p)) => Some(p),
         _ => None,
     }
 }
 
-/// Whether the take `n` moves on at the next row and nowhere else: the value a store writes,
-/// or a `consume` argument no other argument's root shares. The part then moves straight to
-/// its destination and needs no slot. The store does not write the take's root, so no row
-/// between the take and the move writes the field.
+/// Whether the take `n` of `taken` moves on at the next row and nowhere else: the value a
+/// store writes, or a `consume` argument no other argument's root shares. The part then moves
+/// straight to its destination and needs no slot. The store does not write the take's root, so
+/// no row between the take and the move writes the field.
 fn core_moves_on(
     body: &vyrn_frontend::core::Body,
-    lets: &[(Name, &Rhs)],
+    taken: &vyrn_frontend::core::Place,
     occurs: &[u32],
     n: Name,
 ) -> bool {
-    let Some((root, _)) = core_taken(lets, n).and_then(vyrn_lower::kernel::root_of) else {
+    let Some((root, _)) = vyrn_lower::kernel::root_of(taken) else {
         return false;
     };
     let rooted = |p: &vyrn_frontend::core::Place| {

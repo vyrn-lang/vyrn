@@ -602,10 +602,10 @@ pub fn census_spans<'a>(
 }
 
 /// Runs `vyrn args` in `cwd` on one thread with the allocation counter armed and
-/// returns its table as `(phase, allocations, bytes requested)`, in the table's order. Needs a
-/// binary built with `--features allocs`. `cache` is the generator cache: a
+/// returns its table as `(phase, allocations, bytes requested, rows visited)`, in the table's
+/// order. Needs a binary built with `--features allocs`. `cache` is the generator cache: a
 /// warm cache is the only state a run may start from, so callers run twice.
-pub fn alloc_phases(args: &[&str], cwd: &Path, cache: &Path) -> Vec<(String, u64, u64)> {
+pub fn alloc_phases(args: &[&str], cwd: &Path, cache: &Path) -> Vec<(String, u64, u64, u64)> {
     let out = vyrn()
         .args(args)
         .current_dir(cwd)
@@ -616,21 +616,28 @@ pub fn alloc_phases(args: &[&str], cwd: &Path, cache: &Path) -> Vec<(String, u64
         .expect("run vyrn");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "vyrn {args:?} failed:\n{err}");
-    let (_, table) = err
-        .split_once("alloc phase")
+    let (rows, table) = (err.split_once("rows phase"))
+        .and_then(|(_, t)| t.split_once("alloc phase"))
         .unwrap_or_else(|| panic!("vyrn {args:?} printed no allocation table:\n{err}"));
+    // A row's numbers are its last `k` cells: phase names hold spaces.
+    let cells = |line: &str, k: usize| -> Option<(String, Vec<u64>)> {
+        let cells: Vec<&str> = line.split_whitespace().collect();
+        let n = cells.len().checked_sub(k).filter(|&n| n > 0)?;
+        let nums = cells[n..]
+            .iter()
+            .map(|c| c.parse().ok())
+            .collect::<Option<_>>()?;
+        Some((cells[..n].join(" "), nums))
+    };
+    let visited: Vec<_> = rows.lines().skip(1).filter_map(|l| cells(l, 1)).collect();
     table
         .lines()
         .skip(1)
-        .filter_map(|line| {
-            // `reallocs` and `frees` sit between the count and the bytes. Phase names hold spaces.
-            let cells: Vec<&str> = line.split_whitespace().collect();
-            let n = cells.len().checked_sub(4).filter(|&n| n > 0)?;
-            Some((
-                cells[..n].join(" "),
-                cells[n].parse().ok()?,
-                cells[n + 3].parse().ok()?,
-            ))
+        .filter_map(|l| cells(l, 4))
+        .map(|(phase, n)| {
+            // `reallocs` and `frees` sit between the count and the bytes.
+            let rows = visited.iter().find(|v| v.0 == phase).map_or(0, |v| v.1[0]);
+            (phase, n[0], n[3], rows)
         })
         .collect()
 }

@@ -15,6 +15,11 @@
 //! siblings) leaves the count of `codegen: bodies` at 1.6 times for the shape
 //! `many locals`, and the bytes at 13.8 times.
 //!
+//! Rows count as allocations do: the core rows the phase's walks visit
+//! (`vyrn_frontend::prof::visit`). A pass that rescans the body for each of
+//! its `n` names allocates nothing for the scan but visits `n` rows each
+//! time, and its time grows with them. Time itself would flake.
+//!
 //! This test sees what `scripts/check-allocs.sh` cannot: that script compares
 //! the examples, and a pass that is quadratic in a shape none of them has
 //! stays inside its threshold.
@@ -29,8 +34,8 @@ use std::fmt::Write;
 
 const SMALL: usize = 1000;
 const LIMIT: f64 = 4.6;
-/// Added to the limit, so a phase of a few dozen allocations or a few KiB is
-/// not a ratio: one extra table is no growth.
+/// Added to the limit, so a phase of a few dozen allocations or rows or a few
+/// KiB is not a ratio: one extra table is no growth.
 const TINY_COUNT: f64 = 64.0;
 const TINY_BYTES: f64 = 65536.0;
 
@@ -144,13 +149,15 @@ fn main() -> Int64 { return pick(V0(\"a\")) }
 
     // One rule of a written parser: `n / 4` alternatives in one body, each
     // an `if` on two flags, so every branch has the earlier alternatives'
-    // temporaries in scope.
+    // temporaries in scope. A lexeme is a record, so its `Option` is a
+    // layout the emitter places.
     let mut s = String::from(
         "type P = { pos: Int64, stop: Int64, refused: Bool }
-fn lit(text: String, p: modify P) -> Option<String> {
+type Lexeme = { text: String, start: Int64 }
+fn lit(text: String, p: modify P) -> Option<Lexeme> {
     if p.pos < p.stop && text[p.pos] == 'a' {
         p.pos = p.pos + 1
-        return Some(\"a\")
+        return Some(Lexeme { text: \"a\", start: p.pos - 1 })
     }
     return None
 }
@@ -158,8 +165,8 @@ fn refuse(p: modify P) -> Bool {
     p.refused = true
     return false
 }
-fn rule(text: String, p: modify P) -> Option<String> {
-    let mut kept: Option<String> = None
+fn rule(text: String, p: modify P) -> Option<Lexeme> {
+    let mut kept: Option<Lexeme> = None
     let mut done = false
 ",
     );
@@ -195,22 +202,92 @@ fn rule(text: String, p: modify P) -> Option<String> {
 fn main() -> Int64 {
     let mut p = P { pos: 0, stop: 1, refused: false }
     if let Some(l) = rule(\"a\", p) {
-        return l.byteLength
+        return l.start
     }
     return 1
 }
 ",
     );
     out.push(("one written rule", s));
+
+    // A long `if` chain that is no parser: `n / 4` tests of a parameter, each
+    // binding a name and indexing by it, so each test leaves its condition
+    // behind for the rest of the body.
+    let mut s = String::from(
+        "fn chain(k: Int64, xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+",
+    );
+    for i in 0..n / 4 {
+        writeln!(
+            s,
+            "    if k == {i} {{
+        let j{i} = k - {i}
+        if j{i} < xs.length {{
+            s = s + xs[j{i}]
+        }}
+    }}"
+        )
+        .unwrap();
+    }
+    s.push_str(
+        "    return s
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    return chain(1, xs)
+}
+",
+    );
+    out.push(("long if chain", s));
+
+    // A user `match` of `n / 4` payload variants, each arm indexing by its
+    // binder.
+    let mut s = String::from(
+        "type T = enum {
+",
+    );
+    for i in 0..n / 4 {
+        writeln!(s, "    V{i}(Int64),").unwrap();
+    }
+    s.push_str(
+        "}
+fn pick(t: T, xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    match t {
+",
+    );
+    for i in 0..n / 4 {
+        writeln!(
+            s,
+            "        V{i}(k) => {{
+            if k >= 0 && k < xs.length {{
+                s = s + xs[k] * {i}
+            }}
+        }}"
+        )
+        .unwrap();
+    }
+    s.push_str(
+        "    }
+    return s
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    return pick(V0(1), xs)
+}
+",
+    );
+    out.push(("match of checks", s));
     out
 }
 
 #[test]
-#[ignore = "builds sixteen generated programs on one thread; named in the gate list"]
+#[ignore = "builds twenty generated programs on one thread; named in the gate list"]
 fn no_phase_allocates_faster_than_its_input() {
     let dir = scratch("scaling");
     let cache = scratch("scaling-gen");
-    let build = |n: usize| -> Vec<(&'static str, Vec<(String, u64, u64)>)> {
+    let build = |n: usize| -> Vec<(&'static str, Vec<(String, u64, u64, u64)>)> {
         shapes(n)
             .into_iter()
             .map(|(name, src)| {
@@ -232,16 +309,18 @@ fn no_phase_allocates_faster_than_its_input() {
     let (small, large) = (build(SMALL), build(4 * SMALL));
     let mut failures = Vec::new();
     for ((name, a), (_, b)) in small.iter().zip(&large) {
-        for (phase, allocs, bytes) in b {
-            let (a_allocs, a_bytes) = a
+        for (phase, allocs, bytes, rows) in b {
+            let (a_allocs, a_bytes, a_rows) = a
                 .iter()
                 .find(|p| p.0 == *phase)
-                .map_or((0, 0), |p| (p.1, p.2));
+                .map_or((0, 0, 0), |p| (p.1, p.2, p.3));
             let over = |big: u64, little: u64, tiny: f64| big as f64 > LIMIT * little as f64 + tiny;
-            let grew = over(*allocs, a_allocs, TINY_COUNT) || over(*bytes, a_bytes, TINY_BYTES);
+            let grew = over(*allocs, a_allocs, TINY_COUNT)
+                || over(*bytes, a_bytes, TINY_BYTES)
+                || over(*rows, a_rows, TINY_COUNT);
             let known = KNOWN.iter().any(|k| (k.0, k.1) == (*name, phase.as_str()));
             let report = format!(
-                "{name}: phase `{phase}`: allocations {a_allocs} to {allocs}, bytes {a_bytes} to {bytes}, from {SMALL} to {} items (limit {LIMIT} times)",
+                "{name}: phase `{phase}`: allocations {a_allocs} to {allocs}, bytes {a_bytes} to {bytes}, rows {a_rows} to {rows}, from {SMALL} to {} items (limit {LIMIT} times)",
                 4 * SMALL
             );
             match (grew, known) {

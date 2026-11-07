@@ -2064,11 +2064,21 @@ fn element_seeds(
     if !rows(ss).any(|(s, _)| read(s)) || !rows(ss).any(|(s, _)| by_name(s)) {
         return out;
     }
-    // Per name, its `let` and the count of other rows that write it.
+    // Per name, its `let`, the count of other rows that write it, and the
+    // names its stores take, in row order.
     let mut defs: Vec<(Option<&Rhs>, u32)> = vec![(None, 0); b.names.len()];
+    let mut stores: Vec<Vec<Name>> = vec![Vec::new(); b.names.len()];
     for (s, _) in rows(ss) {
         if let St::Let(n, rhs) = s {
             defs[n.index()].0 = Some(rhs);
+        }
+        if let St::Store {
+            place: Place::Name(n),
+            value: Val::Name(m),
+            ..
+        } = s
+        {
+            stores[n.index()].push(*m);
         }
         for n in row_writes(s) {
             defs[n.index()].1 += 1;
@@ -2102,14 +2112,7 @@ fn element_seeds(
         let (v, c) = (defs[i.index()].0)
             .and_then(|d| reach(b, decls, d, &|x| defs[x.index()].0))
             .unwrap_or((*i, 1));
-        let stored = rows(ss).filter_map(|(s, _)| match s {
-            St::Store {
-                place: Place::Name(n),
-                value: Val::Name(m),
-                ..
-            } if *n == v => Some(*m),
-            _ => None,
-        });
+        let stored = stores[v.index()].iter().copied();
         for x in element(v).into_iter().chain(stored.filter_map(element)) {
             let target = match place {
                 Place::Name(y) => field(*y).cloned().unwrap_or(Place::Name(root(*y))),
@@ -3062,9 +3065,18 @@ fn guard_templates(
 /// Whether some return of `body` returns a negative integer literal, or a
 /// name bound once to `0 - k` with `k` a positive literal.
 fn negative_return(body: &Body) -> bool {
-    let negative = |n: Name| {
-        writes_of(&body.stmts, n) == 1
-            && matches!(let_of(&body.stmts, n), Some(Rhs::Prim(Op::Bin(BinOp::Sub), vs, _))
+    // Built at the first return of a name: a body may return at every arm.
+    let mut defs = None;
+    let mut negative = |n: Name| {
+        let (lets, writes) = defs.get_or_insert_with(|| {
+            let names = body.names.len();
+            (
+                lets_of(&body.stmts, names),
+                writes_count(&body.stmts, names),
+            )
+        });
+        writes[n.index()] == 1
+            && matches!(lets[n.index()], Some(Rhs::Prim(Op::Bin(BinOp::Sub), vs, _))
                 if matches!(vs.as_slice(), [Val::Lit(Lit::Int(0)), Val::Lit(Lit::Int(k))] if *k > 0))
     };
     rows(&body.stmts).any(|(s, _)| match s {
@@ -3390,6 +3402,10 @@ struct Walk<'a> {
     /// The names a sum or difference binds that a recording walk could not
     /// show exact ([`Walk::fits`]), which a `prove` row's reason names.
     wraps: BTreeSet<Name>,
+    /// Per name, the last row of its `let`'s list that names it
+    /// ([`extents`]): after that row the walk drops the name's conditions,
+    /// which only a row naming it reads.
+    ends: Vec<Option<u32>>,
 }
 
 /// What the walk keeps about one name.
@@ -3649,6 +3665,7 @@ impl<'a> Walk<'a> {
             arrays: BTreeMap::new(),
             rows: None,
             wraps: BTreeSet::new(),
+            ends: extents(stmts, body.names.len()),
         };
         for (k, p) in ghosted {
             w.elem_cands
@@ -4636,7 +4653,8 @@ impl<'a> Walk<'a> {
     }
 
     fn block(&mut self, mut st: State, ss: &mut [St]) -> State {
-        for s in ss {
+        let mut ending: Vec<(usize, Name)> = Vec::new();
+        for (i, s) in ss.iter_mut().enumerate() {
             // A summary every return so far refuted gains nothing from the rest.
             if self.post.as_ref().is_some_and(BTreeSet::is_empty) && self.when.is_none() {
                 return State::dead();
@@ -4651,6 +4669,15 @@ impl<'a> Walk<'a> {
             st = self.stmt(st, s);
             self.track(&mut st, s, stale);
             self.unpush(s);
+            if let St::Let(n, _) = s {
+                ending.extend(self.ends[n.index()].map(|e| (e as usize, *n)));
+            }
+            ending.retain(|&(e, n)| {
+                if e == i {
+                    st.conds.remove(&n);
+                }
+                e != i
+            });
         }
         st
     }
@@ -6791,6 +6818,41 @@ fn leave(st: &mut State, ss: &[St], binds: &[Name]) {
     }
 }
 
+/// Per name a `let` of `ss` binds, the index in the `let`'s list of the last
+/// row that names the name, itself or in a row under it ([`St::operands`]).
+/// `None` for a name no `let` binds, two `let`s bind, or a row outside the
+/// `let`'s list names.
+fn extents(ss: &[St], names: usize) -> Vec<Option<u32>> {
+    /// A `let`'s list, by its number in pre-order, the list's depth, and the
+    /// last row naming the name, or `None` once no one row is.
+    type At = (u32, usize, Option<u32>);
+    fn go(ss: &[St], path: &mut Vec<(u32, u32)>, lists: &mut u32, at: &mut [Option<At>]) {
+        let list = *lists;
+        *lists += 1;
+        for (i, s) in (0..).zip(ss) {
+            path.push((list, i));
+            if let St::Let(n, _) = s {
+                let last = at[n.index()].is_none().then_some(i);
+                at[n.index()] = Some((list, path.len() - 1, last));
+            }
+            s.operands(&mut |v, _| {
+                let Val::Name(n) = v else { return };
+                if let Some((l, d, last)) = &mut at[n.index()] {
+                    let inside = path.get(*d).filter(|p| p.0 == *l);
+                    *last = last.and(inside.map(|p| p.1));
+                }
+            });
+            s.lists().for_each(|l| go(l, path, lists, at));
+            path.pop();
+        }
+    }
+    let mut at = vec![None; names];
+    go(ss, &mut Vec::new(), &mut 0, &mut at);
+    at.into_iter()
+        .map(|a| a.and_then(|(.., last)| last))
+        .collect()
+}
+
 /// The rows a loop runs on every turn that reaches its end: the body's own
 /// rows and those of the blocks among them.
 fn every_turn(ss: &[St]) -> Vec<&St> {
@@ -6805,27 +6867,55 @@ fn every_turn(ss: &[St]) -> Vec<&St> {
 /// How many rows of `ss` write `n`: a `let`, a store, a binder, or a call
 /// argument other than `read`.
 fn writes_of(ss: &[St], n: Name) -> usize {
-    let by_call = |rhs: &Rhs| match rhs {
-        Rhs::Call { args, .. } => args
-            .iter()
-            .filter(|(a, c)| *c != Capability::Read && root(a) == Some(n))
-            .count(),
-        _ => 0,
+    let mut k = 0;
+    each_write(ss, &mut |m| k += usize::from(m == n));
+    k
+}
+
+/// Per name, [`writes_of`] over `ss`, for a pass that asks it of many names.
+fn writes_count(ss: &[St], names: usize) -> Vec<u32> {
+    let mut out = vec![0; names];
+    each_write(ss, &mut |m| out[m.index()] += 1);
+    out
+}
+
+/// Hands `f` the name each write of `ss` writes, once per write: a `let`'s
+/// name, the root of each call argument that is not `read`, a store's root,
+/// and each name an arm binds.
+fn each_write(ss: &[St], f: &mut dyn FnMut(Name)) {
+    let by_call = |rhs: &Rhs, f: &mut dyn FnMut(Name)| {
+        if let Rhs::Call { args, .. } = rhs {
+            let written = args.iter().filter(|(_, c)| *c != Capability::Read);
+            written.filter_map(|(a, _)| root(a)).for_each(f);
+        }
     };
-    ss.iter()
-        .map(|s| match s {
-            St::Let(m, rhs) => usize::from(*m == n) + by_call(rhs),
-            St::Do { rhs, .. } => by_call(rhs),
-            St::Store { place, .. } => usize::from(place_root(place) == Some(n)),
-            St::If { then, els, .. } => writes_of(then, n) + writes_of(els, n),
-            St::Loop { body, .. } | St::Block { body, .. } => writes_of(body, n),
-            St::Switch { arms, .. } => arms
-                .iter()
-                .map(|a| usize::from(a.binds.contains(&n)) + writes_of(&a.body, n))
-                .sum(),
-            _ => 0,
-        })
-        .sum()
+    for s in ss {
+        vyrn_frontend::prof::visit();
+        match s {
+            St::Let(m, rhs) => {
+                f(*m);
+                by_call(rhs, f);
+            }
+            St::Do { rhs, .. } => by_call(rhs, f),
+            St::Store { place, .. } => place_root(place).into_iter().for_each(&mut *f),
+            St::If { then, els, .. } => {
+                each_write(then, f);
+                each_write(els, f);
+            }
+            St::Loop { body, .. } | St::Block { body, .. } => each_write(body, f),
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    // An arm binds a name once, however often it lists it.
+                    let first = |i: usize| !a.binds[..i].contains(&a.binds[i]);
+                    (0..a.binds.len())
+                        .filter(|&i| first(i))
+                        .for_each(|i| f(a.binds[i]));
+                    each_write(&a.body, f);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The test name, the counter `k` and its bound `c` of a loop `body` that
@@ -7111,9 +7201,13 @@ fn relevant(
             }
         }
     }
+    let lets = match checks {
+        true => Vec::new(),
+        false => lets_of(&body.stmts, body.names.len()),
+    };
     let goals = match checks {
         true => Goals::Checks,
-        false => Goals::Results,
+        false => Goals::Results(&lets),
     };
     loop {
         let before = rel.iter().filter(|r| **r).count();
@@ -7125,12 +7219,13 @@ fn relevant(
 }
 
 /// What a walk proves, for [`mark`]: its kept checks, the record facts its
-/// rows oblige ([`obliged`]), or only the facts of its results (a solve).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Goals {
+/// rows oblige ([`obliged`]), or only the facts of its results (a solve),
+/// with the body's [`lets_of`].
+#[derive(Clone, Copy)]
+enum Goals<'a> {
     Checks,
     Obligations,
-    Results,
+    Results(&'a [Option<&'a Rhs>]),
 }
 
 fn mark(
@@ -7150,7 +7245,7 @@ fn mark(
         match s {
             St::Check(c) => {
                 // A kept check's names are relevant; any other check links them.
-                let mut any = goals == Goals::Checks && c.verdict == Verdict::Kept;
+                let mut any = matches!(goals, Goals::Checks) && c.verdict == Verdict::Kept;
                 guard_names(&c.guard, &mut |n| any |= rel[n.index()]);
                 if any {
                     guard_names(&c.guard, &mut |n| rel[n.index()] = true);
@@ -7202,8 +7297,10 @@ fn mark(
                         link(rel, n.into_iter().chain(some_part(rhs)));
                         // A solve states the integer fields of a payload a
                         // literal builds ([`templates`]).
-                        let made = (some_part(rhs).filter(|_| goals == Goals::Results))
-                            .and_then(|v| let_of(&body.stmts, v));
+                        let made = match goals {
+                            Goals::Results(lets) => some_part(rhs).and_then(|v| lets[v.index()]),
+                            _ => None,
+                        };
                         if let Some(Rhs::Make(Ctor::Record(..), vs)) = made {
                             let int = |m: &Name| kind_of(&body.names[m.index()].ty, decls).is_int();
                             link(
@@ -7236,7 +7333,8 @@ fn mark(
                 // A Bool a branch stores takes the branch's facts at the join
                 // (`State::join`): `a && b && c` keeps `b`'s for a check or an
                 // obligation.
-                if goals != Goals::Results && val(cond).is_some_and(|c| rel[c.index()]) {
+                if !matches!(goals, Goals::Results(_)) && val(cond).is_some_and(|c| rel[c.index()])
+                {
                     let mut set = BTreeSet::new();
                     stores(std::slice::from_ref(s), &mut set);
                     set.retain(|n| body.names[n.index()].ty == Type::Bool);
@@ -7396,12 +7494,36 @@ fn equal_fields(entry: &State, written: &BTreeSet<Name>) -> Vec<Lin> {
 
 /// The value the `let` of `n` in `ss` binds.
 fn let_of(ss: &[St], n: Name) -> Option<&Rhs> {
-    ss.iter().find_map(|s| match s {
-        St::Let(m, rhs) if *m == n => Some(rhs),
-        St::If { then, els, .. } => let_of(then, n).or_else(|| let_of(els, n)),
-        St::Loop { body, .. } | St::Block { body, .. } => let_of(body, n),
-        St::Switch { arms, .. } => arms.iter().find_map(|a| let_of(&a.body, n)),
-        _ => None,
+    let mut out = None;
+    each_let(ss, &mut |m, rhs| {
+        out = (m == n).then_some(rhs);
+        out.is_some()
+    });
+    out
+}
+
+/// Per name, [`let_of`] over `ss`, for a pass that asks it of many names.
+fn lets_of(ss: &[St], names: usize) -> Vec<Option<&Rhs>> {
+    let mut out = vec![None; names];
+    each_let(ss, &mut |m, rhs| {
+        out[m.index()].get_or_insert(rhs);
+        false
+    });
+    out
+}
+
+/// Hands `f` each `let` of `ss` and of the lists of its branches, loops,
+/// blocks and arms, in program order, until `f` returns true.
+fn each_let<'s>(ss: &'s [St], f: &mut dyn FnMut(Name, &'s Rhs) -> bool) -> bool {
+    ss.iter().any(|s| {
+        vyrn_frontend::prof::visit();
+        match s {
+            St::Let(m, rhs) => f(*m, rhs),
+            St::If { then, els, .. } => each_let(then, f) || each_let(els, f),
+            St::Loop { body, .. } | St::Block { body, .. } => each_let(body, f),
+            St::Switch { arms, .. } => arms.iter().any(|a| each_let(&a.body, f)),
+            _ => false,
+        }
     })
 }
 
