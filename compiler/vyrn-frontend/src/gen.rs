@@ -938,7 +938,7 @@ pub fn derive(
             &inner,
             resolver,
             engine,
-            &mut read,
+            (&mut read, &mut Vec::new()),
         );
         let written = written.map_err(|f| match f {
             crate::loader::GenFault::Load(ds) => unplaced(refused(ds)),

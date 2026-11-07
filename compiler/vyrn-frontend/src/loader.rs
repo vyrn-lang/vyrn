@@ -1040,6 +1040,8 @@ struct Work {
     real_paths: HashMap<String, Option<String>>,
     /// Each generation input's hash as this load read it ([`current_input_hash`]).
     inputs: HashMap<String, Option<String>>,
+    /// Each generator program this load checked ([`checked_generator`]).
+    checked: CheckedGens,
     /// The exported gen fns of each module [`unlinked_import`] left out, by key,
     /// in key order for the search of a generator no import of its module names.
     unlinked: BTreeMap<String, GenFns>,
@@ -1690,6 +1692,7 @@ fn load_modules(
         stack: Vec::new(),
         real_paths: HashMap::new(),
         inputs: HashMap::new(),
+        checked: Vec::new(),
         unlinked: BTreeMap::new(),
     };
 
@@ -1998,7 +2001,7 @@ fn load_modules(
                     home,
                     &w.states,
                     &mut w.identities,
-                    &mut w.inputs,
+                    (&mut w.inputs, &mut w.checked),
                     root_key,
                 )?;
                 // A generator import is an import, and the audience rule decides
@@ -2808,7 +2811,7 @@ fn run_generator(
     home: Option<(&str, GenFn)>,
     states: &HashMap<String, bool>,
     identities: &mut HashMap<String, String>,
-    read: &mut HashMap<String, Option<String>>,
+    shared: (&mut HashMap<String, Option<String>>, &mut CheckedGens),
     root_key: &str,
 ) -> Result<(String, Option<Generated>), Vec<Diagnostic>> {
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
@@ -2875,7 +2878,7 @@ fn run_generator(
         opts,
         resolver,
         engine,
-        read,
+        shared,
     )?;
     Ok((gen_key, Some(generated)))
 }
@@ -2952,7 +2955,6 @@ pub fn call_generator(
         line: 0,
         root_key: importer,
     };
-    let mut read = HashMap::new();
     let generated = run_resolved(
         importer,
         &name,
@@ -2963,7 +2965,7 @@ pub fn call_generator(
         opts,
         resolver,
         engine,
-        &mut read,
+        (&mut HashMap::new(), &mut Vec::new()),
     );
     Some(generated.map(|g| g.written.source))
 }
@@ -3043,7 +3045,7 @@ fn run_resolved(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
-    read: &mut HashMap<String, Option<String>>,
+    shared: (&mut HashMap<String, Option<String>>, &mut CheckedGens),
 ) -> Result<Generated, Vec<Diagnostic>> {
     let Site { line, root_key } = site;
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
@@ -3058,7 +3060,7 @@ fn run_resolved(
         &inner,
         resolver,
         engine,
-        read,
+        shared,
     )
     .map_err(|f| match f {
         GenFault::Load(ds) => ds,
@@ -3174,7 +3176,7 @@ pub(crate) fn generation(
     inner: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
-    read: &mut HashMap<String, Option<String>>,
+    (read, checked): (&mut HashMap<String, Option<String>>, &mut CheckedGens),
 ) -> Result<Generated, GenFault> {
     let sources_hash = (cache && !gen_cache_off()).then(|| {
         let id = crate::gen::compiler_identity();
@@ -3206,7 +3208,7 @@ pub(crate) fn generation(
             inner,
             resolver,
             engine,
-            read,
+            (&mut *read, &mut *checked),
         )
         .map_err(|e| match e {
             Ok(ds) => GenFault::Load(ds),
@@ -3384,9 +3386,13 @@ fn vouched_stamps(inputs: &[(String, String)], resolver: &dyn ModuleResolver) ->
         .collect()
 }
 
+/// The generator programs one load checked: the generator module, the gen fn
+/// and its program.
+pub(crate) type CheckedGens = Vec<(String, String, Rc<CheckedGen>)>;
+
 /// A generator module loaded and checked as a runnable program, with its
 /// transitive sources and the fingerprint the engine keys its artifact on.
-struct CheckedGen {
+pub(crate) struct CheckedGen {
     program: Program,
     /// The gen fn's name in `program` ([`own_gen`]).
     name: String,
@@ -3425,10 +3431,12 @@ pub(crate) fn generator_opts(opts: &LoadOptions) -> LoadOptions {
 
 /// Loads the generator module `gen_mod_key` as its own root, keeping what its
 /// gen fn `name` reaches, and checks it, under `inner` ([`generator_opts`]).
-/// An import line's generator and a `derive` generator both load here. With
-/// `memo`, a program checked before under the same context is reused while its
-/// sources are unchanged. The error is the loader's diagnostics, or the reason
-/// the module could not be read again.
+/// An import line's generator and a `derive` generator both load here. A
+/// program in `held` is reused: the calls of one load share `inner`, so each
+/// call of a gen fn checks the same program. With `memo`, a program checked
+/// before under the same context is reused while its sources are unchanged.
+/// The error is the loader's diagnostics, or the reason the module could not
+/// be read again.
 fn checked_generator(
     gen_mod_key: &str,
     name: &str,
@@ -3436,8 +3444,14 @@ fn checked_generator(
     inner: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
-    read: &mut HashMap<String, Option<String>>,
+    (read, held): (&mut HashMap<String, Option<String>>, &mut CheckedGens),
 ) -> Result<Rc<CheckedGen>, Result<Vec<Diagnostic>, String>> {
+    let this = |(m, n, c): &&(String, String, Rc<CheckedGen>)| {
+        m == gen_mod_key && n == name && (c.checked || !check)
+    };
+    if let Some((_, _, c)) = held.iter().find(this) {
+        return Ok(c.clone());
+    }
     let std_root = inner.std_root.as_deref();
     let memo_key = memo.then(|| {
         let mut aliases: Vec<_> = inner.aliases.iter().collect();
@@ -3529,6 +3543,7 @@ fn checked_generator(
         fingerprint,
         checked,
     });
+    held.push((gen_mod_key.to_string(), name.to_string(), checked.clone()));
     if let Some(k) = memo_key {
         CHECKED_GENS.with(|m| {
             let mut m = m.borrow_mut();

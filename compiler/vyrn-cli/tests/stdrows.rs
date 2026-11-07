@@ -236,3 +236,49 @@ fn a_stored_row_names_its_sites_as_the_importer_does() {
         "intStr calls {calls:?}"
     );
 }
+
+/// An entry's body with each input's settled stamp left out: a stamp moves
+/// with the clock, so two fills of one tree agree on every other byte.
+fn unstamped(text: &str) -> String {
+    let mut lines = text.lines().skip(1);
+    let inputs: usize = (lines.next())
+        .and_then(|n| n.parse().ok())
+        .expect("an input count");
+    let mut out = vec![inputs.to_string()];
+    for l in lines.by_ref().take(inputs) {
+        out.push(l.split('\t').take(2).collect::<Vec<_>>().join("\t"));
+    }
+    out.extend(lines.map(str::to_string));
+    out.join("\n")
+}
+
+/// One cold fill runs `std/strings`' own load first, the other `std/json`'s,
+/// so each writes `std/text` under another stack of writers. The entries they
+/// share agree byte for byte: an entry is a function of its key.
+#[test]
+fn a_cold_fill_writes_each_entry_alike_in_any_order() {
+    let strings_first = "import { joinWith } from \"std/strings\"\n\
+                         fn main() -> Int64 {\n    print(joinWith([\"a\"], \",\"))\n    return 0\n}\n";
+    let json_first = "import { Json, emit } from \"std/json\"\n\
+                      import { joinWith } from \"std/strings\"\n\
+                      fn main() -> Int64 {\n    print(emit(JNull))\n    print(joinWith([\"a\"], \",\"))\n    return 0\n}\n";
+    let a = tree_of("stdrows-order-a", strings_first);
+    let mut b = tree_of("stdrows-order-b", json_first);
+    b.std = a.std.clone();
+    for t in [&a, &b] {
+        let out = t.check(false);
+        assert_eq!(out.0, Some(0), "{}", out.1);
+    }
+    let (a, b) = (a.entries("rows-"), b.entries("rows-"));
+    let shared: Vec<_> = (a.iter())
+        .filter_map(|(n, text)| Some((n, text, &b.iter().find(|(m, _)| m == n)?.1)))
+        .collect();
+    assert!(
+        shared.len() >= 4,
+        "the fills share {} entries",
+        shared.len()
+    );
+    for (n, x, y) in shared {
+        assert_eq!(unstamped(x), unstamped(y), "entry {n} differs");
+    }
+}
