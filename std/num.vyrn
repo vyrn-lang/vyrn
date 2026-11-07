@@ -4,20 +4,27 @@
 /// Vyrn implementation serves every engine. The only primitives are the
 /// IEEE-754 bit views `float64Bits` and `float64FromBits`.
 ///
-/// The conversion is exact. The decimal stays a digit array, scaled by powers
-/// of two into `[1/2, 1)`; repeated doubling yields the mantissa bits, and the
-/// leftover fraction rounds half to even. A subnormal asks for fewer bits and
-/// rounds the same way; overflow is an exponent field past its maximum. At
-/// most 800 significant digits are kept; a dropped nonzero digit sets a sticky
-/// flag that turns an exact tie into a round-up.
+/// The conversion is exact, on one of three paths. A literal of at most 19
+/// significant digits is an integer `w` times `10^q`: Clinger's one IEEE-754
+/// operation takes it when `w < 2^53` and `|q| <= 22`, and integer arithmetic
+/// on `w` and powers of 5 when `q` is in `[-26, 27]`. Any other literal takes the
+/// digit path: the decimal stays a digit array, scaled by powers of two into
+/// `[1/2, 1)`; repeated doubling yields the mantissa bits, and the leftover
+/// fraction rounds half to even. A subnormal asks for fewer bits and rounds
+/// the same way; overflow is an exponent field past its maximum. At most 800
+/// significant digits are kept; a dropped nonzero digit sets a sticky flag
+/// that turns an exact tie into a round-up.
 
 /// A decimal significand and exponent: the value is
 /// `0.d[0]d[1]...d[n-1] * 10^dp`, sign carried separately. `trunc` means nonzero digits were dropped,
 /// so the true value is strictly greater.
 type Dec = { d: Array<Int64>, dp: Int64, trunc: Bool }
 
-/// A scanned literal; `ok` is false when the text is not a number.
-type Scanned = { ok: Bool, neg: Bool, d: Array<Int64>, dp: Int64, trunc: Bool }
+/// A scanned literal; `ok` is false when the text is not a number. The value
+/// is `0.d[0]d[1]... * 10^dp` over its significant digits. `w` holds the first
+/// `nw` of them, at most 19, so `w < 2^64`; `more` means a nonzero digit
+/// follows those.
+type Scanned = { ok: Bool, neg: Bool, w: UInt64, nw: Int64, more: Bool, dp: Int64 }
 
 /// Significant digits kept. Past this a digit can only matter at an exact tie,
 /// which the `trunc` flag resolves.
@@ -119,34 +126,40 @@ fn twiceBy(x: Dec, m: Int64) -> Dec {
     return tidy(out, x.dp + extra, x.trunc)
 }
 
-/// Scans `[+-]? digits [. digits] [(e|E) [+-]? digits]`, a superset of JSON's
-/// number grammar. The whole text must match, so `"1 "`, `"1x"` and `""` are
-/// refused.
-fn scan(s: String) -> Scanned {
-    let b = bytes(s)
-    let n = b.length
-    let empty: Array<Int64> = []
-    let mut i = 0
+/// Scans `s[start..end]` as `[+-]? digits [. digits] [(e|E) [+-]? digits]`, a
+/// superset of JSON's number grammar. The whole range must match, so `"1 "`,
+/// `"1x"` and `""` are refused. It reads `s` in place and allocates nothing.
+fn scan(
+    s: String,
+    start: Int64 where value >= 0,
+    end: Int64 where value >= start && value <= s.byteLength,
+) -> Scanned {
+    let bad = Scanned { ok: false, neg: false, w: 0, nw: 0, more: false, dp: 0 }
+    let mut i = start
     let mut neg = false
-    if i < n && (b[i] == '+' || b[i] == '-') {
-        neg = b[i] == '-'
+    if i < end && (s[i] == '+' || s[i] == '-') {
+        neg = s[i] == '-'
         i = i + 1
     }
-    let mut d: Array<Int64> = []
+    let mut w: UInt64 = 0
+    let mut nw = 0
+    let mut more = false
     let mut dp = 0
     let mut sawDigit = false
     let mut sawDot = false
     let mut leading = true
-    let mut trunc = false
-    while i < n && (b[i] == '.' || (b[i] >= '0' && b[i] <= '9')) {
-        if b[i] == '.' {
+    while i < end {
+        let c = Int64(s[i])
+        if c == '.' {
             if sawDot {
-                return Scanned { ok: false, neg: false, d: empty, dp: 0, trunc: false }
+                return bad
             }
             sawDot = true
+        } else if c < '0' || c > '9' {
+            break
         } else {
             sawDigit = true
-            if b[i] == '0' && leading {
+            if c == '0' && leading {
                 // A zero after the point, before any significant digit, moves
                 // the exponent.
                 if sawDot {
@@ -154,12 +167,11 @@ fn scan(s: String) -> Scanned {
                 }
             } else {
                 leading = false
-                if d.length < maxDigits() {
-                    d.push(Int64(b[i]) - 48)
-                } else {
-                    if b[i] != '0' {
-                        trunc = true
-                    }
+                if nw < 19 {
+                    w = w * 10 + UInt64(c - 48)
+                    nw = nw + 1
+                } else if c != '0' {
+                    more = true
                 }
                 if !sawDot {
                     dp = dp + 1
@@ -169,36 +181,60 @@ fn scan(s: String) -> Scanned {
         i = i + 1
     }
     if !sawDigit {
-        return Scanned { ok: false, neg: false, d: empty, dp: 0, trunc: false }
+        return bad
     }
-    if i < n && (b[i] == 'e' || b[i] == 'E') {
+    if i < end && (s[i] == 'e' || s[i] == 'E') {
         i = i + 1
         let mut esign = 1
-        if i < n && (b[i] == '+' || b[i] == '-') {
-            if b[i] == '-' {
+        if i < end && (s[i] == '+' || s[i] == '-') {
+            if s[i] == '-' {
                 esign = 0 - 1
             }
             i = i + 1
         }
-        if i >= n || b[i] < '0' || b[i] > '9' {
-            return Scanned { ok: false, neg: false, d: empty, dp: 0, trunc: false }
+        if i >= end || s[i] < '0' || s[i] > '9' {
+            return bad
         }
         let mut ev = 0
-        while i < n && b[i] >= '0' && b[i] <= '9' {
+        while i < end && s[i] >= '0' && s[i] <= '9' {
             // Clamp: past this the answer is already infinity or zero, and an
             // unclamped sum could overflow into a plausible exponent.
             if ev < 100000 {
-                ev = ev * 10 + (Int64(b[i]) - 48)
+                ev = ev * 10 + (Int64(s[i]) - 48)
             }
             i = i + 1
         }
         dp = dp + esign * ev
     }
-    if i != n {
-        return Scanned { ok: false, neg: false, d: empty, dp: 0, trunc: false }
+    if i != end {
+        return bad
     }
-    let t = tidy(d, dp, trunc)
-    return Scanned { ok: true, neg: neg, d: consume t.d, dp: t.dp, trunc: t.trunc }
+    return Scanned { ok: true, neg: neg, w: w, nw: nw, more: more, dp: dp }
+}
+
+/// The significant digits of `s[start..end]`, which `scan` accepted with
+/// exponent `dp`, for the digit path.
+fn digitsOf(
+    s: String,
+    start: Int64 where value >= 0,
+    end: Int64 where value >= start && value <= s.byteLength,
+    dp: Int64,
+) -> Dec {
+    let mut d: Array<Int64> = []
+    let mut trunc = false
+    let mut i = start
+    while i < end && s[i] != 'e' && s[i] != 'E' {
+        let c = Int64(s[i])
+        if (c >= '1' && c <= '9') || (c == '0' && d.length > 0) {
+            if d.length < maxDigits() {
+                d.push(c - 48)
+            } else if c != '0' {
+                trunc = true
+            }
+        }
+        i = i + 1
+    }
+    return tidy(d, dp, trunc)
 }
 
 /// `m * 2^ex` as a `Float64`, exactly, for `m < 2^53` and `ex >= -1074`. The
@@ -242,6 +278,109 @@ fn ldexp(neg: Bool, mIn: Int64, exIn: Int64) -> Float64 {
     return float64FromBits(bits)
 }
 
+/// `5^k` for `k` in `[0, 27]`, the powers below `2^64`.
+fn pow5(k: Int64) -> UInt64 {
+    let mut r: UInt64 = 1
+    let mut b: UInt64 = 5
+    let mut e = k
+    while e > 0 {
+        if e % 2 == 1 {
+            r = r * b
+        }
+        b = b * b
+        e = e / 2
+    }
+    return r
+}
+
+/// A 128-bit unsigned integer, `hi * 2^64 + lo`.
+type U128 = { hi: UInt64, lo: UInt64 }
+
+/// `a * b` exactly, over 32-bit halves: wasm has no wide multiply.
+fn mul128(a: UInt64, b: UInt64) -> U128 {
+    let low: UInt64 = 4294967295
+    let ll = (a & low) * (b & low)
+    let lh = (a & low) * (b >> 32)
+    let hl = (a >> 32) * (b & low)
+    let mid = (ll >> 32) + (lh & low) + (hl & low)
+    let hi = (a >> 32) * (b >> 32) + (lh >> 32) + (hl >> 32) + (mid >> 32)
+    return U128 { hi: hi, lo: (mid << 32) | (ll & low) }
+}
+
+/// `x`, not 0, shifted left by `z` bits until the top bit of `hi` is set.
+type Shifted = { hi: UInt64, lo: UInt64, z: Int64 }
+
+fn normalize(x: U128) -> Shifted {
+    let mut hi = x.hi
+    let mut lo = x.lo
+    let mut z = 0
+    if hi == 0 {
+        hi = lo
+        lo = 0
+        z = 64
+    }
+    // A shift count is below 64; each mask states it for the prover.
+    let k = Int64(hi.clz()) & 63
+    if k > 0 {
+        hi = (hi << UInt64(k)) | (lo >> UInt64((64 - k) & 63))
+        lo = lo << UInt64(k)
+    }
+    return Shifted { hi: hi, lo: lo, z: z + k }
+}
+
+/// `w * 10^q` for `w > 0` and `q` in `[-26, 27]`, correctly rounded to
+/// `mantBits` bits; every such value is a normal `Float64`. The value is
+/// `w * 5^q * 2^q`. For `q >= 0`, `w * 5^q` is exact in 128 bits. For `q < 0`,
+/// `w * 5^j`, shifted until its top bit is set, is divided by `5^13` once or
+/// twice, so `j - 13` or `j - 26` is `q`; the quotient keeps at least 66 bits.
+/// Either way `m` holds the 64 leading bits and `sticky` whether any bit below
+/// them is set, so the round bit is exact and the rounding is the digit path's:
+/// half to even. The divisor is a literal, so no division check stays.
+fn exactInt(neg: Bool, w: UInt64, q: Int64, mantBits: Int64) -> Float64 {
+    let mut m: UInt64 = 0
+    let mut e = 0
+    let mut sticky = false
+    if q >= 0 {
+        let s = normalize(mul128(w, pow5(q)))
+        m = s.hi
+        sticky = s.lo != 0
+        e = q + 64 - s.z
+    } else {
+        let twice = q < 0 - 13
+        let j = if twice { 26 + q } else { 13 + q }
+        let s = normalize(mul128(w, pow5(j)))
+        let low: UInt64 = 4294967295
+        let mut hi = s.hi
+        let mut lo = s.lo
+        let mut n = if twice { 2 } else { 1 }
+        while n > 0 {
+            // Long division by 5^13 = 1220703125 over 32-bit limbs: each
+            // remainder is below 2^31, so a limb joined to it fits.
+            let t3 = hi >> 32
+            let t2 = ((t3 % 1220703125) << 32) | (hi & low)
+            let t1 = ((t2 % 1220703125) << 32) | (lo >> 32)
+            let t0 = ((t1 % 1220703125) << 32) | (lo & low)
+            hi = ((t3 / 1220703125) << 32) | (t2 / 1220703125)
+            lo = ((t1 / 1220703125) << 32) | (t0 / 1220703125)
+            sticky = sticky || t0 % 1220703125 != 0
+            n = n - 1
+        }
+        let t = normalize(U128 { hi: hi, lo: lo })
+        m = t.hi
+        sticky = sticky || t.lo != 0
+        e = q + 64 - t.z - s.z
+    }
+    let shift = (64 - mantBits) & 63
+    let keep = m >> UInt64(shift)
+    let rest = m & ((UInt64(1) << UInt64(shift)) - 1)
+    let half = UInt64(1) << UInt64((shift - 1) & 63)
+    let mut up: UInt64 = 0
+    if rest > half || (rest == half && (sticky || (keep & 1) == 1)) {
+        up = 1
+    }
+    return ldexp(neg, Int64(keep + up), e + shift)
+}
+
 /// `10^k` as an exact `Float64`, for `k` up to 22. Every partial product's odd
 /// part is below `2^53`, so every multiply is exact.
 fn pow10Exact(k: Int64) -> Float64 {
@@ -254,29 +393,35 @@ fn pow10Exact(k: Int64) -> Float64 {
     return v
 }
 
-/// A scanned decimal, correctly rounded to a binary format with `mantBits`
-/// significand bits and smallest exponent `minExp`: `Float64` is `(53, -1074)`,
-/// `Float32` is `(24, -149)`. A `Float32` result is exact as a `Float64`, so
-/// the caller narrows without a second rounding.
-fn toFloat(sc: Scanned, mantBits: Int64, minExp: Int64) -> Float64 {
-    if sc.d.length == 0 {
+/// `s[start..end]`, which `scan` read into `sc`, correctly rounded to a binary
+/// format with `mantBits` significand bits and smallest exponent `minExp`:
+/// `Float64` is `(53, -1074)`, `Float32` is `(24, -149)`. A `Float32` result is
+/// exact as a `Float64`, so the caller narrows without a second rounding.
+fn toFloat(
+    s: String,
+    start: Int64 where value >= 0,
+    end: Int64 where value >= start && value <= s.byteLength,
+    sc: Scanned,
+    mantBits: Int64,
+    minExp: Int64,
+) -> Float64 {
+    if sc.nw == 0 {
         return ldexp(sc.neg, 0, 0)
     }
-    // Clinger's fast path. With at most 15 significant digits the significand
-    // is an exact `Float64`, and with the exponent within 22 so is the power of
-    // ten; one IEEE-754 multiply or divide of two exact values rounds correctly.
-    // Anything else takes the exact path below. `Float64` only: a `Float32`
-    // needs its one rounding at 24 bits.
-    if mantBits == 53 && !sc.trunc && sc.d.length <= 15 {
-        let e10 = sc.dp - sc.d.length
+    // With no digit past the 19th, the value is `w * 10^e10` exactly.
+    let mut w = sc.w
+    let mut e10 = sc.dp - sc.nw
+    while !sc.more && w % 10 == 0 {
+        w = w / 10
+        e10 = e10 + 1
+    }
+    // Clinger's fast path. Below `2^53` the significand is an exact `Float64`,
+    // and with the exponent within 22 so is the power of ten; one IEEE-754
+    // multiply or divide of two exact values rounds correctly. `Float64` only:
+    // a `Float32` needs its one rounding at 24 bits.
+    if !sc.more && mantBits == 53 && w < 9007199254740992 {
         if e10 >= 0 - 22 && e10 <= 22 {
-            let mut whole = 0
-            let mut di = 0
-            while di < sc.d.length {
-                whole = whole * 10 + sc.d[di]
-                di = di + 1
-            }
-            let mut v = Float64(whole)
+            let mut v = Float64(Int64(w))
             if e10 > 0 {
                 v = v * pow10Exact(e10)
             }
@@ -289,6 +434,10 @@ fn toFloat(sc: Scanned, mantBits: Int64, minExp: Int64) -> Float64 {
             return v
         }
     }
+    if !sc.more && e10 >= 0 - 26 && e10 <= 27 {
+        return exactInt(sc.neg, w, e10, mantBits)
+    }
+    // The digit path: past 19 digits, or an exponent outside those.
     // Coarse guards, far outside every format's range, so the scaling loop
     // never runs a million steps to reach a known answer.
     if sc.dp > 400 {
@@ -299,7 +448,7 @@ fn toFloat(sc: Scanned, mantBits: Int64, minExp: Int64) -> Float64 {
     }
     // Scale into [1/2, 1). `dp > 0` means the value is at least 1; `dp < 0`, or
     // `dp == 0` with a leading digit below 5, means it is below a half.
-    let mut x = Dec { d: sc.d.copy(), dp: sc.dp, trunc: sc.trunc }
+    let mut x = digitsOf(s, start, end, sc.dp)
     let mut e2 = 0
     // 32 bits at a time first: each pass moves the decimal exponent by 9 or 10,
     // so it cannot overshoot. Then one bit at a time, at most about 35 steps.
@@ -380,21 +529,21 @@ fn toFloat(sc: Scanned, mantBits: Int64, minExp: Int64) -> Float64 {
 /// a number. The whole string must match. Too large is `inf` and too small is a
 /// signed zero, as in every IEEE-754 text conversion.
 export fn parseFloat64(s: String) -> Option<Float64> {
-    let sc = scan(s)
+    let sc = scan(s, 0, s.byteLength)
     if !sc.ok {
         return None
     }
-    return Some(toFloat(sc, 53, 0 - 1074))
+    return Some(toFloat(s, 0, s.byteLength, sc, 53, 0 - 1074))
 }
 
 /// Decimal text as a `Float32`, rounded once: decimal -> `Float64` ->
 /// `Float32` rounds twice and is wrong near a `Float32` tie.
 export fn parseFloat32(s: String) -> Option<Float32> {
-    let sc = scan(s)
+    let sc = scan(s, 0, s.byteLength)
     if !sc.ok {
         return None
     }
-    return Some(Float32(toFloat(sc, 24, 0 - 149)))
+    return Some(Float32(toFloat(s, 0, s.byteLength, sc, 24, 0 - 149)))
 }
 
 /// Decimal text as an exact `Int64`, or `None` if it is not an integer or does
@@ -809,6 +958,33 @@ test "the fast path is the correctly rounded one, at its borders" {
             None => "None",
         },
         "5160588303184390419",
+    )
+    // The integer path's ends: 19 digits at `e27` and `e-26` take it, one step
+    // past them the digit path does. Rust's `str::parse` gives the patterns.
+    assertEq(
+        match parseFloat64("9999999999999999999e27") { Some(v) => float64Bits(v).toString(), None => "None" },
+        "5295114571585172422",
+    )
+    assertEq(
+        match parseFloat64("9999999999999999999e28") { Some(v) => float64Bits(v).toString(), None => "None" },
+        "5310170741700075612",
+    )
+    assertEq(
+        match parseFloat64("9999999999999999999e-26") { Some(v) => float64Bits(v).toString(), None => "None" },
+        "4502148214488346440",
+    )
+    assertEq(
+        match parseFloat64("9999999999999999999e-27") { Some(v) => float64Bits(v).toString(), None => "None" },
+        "4487126258331716666",
+    )
+    // Ties the division resolves: 2^52 + 0.5 goes to even, 2^52 + 1.5 up.
+    assertEq(
+        match parseFloat64("45035996273704965e-1") { Some(v) => float64Bits(v).toString(), None => "None" },
+        "4841369599423283200",
+    )
+    assertEq(
+        match parseFloat64("45035996273704967e-1") { Some(v) => float64Bits(v).toString(), None => "None" },
+        "4841369599423283201",
     )
     // Negation is exact: the bit pattern is the positive one with the sign bit.
     assertEq(

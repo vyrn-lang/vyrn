@@ -3003,8 +3003,13 @@ std/num.vyrn	num$maxDigits	yes	yes, emulated Int64
 std/num.vyrn	num$tidy	yes	no, its effect set is alloc
 std/num.vyrn	num$halveBy	yes	no, its effect set is alloc
 std/num.vyrn	num$twiceBy	yes	no, its effect set is alloc
-std/num.vyrn	num$scan	yes	no, its effect set is alloc
-std/num.vyrn	num$ldexp	yes	no, the value of line 212 is Float64, and WGSL has no 64-bit float
+std/num.vyrn	num$scan	yes	no, `s` is String, not an integer, Bool or a read array of one
+std/num.vyrn	num$digitsOf	yes	no, its effect set is alloc
+std/num.vyrn	num$ldexp	yes	no, the value of line 248 is Float64, and WGSL has no 64-bit float
+std/num.vyrn	num$pow5	yes	no, the loop is no counter loop
+std/num.vyrn	num$mul128	yes	no, the value of line 307 is U128, not an integer, Bool or a read array of one
+std/num.vyrn	num$normalize	yes	no, `x` is U128, not an integer, Bool or a read array of one
+std/num.vyrn	num$exactInt	yes	no, the value of line 344 is U128, not an integer, Bool or a read array of one
 std/num.vyrn	num$pow10Exact	yes	no, `v` is Float64, and WGSL has no 64-bit float
 std/num.vyrn	num$toFloat	yes	no, its effect set is alloc
 std/num.vyrn	num$parseFloat64	yes	no, its effect set is alloc

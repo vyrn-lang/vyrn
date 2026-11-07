@@ -168,11 +168,12 @@ fn f64str_is_byte_identical_to_rusts_own_formatter() {
     );
 }
 
-/// The oracle is an implementation known to be correctly rounded. The corpus is
-/// the standard list of values that break naive parsers, random digit strings at
+/// `parseFloat64` and `parseFloat32` against an implementation known to be
+/// correctly rounded. The corpus is the standard list of values that break
+/// naive parsers, the borders of `std/num`'s paths, random digit strings at
 /// random exponents, and non-numbers such as `"1 "` a parser must refuse.
 #[test]
-fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
+fn parsefloat_is_bit_identical_to_rusts_own_parser() {
     let mut corpus: Vec<String> = vec![
         "0",
         "-0",
@@ -250,6 +251,25 @@ fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
         "9.194366959071701e-91",
         "7.4e47",
         "5.9e-8",
+        // The integer path: 19 digits at its exponent ends and one past them,
+        // 20 digits, and ties its division and its product resolve.
+        "9999999999999999999e27",
+        "9999999999999999999e28",
+        "9999999999999999999e-23",
+        "9999999999999999999e-26",
+        "9999999999999999999e-27",
+        "99999999999999999999e-27",
+        "1e-26",
+        "1844674407370955161e27",
+        "45035996273704965e-1",
+        "45035996273704967e-1",
+        "16777217",
+        "16777219e3",
+        "335544331e-1",
+        "3.4028235e38",
+        "3.4028236e38",
+        "1.4e-45",
+        "7.006492e-46",
         // Forms the scanner has to accept, and edges of its own grammar.
         "000123",
         "0.000000000000000000001",
@@ -312,13 +332,13 @@ fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
         .iter()
         .map(|s| {
             format!(
-                "    print(match parseFloat64(\"{}\") {{ Some(v) => float64Bits(v).toString(), None => \"None\" }})\n",
+                "    print(match parseFloat64(\"{0}\") {{ Some(v) => float64Bits(v).toString(), None => \"None\" }})\n    print(match parseFloat32(\"{0}\") {{ Some(v) => float32Bits(v).toString(), None => \"None\" }})\n",
                 s.replace('\\', "\\\\").replace('"', "\\\"")
             )
         })
         .collect();
     let src = format!(
-        "import {{ parseFloat64 }} from \"std/num\"\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n"
+        "import {{ parseFloat32, parseFloat64 }} from \"std/num\"\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n"
     );
 
     let dir = common::scratch("m4a-strtod");
@@ -334,19 +354,25 @@ fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
         .lines()
         .map(|l| l.trim_end().to_string())
         .collect();
-    assert_eq!(got.len(), corpus.len(), "one line per input");
+    assert_eq!(got.len(), 2 * corpus.len(), "two lines per input");
 
+    // Rust accepts `inf` and `NaN`, which `std/num` refuses on purpose.
+    let number = |input: &str| input.contains(|c: char| c.is_ascii_digit());
     let mut bad: Vec<String> = Vec::new();
-    for (input, mine) in corpus.iter().zip(&got) {
-        // Rust accepts `inf` and `NaN`, which `std/num` refuses on purpose.
-        let oracle = match input.parse::<f64>() {
-            Ok(v) if v.is_finite() || input.contains(|c: char| c.is_ascii_digit()) => {
-                v.to_bits().to_string()
-            }
+    for (input, mine) in corpus.iter().zip(got.chunks(2)) {
+        let wide = match input.parse::<f64>() {
+            Ok(v) if v.is_finite() || number(input) => v.to_bits().to_string(),
             _ => "None".to_string(),
         };
-        if *mine != oracle {
-            bad.push(format!("{input:?}: std/num {mine}, Rust {oracle}"));
+        let narrow = match input.parse::<f32>() {
+            Ok(v) if v.is_finite() || number(input) => v.to_bits().to_string(),
+            _ => "None".to_string(),
+        };
+        if mine[0] != wide || mine[1] != narrow {
+            bad.push(format!(
+                "{input:?}: std/num {} {}, Rust {wide} {narrow}",
+                mine[0], mine[1]
+            ));
         }
     }
     assert!(

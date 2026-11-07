@@ -6,12 +6,16 @@ A library, not a builtin: the direct wasm backend has no `strtod`, so one
 Vyrn implementation serves every engine. The only primitives are the
 IEEE-754 bit views `float64Bits` and `float64FromBits`.
 
-The conversion is exact. The decimal stays a digit array, scaled by powers
-of two into `[1/2, 1)`; repeated doubling yields the mantissa bits, and the
-leftover fraction rounds half to even. A subnormal asks for fewer bits and
-rounds the same way; overflow is an exponent field past its maximum. At
-most 800 significant digits are kept; a dropped nonzero digit sets a sticky
-flag that turns an exact tie into a round-up.
+The conversion is exact, on one of three paths. A literal of at most 19
+significant digits is an integer `w` times `10^q`: Clinger's one IEEE-754
+operation takes it when `w < 2^53` and `|q| <= 22`, and integer arithmetic
+on `w` and `5^|q|` when `q` is in `[-23, 27]`. Any other literal takes the
+digit path: the decimal stays a digit array, scaled by powers of two into
+`[1/2, 1)`; repeated doubling yields the mantissa bits, and the leftover
+fraction rounds half to even. A subnormal asks for fewer bits and rounds
+the same way; overflow is an exponent field past its maximum. At most 800
+significant digits are kept; a dropped nonzero digit sets a sticky flag
+that turns an exact tie into a round-up.
 
 ## parseFloat64
 
