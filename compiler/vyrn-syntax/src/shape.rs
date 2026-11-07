@@ -330,7 +330,7 @@ fn reaches(
     shapes: &[Shape],
     from: RuleId,
     to: RuleId,
-    step: &dyn Fn(&Shape) -> bool,
+    step: &dyn Fn(RuleId) -> bool,
 ) -> bool {
     let mut seen = BTreeSet::new();
     let mut todo = holds(g, shapes, from);
@@ -338,7 +338,7 @@ fn reaches(
         if r == to {
             return true;
         }
-        if seen.insert(r.0) && step(&shapes[r.0 as usize]) {
+        if seen.insert(r.0) && step(r) {
             todo.extend(holds(g, shapes, r));
         }
     }
@@ -346,12 +346,12 @@ fn reaches(
 }
 
 /// Refuses a rule that reaches itself through its one reference alone: no type stands
-/// on that cycle. Any other cycle holds a record or a choice, and [`recursive_records`]
-/// and [`recursive_choices`] give it a release.
+/// on that cycle. Any other cycle holds a record or a choice, and [`releases`] gives
+/// it a release.
 fn refuse_endless(g: &Grammar, shapes: &[Shape], rules: &[RuleId]) -> Result<(), Refused> {
-    let same = |s: &Shape| matches!(s, Shape::Same(_));
+    let same = |r: RuleId| matches!(shapes[r.0 as usize], Shape::Same(_));
     for &r in rules {
-        if same(&shapes[r.0 as usize]) && reaches(g, shapes, r, r, &same) {
+        if same(r) && reaches(g, shapes, r, r, &same) {
             let rule = g.body(r);
             let sentence = format!(
                 "rule `{}` is its own one reference, so it has no type; give it a label",
@@ -363,50 +363,54 @@ fn refuse_endless(g: &Grammar, shapes: &[Shape], rules: &[RuleId]) -> Result<(),
     Ok(())
 }
 
-/// Each record whose type reaches itself, with its fields: the type name and the
-/// field names. A `climb` rule's binary node is such a record.
-pub(crate) fn recursive_records(
-    g: &Grammar,
-    shapes: &[Shape],
-    rules: &[RuleId],
-) -> Vec<(String, Vec<Rc<str>>)> {
-    let any = |_: &Shape| true;
-    let mut out = Vec::new();
-    for &r in rules {
-        let name = type_name(&g.body(r).name);
-        match &shapes[r.0 as usize] {
-            Shape::Record(fields) if reaches(g, shapes, r, r, &any) => {
-                out.push((name, fields.iter().map(|f| f.name.clone()).collect()));
-            }
-            Shape::Climb(_) => {
-                let fields = ["left", "op", "right"].map(Rc::from).to_vec();
-                out.push((format!("{name}Binary"), fields));
-            }
-            _ => {}
-        }
-    }
-    out
+/// How a type that declares its release takes itself apart.
+pub(crate) enum Release {
+    /// A record's fields, by name.
+    Fields(Vec<Rc<str>>),
+    /// A choice's variants, each once.
+    Arms(Vec<String>),
 }
 
-/// Each choice that reaches itself with no record between, with its variants: the type
-/// name and the variant names, each once. A record on a cycle ends that cycle's release.
-pub(crate) fn recursive_choices(
-    g: &Grammar,
-    shapes: &[Shape],
-    rules: &[RuleId],
-) -> Vec<(String, Vec<String>)> {
-    let no_record = |s: &Shape| matches!(s, Shape::Choice(_) | Shape::Same(_) | Shape::Climb(_));
+/// The types that declare their release, with how each takes itself apart. The
+/// compiler's release walk stops at a declared release, so each cycle of the types
+/// needs one, and a `climb` rule's binary node is on a cycle of its own. Records come
+/// first, then choices, then the types of `climb` rules, each in file order: each
+/// value of a type that declares its release costs a call, and a record is rarer
+/// than a choice that holds it. A type declares its release when it reaches itself
+/// past every type that declares one before it.
+pub(crate) fn releases(g: &Grammar, shapes: &[Shape], rules: &[RuleId]) -> Vec<(String, Release)> {
+    let mut declared: Vec<RuleId> = Vec::new();
     let mut out = Vec::new();
-    for &r in rules {
-        if let Shape::Choice(names) = &shapes[r.0 as usize] {
-            if reaches(g, shapes, r, r, &no_record) {
-                let mut arms: Vec<String> = Vec::new();
-                for (v, _) in variants(g, names, r) {
-                    if !arms.iter().any(|a| a == v) {
-                        arms.push(v.to_string());
-                    }
+    for pass in 0..3 {
+        for &r in rules {
+            let name = type_name(&g.body(r).name);
+            let release = match (&shapes[r.0 as usize], pass) {
+                (Shape::Record(fields), 0) => {
+                    Release::Fields(fields.iter().map(|f| f.name.clone()).collect())
                 }
-                out.push((type_name(&g.body(r).name), arms));
+                (Shape::Climb(_), 0) => {
+                    let fields = ["left", "op", "right"].map(Rc::from).to_vec();
+                    out.push((format!("{name}Binary"), Release::Fields(fields)));
+                    continue;
+                }
+                (Shape::Choice(names), 1) => {
+                    let mut arms: Vec<String> = Vec::new();
+                    for (v, _) in variants(g, names, r) {
+                        if !arms.iter().any(|a| a == v) {
+                            arms.push(v.to_string());
+                        }
+                    }
+                    Release::Arms(arms)
+                }
+                (Shape::Climb(operand), 2) => {
+                    let operand = type_name(&g.body(*operand).name);
+                    Release::Arms(vec![format!("{name}{operand}"), format!("{name}Op")])
+                }
+                _ => continue,
+            };
+            if reaches(g, shapes, r, r, &|x| !declared.contains(&x)) {
+                declared.push(r);
+                out.push((name, release));
             }
         }
     }

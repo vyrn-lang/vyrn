@@ -13,9 +13,8 @@
 //! returns. A sequence that fails resets the labels bound inside it. So a partial
 //! value is always a local or an element the reset pops, and the compiler's placed
 //! release frees it at the function's exit or at the reset. A type that reaches
-//! itself holds a record or a choice on the cycle. Each such record has an
-//! `impl Owned` that takes its fields apart, and each choice with no record on its
-//! cycle has one that matches its variants.
+//! itself holds a record or a choice on the cycle, and one type on each cycle has an
+//! `impl Owned` that takes it apart ([`crate::shape::releases`]).
 //!
 //! A syntactic rule keeps the cursor on the first byte of a token: each token it
 //! takes also takes the trivia after it, so a failed alternative pays no second skip
@@ -34,7 +33,7 @@ use std::rc::Rc;
 use crate::gen::walk;
 use crate::load::first;
 use crate::lower::{can_miss, fallible, free_labels, miss, Miss};
-use crate::shape::{shapes, type_name, Field, Mult, Shape, Ty};
+use crate::shape::{releases, shapes, type_name, Field, Mult, Release, Shape, Ty};
 use crate::{
     At, Builtin, ByteSet, Embed, Grammar, HoleSrc, Level, Lit, Recover, Refused, RuleId, Throw, E,
 };
@@ -890,25 +889,26 @@ impl Writer<'_> {
                 Shape::Same(_) | Shape::Lexical => {}
             }
         }
-        for (name, fields) in crate::shape::recursive_records(self.g, &self.shapes, rules) {
+        for (name, release) in releases(self.g, &self.shapes, rules) {
             let _ = writeln!(
                 o,
                 "impl Owned for {name} {{\n    fn release(consume self) {{"
             );
-            for f in fields {
-                let _ = writeln!(o, "        let {f}Kept = consume self.{f}");
+            match release {
+                Release::Fields(fields) => {
+                    for f in fields {
+                        let _ = writeln!(o, "        let {f}Kept = consume self.{f}");
+                    }
+                }
+                Release::Arms(arms) => {
+                    let _ = writeln!(o, "        match consume self {{");
+                    for arm in arms {
+                        let _ = writeln!(o, "            {arm}(kept) => {{}}");
+                    }
+                    let _ = writeln!(o, "        }}");
+                }
             }
             let _ = writeln!(o, "    }}\n}}\n");
-        }
-        for (name, arms) in crate::shape::recursive_choices(self.g, &self.shapes, rules) {
-            let _ = writeln!(
-                o,
-                "impl Owned for {name} {{\n    fn release(consume self) {{\n        match consume self {{"
-            );
-            for arm in arms {
-                let _ = writeln!(o, "            {arm}(kept) => {{}}");
-            }
-            let _ = writeln!(o, "        }}\n    }}\n}}\n");
         }
     }
 
@@ -2207,6 +2207,13 @@ mod tests {
         let g = load("expect ^E\nA = '(' A ')' / B\nB = 'b'\n").expect("it loads");
         let written = parser(&g).expect("it lowers");
         assert!(written.contains("impl Owned for A"), "{written}");
+    }
+
+    #[test]
+    fn two_records_on_one_cycle_have_one_release() {
+        let grammar = "expect ^E\nDoc = a:A\nA = '(' b:B? ')'\nB = '[' a:A ']'\n";
+        let written = parser(&load(grammar).expect("it loads")).expect("it lowers");
+        assert_eq!(written.matches("impl Owned for").count(), 1, "{written}");
     }
 
     #[test]
