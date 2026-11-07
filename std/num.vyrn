@@ -529,48 +529,74 @@ fn toFloat(
 /// a number. The whole string must match. Too large is `inf` and too small is a
 /// signed zero, as in every IEEE-754 text conversion.
 export fn parseFloat64(s: String) -> Option<Float64> {
-    let sc = scan(s, 0, s.byteLength)
+    return parseFloat64Range(s, 0, s.byteLength)
+}
+
+/// `parseFloat64` of the bytes `s[start..end]`, read in place: a reader parses
+/// a number of its source without copying it out. `0 <= start <= end <=
+/// s.byteLength`, or an index traps.
+export fn parseFloat64Range(
+    s: String,
+    start: Int64 where value >= 0,
+    end: Int64 where value >= start && value <= s.byteLength,
+) -> Option<Float64> {
+    let sc = scan(s, start, end)
     if !sc.ok {
         return None
     }
-    return Some(toFloat(s, 0, s.byteLength, sc, 53, 0 - 1074))
+    return Some(toFloat(s, start, end, sc, 53, 0 - 1074))
 }
 
 /// Decimal text as a `Float32`, rounded once: decimal -> `Float64` ->
 /// `Float32` rounds twice and is wrong near a `Float32` tie.
 export fn parseFloat32(s: String) -> Option<Float32> {
-    let sc = scan(s, 0, s.byteLength)
+    return parseFloat32Range(s, 0, s.byteLength)
+}
+
+/// `parseFloat32` of the bytes `s[start..end]`, as `parseFloat64Range` reads.
+export fn parseFloat32Range(
+    s: String,
+    start: Int64 where value >= 0,
+    end: Int64 where value >= start && value <= s.byteLength,
+) -> Option<Float32> {
+    let sc = scan(s, start, end)
     if !sc.ok {
         return None
     }
-    return Some(Float32(toFloat(s, 0, s.byteLength, sc, 24, 0 - 149)))
+    return Some(Float32(toFloat(s, start, end, sc, 24, 0 - 149)))
 }
 
 /// Decimal text as an exact `Int64`, or `None` if it is not an integer or does
 /// not fit. `"9223372036854775808"` is `None`; the `parse` builtin wraps it.
 export fn parseInt64(s: String) -> Option<Int64> {
-    let b = bytes(s)
-    if b.length == 0 {
-        return None
-    }
-    let mut i = 0
+    return parseInt64Range(s, 0, s.byteLength)
+}
+
+/// `parseInt64` of the bytes `s[start..end]`, as `parseFloat64Range` reads.
+export fn parseInt64Range(
+    s: String,
+    start: Int64 where value >= 0,
+    end: Int64 where value >= start && value <= s.byteLength,
+) -> Option<Int64> {
+    let mut i = start
     let mut neg = false
-    if b[0] == '-' || b[0] == '+' {
-        neg = b[0] == '-'
-        i = 1
+    if i < end && (s[i] == '-' || s[i] == '+') {
+        neg = s[i] == '-'
+        i = i + 1
     }
-    if i >= b.length {
+    if i >= end {
         return None
     }
     // Accumulate in `UInt64`, so the check compares magnitudes before any
     // overflow. `Int64.min`'s magnitude is one more than `Int64.max`'s.
     let mut acc: UInt64 = 0
     let limit: UInt64 = if neg { 9223372036854775808 } else { 9223372036854775807 }
-    while i < b.length {
-        if b[i] < '0' || b[i] > '9' {
+    while i < end {
+        let c = Int64(s[i])
+        if c < '0' || c > '9' {
             return None
         }
-        let dig: UInt64 = UInt64(Int64(b[i]) - 48)
+        let dig: UInt64 = UInt64(c - 48)
         if acc > 1844674407370955161 {
             return None
         }
@@ -591,18 +617,27 @@ export fn parseInt64(s: String) -> Option<Int64> {
 /// Decimal text as an exact `UInt64`, or `None`. No sign is accepted, not
 /// even `+`.
 export fn parseUInt64(s: String) -> Option<UInt64> {
-    let b = bytes(s)
-    if b.length == 0 {
+    return parseUInt64Range(s, 0, s.byteLength)
+}
+
+/// `parseUInt64` of the bytes `s[start..end]`, as `parseFloat64Range` reads.
+export fn parseUInt64Range(
+    s: String,
+    start: Int64 where value >= 0,
+    end: Int64 where value >= start && value <= s.byteLength,
+) -> Option<UInt64> {
+    if start >= end {
         return None
     }
     let umax: UInt64 = 18446744073709551615
     let mut acc: UInt64 = 0
-    let mut i = 0
-    while i < b.length {
-        if b[i] < '0' || b[i] > '9' {
+    let mut i = start
+    while i < end {
+        let c = Int64(s[i])
+        if c < '0' || c > '9' {
             return None
         }
-        let dig: UInt64 = UInt64(Int64(b[i]) - 48)
+        let dig: UInt64 = UInt64(c - 48)
         if acc > 1844674407370955161 {
             return None
         }

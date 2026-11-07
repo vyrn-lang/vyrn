@@ -305,10 +305,22 @@ fn refusedString(p: modify JsonReader, msg: String) -> String {
 }
 
 /// Reads a JSON number, the cursor on `-` or a digit, and returns its raw text.
-/// Grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`. Refused, it
-/// answers `""`.
+/// Refused, it answers `""`.
 export fn readJsonNumber(p: modify JsonReader) -> String {
     let start = p.pos
+    if skipJsonNumber(p) == false {
+        return ""
+    }
+    return match stringFromBytes(bytes(p.src, start, p.pos)) {
+        Ok(v) => v,
+        Err(e) => refusedString(p, "invalid number"),
+    }
+}
+
+/// Reads past a JSON number, the cursor on `-` or a digit, and answers whether
+/// it was one; the number is the source from the cursor's old position to its
+/// new one. Grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
+export fn skipJsonNumber(p: modify JsonReader) -> Bool {
     if peek(p) == '-' {
         step(p)
     }
@@ -318,12 +330,12 @@ export fn readJsonNumber(p: modify JsonReader) -> String {
     } else if d >= '1' && d <= '9' {
         skipDigits(p)
     } else {
-        return refusedString(p, "invalid number: expected a digit")
+        return refusedNumber(p, "invalid number: expected a digit")
     }
     if peek(p) == '.' {
         step(p)
         if isDigit(peek(p)) == false {
-            return refusedString(p, "invalid number: expected a digit after '.'")
+            return refusedNumber(p, "invalid number: expected a digit after '.'")
         }
         skipDigits(p)
     }
@@ -333,14 +345,16 @@ export fn readJsonNumber(p: modify JsonReader) -> String {
             step(p)
         }
         if isDigit(peek(p)) == false {
-            return refusedString(p, "invalid number: expected a digit in the exponent")
+            return refusedNumber(p, "invalid number: expected a digit in the exponent")
         }
         skipDigits(p)
     }
-    return match stringFromBytes(bytes(p.src, start, p.pos)) {
-        Ok(v) => v,
-        Err(e) => refusedString(p, "invalid number"),
-    }
+    return true
+}
+
+fn refusedNumber(p: modify JsonReader, msg: String) -> Bool {
+    refuse(p, msg)
+    return false
 }
 
 fn isDigit(b: Int64) -> Bool {

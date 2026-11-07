@@ -19,7 +19,7 @@
 import { Json, JsonField, JsonReader, copyJson, copyJsonArray, copyJsonFields } from "std/json"
 import { JsonKeySet } from "std/jsonread"
 import * as jr from "std/jsonread"
-import { parseInt64, parseUInt64, parseFloat64, parseFloat32 } from "std/num"
+import { parseInt64, parseFloat32Range, parseFloat64Range, parseInt64Range, parseUInt64Range } from "std/num"
 import { arm, ifChain, ifChainOr } from "std/code"
 
 /// An object's fields in document order, or `[]` for anything else.
@@ -352,10 +352,13 @@ export fn dIntRange(
     if expect(p, path, seg, idx, iss, '0', "integer") == false {
         return out
     }
-    if let Some(n) = parseInt64(jr.readJsonNumber(p)) {
-        if n >= lo && n <= hi {
-            out.push(n)
-            return out
+    let start = p.pos
+    if jr.skipJsonNumber(p) {
+        if let Some(n) = parseInt64Range(p.src, start, p.pos) {
+            if n >= lo && n <= hi {
+                out.push(n)
+                return out
+            }
         }
     }
     pushType(iss, pathAt(path, seg, idx), "integer", "number")
@@ -376,10 +379,13 @@ export fn dUIntMax(
     if expect(p, path, seg, idx, iss, '0', "integer") == false {
         return out
     }
-    if let Some(n) = parseUInt64(jr.readJsonNumber(p)) {
-        if n <= hi {
-            out.push(n)
-            return out
+    let start = p.pos
+    if jr.skipJsonNumber(p) {
+        if let Some(n) = parseUInt64Range(p.src, start, p.pos) {
+            if n <= hi {
+                out.push(n)
+                return out
+            }
         }
     }
     pushType(iss, pathAt(path, seg, idx), "integer", "number")
@@ -393,9 +399,12 @@ export fn dFloat64(p: modify JsonReader, path: String, seg: String, idx: Int64, 
     if expect(p, path, seg, idx, iss, '0', "number") == false {
         return out
     }
-    if let Some(f) = parseFloat64(jr.readJsonNumber(p)) {
-        out.push(f)
-        return out
+    let start = p.pos
+    if jr.skipJsonNumber(p) {
+        if let Some(f) = parseFloat64Range(p.src, start, p.pos) {
+            out.push(f)
+            return out
+        }
     }
     pushType(iss, pathAt(path, seg, idx), "number", "number")
     return out
@@ -408,9 +417,12 @@ export fn dFloat32(p: modify JsonReader, path: String, seg: String, idx: Int64, 
     if expect(p, path, seg, idx, iss, '0', "number") == false {
         return out
     }
-    if let Some(f) = parseFloat32(jr.readJsonNumber(p)) {
-        out.push(f)
-        return out
+    let start = p.pos
+    if jr.skipJsonNumber(p) {
+        if let Some(f) = parseFloat32Range(p.src, start, p.pos) {
+            out.push(f)
+            return out
+        }
     }
     pushType(iss, pathAt(path, seg, idx), "number", "number")
     return out

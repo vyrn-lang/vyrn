@@ -312,7 +312,7 @@ examples/columns.vyrn	sumColumns	yes	no, `c` is ParticleColumns, not an integer,
 examples/columns.vyrn	moveRows	no, it keeps an index check	no, it is not trap-free
 examples/columns.vyrn	moveColumns	no, it keeps an index check	no, it is not trap-free
 examples/columns.vyrn	run	no, it calls `moveRows`, which is not trap-free	no, its effect set is alloc
-examples/columns.vyrn	numberAt	yes	no, its effect set is alloc
+examples/columns.vyrn	numberAt	yes	no, `argv` is Array<String>, not an integer, Bool or a read array of one
 examples/columns.vyrn	main	no, it calls `run`, which is not trap-free	no, its effect set is alloc, write-output, args
 examples/columns.vyrn	where$pBodyColumns	yes	no, `x` is Array<Float64>, and WGSL has no 64-bit float
 examples/columns.vyrn	where$cBodyColumns	no, it calls `panic`	no, its effect set is trap
@@ -1689,7 +1689,7 @@ examples/textbytes.vyrn	verdict	yes	no, its effect set is alloc
 examples/textbytes.vyrn	lc	yes	no, its effect set is alloc
 examples/textbytes.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/threeengines.vyrn	chain	yes	no, its effect set is alloc
-examples/threeengines.vyrn	roundsOf	yes	no, its effect set is alloc
+examples/threeengines.vyrn	roundsOf	yes	no, `argv` is Array<String>, not an integer, Bool or a read array of one
 examples/threeengines.vyrn	main	yes	no, its effect set is alloc, write-output, args
 examples/tree.vyrn	treeSum	no, it calls `panic`	no, its effect set is trap
 examples/tree.vyrn	treeDepth	no, it calls `maxDepth`, which is not trap-free	no, its effect set is trap
@@ -2688,7 +2688,7 @@ std/i18n.vyrn	mfUse	yes	no, its effect set is alloc
 std/i18n.vyrn	mfFunc	yes	no, its effect set is alloc
 std/i18n.vyrn	mfPatternUses	yes	no, its effect set is alloc
 std/i18n.vyrn	mfDeclare	yes	no, its effect set is alloc
-std/i18n.vyrn	mfNumberKey	yes	no, its effect set is alloc
+std/i18n.vyrn	mfNumberKey	yes	no, `k` is String, not an integer, Bool or a read array of one
 std/i18n.vyrn	mfMatcher	no, it keeps an index check	no, its effect set is alloc, trap
 std/i18n.vyrn	mfArgs	no, it calls `mfMatcher`, which is not trap-free	no, its effect set is alloc, trap
 std/i18n.vyrn	readMessage	no, it keeps an index check	no, its effect set is alloc, trap
@@ -2859,10 +2859,10 @@ std/jsondec.vyrn	jsondec$dStr	no, it calls `expect`, which is not trap-free	no, 
 std/jsondec.vyrn	jsondec$dBool	no, it calls `expect`, which is not trap-free	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$dInt64	no, it calls `dIntRange`, which is not trap-free	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$dIntKey	yes	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$dIntRange	no, it calls `readJsonNumber`, which is not trap-free	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$dUIntMax	no, it calls `readJsonNumber`, which is not trap-free	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$dFloat64	no, it calls `readJsonNumber`, which is not trap-free	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$dFloat32	no, it calls `readJsonNumber`, which is not trap-free	no, its effect set is alloc
+std/jsondec.vyrn	jsondec$dIntRange	no, it keeps a where clause check	no, its effect set is alloc
+std/jsondec.vyrn	jsondec$dUIntMax	no, it keeps a where clause check	no, its effect set is alloc
+std/jsondec.vyrn	jsondec$dFloat64	no, it keeps a where clause check	no, its effect set is alloc
+std/jsondec.vyrn	jsondec$dFloat32	no, it keeps a where clause check	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$jsonDecoders	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/jsondec.vyrn	jsondec$jsonDecoder	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/jsondec.vyrn	jsondec$isName	yes	no, its effect set is alloc
@@ -2892,6 +2892,8 @@ std/jsonread.vyrn	readHex4	yes	no, its effect set is alloc
 std/jsonread.vyrn	readJsonString	yes	no, its effect set is alloc
 std/jsonread.vyrn	refusedString	yes	no, its effect set is alloc
 std/jsonread.vyrn	readJsonNumber	no, it keeps a slice check	no, its effect set is alloc
+std/jsonread.vyrn	skipJsonNumber	yes	no, its effect set is alloc
+std/jsonread.vyrn	refusedNumber	yes	no, its effect set is alloc
 std/jsonread.vyrn	isDigit	yes	yes, emulated Int64
 std/jsonread.vyrn	skipDigits	yes	no, `p` is JsonReader, not an integer, Bool or a read array of one
 std/jsonread.vyrn	readJsonKeyword	yes	no, its effect set is alloc
@@ -3013,9 +3015,13 @@ std/num.vyrn	num$exactInt	yes	no, the value of line 344 is U128, not an integer,
 std/num.vyrn	num$pow10Exact	yes	no, `v` is Float64, and WGSL has no 64-bit float
 std/num.vyrn	num$toFloat	yes	no, its effect set is alloc
 std/num.vyrn	num$parseFloat64	yes	no, its effect set is alloc
+std/num.vyrn	num$parseFloat64Range	yes	no, its effect set is alloc
 std/num.vyrn	num$parseFloat32	yes	no, its effect set is alloc
-std/num.vyrn	num$parseInt64	yes	no, its effect set is alloc
-std/num.vyrn	num$parseUInt64	yes	no, its effect set is alloc
+std/num.vyrn	num$parseFloat32Range	yes	no, its effect set is alloc
+std/num.vyrn	num$parseInt64	yes	no, `s` is String, not an integer, Bool or a read array of one
+std/num.vyrn	num$parseInt64Range	yes	no, `s` is String, not an integer, Bool or a read array of one
+std/num.vyrn	num$parseUInt64	yes	no, `s` is String, not an integer, Bool or a read array of one
+std/num.vyrn	num$parseUInt64Range	yes	no, `s` is String, not an integer, Bool or a read array of one
 std/num.vyrn	num$f64Str	no, it keeps an index check	no, its effect set is alloc, trap
 std/num.vyrn	num$asciiStr	no, it calls `panic`	no, its effect set is alloc, trap
 std/openapi.vyrn	oaBaseName	yes	no, its effect set is alloc
