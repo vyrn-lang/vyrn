@@ -740,9 +740,10 @@ pub type GenEngine = dyn Fn(
     + Send
     + Sync;
 
-/// Identifies the running compiler build: the crate version, then the
-/// executable's [`crate::manifest::settled_stamp`], else the hash of its bytes.
-/// A persisted generator output or artifact is reused only by the same build.
+/// Identifies the running compiler build: the crate version and the hash of
+/// the executable's bytes. A persisted generator output, artifact or std entry
+/// is reused only by the same build. Computed on the first call, so a process
+/// that keys no persisted file never hashes the executable.
 pub fn compiler_identity() -> String {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ID.get_or_init(|| {
@@ -759,17 +760,51 @@ pub fn compiler_identity() -> String {
     .clone()
 }
 
-/// The executable part of [`compiler_identity`]: the file's settled stamp, else
-/// the hash of its bytes, because a second build of one size can carry the
-/// stamp of the first while its times lie inside the slack.
+/// The format word that opens an executable's record.
+const EXE_TAG: &str = "exe1";
+
+/// The executable part of [`compiler_identity`]: the hash of its bytes. A
+/// record in the generator cache's directory vouches for the hash under the
+/// executable's settled stamp, which a stat takes before the read, as for a
+/// generator input. A young executable has no stamp and hashes on every run;
+/// both runs name one build alike. `VYRN_NO_GEN_CACHE` leaves the record
+/// alone: it says what the binary is, not what a generation wrote.
 fn executable_id(exe: &std::path::Path) -> String {
-    if let Some(stamp) = crate::manifest::settled_stamp(exe) {
-        return stamp.0;
+    let stamp = crate::manifest::settled_stamp(exe);
+    let key = stamp.as_ref().map(|s| {
+        let seed = format!("{EXE_TAG}\0{}\0{}", exe.display(), s.0);
+        format!("exe-{}", crate::hash::sha256_hex(seed.as_bytes()))
+    });
+    let recorded = key.as_deref().and_then(|k| {
+        let text = crate::manifest::gen_cache_get(k)?;
+        exe_record_hash(k, &text).map(str::to_string)
+    });
+    if let Some(hash) = recorded {
+        return hash;
     }
-    match std::fs::read(exe) {
-        Ok(bytes) => format!("sha256:{}", crate::hash::sha256_hex(&bytes)),
-        Err(_) => format!("unknown-{}", std::process::id()),
+    let Ok(bytes) = std::fs::read(exe) else {
+        return format!("unknown-{}", std::process::id());
+    };
+    let hash = format!("sha256:{}", crate::hash::sha256_hex(&bytes));
+    if let Some(k) = &key {
+        crate::manifest::gen_cache_put(k, &exe_record(k, &hash));
     }
+    hash
+}
+
+/// The record of an executable whose bytes hash to `hash`, under `key`.
+fn exe_record(key: &str, hash: &str) -> String {
+    let tag = crate::loader::gen_cache_tag(key, hash.as_bytes());
+    format!("{EXE_TAG} {tag}\n{hash}")
+}
+
+/// The hash a record [`exe_record`] wrote under `key` holds; `None` for a
+/// damaged, foreign or other-format record, which reads as a miss.
+fn exe_record_hash<'t>(key: &str, text: &'t str) -> Option<&'t str> {
+    let (head, hash) = text.split_once('\n')?;
+    let tag = head.strip_prefix(EXE_TAG)?.strip_prefix(' ')?;
+    (crate::loader::gen_cache_tag(key, hash.as_bytes()) == tag && hash.starts_with("sha256:"))
+        .then_some(hash)
 }
 
 /// Runs `fn_name` in `program` as a generation target on `inputs.engine`,
@@ -903,7 +938,7 @@ pub fn derive(
             &inner,
             resolver,
             engine,
-            &mut read,
+            (&mut read, &mut Vec::new()),
         );
         let written = written.map_err(|f| match f {
             crate::loader::GenFault::Load(ds) => unplaced(refused(ds)),
@@ -1015,5 +1050,21 @@ mod tests {
         std::fs::write(&b, b"bldB").unwrap();
         assert_ne!(executable_id(&a), executable_id(&b));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A record reads back under its own key, and any other record is a miss.
+    #[test]
+    fn a_damaged_foreign_or_moved_executable_record_reads_as_a_miss() {
+        let hash = "sha256:00ff";
+        let good = exe_record("exe-a", hash);
+        assert_eq!(exe_record_hash("exe-a", &good), Some(hash));
+        assert_eq!(exe_record_hash("exe-b", &good), None, "moved");
+        let damaged = good.replace("00ff", "00fe");
+        assert_eq!(exe_record_hash("exe-a", &damaged), None, "damaged");
+        let foreign = format!("{EXE_TAG} {}\n{hash}", "0".repeat(64));
+        assert_eq!(exe_record_hash("exe-a", &foreign), None, "foreign");
+        let other = exe_record("exe-a", "1.0:42");
+        assert_eq!(exe_record_hash("exe-a", &other), None, "not a hash");
+        assert_eq!(exe_record_hash("exe-a", "exe1"), None, "truncated");
     }
 }

@@ -142,7 +142,8 @@ the playground serves an embedded `std/`. The loader:
   after the load (`loader::GEN_HOST`, which `vyrn-genwasm` spells its calls by);
 - loads a generator's module as its own root, for an import line's generator
   and a `derive` generator alike (`checked_generator`), and links only what its
-  gen fn reaches (`keep_reached`);
+  gen fn reaches (`keep_reached`). A load checks the program of each gen fn
+  its import lines call once, and each of those lines runs that program;
 - leaves out of the program a std module imported only for generators its
   importer spells on import lines (`unlinked_import`). The decision reads each
   exported gen fn's signature and `export to` paths: from the cache entry of

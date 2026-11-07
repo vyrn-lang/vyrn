@@ -135,12 +135,17 @@ fn a_changed_std_byte_misses_its_entry_and_the_verdict_holds() {
     );
 }
 
+/// The entries damaged are `std/task`'s, which the root's `sleep` reads: a
+/// warm check reads only the entries of modules the root reaches, and an own
+/// load may have written others.
 #[test]
 fn a_damaged_entry_reads_as_a_miss_and_is_written_again() {
     let t = tree("stdrows-damaged");
     let first = t.check(false);
-    for kind in ["rows-", "interface-"] {
-        let (name, _) = t.entries(kind).into_iter().next().expect("an entry");
+    for (kind, task) in [("rows-", "\nsleep\t"), ("interface-", "fn sleep(")] {
+        let (name, _) = (t.entries(kind).into_iter())
+            .find(|(_, text)| text.contains(task))
+            .expect("std/task's entry");
         std::fs::write(t.cache.join(&name), "interface1 0000\n1\n").expect("damage");
         assert_eq!(t.check(false), first);
         let text = std::fs::read_to_string(t.cache.join(&name)).expect("read");
@@ -230,4 +235,50 @@ fn a_stored_row_names_its_sites_as_the_importer_does() {
         !calls.iter().any(|c| c.contains("panicAt")),
         "intStr calls {calls:?}"
     );
+}
+
+/// An entry's body with each input's settled stamp left out: a stamp moves
+/// with the clock, so two fills of one tree agree on every other byte.
+fn unstamped(text: &str) -> String {
+    let mut lines = text.lines().skip(1);
+    let inputs: usize = (lines.next())
+        .and_then(|n| n.parse().ok())
+        .expect("an input count");
+    let mut out = vec![inputs.to_string()];
+    for l in lines.by_ref().take(inputs) {
+        out.push(l.split('\t').take(2).collect::<Vec<_>>().join("\t"));
+    }
+    out.extend(lines.map(str::to_string));
+    out.join("\n")
+}
+
+/// One cold fill runs `std/strings`' own load first, the other `std/json`'s,
+/// so each writes `std/text` under another stack of writers. The entries they
+/// share agree byte for byte: an entry is a function of its key.
+#[test]
+fn a_cold_fill_writes_each_entry_alike_in_any_order() {
+    let strings_first = "import { joinWith } from \"std/strings\"\n\
+                         fn main() -> Int64 {\n    print(joinWith([\"a\"], \",\"))\n    return 0\n}\n";
+    let json_first = "import { Json, emit } from \"std/json\"\n\
+                      import { joinWith } from \"std/strings\"\n\
+                      fn main() -> Int64 {\n    print(emit(JNull))\n    print(joinWith([\"a\"], \",\"))\n    return 0\n}\n";
+    let a = tree_of("stdrows-order-a", strings_first);
+    let mut b = tree_of("stdrows-order-b", json_first);
+    b.std = a.std.clone();
+    for t in [&a, &b] {
+        let out = t.check(false);
+        assert_eq!(out.0, Some(0), "{}", out.1);
+    }
+    let (a, b) = (a.entries("rows-"), b.entries("rows-"));
+    let shared: Vec<_> = (a.iter())
+        .filter_map(|(n, text)| Some((n, text, &b.iter().find(|(m, _)| m == n)?.1)))
+        .collect();
+    assert!(
+        shared.len() >= 4,
+        "the fills share {} entries",
+        shared.len()
+    );
+    for (n, x, y) in shared {
+        assert_eq!(unstamped(x), unstamped(y), "entry {n} differs");
+    }
 }
