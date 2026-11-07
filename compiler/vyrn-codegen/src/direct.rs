@@ -10777,7 +10777,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
         };
         let pt = |i: usize| pts.get(i).copied().unwrap_or(0);
         let landings = self.resume_dispatch(b, &pts, base);
+        // The first row no earlier row emitted: an `if` emits the rows it threads into.
+        let mut next = 0;
         for (i, s) in ss.iter().enumerate() {
+            if i < next {
+                continue;
+            }
             if let St::Check(c) = s {
                 match &c.guard {
                     Guard::Clause { atoms, says } => self.clause_check(m, b, c, atoms, says)?,
@@ -11351,31 +11356,6 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         }
                     }
                 }
-                // A loop's exit. The pass makes up one `break` (`site: 0`) in the else arm of a
-                // two-way branch it also makes up at the loop's head, so this row is a
-                // conditional branch out of the loop. The reader's own `if c { break }` has the
-                // reader's site and is emitted as a plain two-way branch.
-                St::If {
-                    cond,
-                    then,
-                    els,
-                    site: NodeId::NONE,
-                } if then.is_empty()
-                    && matches!(
-                        els.as_slice(),
-                        [St::Break {
-                            site: NodeId::NONE,
-                            ..
-                        }]
-                    )
-                    && !self.loops.is_empty() =>
-                {
-                    self.core_val(m, b, cond, &Type::Bool, 0)?;
-                    b.ins(&Instruction::I32Eqz);
-                    let brk = self.loops.last().expect("a loop is open").0;
-                    let out = self.br_to(brk);
-                    b.ins(&Instruction::BrIf(out));
-                }
                 // `block { loop { .. br 0 } }`: `St::Break` targets the block and `St::Continue`
                 // the loop. `St::Loop` is infinite, so the back edge is unconditional.
                 St::Loop { body: inner, .. } => {
@@ -11425,46 +11405,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     let d = self.br_to(to);
                     b.ins(&Instruction::Br(d));
                 }
-                St::If {
-                    cond, then, els, ..
-                } => {
-                    // A resume takes the side that holds its point.
-                    match self.resume.filter(|_| pt(i) > 0) {
-                        Some(r) => {
-                            b.ins(&Instruction::LocalGet(r.at));
-                            b.ins(&Instruction::If(BlockType::Result(ValType::I32)));
-                            self.depth += 1;
-                            resuming_into(b, r.at, first + 1, list_points(then));
-                            b.ins(&Instruction::Else);
-                            self.core_val(m, b, cond, &Type::Bool, 0)?;
-                            b.ins(&Instruction::End);
-                            self.depth -= 1;
-                        }
-                        None => self.core_val(m, b, cond, &Type::Bool, 0)?,
-                    }
-                    let stacked = self.core_stacked(ss, i);
-                    b.ins(&Instruction::If(match stacked {
-                        Some((n, v)) => {
-                            self.core_w.stacked.push(n);
-                            BlockType::Result(v)
-                        }
-                        None => BlockType::Empty,
-                    }));
-                    self.depth += 1;
-                    let mark = self.scope.len();
-                    self.core_stmts(m, b, then, first)?;
-                    self.scope.truncate(mark);
-                    if !els.is_empty() {
-                        b.ins(&Instruction::Else);
-                        self.core_stmts(m, b, els, first + list_points(then))?;
-                        self.scope.truncate(mark);
-                    }
-                    self.depth -= 1;
-                    b.ins(&Instruction::End);
-                    if let Some((n, _)) = stacked {
-                        self.core_w.stacked.pop();
-                        self.core_w.held = Some(n);
-                    }
+                St::If { .. } => {
+                    let to = self.core_if(m, b, ss, i, first, pt(i) > 0, &ends, &mut due)?;
+                    (last, next) = (Some(to), to + 1);
                 }
                 // `region { .. }` is the same block inside an arena scope. The depth is counted
                 // here because it is a fact about the code being written.
@@ -13121,6 +13064,159 @@ impl<'a, 'p> Fn_<'a, 'p> {
             && self.core_as_is(&from.ty, &info.ty)
             && (joins || unwritten(*x)))
         .then_some(*x)
+    }
+
+    /// Emits the `if` at `ss[i]` and returns the last row it emitted: `i`, or the last row it
+    /// threads into ([`Fn_::core_threads`]). `resumes` says whether a side holds a resume
+    /// point; `ends` and `due` are [`Fn_::core_stmts`]'s for `ss`.
+    #[allow(clippy::too_many_arguments)]
+    fn core_if(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        ss: &'a [St],
+        i: usize,
+        first: u32,
+        resumes: bool,
+        ends: &[Vec<Name>],
+        due: &mut Vec<Name>,
+    ) -> Result<usize, String> {
+        let St::If {
+            cond,
+            then,
+            els,
+            site,
+        } = &ss[i]
+        else {
+            return unsupported("a core `if` row that is no `if`", 0);
+        };
+        // A loop's exit. The pass makes up one `break` (`site: 0`) in the else arm of a
+        // two-way branch it also makes up at the loop's head, so this row is a
+        // conditional branch out of the loop. The reader's own `if c { break }` has the
+        // reader's site and is emitted as a plain two-way branch.
+        if *site == NodeId::NONE
+            && then.is_empty()
+            && matches!(
+                els.as_slice(),
+                [St::Break {
+                    site: NodeId::NONE,
+                    ..
+                }]
+            )
+            && !self.loops.is_empty()
+        {
+            self.core_val(m, b, cond, &Type::Bool, 0)?;
+            b.ins(&Instruction::I32Eqz);
+            let brk = self.loops.last().expect("a loop is open").0;
+            let out = self.br_to(brk);
+            b.ins(&Instruction::BrIf(out));
+            return Ok(i);
+        }
+        // A resume takes the side that holds its point.
+        match self.resume.filter(|_| resumes) {
+            Some(r) => {
+                b.ins(&Instruction::LocalGet(r.at));
+                b.ins(&Instruction::If(BlockType::Result(ValType::I32)));
+                self.depth += 1;
+                resuming_into(b, r.at, first + 1, list_points(then));
+                b.ins(&Instruction::Else);
+                self.core_val(m, b, cond, &Type::Bool, 0)?;
+                b.ins(&Instruction::End);
+                self.depth -= 1;
+            }
+            None => self.core_val(m, b, cond, &Type::Bool, 0)?,
+        }
+        let mark = self.scope.len();
+        if let Some((n, on_then)) = self.core_threads(ss, i) {
+            b.ins(&Instruction::If(BlockType::Empty));
+            self.depth += 1;
+            if on_then {
+                b.ins(&Instruction::Else);
+            }
+            self.core_w.stacked.push(n);
+            self.core_stmts(m, b, if on_then { els } else { then }, first)?;
+            self.core_w.stacked.pop();
+            self.core_w.held = Some(n);
+            self.scope.truncate(mark);
+            self.core_give_back(b, due, &ends[i]);
+            let mut j = i + 1;
+            while let Some(x) = self.core_passes(ss, j) {
+                self.core_site(m, b, &ss[j]);
+                self.core_w.held = Some(x);
+                self.core_give_back(b, due, &ends[j]);
+                j += 1;
+            }
+            self.core_site(m, b, &ss[j]);
+            let to = self.core_if(m, b, ss, j, first, false, ends, due)?;
+            self.depth -= 1;
+            b.ins(&Instruction::End);
+            return Ok(to);
+        }
+        let stacked = self.core_stacked(ss, i);
+        b.ins(&Instruction::If(match stacked {
+            Some((n, v)) => {
+                self.core_w.stacked.push(n);
+                BlockType::Result(v)
+            }
+            None => BlockType::Empty,
+        }));
+        self.depth += 1;
+        self.core_stmts(m, b, then, first)?;
+        self.scope.truncate(mark);
+        if !els.is_empty() {
+            b.ins(&Instruction::Else);
+            self.core_stmts(m, b, els, first + list_points(then))?;
+            self.scope.truncate(mark);
+        }
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        if let Some((n, _)) = stacked {
+            self.core_w.stacked.pop();
+            self.core_w.held = Some(n);
+        }
+        Ok(i)
+    }
+
+    /// The Bool join of the `if` at `ss[i]` and whether its decided side is `then`, when
+    /// that side stores a literal the rows after it run nothing for ([`Fn_::core_skips`]):
+    /// `a && b` stores `false` on its `else` side, `a || b` stores `true` on its `then`
+    /// side. The `if` then emits only its value side, with the next row inside it, so the
+    /// decided side jumps past both, as nested `if`s do.
+    fn core_threads(&self, ss: &[St], i: usize) -> Option<(Name, bool)> {
+        let (n, _) = self.core_stacked(ss, i)?;
+        let (k, on_then) = core_decided(&ss[i], n)?;
+        (!matches!(ss.get(i + 1), Some(St::Check(_))) && self.core_skips(ss, i + 1, k))
+            .then_some((n, on_then))
+    }
+
+    /// The temporary the `let` at `ss[j]` copies a held scalar of its own type into, when it
+    /// is held in turn: the value on the operand stack passes on with no instruction.
+    fn core_passes(&self, ss: &[St], j: usize) -> Option<Name> {
+        let body = self.body();
+        let Some(St::Let(x, Rhs::Val(Val::Name(y)))) = ss.get(j) else {
+            return None;
+        };
+        let info = &body.names[x.index()];
+        (info.binding.is_none()
+            && info.ty == body.names[y.index()].ty
+            && !matches!(ss.get(j + 1), Some(St::Check(_)))
+            && self.core_holds(ss, j, *x))
+        .then_some(*x)
+    }
+
+    /// Whether the rows from `ss[j]` run nothing when the held Bool is `k`: the `if` there,
+    /// past any copy of the Bool ([`Fn_::core_passes`]), takes an empty side for `k`, or
+    /// that side is the decided side of a join that threads ([`Fn_::core_threads`]). The
+    /// recursion walks forward through `ss`, so it ends.
+    fn core_skips(&self, ss: &[St], j: usize, k: bool) -> bool {
+        if self.core_passes(ss, j).is_some() {
+            return self.core_skips(ss, j + 1, k);
+        }
+        let Some(St::If { then, els, .. }) = ss.get(j) else {
+            return false;
+        };
+        (if k { then } else { els }).is_empty()
+            || (self.core_threads(ss, j)).is_some_and(|(_, on_then)| on_then == k)
     }
 
     /// The scalar temporary the `if` at `ss[i]` joins through, and its wasm type, when the
@@ -15987,6 +16083,23 @@ fn drops_ahead<'s>(ss: impl Iterator<Item = &'s St>) -> usize {
 
 /// The row after `ss[i]` that emits where it stands: a check row runs inside
 /// the row it guards.
+/// The literal one side of the `if` `s` stores into `n` and does nothing else, and whether
+/// that side is `then`. The `else` side is asked first.
+fn core_decided(s: &St, n: Name) -> Option<(bool, bool)> {
+    let St::If { then, els, .. } = s else {
+        return None;
+    };
+    let lit = |l: &[St]| match l {
+        [St::Store {
+            place: vyrn_frontend::core::Place::Name(m),
+            value: Val::Lit(Lit::Bool(k)),
+            ..
+        }] if *m == n => Some(*k),
+        _ => None,
+    };
+    (lit(els).map(|k| (k, false))).or_else(|| lit(then).map(|k| (k, true)))
+}
+
 fn next_row(ss: &[St], i: usize) -> Option<&St> {
     ss[i + 1..].iter().find(|s| !matches!(s, St::Check(_)))
 }
