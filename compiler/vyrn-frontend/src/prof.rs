@@ -8,7 +8,8 @@
 //! `VYRN_BUILD_PROFILE=allocs` adds a table of allocation counts per phase.
 //! [`Counting`] wraps the global allocator and bumps thread-local counters, so
 //! the hot path touches no shared line. A worker hands its counters to the
-//! caller as it hands over its phases.
+//! caller as it hands over its phases. A build with the `allocs` feature also
+//! counts the core rows each phase's walks visit ([`visit`]).
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::{Cell, RefCell};
@@ -131,14 +132,15 @@ pub fn phase_table() -> String {
     let lines = LINES.with(|l| l.take());
     out.push_str(&format!("lines read  {lines}\n"));
     if ALLOCS_ON.load(Relaxed) {
+        out.push_str(&rows_table(&counts));
         out.push_str(&alloc_table(&counts));
     }
     out
 }
 
-/// The slots of [`Counts`] per phase: allocations, reallocations, frees and
-/// bytes requested.
-const KINDS: usize = 4;
+/// The slots of [`Counts`] per phase: allocations, reallocations, frees,
+/// bytes requested and rows visited.
+const KINDS: usize = 5;
 /// Phase tags; a phase past the last shares it.
 const TAGS: usize = 96;
 /// One thread's counts: `KINDS` consecutive slots per phase tag, tag 0 being
@@ -202,6 +204,32 @@ pub fn absorb_counts(other: &Counts) {
     });
 }
 
+/// Counts one core row a walk visits into the running phase. A pass that
+/// rescans a body per name visits rows faster than the body grows, which
+/// `tests/compiler_scaling.rs` fails; time alone would flake. Compiled to
+/// nothing without the `allocs` feature.
+#[inline(always)]
+pub fn visit() {
+    #[cfg(feature = "allocs")]
+    if ALLOCS_ON.load(Relaxed) {
+        let t = TAG.with(Cell::get) as usize * KINDS + 4;
+        COUNTS.with(|c| c[t].set(c[t].get() + 1));
+    }
+}
+
+fn rows_table(counts: &Counts) -> String {
+    let names = TAG_NAMES.lock().unwrap();
+    let mut out = format!("\n{:<28} {:>12}\n", "rows phase", "rows");
+    for (t, row) in counts.chunks(KINDS).enumerate().filter(|(_, r)| r[4] != 0) {
+        let name = match t {
+            0 => "(outside)",
+            _ => names.get(t - 1).copied().unwrap_or("(overflow)"),
+        };
+        out.push_str(&format!("{name:<28} {:>12}\n", row[4]));
+    }
+    out
+}
+
 fn alloc_table(counts: &Counts) -> String {
     let names = TAG_NAMES.lock().unwrap();
     let mut out = format!(
@@ -209,7 +237,7 @@ fn alloc_table(counts: &Counts) -> String {
         "alloc phase", "allocs", "reallocs", "frees", "bytes"
     );
     for (t, row) in counts.chunks(KINDS).enumerate() {
-        if row.iter().all(|&n| n == 0) {
+        if row[..4].iter().all(|&n| n == 0) {
             continue;
         }
         let name = match t {

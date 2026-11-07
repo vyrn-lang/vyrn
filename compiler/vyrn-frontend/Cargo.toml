@@ -26,6 +26,11 @@ vyrn-genwasm = { path = "../vyrn-genwasm" }
 # integration test of either has to install them.
 vyrn-lower = { path = "../vyrn-lower" }
 
+# `allocs` counts the rows each phase's walks visit (`prof::visit`).
+# `vyrn-cli`'s `allocs` turns it on.
+[features]
+allocs = []
+
 [lib]
 name = "vyrn_frontend"
 path = "src/lib.rs"

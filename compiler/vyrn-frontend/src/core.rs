@@ -1148,6 +1148,7 @@ impl<'a> Iterator for Rows<'a> {
                 self.1.pop().is_some().then_some(())?;
                 continue;
             };
+            crate::prof::visit();
             let inner = depth + u32::from(matches!(s, St::Loop { .. }));
             let at = self.1.len();
             self.1.extend(s.lists().map(|l| (l.iter(), inner)));

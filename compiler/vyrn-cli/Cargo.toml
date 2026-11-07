@@ -62,7 +62,7 @@ vyrn-syntax = { path = "../vyrn-syntax" }
 # Off by default: the counter's load in every allocation cost 2.5% to 3.7% of a
 # build. `tests/compiler_scaling.rs` and `scripts/check-allocs.sh` need it.
 [features]
-allocs = []
+allocs = ["vyrn-frontend/allocs"]
 
 # The host the compiled route runs in, and nothing else (see src/lib.rs).
 # `vyrn-frontend` dev-depends on it so its tests run a program the way the
