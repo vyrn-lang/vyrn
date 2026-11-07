@@ -10351,6 +10351,9 @@ struct Walked {
     slot: Vec<Option<(u32, u32)>>,
     /// The name the operand stack is holding, if any.
     held: Option<Name>,
+    /// The scalar joins whose stores leave the value on the operand stack
+    /// ([`Fn_::core_stacked`]).
+    stacked: Vec<Name>,
     /// The temporary built in the caller's storage, which the `return` after
     /// it hands back without a copy ([`Fn_::core_lands`]).
     landed: Option<Name>,
@@ -10636,6 +10639,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             occurs: core.occurrences(),
             slot: vec![None; core.names.len()],
             held: None,
+            stacked: Vec::new(),
             landed: None,
             walks: vec![None; core.names.len()],
             built: vec![None; core.names.len()],
@@ -11186,20 +11190,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     }
                     // A temporary the next statement reads once, first, and nothing else reads
                     // stays on the operand stack. Every other name takes a local, in row order.
-                    // A clause check between them reads the call's arguments where it stands.
-                    let clause = ss[i + 1..]
-                        .iter()
-                        .map_while(|s| match s {
-                            St::Check(c) => Some(&c.guard),
-                            _ => None,
-                        })
-                        .any(|g| matches!(g, Guard::Clause { .. }));
-                    if info.binding.is_none()
-                        && self.resume.is_none()
-                        && self.core_w.reads[n.index()] == 1
-                        && !clause
-                        && self.core_first_read(next_row(ss, i)) == Some(*n)
-                    {
+                    if info.binding.is_none() && self.core_holds(ss, i, *n) {
                         self.core_w.held = Some(*n);
                         continue;
                     }
@@ -11225,6 +11216,15 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     ..
                 } if self.core_unit(&body.names[n.index()].ty) => {
                     self.core_val(m, b, value, &Type::Unit, *line)?;
+                }
+                St::Store {
+                    place: vyrn_frontend::core::Place::Name(n),
+                    value,
+                    line,
+                    ..
+                } if self.core_w.stacked.contains(n) => {
+                    let ty = body.names[n.index()].ty.clone();
+                    self.core_val(m, b, value, &ty, *line)?;
                 }
                 St::Store {
                     place: vyrn_frontend::core::Place::Name(n),
@@ -11442,7 +11442,14 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         }
                         None => self.core_val(m, b, cond, &Type::Bool, 0)?,
                     }
-                    b.ins(&Instruction::If(BlockType::Empty));
+                    let stacked = self.core_stacked(ss, i);
+                    b.ins(&Instruction::If(match stacked {
+                        Some((n, v)) => {
+                            self.core_w.stacked.push(n);
+                            BlockType::Result(v)
+                        }
+                        None => BlockType::Empty,
+                    }));
                     self.depth += 1;
                     let mark = self.scope.len();
                     self.core_stmts(m, b, then, first)?;
@@ -11454,6 +11461,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
+                    if let Some((n, _)) = stacked {
+                        self.core_w.stacked.pop();
+                        self.core_w.held = Some(n);
+                    }
                 }
                 // `region { .. }` is the same block inside an arena scope. The depth is counted
                 // here because it is a fact about the code being written.
@@ -13110,6 +13121,47 @@ impl<'a, 'p> Fn_<'a, 'p> {
             && self.core_as_is(&from.ty, &info.ty)
             && (joins || unwritten(*x)))
         .then_some(*x)
+    }
+
+    /// The scalar temporary the `if` at `ss[i]` joins through, and its wasm type, when the
+    /// value can stay on the operand stack as the `if`'s result: each branch ends storing
+    /// it, no other row names it, and the next row reads it first, as a held `let` reads
+    /// ([`Walked::held`]). `a && b`, `a || b` and a scalar `if` expression join this way.
+    fn core_stacked(&self, ss: &[St], i: usize) -> Option<(Name, ValType)> {
+        let St::If { then, els, .. } = &ss[i] else {
+            return None;
+        };
+        let stored = |l: &[St]| match l.last() {
+            Some(St::Store {
+                place: vyrn_frontend::core::Place::Name(n),
+                releases: false,
+                ..
+            }) => Some(*n),
+            _ => None,
+        };
+        let n = stored(then).filter(|n| stored(els) == Some(*n))?;
+        let info = &self.body().names[n.index()];
+        let Ok(Repr::Scalar(v)) = self.cx.repr(&info.ty, info.line) else {
+            return None;
+        };
+        (info.binding.is_none() && self.core_w.occurs[n.index()] == 3 && self.core_holds(ss, i, n))
+            .then_some((n, v))
+    }
+
+    /// Whether the operand stack can carry `n` from row `ss[i]` to the next row: the next row
+    /// reads it first and no other row reads it. A clause check between them reads the
+    /// call's arguments where it stands, and a waiting body saves only its locals.
+    fn core_holds(&self, ss: &[St], i: usize, n: Name) -> bool {
+        let clause = (ss[i + 1..].iter())
+            .map_while(|s| match s {
+                St::Check(c) => Some(&c.guard),
+                _ => None,
+            })
+            .any(|g| matches!(g, Guard::Clause { .. }));
+        self.resume.is_none()
+            && self.core_w.reads[n.index()] == 1
+            && !clause
+            && self.core_first_read(next_row(ss, i)) == Some(n)
     }
 
     /// Whether `n` is the temporary a layout `if` or `match` expression joins through: a
