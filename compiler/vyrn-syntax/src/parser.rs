@@ -669,15 +669,9 @@ impl Writer<'_> {
         let h = self.local("h");
         self.line(format!("let mut {h} = false"));
         for (i, variant) in variants.iter().enumerate() {
-            if i > 0 {
-                self.open(format!("if !{h} && !p.refused {{"));
-            }
             self.take = variant.clone();
             self.put_alt(&h, v, i)?;
             self.take = None;
-            if i > 0 {
-                self.close();
-            }
         }
         Ok(h)
     }
@@ -964,15 +958,26 @@ impl Writer<'_> {
     }
 
     /// Writes alternative `i` of `v` so that the flag `h`, declared and false, says
-    /// whether it matched, behind its guard.
+    /// whether it matched, behind one test: those before it missed, and its guard.
     fn put_alt(&mut self, h: &str, v: &[E], i: usize) -> Result<(), Refused> {
-        let Some((set, x)) = self.guard_of(v, i) else {
-            return self.put_into(h, &v[i]);
+        let mut tests = Vec::new();
+        if i > 0 {
+            tests.push(format!("!{h} && !p.refused"));
+        }
+        let x = match self.guard_of(v, i) {
+            Some((set, x)) => {
+                tests.push(format!(
+                    "p.pos < p.stop && ({})",
+                    set_test(&set, "text[p.pos]")
+                ));
+                x
+            }
+            None => &v[i],
         };
-        self.open(format!(
-            "if p.pos < p.stop && ({}) {{",
-            set_test(&set, "text[p.pos]")
-        ));
+        if tests.is_empty() {
+            return self.put_into(h, x);
+        }
+        self.open(format!("if {} {{", tests.join(" && ")));
         self.put_into(h, x)?;
         self.close();
         Ok(())
@@ -1077,9 +1082,7 @@ impl Writer<'_> {
                     None => self.flag(&v[0])?,
                 };
                 for i in 1..v.len() {
-                    self.open(format!("if !{h} && !p.refused {{"));
                     self.put_alt(&h, v, i)?;
-                    self.close();
                 }
                 h
             }
@@ -1156,14 +1159,12 @@ impl Writer<'_> {
         let test = self.lit_test(l, exact);
         let n = l.s.len();
         if self.syntactic() {
-            self.line(format!("let mut {h} = {test}"));
-            self.open(format!("if {h} {{"));
-            self.line(format!("{h} = advance(text, p, {n})"));
-        } else {
-            self.line(format!("let {h} = {test}"));
-            self.open(format!("if {h} {{"));
-            self.line(format!("p.pos = p.pos + {n}"));
+            self.line(format!("let mut {h} = {test} && advance(text, p, {n})"));
+            return h;
         }
+        self.line(format!("let {h} = {test}"));
+        self.open(format!("if {h} {{"));
+        self.line(format!("p.pos = p.pos + {n}"));
         self.close();
         h
     }
@@ -1216,13 +1217,11 @@ impl Writer<'_> {
                 })?;
                 return Ok(h);
             }
-            if self.syntactic() {
-                self.line(format!("let mut {h} = {f}(text, p{args})"));
-                self.open(format!("if {h} {{"));
-                self.line(format!("{h} = advance(text, p, 0)"));
-                self.close();
-            } else {
-                self.line(format!("let {h} = {f}(text, p{args})"));
+            match self.syntactic() {
+                true => self.line(format!(
+                    "let mut {h} = {f}(text, p{args}) && advance(text, p, 0)"
+                )),
+                false => self.line(format!("let {h} = {f}(text, p{args})")),
             }
             return Ok(h);
         }
