@@ -42,11 +42,7 @@ const TINY_BYTES: f64 = 65536.0;
 /// Phases that are superlinear today, as `(shape, phase)`, each with its
 /// cause. The test fails when one stops being superlinear, so a fix removes
 /// its row.
-const KNOWN: &[(&str, &str, &str)] = &[(
-    "one written rule",
-    "codegen: bodies",
-    "per layout name, the emitter scans the body's lets and collects every row after its let",
-)];
+const KNOWN: &[(&str, &str, &str)] = &[];
 
 /// The programs of one size. Each reaches every item from `main`.
 fn shapes(n: usize) -> Vec<(&'static str, String)> {
