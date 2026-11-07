@@ -2890,7 +2890,6 @@ std/jsonread.vyrn	hexVal	yes	yes, emulated Int64
 std/jsonread.vyrn	pushUtf8	yes	no, its effect set is alloc
 std/jsonread.vyrn	readHex4	yes	no, its effect set is alloc
 std/jsonread.vyrn	readJsonString	yes	no, its effect set is alloc
-std/jsonread.vyrn	readEscaped	yes	no, its effect set is alloc
 std/jsonread.vyrn	refusedString	yes	no, its effect set is alloc
 std/jsonread.vyrn	readJsonNumber	no, it keeps a slice check	no, its effect set is alloc
 std/jsonread.vyrn	skipJsonNumber	yes	no, its effect set is alloc

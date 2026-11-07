@@ -206,36 +206,33 @@ fn readHex4(p: modify JsonReader) -> Int64 {
 /// escape to UTF-8. Refused, it answers `""`.
 export fn readJsonString(p: modify JsonReader) -> String {
     step(p) // opening "
-    let start = p.pos
-    while p.pos < p.n {
-        let c = Int64(p.src[p.pos])
-        if c == '"' || c == '\\' || c < 32 {
-            break
-        }
-        p.pos = p.pos + 1
-    }
-    // A string with no escape is one run of the source, cut at ASCII bytes, so
-    // `slice` copies it with no UTF-8 check. Otherwise the run starts the
+    // The string alternates runs of bytes held as they are with escapes. A
+    // string that is one run is cut from the source at ASCII bytes, so `slice`
+    // copies it with no UTF-8 check. Otherwise each run is copied into the
     // decoded bytes, which `stringFromBytes` checks, for the NUL of `\u0000`.
-    // The `else` keeps the cursor's facts for the `bytes` range check.
-    if peek(p) == '"' {
-        let run = slice(p.src, start, p.pos)
-        step(p) // closing "
-        return match run {
-            Ok(v) => v,
-            Err(e) => refusedString(p, "string is not valid UTF-8"),
-        }
-    } else {
-        return readEscaped(p, bytes(p.src, start, p.pos))
-    }
-}
-
-/// The rest of a JSON string after its first run, `run`, the cursor on the
-/// byte the run stopped at: an escape, a control byte or the end.
-fn readEscaped(p: modify JsonReader, run: consume Array<UInt8>) -> String {
-    let mut out = run
+    let mut out: Array<UInt8> = []
     while true {
+        let from = p.pos
+        while p.pos < p.n {
+            let c = Int64(p.src[p.pos])
+            if c == '"' || c == '\\' || c < 32 {
+                break
+            }
+            p.pos = p.pos + 1
+        }
         let b = peek(p)
+        // Every escape adds a byte, so an empty `out` means none came before.
+        if b == '"' && out.length == 0 {
+            let run = slice(p.src, from, p.pos)
+            step(p) // closing "
+            return match run {
+                Ok(v) => v,
+                Err(e) => refusedString(p, "string is not valid UTF-8"),
+            }
+        }
+        if p.pos > from {
+            out.append(bytes(p.src, from, p.pos))
+        }
         if b < 0 {
             refuse(p, "unterminated string")
             return ""
@@ -247,70 +244,66 @@ fn readEscaped(p: modify JsonReader, run: consume Array<UInt8>) -> String {
                 Err(e) => refusedString(p, "string is not valid UTF-8"),
             }
         }
-        if b == '\\' {
-            step(p) // backslash
-            let e = peek(p)
-            if e == '"' {
-                out.push('"')
-                step(p)
-            } else if e == '\\' {
-                out.push('\\')
-                step(p)
-            } else if e == '/' {
-                out.push('/')
-                step(p)
-            } else if e == 'b' {
-                out.push('\x08')
-                step(p)
-            } else if e == 'f' {
-                out.push('\x0c')
-                step(p)
-            } else if e == 'n' {
-                out.push('\n')
-                step(p)
-            } else if e == 'r' {
-                out.push('\r')
-                step(p)
-            } else if e == 't' {
-                out.push('\t')
-                step(p)
-            } else if e == 'u' {
+        if b < 32 {
+            return refusedString(p, "control character in string (must be escaped)")
+        }
+        step(p) // backslash
+        let e = peek(p)
+        if e == '"' {
+            out.push('"')
+            step(p)
+        } else if e == '\\' {
+            out.push('\\')
+            step(p)
+        } else if e == '/' {
+            out.push('/')
+            step(p)
+        } else if e == 'b' {
+            out.push('\x08')
+            step(p)
+        } else if e == 'f' {
+            out.push('\x0c')
+            step(p)
+        } else if e == 'n' {
+            out.push('\n')
+            step(p)
+        } else if e == 'r' {
+            out.push('\r')
+            step(p)
+        } else if e == 't' {
+            out.push('\t')
+            step(p)
+        } else if e == 'u' {
+            step(p) // u
+            let hi = readHex4(p)
+            if hi < 0 {
+                return ""
+            }
+            if hi >= 55296 && hi <= 56319 {
+                // A low surrogate `\uDC00..DFFF` must follow.
+                if peek(p) != '\\' || ahead(p, 1) != 'u' {
+                    return refusedString(p, "unpaired high surrogate in \\u escape")
+                }
+                step(p) // backslash
                 step(p) // u
-                let hi = readHex4(p)
-                if hi < 0 {
+                let lo = readHex4(p)
+                if lo < 0 {
                     return ""
                 }
-                if hi >= 55296 && hi <= 56319 {
-                    // A low surrogate `\uDC00..DFFF` must follow.
-                    if peek(p) != '\\' || ahead(p, 1) != 'u' {
-                        return refusedString(p, "unpaired high surrogate in \\u escape")
-                    }
-                    step(p) // backslash
-                    step(p) // u
-                    let lo = readHex4(p)
-                    if lo < 0 {
-                        return ""
-                    }
-                    if lo < 56320 || lo > 57343 {
-                        return refusedString(p, "unpaired high surrogate in \\u escape")
-                    }
-                    let cp = 65536 + (hi - 55296) * 1024 + (lo - 56320)
-                    pushUtf8(out, cp)
-                } else if hi >= 56320 && hi <= 57343 {
-                    return refusedString(p, "unexpected low surrogate in \\u escape")
-                } else {
-                    pushUtf8(out, hi)
+                if lo < 56320 || lo > 57343 {
+                    return refusedString(p, "unpaired high surrogate in \\u escape")
                 }
-            } else if e < 0 {
-                return refusedString(p, "unterminated string")
+                let cp = 65536 + (hi - 55296) * 1024 + (lo - 56320)
+                pushUtf8(out, cp)
+            } else if hi >= 56320 && hi <= 57343 {
+                return refusedString(p, "unexpected low surrogate in \\u escape")
             } else {
-                return refusedString(p, "invalid escape in string")
+                pushUtf8(out, hi)
             }
-        } else if b < 32 {
-            return refusedString(p, "control character in string (must be escaped)")
+        } else if e < 0 {
+            return refusedString(p, "unterminated string")
         } else {
-            out.push(UInt8(b))
-            step(p)
+            return refusedString(p, "invalid escape in string")
         }
     }
     return refusedString(p, "unterminated string")
