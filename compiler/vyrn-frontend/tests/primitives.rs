@@ -86,6 +86,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@error", Syscall, "as `@trace`"),
     ("bytes", View, "String -> Array<UInt8>, whole or a byte range: what all four runtime modules stand on"),
     ("stringFromBytes", View, "the only Array<UInt8> -> String construction there is"),
+    ("stringOf", View, "String -> Option<String>, a byte range of a String copied with no UTF-8 check, which no Vyrn body can spell"),
     ("float32Bits", View, "i32.reinterpret_f32, one instruction"),
     ("float32FromBits", View, "the other direction"),
     ("float64Bits", View, "i64.reinterpret_f64, one instruction"),

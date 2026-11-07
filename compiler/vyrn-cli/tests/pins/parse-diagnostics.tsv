@@ -1436,7 +1436,7 @@ std/imports.vyrn	0	cbf29ce484222325	20	18	409f686b6f933556
 std/json.vyrn	0	cbf29ce484222325	20	17	3b360934678d6034
 std/json5.vyrn	0	cbf29ce484222325	20	16	d198eaaadc5f3db1
 std/jsondec.vyrn	0	cbf29ce484222325	20	16	388b329bdabafed6
-std/jsonread.vyrn	0	cbf29ce484222325	20	17	77061c418d57ed06
+std/jsonread.vyrn	0	cbf29ce484222325	20	17	f8df279eb5910375
 std/math.vyrn	0	cbf29ce484222325	20	17	e72ba77f63e61151
 std/mem.vyrn	0	cbf29ce484222325	20	17	25c1efb3bc391d61
 std/narrow.vyrn	0	cbf29ce484222325	20	20	85b6ac30dd37a2f3
@@ -1448,13 +1448,13 @@ std/random.vyrn	0	cbf29ce484222325	20	16	b8e97c8b736a86a6
 std/regex.vyrn	0	cbf29ce484222325	20	17	cfb07ec5985e7a67
 std/rpc.editor.vyrn	0	cbf29ce484222325	20	15	5308db71b62b6a5c
 std/rpc.vyrn	0	cbf29ce484222325	20	17	1fb054967659d958
-std/runtime.vyrn	0	cbf29ce484222325	20	18	33c34a2c42fbefcb
+std/runtime.vyrn	0	cbf29ce484222325	20	18	0cc927f4a1d0d36e
 std/scan.vyrn	0	cbf29ce484222325	20	16	fa2868ab13f061b1
 std/slots.vyrn	0	cbf29ce484222325	20	18	ada7e63f76e123a9
 std/storage.vyrn	0	cbf29ce484222325	20	14	838ee66367094974
 std/stream.vyrn	0	cbf29ce484222325	20	17	18e56aff739731b0
 std/strings.vyrn	0	cbf29ce484222325	20	17	b629a5aa6d142897
-std/strpred.vyrn	0	cbf29ce484222325	20	17	9c14050c2040cc5b
+std/strpred.vyrn	0	cbf29ce484222325	20	17	cc6bc59f6decd9aa
 std/sum.vyrn	0	cbf29ce484222325	20	15	8c91500e0625df59
 std/symbolmap.vyrn	0	cbf29ce484222325	20	16	a2136b9a284642be
 std/syntax.vyrn	0	cbf29ce484222325	20	13	ee4b663ee331e4fa

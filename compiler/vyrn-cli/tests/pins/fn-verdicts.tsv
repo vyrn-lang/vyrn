@@ -2890,6 +2890,7 @@ std/jsonread.vyrn	hexVal	yes	yes, emulated Int64
 std/jsonread.vyrn	pushUtf8	yes	no, its effect set is alloc
 std/jsonread.vyrn	readHex4	yes	no, its effect set is alloc
 std/jsonread.vyrn	readJsonString	yes	no, its effect set is alloc
+std/jsonread.vyrn	readEscaped	yes	no, its effect set is alloc
 std/jsonread.vyrn	refusedString	yes	no, its effect set is alloc
 std/jsonread.vyrn	readJsonNumber	no, it keeps a slice check	no, its effect set is alloc
 std/jsonread.vyrn	skipJsonNumber	yes	no, its effect set is alloc
@@ -3168,6 +3169,7 @@ std/runtime.vyrn	runtime$arrAppend	no, it calls `load32`, which has no body to j
 std/runtime.vyrn	runtime$arrCopyFrom	no, it calls `load32`, which has no body to judge	no, its effect set is alloc
 std/runtime.vyrn	runtime$arrClear	no, it calls `copy`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$bytesOf	no, it calls `store32`, which has no body to judge	no, its effect set is alloc
+std/runtime.vyrn	runtime$strOf	no, it calls `load32`, which has no body to judge	no, its effect set is alloc, trap
 std/runtime.vyrn	runtime$drain	no, it calls `heapBase`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$writeAll	no, it calls `heapBase`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$printStr	no, it calls `heapBase`, which has no body to judge	no, it is not trap-free

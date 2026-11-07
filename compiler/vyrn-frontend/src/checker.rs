@@ -271,6 +271,7 @@ pub const RESERVED: &[&str] = &[
     "fsyncFile",
     "readFileBytes",
     "stringFromBytes",
+    "stringOf",
     "listDir",
     "listDirKinds",
     "lineAt",

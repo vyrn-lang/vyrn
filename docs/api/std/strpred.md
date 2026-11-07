@@ -103,8 +103,7 @@ character boundaries.
 `OutOfRange(start)` when `start < 0`; `OutOfRange(end)` when
 `end > s.byteLength` or `start > end`. `SplitsCharacter(i)` when cut point
 `i` lands on a continuation byte. The range is checked before the boundary,
-as `examples/strpredbytes.vyrn` pins. A string that holds NUL, which no
-program can construct, returns `SplitsCharacter(start)`.
+as `examples/strpredbytes.vyrn` pins.
 
 It reads `s[i]` and `s.byteLength`, never `bytes(s)`: `std/scan` slices once
 per token, so a whole-string copy per call would be quadratic.

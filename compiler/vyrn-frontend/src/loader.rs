@@ -1249,6 +1249,8 @@ runtime_calls! {
     arr_clear = "arrClear" (I32; 2) -> ();
     // `bytes(s, from, to)`: the triple's slot leads.
     bytes_of = "bytesOf" (I32, I32, I64, I64) -> ();
+    /// `stringOf`'s copy, a flat `Option<Int64>` as its two words.
+    str_of = "strOf" (I32, I64, I64) -> (I64, I64);
     // The I/O family this emitter calls; the builtins route to their own functions
     // (`loader::RT_MODULES`). The fixed-clock keys trail.
     /// The ONE place bytes leave a program, with the stdout buffer behind it.

@@ -162,8 +162,7 @@ export type SliceError = enum { OutOfRange(Int64), SplitsCharacter(Int64) }
 /// `OutOfRange(start)` when `start < 0`; `OutOfRange(end)` when
 /// `end > s.byteLength` or `start > end`. `SplitsCharacter(i)` when cut point
 /// `i` lands on a continuation byte. The range is checked before the boundary,
-/// as `examples/strpredbytes.vyrn` pins. A string that holds NUL, which no
-/// program can construct, returns `SplitsCharacter(start)`.
+/// as `examples/strpredbytes.vyrn` pins.
 ///
 /// It reads `s[i]` and `s.byteLength`, never `bytes(s)`: `std/scan` slices once
 /// per token, so a whole-string copy per call would be quadratic.
@@ -188,11 +187,11 @@ export fn slice(s: String, start: Int64, end: Int64) -> Result<String, SliceErro
     if start == end {
         return Ok("")
     }
-    // One copy call; a byte-push loop was 19 times slower. `bytes`
-    // checks only that the range exists; the bounds and boundaries ran above.
-    return match stringFromBytes(bytes(s, start, end)) {
-        Ok(v) => Ok(v),
-        Err(e) => Err(SplitsCharacter(start)),
+    // One copy call, as a byte-push loop was 19 times slower, and no UTF-8
+    // check: the bounds and boundaries ran above, so `stringOf` answers `Some`.
+    return match stringOf(s, start, end) {
+        Some(v) => Ok(v),
+        None => Err(SplitsCharacter(start)),
     }
 }
 
@@ -226,4 +225,14 @@ test "an empty needle occurs at an offset up to the length and nowhere past it" 
     assertEq(findPlain("ab", "", 2) ?? 0 - 1, 2)
     assertEq(findPlain("ab", "", 3) ?? 0 - 1, 0 - 1)
     assertEq(findSkipping("ab", "", 3, skipTable("", 2)) ?? 0 - 1, 0 - 1)
+}
+
+test "stringOf cuts at character boundaries and answers None inside one" {
+    // "é" is the two bytes C3 A9, at offsets 3 and 4 of "café".
+    assertEq(stringOf("café", 0, 3) ?? "None", "caf")
+    assertEq(stringOf("café", 3, 5) ?? "None", "é")
+    assertEq(stringOf("café", 4, 5) ?? "None", "None")
+    assertEq(stringOf("café", 0, 4) ?? "None", "None")
+    assertEq(stringOf("café", 2, 2) ?? "None", "")
+    assertEq(stringOf("café", 5, 5) ?? "None", "")
 }

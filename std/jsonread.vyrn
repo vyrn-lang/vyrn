@@ -19,6 +19,7 @@
 
 import { Json, JsonField, JsonReader, emit, emitPretty, jsonEq } from "std/json"
 import { fnv1aStr } from "std/hash"
+import { slice } from "std/strpred"
 
 /// The deepest nesting the reader accepts. Past the engine's call cap the
 /// recursion traps, which no `Err` arm catches. Each level costs about two
@@ -213,10 +214,26 @@ export fn readJsonString(p: modify JsonReader) -> String {
         }
         p.pos = p.pos + 1
     }
-    // A string with no escape is one run of the source, copied in one call.
-    // Otherwise the run starts the decoded bytes, and the loop below reads on
-    // from the first byte the run stopped at.
-    let mut out = bytes(p.src, start, p.pos)
+    // A string with no escape is one run of the source, cut at ASCII bytes, so
+    // `slice` copies it with no UTF-8 check. Otherwise the run starts the
+    // decoded bytes, which `stringFromBytes` checks, for the NUL of `\u0000`.
+    // The `else` keeps the cursor's facts for the `bytes` range check.
+    if peek(p) == '"' {
+        let run = slice(p.src, start, p.pos)
+        step(p) // closing "
+        return match run {
+            Ok(v) => v,
+            Err(e) => refusedString(p, "string is not valid UTF-8"),
+        }
+    } else {
+        return readEscaped(p, bytes(p.src, start, p.pos))
+    }
+}
+
+/// The rest of a JSON string after its first run, `run`, the cursor on the
+/// byte the run stopped at: an escape, a control byte or the end.
+fn readEscaped(p: modify JsonReader, run: consume Array<UInt8>) -> String {
+    let mut out = run
     while true {
         let b = peek(p)
         if b < 0 {
