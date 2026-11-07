@@ -200,8 +200,9 @@ fn missing(name: &str, m: &str) -> Diagnostic {
 }
 
 thread_local! {
-    /// The entries this thread read or wrote, by key. A key names the
-    /// compiler, the module and its text, so an entry here is never stale.
+    /// The entries this thread read or wrote, by key: the cache key, or the
+    /// module and its text hash where `VYRN_NO_GEN_CACHE` keys no file. Either
+    /// names the module and its text, so an entry here is never stale.
     static ENTRIES: RefCell<HashMap<String, Arc<Entry>>> = RefCell::new(HashMap::new());
 }
 
@@ -216,11 +217,17 @@ fn entry(
     seen: &mut Seen,
 ) -> Result<Arc<Entry>, Vec<Diagnostic>> {
     let hash = program.module_hashes.get(owner).map_or("", String::as_str);
-    let key = entry_key(owner, hash);
+    // The cache key names the compiler, so only a load that reads or writes
+    // the cache asks for its identity.
+    let off = loader::gen_cache_off();
+    let key = match off {
+        true => format!("{owner}\0{hash}"),
+        false => entry_key(owner, hash),
+    };
     if let Some(e) = ENTRIES.with(|c| c.borrow().get(&key).cloned()) {
         return Ok(e);
     }
-    let cached = (!loader::gen_cache_off())
+    let cached = (!off)
         .then(|| resolver.gen_cache_get(&key))
         .flatten()
         .and_then(|text| Entry::read(&key, &text))
@@ -229,7 +236,7 @@ fn entry(
         Some(e) => e,
         None => {
             let e = Entry::written(owner, opts, resolver, engine)?;
-            if !loader::gen_cache_off() {
+            if !off {
                 resolver.gen_cache_put(&key, &e.render(&key));
             }
             e

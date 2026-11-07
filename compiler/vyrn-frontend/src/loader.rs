@@ -2395,21 +2395,20 @@ fn interface_parse(
     if let Some(p) = PARSE_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
         return Ok(p);
     }
-    let entry = {
+    let entry = (!gen_cache_off()).then(|| {
         let id = crate::gen::compiler_identity();
         let seed = format!("{INTERFACE_TAG}\0{id}\0{key}\0{hash}");
         format!("interface-{}", crate::hash::sha256_hex(seed.as_bytes()))
-    };
-    let stored = (!gen_cache_off())
-        .then(|| resolver.gen_cache_get(&entry))
-        .flatten()
-        .and_then(|t| Interface::read(&entry, &t));
+    });
+    let stored = (entry.as_deref())
+        .and_then(|e| Some((e, resolver.gen_cache_get(e)?)))
+        .and_then(|(e, t)| Interface::read(e, &t));
     let interface = match stored {
         Some(i) => i,
         None => {
             let i = Interface::of(key, text, hash, root_key, opts)?;
-            if !gen_cache_off() {
-                resolver.gen_cache_put(&entry, &i.render(&entry));
+            if let Some(e) = &entry {
+                resolver.gen_cache_put(e, &i.render(e));
             }
             i
         }
@@ -3177,16 +3176,12 @@ pub(crate) fn generation(
     engine: Option<&crate::gen::GenEngine>,
     read: &mut HashMap<String, Option<String>>,
 ) -> Result<Generated, GenFault> {
-    let sources_hash = generator_cache_key(
-        &crate::gen::compiler_identity(),
-        gen_mod_key,
-        name,
-        &call.arg_repr,
-        &call.allowed,
-    );
-    let no_cache = !cache || gen_cache_off();
-    let hit = (!no_cache).then(|| cached(&sources_hash, gen_mod_key, inner, resolver, read));
-    if let Some(entry) = hit.flatten() {
+    let sources_hash = (cache && !gen_cache_off()).then(|| {
+        let id = crate::gen::compiler_identity();
+        generator_cache_key(&id, gen_mod_key, name, &call.arg_repr, &call.allowed)
+    });
+    let hit = (sources_hash.as_deref()).and_then(|k| cached(k, gen_mod_key, inner, resolver, read));
+    if let Some(entry) = hit {
         return Ok(Generated {
             written: entry.written.clone(),
             inputs: entry.inputs.clone(),
@@ -3269,7 +3264,7 @@ pub(crate) fn generation(
     }
     // Cache the output under its recorded inputs, for the next load and the
     // LSP's per-keystroke re-analysis.
-    if !no_cache && checked.describable {
+    if let Some(sources_hash) = sources_hash.filter(|_| checked.describable) {
         let stamps = vouched_stamps(&inputs, resolver);
         let gens = in_std(gen_mod_key, inner)
             .then(|| declared_gens(gen_mod_key, &inputs, inner, resolver))

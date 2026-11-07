@@ -2,6 +2,8 @@
 //! keys the generator cache and verifies every content-addressed
 //! blob.
 
+use std::fmt::Write as _;
+
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -19,7 +21,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
     ];
-    let mut msg = data.to_vec();
+    // The input, its padding of at most 64 bytes and its length, in one block.
+    let mut msg = Vec::with_capacity(data.len() + 72);
+    msg.extend_from_slice(data);
     let bit_len = (data.len() as u64).wrapping_mul(8);
     msg.push(0x80);
     while msg.len() % 64 != 56 {
@@ -71,7 +75,11 @@ pub fn sha256_hex(data: &[u8]) -> String {
         h[6] = h[6].wrapping_add(g);
         h[7] = h[7].wrapping_add(hh);
     }
-    h.iter().map(|x| format!("{x:08x}")).collect()
+    let mut hex = String::with_capacity(64);
+    for x in h {
+        let _ = write!(hex, "{x:08x}");
+    }
+    hex
 }
 
 #[cfg(test)]
