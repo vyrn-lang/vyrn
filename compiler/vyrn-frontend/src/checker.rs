@@ -418,13 +418,13 @@ pub type Appended = (
 /// Whether an impl for `ty` can dispatch: a value of `ty` carries the name
 /// the impl is keyed by. A validated scalar erases to its base, so it carries
 /// none.
-fn dispatches_on(ty: &Type, types: &HashMap<String, (DeclId, TypeDecl)>) -> bool {
+fn dispatches_on(ty: &Type, types: &HashMap<&str, (DeclId, &TypeDecl)>) -> bool {
     match ty {
         Type::Int | Type::Bool | Type::Str => true,
         // The two built-in sums, under either spelling.
         _ if crate::types::is_sum_alias(ty) => true,
         Type::Named(n) | Type::App(n, _) => matches!(
-            types.get(n).map(|(_, d)| &d.base),
+            types.get(n.as_str()).map(|(_, d)| &d.base),
             Some(Type::Enum(_) | Type::Record(_))
         ),
         _ => false,
@@ -508,7 +508,7 @@ fn check_accum_inner(
     let mut in_bodies = 0usize;
 
     // 1. Collect and validate type declarations.
-    let mut types: HashMap<String, (DeclId, TypeDecl)> = HashMap::new();
+    let mut types: HashMap<&str, (DeclId, &TypeDecl)> = HashMap::new();
     for (i, t) in program.type_decls.iter().enumerate() {
         let name = DeclName(&t.name);
         // A declared type keys its impls by its name (`types::type_key`), and
@@ -520,11 +520,11 @@ fn check_accum_inner(
             out.push(cerr!(t.line, RedefinesBuiltinType, name).in_file(t.module.clone()));
             continue;
         }
-        if types.contains_key(&t.name) {
+        if types.contains_key(t.name.as_str()) {
             out.push(cerr!(t.line, TypeDefinedTwice, name).in_file(t.module.clone()));
             continue;
         }
-        types.insert(t.name.clone(), (DeclId::nth(DeclKind::Type, i), t.clone()));
+        types.insert(&t.name, (DeclId::nth(DeclKind::Type, i), t));
     }
 
     // 1b. Collect enum variants into a global constructor table.
@@ -541,7 +541,7 @@ fn check_accum_inner(
                     out.push(cerr!(t.line, EnumVariantDefinedTwice, name = v.name));
                     continue;
                 }
-                if let Some((_, ty)) = types.get(&v.name) {
+                if let Some((_, ty)) = types.get(v.name.as_str()) {
                     // Type and variant names share one namespace across the
                     // linked program, so the other declaration may be in std.
                     let from = ty
@@ -581,7 +581,7 @@ fn check_accum_inner(
             )
         })
         .collect();
-    let mut fn_decls: HashMap<String, DeclId> = HashMap::new();
+    let mut fn_decls: HashMap<&str, DeclId> = HashMap::new();
     for (i, f) in program.functions.iter().enumerate() {
         if RESERVED.contains(&f.name.as_str()) {
             out.push(cerr_at!(f.line, f.name_span(), ReservedName, name = f.name));
@@ -596,7 +596,7 @@ fn check_accum_inner(
             ));
             continue;
         }
-        if fn_decls.contains_key(&f.name) {
+        if fn_decls.contains_key(f.name.as_str()) {
             out.push(cerr_at!(
                 f.line,
                 f.name_span(),
@@ -605,7 +605,7 @@ fn check_accum_inner(
             ));
             continue;
         }
-        if types.contains_key(&f.name) {
+        if types.contains_key(f.name.as_str()) {
             out.push(cerr_at!(
                 f.line,
                 f.name_span(),
@@ -614,12 +614,12 @@ fn check_accum_inner(
             ));
             continue;
         }
-        fn_decls.insert(f.name.clone(), DeclId::nth(DeclKind::Fn, i));
+        fn_decls.insert(&f.name, DeclId::nth(DeclKind::Fn, i));
     }
-    let all_bounds: HashMap<String, HashMap<String, Vec<String>>> = program
+    let all_bounds: HashMap<&str, &HashMap<String, Vec<String>>> = program
         .functions
         .iter()
-        .map(|f| (f.name.clone(), f.type_bounds.clone()))
+        .map(|f| (f.name.as_str(), &f.type_bounds))
         .collect();
     // Protocol registries: each method name to its protocol and
     // signature, and which (protocol, type key) pairs are implemented.
@@ -910,7 +910,7 @@ fn check_accum_inner(
             _ => {
                 let named_scalar = match &imp.ty {
                     Type::Named(n) | Type::App(n, _) => types
-                        .get(n)
+                        .get(n.as_str())
                         .map(|(_, d)| &d.base)
                         .filter(|b| !matches!(b, Type::Enum(_) | Type::Record(_))),
                     _ => None,
@@ -1628,16 +1628,16 @@ struct Cx<'a> {
     functions: &'a [Function],
     /// The first function declared under each name that the checker accepts;
     /// [`Checker::resolve_fn`] reads it.
-    fn_decls: &'a HashMap<String, DeclId>,
+    fn_decls: &'a HashMap<&'a str, DeclId>,
     /// Each function's parameter types and result, by [`DeclId::index`].
     sigs: &'a [(Vec<Type>, Type)],
     /// The type declarations by name with their ids, which the checker reads
     /// as [`crate::types::Decls`], recording each lookup.
-    types: &'a HashMap<String, (DeclId, TypeDecl)>,
+    types: &'a HashMap<&'a str, (DeclId, &'a TypeDecl)>,
     contracts: &'a HashMap<String, ContractDecl>,
     variants: &'a HashMap<String, VariantInfo>,
     /// Function name to (type parameter to bounds).
-    all_bounds: &'a HashMap<String, HashMap<String, Vec<String>>>,
+    all_bounds: &'a HashMap<&'a str, &'a HashMap<String, Vec<String>>>,
     /// Method name to (protocol, signature).
     protocol_methods: &'a HashMap<String, Vec<(String, MethodSig)>>,
     /// Projection names protocols declare.
@@ -1846,7 +1846,7 @@ enum Reach {
 impl Decls for Checker<'_> {
     fn decl(&self, name: &str) -> Option<&TypeDecl> {
         let types = self.types;
-        self.read(name, types.get(name).map(|(d, t)| (*d, t)))
+        self.read(name, types.get(name).map(|(d, t)| (*d, *t)))
     }
 }
 
@@ -2189,11 +2189,11 @@ impl<'a> Checker<'a> {
     /// is entered once, so a recursive type terminates. A `fn` type is never
     /// descended: `at` decides at it.
     fn reaches(&self, ty: &Type, at: &dyn Fn(&Type) -> Reach) -> bool {
-        fn go(
-            ty: &Type,
-            types: &dyn Decls,
+        fn go<'t>(
+            ty: &'t Type,
+            types: &'t dyn Decls,
             at: &dyn Fn(&Type) -> Reach,
-            seen: &mut Vec<String>,
+            seen: &mut Vec<&'t str>,
         ) -> bool {
             match at(ty) {
                 Reach::Yes => return true,
@@ -2207,9 +2207,9 @@ impl<'a> Checker<'a> {
                         _ => &[],
                     };
                     args.iter().any(|a| go(a, types, at, seen))
-                        || (!seen.iter().any(|s| s == n)
+                        || (!seen.contains(&n.as_str())
                             && types.decl(n).is_some_and(|d| {
-                                seen.push(n.clone());
+                                seen.push(n);
                                 let r = go(&d.base, types, at, seen);
                                 seen.pop();
                                 r
@@ -2382,7 +2382,8 @@ impl<'a> Checker<'a> {
     fn ensure_type_exists(&self, ty: &Type, line: usize) -> Result<(), Diagnostic> {
         // A stream's lifetime is a scope: legal only at the root of
         // a binding, parameter or return type, where movecheck can see it.
-        if !matches!(self.base(ty), Type::Stream(_)) && self.contains_stream(ty) {
+        if !matches!(*crate::types::resolved(ty, self), Type::Stream(_)) && self.contains_stream(ty)
+        {
             return Err(cerr!(line, TypeHoldsStream, ty));
         }
         match ty {
@@ -5674,7 +5675,7 @@ impl<'a> Checker<'a> {
                             ret: mret,
                             type_params: self.type_params(&mangled),
                             caps: mcaps.as_ref(),
-                            bounds: self.all_bounds.get(mangled.as_str()),
+                            bounds: self.all_bounds.get(mangled.as_str()).copied(),
                             recv: Some(&recv),
                             written: &[],
                         },
@@ -5777,7 +5778,7 @@ impl<'a> Checker<'a> {
                 type_params: self.type_params(name).or(seeded_generics.as_ref()),
                 caps: caps.as_ref().or(seeded_caps.as_ref()),
                 // A seeded row's bounds are the typed judgment's.
-                bounds: self.all_bounds.get(name),
+                bounds: self.all_bounds.get(name).copied(),
                 recv: None,
                 written,
             },

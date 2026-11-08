@@ -19,7 +19,7 @@
 //! declaration; the loader stamps no site onto it (see [`crate::loader`]'s
 //! runtime-module rule), so every engine prints the same bytes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::ast::{
     BinOp, Block, ContractMemberKind, Expr, Function, Id, Numbering, Param, Program, Stmt, Type,
@@ -61,12 +61,16 @@ fn pred_args(decl: &TypeDecl, value: Expr) -> Vec<Expr> {
 /// to append to a linked program. `check_and_synthesize` calls it before any
 /// backend builds its function table; afterwards they are ordinary functions
 /// to every pass.
-pub fn constructors(types: &HashMap<String, TypeDecl>) -> Vec<Function> {
-    let mut names: Vec<&String> = types.keys().collect();
-    names.sort();
+pub fn constructors(types: &[TypeDecl]) -> Vec<Function> {
+    // Stable, so a name declared twice ends on its last declaration, which
+    // stands as it does in a table by name.
+    let mut by_name: Vec<&TypeDecl> = types.iter().collect();
+    by_name.sort_by(|a, b| a.name.cmp(&b.name));
     let mut out = Vec::new();
-    for n in names {
-        let decl = &types[n];
+    for (i, decl) in by_name.iter().enumerate() {
+        if by_name.get(i + 1).is_some_and(|d| d.name == decl.name) {
+            continue;
+        }
         if decl.predicate.is_none() {
             continue;
         }

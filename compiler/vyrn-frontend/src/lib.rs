@@ -84,9 +84,10 @@ pub fn check(source: &str) -> Result<ast::Program, String> {
             // A `where` type's predicate is a generated constructor, so this
             // path adds the constructors too. The JSON walks need the checker's
             // record, so they stay on the linked path.
-            let types = types::decl_map(&program);
             let from = program.functions.len();
-            program.functions.extend(ctor::constructors(&types));
+            program
+                .functions
+                .extend(ctor::constructors(&program.type_decls));
             program.number_appended(from);
             Ok(program)
         }
@@ -149,7 +150,7 @@ pub fn check_and_synthesize(
                 ctor::name_unions(program);
                 program
                     .functions
-                    .extend(ctor::constructors(&types::decl_map(program)));
+                    .extend(ctor::constructors(&program.type_decls));
                 // Parsed apart, so numbered from 1: renumbered, or their ids
                 // would key the second check's types over the program's own.
                 program.number_appended(at);
@@ -171,11 +172,10 @@ pub fn check_and_synthesize(
     let synth_span = prof::phase("synthesize");
     let from = program.functions.len();
     if diags.is_empty() {
-        let types = types::decl_map(program);
         // One constructor per `where` type, unless the `derive` join added it.
         let have: std::collections::HashSet<&str> =
             program.functions.iter().map(|f| f.name.as_str()).collect();
-        let fresh: Vec<_> = ctor::constructors(&types)
+        let fresh: Vec<_> = ctor::constructors(&program.type_decls)
             .into_iter()
             .filter(|f| !have.contains(f.name.as_str()))
             .collect();
