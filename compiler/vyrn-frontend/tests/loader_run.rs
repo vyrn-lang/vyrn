@@ -1162,6 +1162,15 @@ mod gen_tests {
                 cache: RefCell::new(HashMap::new()),
             }
         }
+
+        /// The keys of the generations' entries: every entry but a std
+        /// module's interface.
+        fn generations(&self) -> Vec<String> {
+            let keys = self.cache.borrow().keys().cloned().collect::<Vec<_>>();
+            keys.into_iter()
+                .filter(|k| !k.starts_with("interface-"))
+                .collect()
+        }
     }
     impl ModuleResolver for CachingResolver {
         fn read(&self, resolved: &str) -> Result<String, String> {
@@ -1681,9 +1690,9 @@ fn main() -> Int64 { return shape().byteLength }"#;
         let gen = derive_gen("one").replace("let mut out = vyrn\"\"", "let mut out = 1");
         let r = CachingResolver::new(&[("gen.vyrn", &gen)]);
         let cold = derive_with(DERIVE_ROOT, &r).expect_err("the generator is refused");
-        assert!(r.cache.borrow().is_empty(), "cold: no entry");
+        assert!(r.generations().is_empty(), "cold: no entry");
         assert_eq!(derive_with(DERIVE_ROOT, &r), Err(cold));
-        assert!(r.cache.borrow().is_empty(), "warm: no entry");
+        assert!(r.generations().is_empty(), "warm: no entry");
     }
 
     /// The generator's source is an input of its entry: editing it misses.
@@ -1883,7 +1892,7 @@ fn main() -> Int64 { return shape().byteLength }"#;
         let before = gen_run_count();
         assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 1);
         assert_eq!(gen_run_count(), before + 1, "cold: one run");
-        let keys: Vec<String> = r.cache.borrow().keys().cloned().collect();
+        let keys = r.generations();
         assert_eq!(keys.len(), 1, "one generation, one entry");
 
         // What an attacker with write access to the cache directory writes.
