@@ -468,6 +468,31 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
     Ok(tokens(scan(src)?))
 }
 
+/// [`lex`] of `src`, a piece of a file that starts on `line` at `col`: each
+/// token and the refusal carry their place in the file.
+pub fn lex_at(src: &str, (line, col): (usize, usize)) -> Result<Vec<Token>, Diagnostic> {
+    let mut d = match lex(src) {
+        Ok(mut toks) => {
+            for t in &mut toks {
+                (t.line, t.col) = moved((t.line, t.col), (line, col));
+            }
+            return Ok(toks);
+        }
+        Err(d) => d,
+    };
+    (d.line, d.col) = moved((d.line, d.col), (line, col));
+    Err(d)
+}
+
+/// Where a place of a piece's own lexing lies in the file, when the piece
+/// starts at `from` there.
+pub(crate) fn moved((line, col): (usize, usize), from: (usize, usize)) -> (usize, usize) {
+    match line {
+        1 => (from.0, col + from.1 - 1),
+        _ => (line + from.0 - 1, col),
+    }
+}
+
 /// Tokenizes a code quote's text, each NUL a hole: a word, alone or part of a longer
 /// one. Only [`crate::parser::skeleton_refusal`] and the holes of the text it reads
 /// come here, and no part holds a NUL, because no string does.

@@ -1100,15 +1100,18 @@ fn an_unchanged_rebuild_regenerates_no_provider() {
         String::from_utf8_lossy(&out.stdout).to_string()
     };
     // Each generation entry's name and mtime, so a rewrite shows. Files only: the
-    // `wasm/` directory is the compiled engine's store, not a generation, and an
-    // `exe-` record names the binary, written once its stamp settles.
+    // `wasm/` directory is the compiled engine's store, not a generation, an
+    // `exe-` record names the binary, written once its stamp settles, and an
+    // `interface-` entry is a std module's interface.
     let stamp = |cache: &Path| -> Vec<(String, std::time::SystemTime)> {
         let mut v: Vec<_> = std::fs::read_dir(cache)
             .unwrap()
             .filter(|e| {
                 e.as_ref().is_ok_and(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
                     e.file_type().is_ok_and(|t| t.is_file())
-                        && !e.file_name().to_string_lossy().starts_with("exe-")
+                        && !name.starts_with("exe-")
+                        && !name.starts_with("interface-")
                 })
             })
             .map(|e| {

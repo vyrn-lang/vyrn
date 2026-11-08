@@ -75,7 +75,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
 /// [`parse_accum`] for an imported module: its `test` and `bench` blocks are
 /// skipped unparsed and left out of the program. With `skim`, the body of each
 /// top-level function is left unparsed too, in an empty block, and
-/// [`Skimmed::body`] parses it when a caller needs it.
+/// [`Skimmed::braces`] says where it stands; [`body`] parses its text.
 pub fn parse_imported(tokens: Vec<Token>, skim: bool) -> (Program, Vec<Diagnostic>, Skimmed) {
     parse_with(tokens, true, skim)
 }
@@ -118,32 +118,24 @@ impl Skimmed {
             .collect()
     }
 
-    /// Whether a skimmed body spells the identifier `name`.
-    pub fn mentions(&self, name: &str) -> bool {
-        (self.bodies.iter())
-            .flat_map(|(_, range)| &self.tokens[range.clone()])
-            .any(|t| matches!(&t.tok, Tok::Ident(s) if s == name))
+    /// The method-form names the module answers to, which [`body`] reads.
+    pub fn into_answers(self) -> HashSet<String> {
+        self.answers
     }
+}
 
-    /// Parses `f`'s skimmed body, as [`parse_accum`] would have, or returns
-    /// `None` when the parse did not skim it.
-    pub fn body(&self, f: &Function) -> Option<Result<Block, Vec<Diagnostic>>> {
-        let mut tokens = self.tokens(f)?.to_vec();
-        let close = tokens.last()?;
-        let (line, col) = (close.line, close.col);
-        tokens.push(Token {
-            tok: Tok::Eof,
-            line,
-            col,
-        });
-        let scope: Vec<&str> = f.type_params.iter().map(String::as_str).collect();
-        Some(recognizer::block(
-            &tokens,
-            Cx::plain(&self.answers),
-            &scope,
-            |view| Build::read(view, 0, &self.answers).block(),
-        ))
-    }
+/// Parses `tokens`, the lexing of a skimmed function body from its `{` to its
+/// `}` closed by `Eof`, as [`parse_accum`] would have parsed it in its module.
+/// `answers` are the module's ([`Skimmed::into_answers`]) and `type_params` the
+/// function's.
+pub fn body(
+    mut tokens: Vec<Token>,
+    answers: &HashSet<String>,
+    type_params: &[String],
+) -> Result<Block, Vec<Diagnostic>> {
+    let scope: Vec<&str> = type_params.iter().map(String::as_str).collect();
+    let (events, mut holes) = recognizer::block(&tokens, Cx::plain(answers), &scope)?;
+    Ok(Build::take(&mut tokens, &mut holes, &events, answers).block())
 }
 
 fn parse_with(
@@ -544,16 +536,7 @@ fn build(
     };
     let mut bodies = Vec::new();
     let events = std::mem::take(&mut run.events);
-    let mut b = Build {
-        src: Src::Take(tokens, &mut run.holes),
-        events: &events,
-        at: 0,
-        in_hole: false,
-        answers,
-        aliases: Default::default(),
-        field_preds: None,
-        extra_stmts: Vec::new(),
-    };
+    let mut b = Build::take(tokens, &mut run.holes, &events, answers);
     while b.at < events.len() {
         b.aliases.clear();
         b.item(&mut program, &mut bodies, imported, &run.skips);
@@ -612,6 +595,25 @@ struct TypeParts {
 }
 
 impl<'a> Build<'a> {
+    /// The read after the run, which takes each token's payload.
+    fn take(
+        toks: &'a mut [Token],
+        holes: &'a mut [HoleRun],
+        events: &'a [Event],
+        answers: &'a HashSet<String>,
+    ) -> Build<'a> {
+        Build {
+            src: Src::Take(toks, holes),
+            events,
+            at: 0,
+            in_hole: false,
+            answers,
+            aliases: Default::default(),
+            field_preds: None,
+            extra_stmts: Vec::new(),
+        }
+    }
+
     /// A read of `view` from event `at`, for a check during the run.
     fn read(view: View<'a>, at: usize, answers: &'a HashSet<String>) -> Build<'a> {
         Build {

@@ -380,10 +380,11 @@ impl Entry {
         }
         let fenced = vyrn_frontend::checker::fenced(&program, &world.ownership.record);
         let mut rows = BTreeMap::new();
+        let gives = loader::Gives::of(root, opts);
         for f in program
             .functions
             .iter()
-            .filter(|f| loader::is_given(f, root, opts))
+            .filter(|f| loader::is_given(f, gives))
         {
             let Some(k) = home(f, root) else {
                 continue;

@@ -119,27 +119,27 @@ the playground serves an embedded `std/`. The loader:
 - links the modules (`link`), so no later pass sees a module boundary, and
   refuses cycles, missing or unexported names, duplicates and two impls of
   one pair;
-- under `vyrn check`, takes an imported `std/` module as its interface
-  (`loader::std_given`): each non-generic top-level function's body is
+- takes an imported `std/` module as its interface: the load lexes and parses
+  the module's interface entry (`loader::interface_parse`), its text with each
+  top-level function body cut to its newlines, each cut body's place and the
+  names a given body spells, keyed by the compiler's identity, the module's
+  key and its text hash, in the generator cache's directory. Under `vyrn
+  check` (`loader::std_given`) each non-generic function's body is
   `ast::Body::Given`, unparsed and untyped, and its module's stored row stands
-  for it (below); every other body is parsed. The load lexes and parses the
-  module's interface entry (`loader::interface_parse`): its text with each
-  given body cut to its newlines, and the names each cut body spells, keyed by
-  the compiler's identity, the module's key and its text hash, in the
-  generator cache's directory. The link drops what no root reaches, as below,
-  following a given body's stored names;
-- in every other load, parses an imported `std/` module's top-level function
-  bodies only where a root can reach them by spelling (`parse_reached`), and
-  drops each function, test and bench of such a module that no root reaches
-  by name (`drop_unreached`), so an importer pays to lex the module and to
-  parse and check what it calls. A gen fn that only an import line or a `toJson` or
-  `fromJson` site names is not reached, because it runs only in its own load.
-  An injected runtime module's other functions are roots, because the emitter
-  and the desugars call them by name, except `std/runtime`'s: its roots include
-  every function the emitter calls by name (`loader::RUNTIME_CALLS`, the one
-  table both read) and every function a reached builtin routes to. A
-  generator's own load also roots each builtin its engine calls in what it adds
-  after the load (`loader::GEN_HOST`, which `vyrn-genwasm` spells its calls by);
+  for it (below). The load lexes and parses any other cut body from the
+  module's text only where a root can reach it by spelling (`parse_reached`),
+  and drops each function, test and bench of such a module that no root
+  reaches by name (`drop_unreached`), following a given body's stored names,
+  so an importer pays to read the module's interface and to parse and check
+  what it calls. A load that writes a std module's rows parses every body of
+  that module. A gen fn that only an import line or a `toJson` or `fromJson`
+  site names is not reached, because it runs only in its own load. An injected
+  runtime module's other functions are roots, because the emitter and the
+  desugars call them by name, except `std/runtime`'s: its roots include every
+  function the emitter calls by name (`loader::RUNTIME_CALLS`, the one table
+  both read) and every function a reached builtin routes to. A generator's own
+  load also roots each builtin its engine calls in what it adds after the load
+  (`loader::GEN_HOST`, which `vyrn-genwasm` spells its calls by);
 - loads a generator's module as its own root, for an import line's generator
   and a `derive` generator alike (`checked_generator`), and links only what its
   gen fn reaches (`keep_reached`). A load checks the program of each gen fn

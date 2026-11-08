@@ -210,15 +210,14 @@ pub(crate) fn file(tokens: &[Token], cx: Cx<'_>) -> Run {
     }
 }
 
-/// Reads a function body, as [`parser::Skimmed::body`] asks: `read` builds it unless
-/// it holds a refusal. The refusals of its statements come first, in the order they
-/// arose, and the body's own last.
-pub(crate) fn block<T>(
+/// Reads a function body, as [`parser::body`] asks, into its events and holes
+/// unless it holds a refusal. The refusals of its statements come first, in
+/// the order they arose, and the body's own last.
+pub(crate) fn block(
     tokens: &[Token],
     cx: Cx<'_>,
     scope: &[&str],
-    read: impl FnOnce(View<'_>) -> T,
-) -> Result<T, Vec<Diagnostic>> {
+) -> Result<(Vec<Event>, Vec<HoleRun>), Vec<Diagnostic>> {
     let mut r = Recognizer::over(tokens, cx, scope);
     let result = r._block();
     let mut errors = std::mem::take(&mut r.errors);
@@ -231,7 +230,7 @@ pub(crate) fn block<T>(
     if !errors.is_empty() {
         return Err(errors);
     }
-    Ok(read(r.view()))
+    Ok((r.events, r.holes))
 }
 
 /// The first refusal of `tokens` read as a code quote's text ([`lexer::lex_quote`]).
@@ -1167,10 +1166,7 @@ impl<'t> Recognizer<'t> {
         };
         let mut toks = lex(&hole.src).map_err(|e| wrap(e.render()))?;
         for t in &mut toks {
-            if t.line == 1 {
-                t.col += hole.col - 1;
-            }
-            t.line += hole.line - 1;
+            (t.line, t.col) = lexer::moved((t.line, t.col), (hole.line, hole.col));
         }
         let run = {
             let cx = Cx::plain(self.cx.answers);

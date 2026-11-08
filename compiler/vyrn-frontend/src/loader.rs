@@ -1011,8 +1011,9 @@ struct Module {
     hash: Option<String>,
     /// [`program_ref_names`] of `program` as loaded, before `link` renames.
     refs: Rc<HashSet<String>>,
-    /// The parse whose skimmed bodies `program`'s empty ones stand for.
-    skimmed: Option<Rc<Parsed>>,
+    /// The parse whose cut bodies ([`Parsed::bodies`]) `program`'s empty and
+    /// given ones stand for.
+    cut: Option<Rc<Parsed>>,
     /// The line and column of each function [`parse_reached`] left with an
     /// empty block for its unparsed body. [`drop_unreached`] drops every one.
     unparsed: Vec<(usize, usize)>,
@@ -1864,7 +1865,7 @@ fn load_modules(
                 injected: None,
                 hash: None,
                 refs: Rc::default(),
-                skimmed: None,
+                cut: None,
                 unparsed: Vec::new(),
             };
             module.refs = Rc::new(program_ref_names(&module.program));
@@ -1873,12 +1874,9 @@ fn load_modules(
             w.states.insert(key.to_string(), true);
             return Ok(());
         }
-        let owner = generated_importer(key).unwrap_or(key);
-        let parsed = match std_given(opts) && !is_root && in_std(owner, opts) {
-            true if !writes(owner, root_key, opts) => {
-                interface_parse(key, &text, &hash, root_key, opts, resolver)?
-            }
-            _ => module_parse(key, &text, &hash, root_key, opts)?,
+        let parsed = match skims(key, root_key, opts) {
+            true => interface_parse(key, &text, &hash, root_key, opts, resolver)?,
+            false => module_parse(key, &text, &hash, root_key, opts)?,
         };
         let mut program = {
             let _p = crate::prof::phase("parse (clone)");
@@ -1902,9 +1900,10 @@ fn load_modules(
                 *slot = Some(key.to_string());
             }
         }
-        if let Some(s) = (parsed.skimmed.as_ref()).filter(|_| std_given(opts)) {
-            parse_skimmed(&mut program, s, key, root_key)?;
-        }
+        let cut = match &parsed.bodies {
+            Some(b) => b.settle(&mut program, key, root_key, opts)?,
+            None => false,
+        };
 
         // Stamp every `panic` with its file and line, and every quote part with
         // its author, here: the parser knows neither file nor key, and every
@@ -2083,7 +2082,7 @@ fn load_modules(
             injected: None,
             hash: Some(hash),
             refs: parsed.refs.clone(),
-            skimmed: parsed.skimmed.is_some().then(|| parsed.clone()),
+            cut: cut.then(|| parsed.clone()),
             unparsed: Vec::new(),
         });
         Ok(())
@@ -2151,10 +2150,8 @@ fn load_modules(
         }
     }
 
-    if !std_given(opts) {
-        if let Err(diags) = parse_reached(&mut w.modules, opts) {
-            return Err(failed(diags, w.origins));
-        }
+    if let Err(diags) = parse_reached(&mut w.modules, opts) {
+        return Err(failed(diags, w.origins));
     }
     let away = away_from_home(&w.modules, &root_key, opts, &mut w.real_paths);
     if !away.is_empty() {
@@ -2234,12 +2231,90 @@ struct Parsed {
     /// (attribution, panic sites, the dropped `std/result` import) moves a
     /// reference name.
     refs: Rc<HashSet<String>>,
-    /// The bodies a skimming parse left unparsed; `program` holds an empty
-    /// block for each.
-    skimmed: Option<parser::Skimmed>,
-    /// The identifiers of the bodies an [`interface_parse`] cut; empty for
-    /// every other parse.
+    /// The top-level function bodies an imported std module's parse cut;
+    /// `program` holds an empty block for each.
+    bodies: Option<Bodies>,
+    /// The identifiers of the cut bodies; empty for every other parse.
     mentions: HashSet<String>,
+}
+
+/// The top-level function bodies an imported std module's parse cut ([`skims`]):
+/// each one's text in the module's source, which a load lexes and parses only
+/// where a root reaches its function ([`parse_reached`]).
+struct Bodies {
+    /// The module's text.
+    source: Rc<str>,
+    /// The method-form names the module answers to, which a body's parse reads.
+    answers: HashSet<String>,
+    /// By the line and column of the function's name.
+    cuts: Vec<Cut>,
+    /// The names the given bodies spell ([`Interface::spells`]), which every
+    /// [`Body::Given`] of the module shares; empty in a [`module_parse`].
+    names: std::sync::Arc<str>,
+    /// Each given function ([`is_given`]) by its index in the parse's
+    /// functions, and the names its body spells as a range of `names`; empty
+    /// in a [`module_parse`].
+    given: Vec<(usize, std::ops::Range<usize>)>,
+}
+
+/// One cut body.
+struct Cut {
+    /// The line and column of its function's name.
+    at: (usize, usize),
+    /// The line and column of its `{`.
+    open: (usize, usize),
+    /// Its text, `{` to `}`, as a byte range of [`Bodies::source`]. Only
+    /// [`cuts_of`] and [`Cut::read`] build a cut, and both check that the
+    /// range holds those braces.
+    span: std::ops::Range<usize>,
+}
+
+impl Bodies {
+    fn cut(&self, f: &Function) -> Option<&Cut> {
+        let i = (self.cuts).binary_search_by_key(&(f.line, f.col), |c| c.at);
+        Some(&self.cuts[i.ok()?])
+    }
+
+    /// Lexes and parses the body `cut` of the function with `type_params`.
+    fn parse(&self, cut: &Cut, type_params: &[String]) -> Result<Block, Vec<Diagnostic>> {
+        let text = &self.source[cut.span.clone()];
+        let tokens = lexer::lex_at(text, cut.open).map_err(|d| vec![d])?;
+        parser::body(tokens, &self.answers, type_params)
+    }
+
+    /// Gives the functions of `program`, module `key`'s, the bodies this load
+    /// reads: in a module whose rows it writes ([`writes`]) each cut body
+    /// parsed, under [`std_given`] each given function its names, and
+    /// otherwise each cut body the empty block [`parse_reached`] fills where a
+    /// root reaches it. Returns whether a body stays cut.
+    fn settle(
+        &self,
+        program: &mut Program,
+        key: &str,
+        root_key: &str,
+        opts: &LoadOptions,
+    ) -> Result<bool, Vec<Diagnostic>> {
+        let owner = generated_importer(key).unwrap_or(key);
+        if writes(owner, root_key, opts) {
+            for f in &mut program.functions {
+                let Some(cut) = self.cut(f) else { continue };
+                let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
+                    ds.into_iter()
+                        .map(|d| in_module(d, key, root_key))
+                        .collect()
+                };
+                f.body = Body::Written(self.parse(cut, &f.type_params).map_err(in_key)?);
+            }
+            return Ok(false);
+        }
+        if std_given(opts) {
+            for (fi, names) in &self.given {
+                let names = GivenNames::new(self.names.clone(), names.clone());
+                program.functions[*fi].body = Body::Given(names);
+            }
+        }
+        Ok(true)
+    }
 }
 
 thread_local! {
@@ -2268,21 +2343,30 @@ pub fn in_std(key: &str, opts: &LoadOptions) -> bool {
     import_specifier("", key, opts.std_root.as_deref()).starts_with("std/")
 }
 
-/// Whether this load takes an imported std module as its interface: each
-/// non-generic function a [`Body::Given`] its stored row stands for. Only the
+/// Whether this load gives each non-generic function of an imported std
+/// module a [`Body::Given`] its stored row stands for. Only the
 /// outermost load of a host that emits nothing does: an emitting host, a
 /// generator's load and the floor read bodies.
 pub fn std_given(opts: &LoadOptions) -> bool {
     !crate::movecheck::emitting() && opts.nest.depth == 0 && opts.artifacts.is_none()
 }
 
-/// Whether `f`, a top-level function of an imported std module, is given: one
-/// body for every program. A generic is judged per instance, and an `extern`
-/// and a `std/mem` primitive have no body.
-pub fn is_given(f: &Function, key: &str, opts: &LoadOptions) -> bool {
-    f.type_params.is_empty()
-        && !f.is_extern
-        && import_specifier("", key, opts.std_root.as_deref()) != MEM_SPEC
+/// Whether `f`, a top-level function of an imported std module whose
+/// functions `module` says may be given, is given: one body for every
+/// program. A generic is judged per instance, and an `extern` has no body.
+pub fn is_given(f: &Function, module: Gives) -> bool {
+    module.0 && f.type_params.is_empty() && !f.is_extern
+}
+
+/// Whether a std module's functions may be given ([`is_given`]): every
+/// module's but `std/mem`'s, whose primitives have no body.
+#[derive(Clone, Copy)]
+pub struct Gives(bool);
+
+impl Gives {
+    pub fn of(key: &str, opts: &LoadOptions) -> Gives {
+        Gives(import_specifier("", key, opts.std_root.as_deref()) != MEM_SPEC)
+    }
 }
 
 /// The options of std module `m`'s own load, which writes its stored rows
@@ -2308,35 +2392,11 @@ pub fn rows_writer(
     }
 }
 
-/// Whether this load writes the rows of std module `owner`: a load that takes
-/// std as its interface, for its root and each module on the writers' stack.
+/// Whether this load writes the rows of std module `owner`: a load under
+/// [`std_given`], for its root and each module on the writers' stack.
 /// Such a module is parsed whole and drops nothing.
 fn writes(owner: &str, root_key: &str, opts: &LoadOptions) -> bool {
     std_given(opts) && (owner == root_key || opts.nest.writing.iter().any(|w| w == owner))
-}
-
-/// Parses every body of module `key` the skim `s` left, so no body stays
-/// unparsed: a module this load writes the rows of ([`writes`]).
-fn parse_skimmed(
-    program: &mut Program,
-    s: &parser::Skimmed,
-    key: &str,
-    root_key: &str,
-) -> Result<(), Vec<Diagnostic>> {
-    for f in &mut program.functions {
-        if let Some(body) = s
-            .body(f)
-            .filter(|_| f.body.written().is_some_and(|b| b.stmts.is_empty()))
-        {
-            let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
-                ds.into_iter()
-                    .map(|d| in_module(d, key, root_key))
-                    .collect()
-            };
-            f.body = Body::Written(body.map_err(in_key)?);
-        }
-    }
-    Ok(())
 }
 
 /// Lexes and parses module `key`, memoized on its `text` and its [`text_hash`]:
@@ -2350,12 +2410,7 @@ fn module_parse(
     opts: &LoadOptions,
 ) -> Result<Rc<Parsed>, Vec<Diagnostic>> {
     let is_root = key == root_key;
-    // An imported std module's top-level bodies, and those of a module a std
-    // module's generator import wrote, are parsed when a root reaches them
-    // ([`parse_reached`]). The floor reads every body's carriers at load, so a
-    // load that declares artifacts parses them all.
-    let owner = generated_importer(key).unwrap_or(key);
-    let skim = !is_root && opts.artifacts.is_none() && in_std(owner, opts);
+    let skim = skims(key, root_key, opts);
     // The root parses its `test` and `bench` blocks, an imported module skips
     // them, so one text loaded as both parses twice.
     let cache_key = match (is_root, skim) {
@@ -2387,22 +2442,36 @@ fn module_parse(
     if !errors.is_empty() {
         return Err(in_key(errors));
     }
-    if let Some(s) = &skimmed {
-        // A body that may mention a runtime builtin is parsed here, so
-        // the mention scan in [`load_modules`] sees every mention.
-        for f in &mut program.functions {
-            if s.tokens(f).is_some_and(mentions_runtime) {
-                if let Some(body) = s.body(f) {
-                    f.body = Body::Written(body.map_err(in_key)?);
+    let (bodies, mentions) = match skimmed {
+        Some(s) => {
+            let cuts = cuts_of(&program, &s, text).map_err(|d| in_key(vec![d]))?;
+            // A body that may mention a runtime builtin is parsed here, so
+            // `refs` holds every mention the scan in [`load_modules`] reads.
+            let rt: Vec<bool> = (program.functions.iter())
+                .map(|f| s.tokens(f).is_some_and(mentions_runtime))
+                .collect();
+            let mentions = s.idents();
+            let bodies = Bodies {
+                source: text.into(),
+                answers: s.into_answers(),
+                cuts,
+                names: "".into(),
+                given: Vec::new(),
+            };
+            for (f, _) in (program.functions.iter_mut()).zip(rt).filter(|(_, rt)| *rt) {
+                if let Some(cut) = bodies.cut(f) {
+                    f.body = Body::Written(bodies.parse(cut, &f.type_params).map_err(in_key)?);
                 }
             }
+            (Some(bodies), mentions)
         }
-    }
+        None => (None, HashSet::new()),
+    };
     let p = Rc::new(Parsed {
         refs: Rc::new(program_ref_names(&program)),
         program,
-        skimmed,
-        mentions: HashSet::new(),
+        bodies,
+        mentions,
     });
     PARSE_CACHE.with(|c| {
         let mut c = c.borrow_mut();
@@ -2416,14 +2485,64 @@ fn module_parse(
     Ok(p)
 }
 
-/// The format word that opens a std module's interface entry.
-const INTERFACE_TAG: &str = "interface2";
+/// Whether a load takes module `key` as an imported std module, whose
+/// top-level function bodies it parses only where a root reaches them
+/// ([`interface_parse`]): a module of the std tree or one a std module's
+/// generator import wrote, but not the root. The floor reads every body's
+/// carriers at load, so a load that declares artifacts parses them all.
+fn skims(key: &str, root_key: &str, opts: &LoadOptions) -> bool {
+    let owner = generated_importer(key).unwrap_or(key);
+    key != root_key && opts.artifacts.is_none() && in_std(owner, opts)
+}
 
-/// The parse of imported std module `key` as its interface ([`std_given`]):
-/// each given function ([`is_given`]) with a [`Body::Given`], every other
-/// body parsed. Read from the module's interface entry, beside the generator
-/// cache's entries, and written there on a miss; `VYRN_NO_GEN_CACHE` reads
-/// and writes none. Memoized as [`module_parse`] is.
+/// The body of each function of `program` that the skim `s` of `text` left,
+/// as [`Bodies::cuts`] holds them.
+fn cuts_of(program: &Program, s: &parser::Skimmed, text: &str) -> Result<Vec<Cut>, Diagnostic> {
+    // Each line's byte offset, and a column's within it.
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let at = |(line, col): (usize, usize)| -> Option<usize> {
+        let start = *starts.get(line.checked_sub(1)?)?;
+        let (i, _) = text[start..].char_indices().nth(col.checked_sub(1)?)?;
+        Some(start + i)
+    };
+    let mut cuts = Vec::new();
+    for f in &program.functions {
+        let Some((open, close)) = s.braces(f) else {
+            continue;
+        };
+        let span = match (at(open), at(close)) {
+            (Some(a), Some(z)) if text.as_bytes()[a] == b'{' && text.as_bytes()[z] == b'}' => {
+                a..z + 1
+            }
+            _ => {
+                let why = format!(
+                    "internal error: the braces of `{}` lie where no brace is",
+                    f.name
+                );
+                return Err(Diagnostic::error(f.line, 0, "load", why));
+            }
+        };
+        cuts.push(Cut {
+            at: (f.line, f.col),
+            open,
+            span,
+        });
+    }
+    cuts.sort_unstable_by_key(|c| c.at);
+    cuts.dedup_by_key(|c| c.at);
+    Ok(cuts)
+}
+
+/// The format word that opens a std module's interface entry.
+const INTERFACE_TAG: &str = "interface3";
+
+/// The parse of imported std module `key` as its interface ([`skims`]): each
+/// top-level function body cut ([`Parsed::bodies`]), for [`Bodies::settle`]
+/// and [`parse_reached`] to fill. Read from the module's interface entry,
+/// beside the generator cache's entries, and written there on a miss;
+/// `VYRN_NO_GEN_CACHE` reads and writes none. Memoized as [`module_parse`] is.
 fn interface_parse(
     key: &str,
     text: &str,
@@ -2461,7 +2580,7 @@ fn interface_parse(
             .collect()
     };
     let scan = lexer::scan(&interface.text).map_err(|d| in_key(vec![d]))?;
-    let (mut program, errors, _) = parser::parse_imported(lexer::tokens(scan), false);
+    let (program, errors, skimmed) = parser::parse_imported(lexer::tokens(scan), false);
     if !errors.is_empty() {
         return Err(in_key(errors));
     }
@@ -2469,8 +2588,10 @@ fn interface_parse(
     // One line per given function, in source order: its name, then each
     // name its body spells, each followed by a space.
     let spells = &interface.spells;
+    let mut given = Vec::new();
     let mut at = 0;
-    for f in (program.functions.iter_mut()).filter(|f| is_given(f, owner, opts)) {
+    let gives = Gives::of(owner, opts);
+    for (fi, f) in (program.functions.iter().enumerate()).filter(|(_, f)| is_given(f, gives)) {
         let line = spells[at..].split_once('\n').map(|(l, _)| l);
         let names = line.and_then(|l| l.strip_prefix(f.name.as_str())?.strip_prefix(' '));
         let (Some(line), Some(names)) = (line, names) else {
@@ -2486,32 +2607,67 @@ fn interface_parse(
             return Err(in_key(vec![d]));
         };
         let from = at + line.len() - names.len();
-        f.body = Body::Given(GivenNames::new(spells.clone(), from..from + names.len()));
+        given.push((fi, from..from + names.len()));
         at += line.len() + 1;
     }
-    if at != spells.len() {
-        let d = Diagnostic::error(0, 0, "load", format!("internal error: the interface of `{key}` holds names for a function it does not declare"));
+    let cuts: Option<Vec<Cut>> = (interface.cuts.lines())
+        .map(|l| Cut::read(l, text))
+        .collect();
+    let (true, Some(mut cuts)) = (at == spells.len(), cuts) else {
+        let d = Diagnostic::error(
+            0,
+            0,
+            "load",
+            format!("internal error: the interface of `{key}` does not match the module"),
+        );
         return Err(in_key(vec![d]));
-    }
+    };
+    cuts.sort_unstable_by_key(|c| c.at);
     let p = Rc::new(Parsed {
         program,
         refs: Rc::new(interface.refs),
-        skimmed: None,
+        bodies: Some(Bodies {
+            source: text.into(),
+            answers: skimmed.into_answers(),
+            cuts,
+            names: spells.clone(),
+            given,
+        }),
         mentions: interface.mentions,
     });
     PARSE_CACHE.with(|c| c.borrow_mut().insert(cache_key, p.clone()));
     Ok(p)
 }
 
+impl Cut {
+    /// The cut body of the module text `source` that a line of
+    /// [`Interface::cuts`] states, or `None` for a damaged line.
+    fn read(line: &str, source: &str) -> Option<Cut> {
+        let mut words = line.split(' ').map(|w| w.parse::<usize>().ok());
+        let mut num = || words.next().flatten();
+        let cut = Cut {
+            at: (num()?, num()?),
+            open: (num()?, num()?),
+            span: num()?..num()?,
+        };
+        let text = source.get(cut.span.clone())?;
+        (text.starts_with('{') && text.ends_with('}')).then_some(cut)
+    }
+}
+
 /// What a load reads of a std module it takes as its interface: the module's
-/// text with each given body's statements cut and its newlines kept, so
-/// every other line and column stands, and the names the cut bodies would
-/// add to [`Parsed::refs`] and [`Parsed::mentions`], and the names each cut
-/// body spells ([`Body::Given`]), a line per given function in source order.
+/// text with each top-level function body's statements cut and its newlines
+/// kept, so every other line and column stands, and the names the cut bodies
+/// would add to [`Parsed::refs`] and [`Parsed::mentions`].
 struct Interface {
     refs: HashSet<String>,
     mentions: HashSet<String>,
+    /// The names each given body spells ([`Body::Given`]), a line per given
+    /// function in source order.
     spells: std::sync::Arc<str>,
+    /// A line per cut body ([`Cut`]): the line and column of its function's
+    /// name and of its `{`, then its byte range in the module's text.
+    cuts: String,
     text: String,
 }
 
@@ -2525,31 +2681,26 @@ impl Interface {
         opts: &LoadOptions,
     ) -> Result<Interface, Vec<Diagnostic>> {
         let full = module_parse(key, text, hash, root_key, opts)?;
-        let s = (full.skimmed.as_ref()).expect("an imported std module's parse skims");
+        let b = (full.bodies.as_ref()).expect("an imported std module's parse skims");
         let owner = generated_importer(key).unwrap_or(key);
-        // Each line's byte offset, and a column's within it.
-        let starts: Vec<usize> = std::iter::once(0)
-            .chain(text.match_indices('\n').map(|(i, _)| i + 1))
-            .collect();
-        let at = |(line, col): (usize, usize)| -> Option<usize> {
-            let start = *starts.get(line.checked_sub(1)?)?;
-            let (i, _) = text[start..].char_indices().nth(col.checked_sub(1)?)?;
-            Some(start + i)
+        let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
+            ds.into_iter()
+                .map(|d| in_module(d, key, root_key))
+                .collect()
         };
-        let given = || (full.program.functions.iter()).filter(|f| is_given(f, owner, opts));
         let mut spells = String::new();
-        for f in given() {
-            let parsed = match f.body.written().filter(|b| !b.stmts.is_empty()) {
-                Some(b) => Some(b.clone()),
-                None => s.body(f).transpose().map_err(|ds| {
-                    ds.into_iter()
-                        .map(|d| in_module(d, key, root_key))
-                        .collect::<Vec<_>>()
-                })?,
+        let gives = Gives::of(owner, opts);
+        for f in (full.program.functions.iter()).filter(|f| is_given(f, gives)) {
+            let cut = b
+                .cut(f)
+                .filter(|_| f.body.written().is_some_and(|b| b.stmts.is_empty()));
+            let parsed = match cut {
+                Some(cut) => Some(b.parse(cut, &f.type_params).map_err(in_key)?),
+                None => None,
             };
             let mut names: Vec<&str> = Vec::new();
-            if let Some(b) = &parsed {
-                crate::ast::spelled(b, &mut names);
+            if let Some(body) = parsed.as_ref().or(f.body.written()) {
+                crate::ast::spelled(body, &mut names);
             }
             names.sort_unstable();
             names.dedup();
@@ -2561,34 +2712,35 @@ impl Interface {
             }
             spells.push('\n');
         }
-        let mut cuts: Vec<(usize, usize)> = given()
-            .filter_map(|f| {
-                let (open, close) = s.braces(f)?;
-                let (a, b) = (at(open)?, at(close)?);
-                (text.as_bytes().get(a) == Some(&b'{') && text.as_bytes().get(b) == Some(&b'}'))
-                    .then_some((a + 1, b))
-            })
-            .collect();
-        cuts.sort_unstable();
-        cuts.dedup();
+        let mut cuts = String::new();
+        for c in &b.cuts {
+            let ((line, col), (open_line, open_col)) = (c.at, c.open);
+            let (start, end) = (c.span.start, c.span.end);
+            cuts.push_str(&format!(
+                "{line} {col} {open_line} {open_col} {start} {end}\n"
+            ));
+        }
         let mut out = String::with_capacity(text.len() / 4);
         let mut from = 0;
-        for (a, b) in cuts {
+        for c in &b.cuts {
+            let (a, z) = (c.span.start + 1, c.span.end - 1);
             out.push_str(&text[from..a]);
-            out.extend(text[a..b].chars().filter(|c| *c == '\n'));
-            from = b;
+            out.extend(text[a..z].chars().filter(|c| *c == '\n'));
+            from = z;
         }
         out.push_str(&text[from..]);
         Ok(Interface {
             refs: (*full.refs).clone(),
-            mentions: s.idents(),
+            mentions: full.mentions.clone(),
             spells: spells.into(),
+            cuts,
             text: out,
         })
     }
 
     /// The entry as text: the tag line, the counted refs and mentions, the
-    /// given bodies' names after their length in bytes, then the cut text.
+    /// given bodies' names and the cuts, each after its length in bytes, then
+    /// the cut text.
     fn render(&self, key: &str) -> String {
         let mut body = String::new();
         for names in [&self.refs, &self.mentions] {
@@ -2600,8 +2752,10 @@ impl Interface {
                 body.push('\n');
             }
         }
-        body.push_str(&format!("{}\n", self.spells.len()));
-        body.push_str(&self.spells);
+        for table in [&*self.spells, &self.cuts] {
+            body.push_str(&format!("{}\n", table.len()));
+            body.push_str(table);
+        }
         body.push_str(&self.text);
         let tag = gen_cache_tag(key, body.as_bytes());
         format!("{INTERFACE_TAG} {tag}\n{body}")
@@ -2628,14 +2782,19 @@ impl Interface {
                 .collect()
         };
         let (refs, mentions) = (names()?, names()?);
-        let (n, tail) = rest.split_once('\n')?;
-        let n: usize = n.parse().ok()?;
-        let spells = tail.get(..n)?;
-        rest = tail.get(n..)?;
+        let mut table = || -> Option<&str> {
+            let (n, tail) = rest.split_once('\n')?;
+            let n: usize = n.parse().ok()?;
+            let table = tail.get(..n)?;
+            rest = tail.get(n..)?;
+            Some(table)
+        };
+        let (spells, cuts) = (table()?, table()?);
         Some(Interface {
             refs,
             mentions,
             spells: spells.into(),
+            cuts: cuts.to_string(),
             text: rest.to_string(),
         })
     }
@@ -2731,7 +2890,6 @@ fn unlinked_import(
             && on_a_generator_line(name)
             && bindings(name) == 1
             && !parsed.refs.contains(name)
-            && !parsed.skimmed.as_ref().is_some_and(|s| s.mentions(name))
             && !parsed.mentions.contains(name)
             && !decls(program).any(|d| d.name == name)
     });
@@ -5729,28 +5887,29 @@ fn generator_calls(modules: &[Module]) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Parses the skimmed body of each function a root can reach by its spelling,
-/// and records in [`Module::unparsed`] each one it leaves unparsed.
+/// Parses the cut body ([`Parsed::bodies`]) of each function a root can reach
+/// by its spelling, and records in [`Module::unparsed`] each one it leaves
+/// unparsed. A given body ([`Body::Given`]) is not parsed: its names are its
+/// spellings.
 ///
 /// The spellings a root reaches are [`crate::ast::spelled`] of every body but a
-/// skimmed module's top-level functions, every imported name and every name in
+/// cut one, every imported name and every name in
 /// [`LoadOptions::host_calls`]. A reached function's spellings are reached too.
 /// They are taken before `link` renames, so a spelling reaches every function
 /// that declares it, and a namespace member `ns.f` is the field `f`: every
 /// function the link's walk keeps ([`drop_unreached`]) is parsed, and it
-/// asserts so. A program that calls `derive` parses every skimmed body.
+/// asserts so. A program that calls `derive` parses every cut body.
 fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<Diagnostic>> {
     let generators: HashSet<String> = generator_calls(modules).map(str::to_string).collect();
-    // The skimmed modules' top-level functions no spelling reached yet, by
-    // name. A body that mentions a runtime builtin was parsed at load.
-    let mut waiting: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    // The functions with a cut body no spelling reached yet, by name.
+    let mut waiting: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
     for (mi, m) in modules.iter().enumerate() {
-        let Some(s) = m.skimmed.as_ref().and_then(|p| p.skimmed.as_ref()) else {
+        let Some(b) = m.cut.as_ref().and_then(|p| p.bodies.as_ref()) else {
             continue;
         };
         for (fi, f) in m.program.functions.iter().enumerate() {
-            if s.tokens(f).is_some() {
-                waiting.entry(f.name.clone()).or_default().push((mi, fi));
+            if b.cut(f).is_some() {
+                waiting.entry(&f.name).or_default().push((mi, fi));
             }
         }
     }
@@ -5759,7 +5918,7 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     }
     let unparsed = |mi: usize, f: &Function| {
         waiting
-            .get(&f.name)
+            .get(f.name.as_str())
             .is_some_and(|w| w.iter().any(|(m, _)| *m == mi))
     };
     let mut names: Vec<&str> = opts.host_calls.to_vec();
@@ -5773,9 +5932,7 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             None => {}
         }
         for f in m.program.functions.iter().filter(|f| !unparsed(mi, f)) {
-            if let Some(b) = f.body.written() {
-                crate::ast::spelled(b, &mut names);
-            }
+            f.body.spelled(&mut names);
         }
         for t in m.program.tests.iter().chain(&m.program.benches) {
             crate::ast::spelled(&t.body, &mut names);
@@ -5810,6 +5967,8 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     }
     let mut derive = names.contains(&"derive");
     let mut work: Vec<(usize, usize)> = Vec::new();
+    // Each body parsed here, set after the walk, which borrows `modules`.
+    let mut parsed: Vec<(usize, usize, Block)> = Vec::new();
     for n in names {
         work.extend(waiting.remove(n).into_iter().flatten());
         for r in routes_of(n) {
@@ -5820,9 +5979,10 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
         while let Some((mi, fi)) = work.pop() {
             let m = &modules[mi];
             let f = &m.program.functions[fi];
-            let parse = m.skimmed.as_ref().and_then(|p| p.skimmed.as_ref());
-            let parse = parse.filter(|_| f.body.written().is_some_and(|b| b.stmts.is_empty()));
-            let body = match parse.and_then(|s| s.body(f)) {
+            let cut = (m.cut.as_ref().and_then(|p| p.bodies.as_ref()))
+                .and_then(|b| Some((b, b.cut(f)?)))
+                .filter(|_| f.body.written().is_some_and(|b| b.stmts.is_empty()));
+            let body = match cut.map(|(b, cut)| b.parse(cut, &f.type_params)) {
                 Some(body) => {
                     let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
                         ds.into_iter().map(|d| in_module(d, &m.key, "")).collect()
@@ -5835,8 +5995,9 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
                 None => None,
             };
             let mut names: Vec<&str> = Vec::new();
-            if let Some(b) = body.as_ref().or(f.body.written()) {
-                crate::ast::spelled(b, &mut names);
+            match &body {
+                Some(b) => crate::ast::spelled(b, &mut names),
+                None => f.body.spelled(&mut names),
             }
             derive |= names.contains(&"derive");
             for n in names {
@@ -5845,9 +6006,7 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
                     work.extend(waiting.remove(unprefixed(r)).into_iter().flatten());
                 }
             }
-            if let Some(body) = body {
-                modules[mi].program.functions[fi].body = Body::Written(body);
-            }
+            parsed.extend(body.map(|b| (mi, fi, b)));
         }
         // A `derive` generator writes calls after the check, to any function.
         if !derive || waiting.is_empty() {
@@ -5855,12 +6014,18 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
         }
         work.extend(waiting.drain().flat_map(|(_, at)| at));
     }
-    for (mi, fi) in waiting.into_values().flatten() {
+    let left: Vec<(usize, usize)> = (waiting.into_values().flatten())
+        .filter(|&(mi, fi)| {
+            (modules[mi].program.functions[fi].body.written()).is_some_and(|b| b.stmts.is_empty())
+        })
+        .collect();
+    for (mi, fi, body) in parsed {
+        modules[mi].program.functions[fi].body = Body::Written(body);
+    }
+    for (mi, fi) in left {
         let f = &modules[mi].program.functions[fi];
-        if f.body.written().is_some_and(|b| b.stmts.is_empty()) {
-            let at = (f.line, f.col);
-            modules[mi].unparsed.push(at);
-        }
+        let at = (f.line, f.col);
+        modules[mi].unparsed.push(at);
     }
     Ok(())
 }
