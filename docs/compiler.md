@@ -428,9 +428,10 @@ as an importer's does (`loader::rows_writer`), so a row judges the body an
 importer runs. A row holds the judgment the memo keeps of a body, the calls the
 worklist follows out of it, and what the generation fence reads of it
 (`checker::Fenced`); each module adds the function values its bodies store and
-pass. `stdrows::Given::read` reads them before the check, and names each
-declaration by its written name and module, so a program that renames one
-apart reads it under the program's name. The fence reads `Program::fenced`,
+pass. `stdrows::Given::read` reads them before the check: it indexes each
+entry's rows and decodes only the row of a function the program links, once.
+It names each declaration by its written name and module, so a program that
+renames one apart reads it under the program's name. The fence reads `Program::fenced`,
 the effect judgment the stored sources in the record, the worklist roots a
 given function and follows its stored calls, and the placer serves its row as
 it serves a memo entry and never builds it. A written impl method has a row

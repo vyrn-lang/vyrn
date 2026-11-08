@@ -213,11 +213,11 @@ impl<'a> Session<'a> {
         let mut h = Sip::default();
         let _ = match l {
             Looked::Decl(DeclKind::Fn, n) => {
-                head(&mut h, &c.functions[c.fn_decls.get(n)?.index()]);
+                head(&mut h, &c.functions[c.fn_decls.get(n.as_str())?.index()]);
                 Ok(())
             }
             Looked::Decl(DeclKind::Type, n) => {
-                let (_, t) = c.types.get(n)?;
+                let (_, t) = c.types.get(n.as_str())?;
                 let (name, module) = (&t.name, &t.module);
                 let (params, base, predicate) = (&t.type_params, &t.base, &t.predicate);
                 let (exported, predicate) = (t.exported, unplaced(predicate));
@@ -241,8 +241,8 @@ impl<'a> Session<'a> {
             // A miss names no table, so a declaration of the name in any of
             // them moves it.
             Looked::Miss(_, n) => {
-                let fs = c.fn_decls.contains_key(n);
-                let ts = c.types.contains_key(n);
+                let fs = c.fn_decls.contains_key(n.as_str());
+                let ts = c.types.contains_key(n.as_str());
                 let gs = c.globals.borrow().contains_key(n);
                 let vs = c.variants.contains_key(n);
                 write!(h, "{fs}{ts}{gs}{vs}")
@@ -298,8 +298,8 @@ impl<'a> Session<'a> {
         }
         let k = match &r.looked {
             Looked::Decl(kind, n) => Key::Decl(match kind {
-                DeclKind::Fn => c.fn_decls[n],
-                DeclKind::Type => c.types[n].0,
+                DeclKind::Fn => c.fn_decls[n.as_str()],
+                DeclKind::Type => c.types[n.as_str()].0,
                 DeclKind::Global => c.globals.borrow()[n].0,
                 DeclKind::Variant => c.variants[n].id,
                 DeclKind::Protocol => unreachable!("a protocol read is never stored"),

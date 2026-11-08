@@ -177,10 +177,10 @@ fn no_gen_cache_reads_and_writes_no_entry_and_the_verdict_holds() {
 /// each of its frames, read from whichever `rows-` entry holds it.
 fn row_calls(t: &Tree, name: &str) -> Vec<String> {
     // A row's header: its name, its module, then its counts of frames, facts
-    // and calls, and the fence's impure reason.
+    // and calls, the fence's impure reason and its count of lines.
     let header = |l: &str| -> Option<usize> {
         let f: Vec<&str> = l.split('\t').collect();
-        (f.len() == 6 && f[0] == name).then(|| f[2].parse().ok())?
+        (f.len() == 7 && f[0] == name).then(|| f[2].parse().ok())?
     };
     for (_, text) in t.entries("rows-") {
         let lines: Vec<&str> = text.lines().collect();
