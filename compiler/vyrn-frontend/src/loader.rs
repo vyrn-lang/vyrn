@@ -1014,9 +1014,6 @@ struct Module {
     /// The parse whose cut bodies ([`Parsed::bodies`]) `program`'s empty and
     /// given ones stand for.
     cut: Option<Rc<Parsed>>,
-    /// The line and column of each function [`parse_reached`] left with an
-    /// empty block for its unparsed body. [`drop_unreached`] drops every one.
-    unparsed: Vec<(usize, usize)>,
 }
 
 /// The state one load walks: the modules entered, their loading state, the
@@ -1866,7 +1863,6 @@ fn load_modules(
                 hash: None,
                 refs: Rc::default(),
                 cut: None,
-                unparsed: Vec::new(),
             };
             module.refs = Rc::new(program_ref_names(&module.program));
             w.modules.push(module);
@@ -2083,7 +2079,6 @@ fn load_modules(
             hash: Some(hash),
             refs: parsed.refs.clone(),
             cut: cut.then(|| parsed.clone()),
-            unparsed: Vec::new(),
         });
         Ok(())
     }
@@ -5757,10 +5752,6 @@ fn link(
         named.extend(imports.map(|n| n.original.clone()));
     }
     let generators: HashSet<String> = generator_calls(&modules).map(str::to_string).collect();
-    let unparsed: HashMap<String, Vec<(usize, usize)>> = (modules.iter())
-        .filter(|m| !m.unparsed.is_empty())
-        .map(|m| (m.key.clone(), m.unparsed.clone()))
-        .collect();
     // Merge. The root goes last so its injected builtins and log config win;
     // imported modules' injected decls are dropped.
     let mut merged: Option<Program> = None;
@@ -5837,8 +5828,8 @@ fn link(
             .collect();
     }
     match &opts.nest.gen {
-        Some(gen) => keep_reached(&mut program, gen, &unparsed),
-        None => drop_unreached(&mut program, lazy, named, &generators, &unparsed),
+        Some(gen) => keep_reached(&mut program, gen),
+        None => drop_unreached(&mut program, lazy, named, &generators),
     }
     program.number();
     Ok(program)
@@ -5888,17 +5879,17 @@ fn generator_calls(modules: &[Module]) -> impl Iterator<Item = &str> {
 }
 
 /// Parses the cut body ([`Parsed::bodies`]) of each function a root can reach
-/// by its spelling, and records in [`Module::unparsed`] each one it leaves
-/// unparsed. A given body ([`Body::Given`]) is not parsed: its names are its
-/// spellings.
+/// by its spelling, and drops each function with a cut body no spelling
+/// reaches, before the link spends work on it. A given body ([`Body::Given`])
+/// is not parsed: its names are its spellings.
 ///
 /// The spellings a root reaches are [`crate::ast::spelled`] of every body but a
 /// cut one, every imported name and every name in
 /// [`LoadOptions::host_calls`]. A reached function's spellings are reached too.
 /// They are taken before `link` renames, so a spelling reaches every function
-/// that declares it, and a namespace member `ns.f` is the field `f`: every
-/// function the link's walk keeps ([`drop_unreached`]) is parsed, and it
-/// asserts so. A program that calls `derive` parses every cut body.
+/// that declares it, and a namespace member `ns.f` is the field `f`: the
+/// link's walk ([`drop_unreached`]) drops every function dropped here. A
+/// program that calls `derive` parses every cut body.
 fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<Diagnostic>> {
     let generators: HashSet<String> = generator_calls(modules).map(str::to_string).collect();
     // The functions with a cut body no spelling reached yet, by name.
@@ -6014,18 +6005,25 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
         }
         work.extend(waiting.drain().flat_map(|(_, at)| at));
     }
-    let left: Vec<(usize, usize)> = (waiting.into_values().flatten())
-        .filter(|&(mi, fi)| {
-            (modules[mi].program.functions[fi].body.written()).is_some_and(|b| b.stmts.is_empty())
-        })
+    // A gen fn an import line names stays for the link to resolve the import
+    // ([`drop_unreached`] drops it after).
+    let mut left: Vec<(usize, usize)> = (waiting.into_values().flatten())
+        .filter(|&(mi, fi)| !modules[mi].program.functions[fi].is_gen)
         .collect();
     for (mi, fi, body) in parsed {
         modules[mi].program.functions[fi].body = Body::Written(body);
     }
-    for (mi, fi) in left {
-        let f = &modules[mi].program.functions[fi];
-        let at = (f.line, f.col);
-        modules[mi].unparsed.push(at);
+    left.sort_unstable();
+    for (mi, m) in modules.iter_mut().enumerate() {
+        let gone = &left[left.partition_point(|&(i, _)| i < mi)..];
+        let gone = &gone[..gone.partition_point(|&(i, _)| i == mi)];
+        if !gone.is_empty() {
+            let mut fi = 0;
+            m.program.functions.retain(|_| {
+                fi += 1;
+                gone.binary_search(&(mi, fi - 1)).is_err()
+            });
+        }
     }
     Ok(())
 }
@@ -6085,21 +6083,13 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
 /// `generators` names each `gen fn` an import line calls ([`generator_calls`]).
 /// Its import is no root, so a `lazy` one is kept only where a kept body spells
 /// it.
-///
-/// `unparsed` names, by module and position, each function whose body
-/// [`parse_reached`] left unparsed ([`assert_parsed`]).
 fn drop_unreached(
     program: &mut Program,
     lazy: &HashSet<String>,
     named: Vec<String>,
     generators: &HashSet<String>,
-    unparsed: &HashMap<String, Vec<(usize, usize)>>,
 ) {
     if lazy.is_empty() {
-        assert!(
-            unparsed.is_empty(),
-            "a load that drops nothing left a body unparsed"
-        );
         return;
     }
     let is_lazy = |m: &Option<String>| m.as_ref().is_some_and(|k| lazy.contains(k));
@@ -6131,15 +6121,10 @@ fn drop_unreached(
     }
     let keep = reached(program, roots);
     if keep.contains("derive") {
-        assert!(
-            unparsed.is_empty(),
-            "`derive` reached and a body is unparsed"
-        );
         drop(keep);
         program.lazy = None;
         return;
     }
-    assert_parsed(program, &keep, unparsed);
     let kept: Vec<bool> = (program.functions.iter())
         .map(|f| !is_lazy(&f.module) || keep.contains(f.name.as_str()))
         .collect();
@@ -6153,7 +6138,7 @@ fn drop_unreached(
 /// `std/runtime` function the emitter calls by name ([`RUNTIME_CALLS`]), each
 /// call the engine adds after the load ([`GEN_HOST`]) and each name a `where`
 /// predicate spells.
-fn keep_reached(program: &mut Program, gen: &str, unparsed: &HashMap<String, Vec<(usize, usize)>>) {
+fn keep_reached(program: &mut Program, gen: &str) {
     let calls: Vec<String> = (RUNTIME_CALLS.iter())
         .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
         .collect();
@@ -6168,7 +6153,6 @@ fn keep_reached(program: &mut Program, gen: &str, unparsed: &HashMap<String, Vec
         crate::ast::expr_spelled(p, &mut roots);
     }
     let keep = reached(program, roots);
-    assert_parsed(program, &keep, unparsed);
     let fns: Vec<bool> = (program.functions.iter())
         .map(|f| keep.contains(f.name.as_str()))
         .collect();
@@ -6191,25 +6175,6 @@ fn own_gen<'a>(program: &'a Program, declared: &str) -> Option<&'a str> {
         .filter(|f| f.module.is_none())
         .map(|f| f.name.as_str())
         .find(|n| program.spellings.written(n) == declared)
-}
-
-/// Panics if `keep` holds a function whose body [`parse_reached`] left
-/// unparsed: the link would hand the checker an empty block for a body it
-/// never read.
-fn assert_parsed(
-    program: &Program,
-    keep: &HashSet<&str>,
-    unparsed: &HashMap<String, Vec<(usize, usize)>>,
-) {
-    for f in (program.functions.iter()).filter(|f| keep.contains(f.name.as_str())) {
-        let left = f.module.as_ref().and_then(|k| unparsed.get(k));
-        let at = (f.line, f.col);
-        assert!(
-            !left.is_some_and(|l| l.contains(&at)),
-            "`{}` is reached and unparsed",
-            f.name
-        );
-    }
 }
 
 /// Returns every name `roots` reach in `program`: its functions and module
