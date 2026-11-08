@@ -77,8 +77,17 @@ fn readJsonNumber(p: modify JsonReader) -> String
 ```
 
 Reads a JSON number, the cursor on `-` or a digit, and returns its raw text.
-Grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`. Refused, it
-answers `""`.
+Refused, it answers `""`.
+
+## skipJsonNumber
+
+```vyrn
+fn skipJsonNumber(p: modify JsonReader) -> Bool
+```
+
+Reads past a JSON number, the cursor on `-` or a digit, and answers whether
+it was one; the number is the source from the cursor's old position to its
+new one. Grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
 
 ## readJsonKeyword
 

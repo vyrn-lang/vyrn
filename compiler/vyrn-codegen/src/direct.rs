@@ -4491,7 +4491,50 @@ impl<'p> Fn_<'_, 'p> {
         let l = self.cx.layout(&ty, line)?;
         let off = b.alloc(l.size, l.align);
         b.slot(off);
-        self.core_arg(m, b, "bytes", args, 0, Some(&Type::Str), line)?;
+        self.str_range(m, b, "bytes", row, args, line)?;
+        b.ins(&Instruction::Call(self.cx.rt.bytes_of));
+        b.slot(off);
+        Ok(ty)
+    }
+
+    /// `stringOf(s, start, end)`: `std/runtime`'s `strOf` after the range check `row`, which
+    /// is `bytes`'s, writing the `Option<String>` into a slot allocated here.
+    fn string_of(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        row: Option<Check>,
+        args: &[(Val, Capability)],
+        line: usize,
+    ) -> Result<Type, String> {
+        let ty = Type::option(Type::Str);
+        let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+            return unsupported("`stringOf` returning a non-aggregate", line);
+        };
+        let off = b.alloc(l.size, l.align);
+        self.str_range(m, b, "stringOf", row, args, line)?;
+        b.ins(&Instruction::Call(self.cx.rt.str_of));
+        let Ok(ret @ Ret::Words(_)) = self.cx.ret(&Type::option(Type::Int), line) else {
+            return unsupported("a `strOf` result that is not two words", line);
+        };
+        self.landed(b, &ret, Dest::Slot(off));
+        b.slot(off);
+        Ok(ty)
+    }
+
+    /// Leaves a String's address and a byte range on the stack: `0..s.byteLength` for one
+    /// argument, else `start` and `end` after `row`, the range check; `None` when a pass
+    /// proved it.
+    fn str_range(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        callee: &str,
+        row: Option<Check>,
+        args: &[(Val, Capability)],
+        line: usize,
+    ) -> Result<(), String> {
+        self.core_arg(m, b, callee, args, 0, Some(&Type::Str), line)?;
         let s = b.local(ValType::I32);
         b.ins(&Instruction::LocalTee(s));
         let len = |b: &mut Frame| {
@@ -4504,9 +4547,9 @@ impl<'p> Fn_<'_, 'p> {
             len(b);
         } else {
             let (from, to) = (b.local(ValType::I64), b.local(ValType::I64));
-            self.core_arg(m, b, "bytes", args, 1, Some(&Type::Int), line)?;
+            self.core_arg(m, b, callee, args, 1, Some(&Type::Int), line)?;
             b.ins(&Instruction::LocalSet(from));
-            self.core_arg(m, b, "bytes", args, 2, Some(&Type::Int), line)?;
+            self.core_arg(m, b, callee, args, 2, Some(&Type::Int), line)?;
             b.ins(&Instruction::LocalSet(to));
             if let Some(row) = row {
                 // A range below zero or out of order traps at `from`, one past the string's end at `to`.
@@ -4534,9 +4577,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalGet(from));
             b.ins(&Instruction::LocalGet(to));
         }
-        b.ins(&Instruction::Call(self.cx.rt.bytes_of));
-        b.slot(off);
-        Ok(ty)
+        Ok(())
     }
 
     /// Call `std/runtime`'s `strFromBytes` for the `Array<UInt8>` header in local `src`, writing
@@ -12480,7 +12521,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             // destination.
             Some(Spec::Builds(_)) => {
                 let range = match (callee, args) {
-                    ("bytes", [(s, _), (from, _), (to, _)]) => {
+                    ("bytes" | "stringOf", [(s, _), (from, _), (to, _)]) => {
                         let c = core_check(
                             &mut self.core_w,
                             line,
@@ -12493,6 +12534,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 return match (callee, args) {
                     ("bytes", _) => self.bytes_of(m, b, range, args, line),
                     ("stringFromBytes", _) => self.string_from_bytes(m, b, args, line),
+                    ("stringOf", _) => self.string_of(m, b, range, args, line),
                     ("@toArray", [(v, _)]) => {
                         let aty = self.core_ty(v, &Type::Int);
                         self.core_val(m, b, v, &aty, line)?;

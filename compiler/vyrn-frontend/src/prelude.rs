@@ -868,6 +868,22 @@ fn table() -> Vec<Builtin> {
                 &[],
             ))
             .spec(Spec::Builds(Type::result(Str, Str))),
+        // A String cut from a String at two character boundaries is valid UTF-8
+        // with no NUL, so the copy runs no check. The range is the `bytes`
+        // row's check; a cut on a continuation byte is `None`. `std/strpred`'s
+        // `slice` is the one caller, after its own checks.
+        b("stringOf")
+            .sig(row(
+                "stringOf",
+                &[],
+                &[("s", Read, Str), ("start", Read, Int), ("end", Read, Int)],
+                opt(Str),
+                &[],
+            ))
+            .spec(Spec::Builds(opt(Str)))
+            .indexes(Indexes::Bytes)
+            .home("std/strpred")
+            .hover("stringOf(s, start, end) -> Option<String> — the bytes of `s` from `start` to `end` as a String, `None` where either falls on a continuation byte; only `std/strpred` may call it, and `slice` is the one to call"),
         b("logger")
             .sig(row("logger", &[], &[("name", Read, Str)], Type::Logger, &[]))
             .spec(Spec::Logs),
@@ -1671,6 +1687,7 @@ mod tests {
             ("renameFile", "Result<Bool, String>"),
             ("fsyncFile", "Result<Bool, String>"),
             ("stringFromBytes", "Result<String, String>"),
+            ("stringOf", "Option<String>"),
             ("listDir", "Result<Array<String>, String>"),
             ("listDirKinds", "Result<Array<String>, String>"),
             ("moduleInterface", "ModuleInterface"),

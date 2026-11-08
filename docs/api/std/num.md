@@ -6,12 +6,16 @@ A library, not a builtin: the direct wasm backend has no `strtod`, so one
 Vyrn implementation serves every engine. The only primitives are the
 IEEE-754 bit views `float64Bits` and `float64FromBits`.
 
-The conversion is exact. The decimal stays a digit array, scaled by powers
-of two into `[1/2, 1)`; repeated doubling yields the mantissa bits, and the
-leftover fraction rounds half to even. A subnormal asks for fewer bits and
-rounds the same way; overflow is an exponent field past its maximum. At
-most 800 significant digits are kept; a dropped nonzero digit sets a sticky
-flag that turns an exact tie into a round-up.
+The conversion is exact, on one of three paths. A literal of at most 19
+significant digits is an integer `w` times `10^q`: Clinger's one IEEE-754
+operation takes it when `w < 2^53` and `|q| <= 22`, and integer arithmetic
+on `w` and powers of 5 when `q` is in `[-26, 27]`. Any other literal takes the
+digit path: the decimal stays a digit array, scaled by powers of two into
+`[1/2, 1)`; repeated doubling yields the mantissa bits, and the leftover
+fraction rounds half to even. A subnormal asks for fewer bits and rounds
+the same way; overflow is an exponent field past its maximum. At most 800
+significant digits are kept; a dropped nonzero digit sets a sticky flag
+that turns an exact tie into a round-up.
 
 ## parseFloat64
 
@@ -23,6 +27,16 @@ Decimal text as a correctly rounded `Float64`, or `None` if the text is not
 a number. The whole string must match. Too large is `inf` and too small is a
 signed zero, as in every IEEE-754 text conversion.
 
+## parseFloat64Range
+
+```vyrn
+fn parseFloat64Range(s: String, start: Int64 where value >= 0, end: Int64 where value >= start && value <= s.byteLength) -> Option<Float64>
+```
+
+`parseFloat64` of the bytes `s[start..end]`, read in place: a reader parses
+a number of its source without copying it out. `0 <= start <= end <=
+s.byteLength`, or an index traps.
+
 ## parseFloat32
 
 ```vyrn
@@ -31,6 +45,14 @@ fn parseFloat32(s: String) -> Option<Float32>
 
 Decimal text as a `Float32`, rounded once: decimal -> `Float64` ->
 `Float32` rounds twice and is wrong near a `Float32` tie.
+
+## parseFloat32Range
+
+```vyrn
+fn parseFloat32Range(s: String, start: Int64 where value >= 0, end: Int64 where value >= start && value <= s.byteLength) -> Option<Float32>
+```
+
+`parseFloat32` of the bytes `s[start..end]`, as `parseFloat64Range` reads.
 
 ## parseInt64
 
@@ -41,6 +63,14 @@ fn parseInt64(s: String) -> Option<Int64>
 Decimal text as an exact `Int64`, or `None` if it is not an integer or does
 not fit. `"9223372036854775808"` is `None`; the `parse` builtin wraps it.
 
+## parseInt64Range
+
+```vyrn
+fn parseInt64Range(s: String, start: Int64 where value >= 0, end: Int64 where value >= start && value <= s.byteLength) -> Option<Int64>
+```
+
+`parseInt64` of the bytes `s[start..end]`, as `parseFloat64Range` reads.
+
 ## parseUInt64
 
 ```vyrn
@@ -49,6 +79,14 @@ fn parseUInt64(s: String) -> Option<UInt64>
 
 Decimal text as an exact `UInt64`, or `None`. No sign is accepted, not
 even `+`.
+
+## parseUInt64Range
+
+```vyrn
+fn parseUInt64Range(s: String, start: Int64 where value >= 0, end: Int64 where value >= start && value <= s.byteLength) -> Option<UInt64>
+```
+
+`parseUInt64` of the bytes `s[start..end]`, as `parseFloat64Range` reads.
 
 ## f64Str
 

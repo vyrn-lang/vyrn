@@ -1028,6 +1028,24 @@ export fn bytesOf(dst: Int32, s: Int32, from: Int64, to: Int64) {
     store64(dst + 16, UInt64(n))
 }
 
+/// `stringOf(s, from, to)`: the string's bytes `from..to` as a fresh String, or
+/// `None` where `from` or `to` is a continuation byte. The caller guarantees
+/// `0 <= from <= to <= s.byteLength`. Cut at character boundaries, valid UTF-8
+/// with no NUL stays so, so the copy runs no check.
+export fn strOf(s: Int32, from: Int64, to: Int64) -> Option<Int64> {
+    let n = Int64(load32(s - 8))
+    if from < n && (load8(s + Int32(from)) & 192) == 128 {
+        return None
+    }
+    if to < n && (load8(s + Int32(to)) & 192) == 128 {
+        return None
+    }
+    let len = Int32(to - from)
+    let buf = strNew(len, len)
+    copy(buf, s + Int32(from), len)
+    return Some(Int64(UInt32(buf)))
+}
+
 // I/O, over the host imports `std/mem` declares. The `@.io.*` wording is never
 // spelled here: the emitter interns each message's halves from `trap.rs`'s
 // `io_message_parts` and passes them in. A `dest` is the caller's slot for an

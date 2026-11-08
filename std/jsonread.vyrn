@@ -19,6 +19,7 @@
 
 import { Json, JsonField, JsonReader, emit, emitPretty, jsonEq } from "std/json"
 import { fnv1aStr } from "std/hash"
+import { slice } from "std/strpred"
 
 /// The deepest nesting the reader accepts. Past the engine's call cap the
 /// recursion traps, which no `Err` arm catches. Each level costs about two
@@ -205,20 +206,33 @@ fn readHex4(p: modify JsonReader) -> Int64 {
 /// escape to UTF-8. Refused, it answers `""`.
 export fn readJsonString(p: modify JsonReader) -> String {
     step(p) // opening "
-    let start = p.pos
-    while p.pos < p.n {
-        let c = Int64(p.src[p.pos])
-        if c == '"' || c == '\\' || c < 32 {
-            break
-        }
-        p.pos = p.pos + 1
-    }
-    // A string with no escape is one run of the source, copied in one call.
-    // Otherwise the run starts the decoded bytes, and the loop below reads on
-    // from the first byte the run stopped at.
-    let mut out = bytes(p.src, start, p.pos)
+    // The string alternates runs of bytes held as they are with escapes. A
+    // string that is one run is cut from the source at ASCII bytes, so `slice`
+    // copies it with no UTF-8 check. Otherwise each run is copied into the
+    // decoded bytes, which `stringFromBytes` checks, for the NUL of `\u0000`.
+    let mut out: Array<UInt8> = []
     while true {
+        let from = p.pos
+        while p.pos < p.n {
+            let c = Int64(p.src[p.pos])
+            if c == '"' || c == '\\' || c < 32 {
+                break
+            }
+            p.pos = p.pos + 1
+        }
         let b = peek(p)
+        // Every escape adds a byte, so an empty `out` means none came before.
+        if b == '"' && out.length == 0 {
+            let run = slice(p.src, from, p.pos)
+            step(p) // closing "
+            return match run {
+                Ok(v) => v,
+                Err(e) => refusedString(p, "string is not valid UTF-8"),
+            }
+        }
+        if p.pos > from {
+            out.append(bytes(p.src, from, p.pos))
+        }
         if b < 0 {
             refuse(p, "unterminated string")
             return ""
@@ -230,70 +244,66 @@ export fn readJsonString(p: modify JsonReader) -> String {
                 Err(e) => refusedString(p, "string is not valid UTF-8"),
             }
         }
-        if b == '\\' {
-            step(p) // backslash
-            let e = peek(p)
-            if e == '"' {
-                out.push('"')
-                step(p)
-            } else if e == '\\' {
-                out.push('\\')
-                step(p)
-            } else if e == '/' {
-                out.push('/')
-                step(p)
-            } else if e == 'b' {
-                out.push('\x08')
-                step(p)
-            } else if e == 'f' {
-                out.push('\x0c')
-                step(p)
-            } else if e == 'n' {
-                out.push('\n')
-                step(p)
-            } else if e == 'r' {
-                out.push('\r')
-                step(p)
-            } else if e == 't' {
-                out.push('\t')
-                step(p)
-            } else if e == 'u' {
+        if b < 32 {
+            return refusedString(p, "control character in string (must be escaped)")
+        }
+        step(p) // backslash
+        let e = peek(p)
+        if e == '"' {
+            out.push('"')
+            step(p)
+        } else if e == '\\' {
+            out.push('\\')
+            step(p)
+        } else if e == '/' {
+            out.push('/')
+            step(p)
+        } else if e == 'b' {
+            out.push('\x08')
+            step(p)
+        } else if e == 'f' {
+            out.push('\x0c')
+            step(p)
+        } else if e == 'n' {
+            out.push('\n')
+            step(p)
+        } else if e == 'r' {
+            out.push('\r')
+            step(p)
+        } else if e == 't' {
+            out.push('\t')
+            step(p)
+        } else if e == 'u' {
+            step(p) // u
+            let hi = readHex4(p)
+            if hi < 0 {
+                return ""
+            }
+            if hi >= 55296 && hi <= 56319 {
+                // A low surrogate `\uDC00..DFFF` must follow.
+                if peek(p) != '\\' || ahead(p, 1) != 'u' {
+                    return refusedString(p, "unpaired high surrogate in \\u escape")
+                }
+                step(p) // backslash
                 step(p) // u
-                let hi = readHex4(p)
-                if hi < 0 {
+                let lo = readHex4(p)
+                if lo < 0 {
                     return ""
                 }
-                if hi >= 55296 && hi <= 56319 {
-                    // A low surrogate `\uDC00..DFFF` must follow.
-                    if peek(p) != '\\' || ahead(p, 1) != 'u' {
-                        return refusedString(p, "unpaired high surrogate in \\u escape")
-                    }
-                    step(p) // backslash
-                    step(p) // u
-                    let lo = readHex4(p)
-                    if lo < 0 {
-                        return ""
-                    }
-                    if lo < 56320 || lo > 57343 {
-                        return refusedString(p, "unpaired high surrogate in \\u escape")
-                    }
-                    let cp = 65536 + (hi - 55296) * 1024 + (lo - 56320)
-                    pushUtf8(out, cp)
-                } else if hi >= 56320 && hi <= 57343 {
-                    return refusedString(p, "unexpected low surrogate in \\u escape")
-                } else {
-                    pushUtf8(out, hi)
+                if lo < 56320 || lo > 57343 {
+                    return refusedString(p, "unpaired high surrogate in \\u escape")
                 }
-            } else if e < 0 {
-                return refusedString(p, "unterminated string")
+                let cp = 65536 + (hi - 55296) * 1024 + (lo - 56320)
+                pushUtf8(out, cp)
+            } else if hi >= 56320 && hi <= 57343 {
+                return refusedString(p, "unexpected low surrogate in \\u escape")
             } else {
-                return refusedString(p, "invalid escape in string")
+                pushUtf8(out, hi)
             }
-        } else if b < 32 {
-            return refusedString(p, "control character in string (must be escaped)")
+        } else if e < 0 {
+            return refusedString(p, "unterminated string")
         } else {
-            out.push(UInt8(b))
-            step(p)
+            return refusedString(p, "invalid escape in string")
         }
     }
     return refusedString(p, "unterminated string")
@@ -305,10 +315,22 @@ fn refusedString(p: modify JsonReader, msg: String) -> String {
 }
 
 /// Reads a JSON number, the cursor on `-` or a digit, and returns its raw text.
-/// Grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`. Refused, it
-/// answers `""`.
+/// Refused, it answers `""`.
 export fn readJsonNumber(p: modify JsonReader) -> String {
     let start = p.pos
+    if skipJsonNumber(p) == false {
+        return ""
+    }
+    return match stringFromBytes(bytes(p.src, start, p.pos)) {
+        Ok(v) => v,
+        Err(e) => refusedString(p, "invalid number"),
+    }
+}
+
+/// Reads past a JSON number, the cursor on `-` or a digit, and answers whether
+/// it was one; the number is the source from the cursor's old position to its
+/// new one. Grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
+export fn skipJsonNumber(p: modify JsonReader) -> Bool {
     if peek(p) == '-' {
         step(p)
     }
@@ -318,12 +340,12 @@ export fn readJsonNumber(p: modify JsonReader) -> String {
     } else if d >= '1' && d <= '9' {
         skipDigits(p)
     } else {
-        return refusedString(p, "invalid number: expected a digit")
+        return refusedNumber(p, "invalid number: expected a digit")
     }
     if peek(p) == '.' {
         step(p)
         if isDigit(peek(p)) == false {
-            return refusedString(p, "invalid number: expected a digit after '.'")
+            return refusedNumber(p, "invalid number: expected a digit after '.'")
         }
         skipDigits(p)
     }
@@ -333,14 +355,16 @@ export fn readJsonNumber(p: modify JsonReader) -> String {
             step(p)
         }
         if isDigit(peek(p)) == false {
-            return refusedString(p, "invalid number: expected a digit in the exponent")
+            return refusedNumber(p, "invalid number: expected a digit in the exponent")
         }
         skipDigits(p)
     }
-    return match stringFromBytes(bytes(p.src, start, p.pos)) {
-        Ok(v) => v,
-        Err(e) => refusedString(p, "invalid number"),
-    }
+    return true
+}
+
+fn refusedNumber(p: modify JsonReader, msg: String) -> Bool {
+    refuse(p, msg)
+    return false
 }
 
 fn isDigit(b: Int64) -> Bool {

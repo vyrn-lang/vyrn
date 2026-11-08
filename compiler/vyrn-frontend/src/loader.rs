@@ -1088,6 +1088,19 @@ pub struct RtModule {
     /// would change the load order and so every emitted index. The direct
     /// backend's sweep drops an unreached function's code and data.
     pub always: bool,
+    /// The functions the link keeps though no body spells them ([`reached`]).
+    pub entries: Entries,
+}
+
+/// The functions of a runtime module the emitter or a desugar calls by their
+/// reserved spellings. A route needs no row: a reached builtin reaches the
+/// function it routes to ([`routes_of`]).
+pub enum Entries {
+    /// Each function but a gen fn. A desugar calls what a generator writes
+    /// after the check, and that code may call any of them.
+    Every,
+    /// These reserved spellings, and no other function.
+    Named(&'static [&'static str]),
 }
 
 /// The module the compiler carries as its runtime. It is the one
@@ -1236,6 +1249,8 @@ runtime_calls! {
     arr_clear = "arrClear" (I32; 2) -> ();
     // `bytes(s, from, to)`: the triple's slot leads.
     bytes_of = "bytesOf" (I32, I32, I64, I64) -> ();
+    /// `stringOf`'s copy, a flat `Option<Int64>` as its two words.
+    str_of = "strOf" (I32, I64, I64) -> (I64, I64);
     // The I/O family this emitter calls; the builtins route to their own functions
     // (`loader::RT_MODULES`). The fixed-clock keys trail.
     /// The ONE place bytes leave a program, with the stdout buffer behind it.
@@ -1323,6 +1338,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: RT_PREFIX,
         desugared: &["toJson", "fromJson"],
         always: false,
+        entries: Entries::Every,
     },
     // `fromJson`'s decoders: the reader, the path arithmetic, the scalar
     // decoders, and the generator that writes the typed half per target type.
@@ -1331,6 +1347,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: JSONDEC_PREFIX,
         desugared: &["fromJson"],
         always: false,
+        entries: Entries::Every,
     },
     // `stringFromBytes` is a desugar: only its check ([`STRING_FAULT`]) lives
     // here, and the backend builds the `String`, which needs `std/mem`.
@@ -1343,6 +1360,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: "text$",
         desugared: &["stringFromBytes"],
         always: true,
+        entries: Entries::Named(&[STRING_FAULT]),
     },
     // The float formatter. Desugared, because `@str` is type-directed and only
     // its float case is a call. `print` formats a float without `@str`, so it
@@ -1354,6 +1372,7 @@ pub const RT_MODULES: &[RtModule] = &[
         // `assertEq` renders a mismatched float the way `@str` does.
         desugared: &["@str", "print", "assertEq"],
         always: false,
+        entries: Entries::Named(&[F64_STR]),
     },
     // The run queue, in every program that waits: such a program imports
     // `std/task`, whose `sleep` waits for a timer, or mentions `hostFetch`
@@ -1363,20 +1382,39 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: TASK_PREFIX,
         desugared: &["hostFetch"],
         always: false,
+        entries: Entries::Named(&[
+            "task$taskBegin",
+            "task$taskSettle",
+            "task$taskFinish",
+            "task$taskResult",
+            "task$wake",
+            "task$taskTrapped",
+            "task$regionSwap",
+            "task$regionClose",
+            "task$regionCarry",
+            "task$waitOn",
+            "task$delivery",
+            "task$payloadOf",
+            "task$cancelBegin",
+            "task$cancelEnd",
+        ]),
     },
     // The runtime, in every program. `std/mem` enters as `std/runtime`'s import;
-    // its row only names its prefix.
+    // its row only names its prefix. The emitter's calls are [`RUNTIME_CALLS`],
+    // whose rows carry their signatures.
     RtModule {
         spec: RUNTIME_SPEC,
         prefix: RUNTIME_PREFIX,
         desugared: &[],
         always: true,
+        entries: Entries::Named(&[]),
     },
     RtModule {
         spec: MEM_SPEC,
         prefix: MEM_PREFIX,
         desugared: &[],
         always: false,
+        entries: Entries::Named(&[]),
     },
 ];
 
@@ -5726,14 +5764,13 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     };
     let mut names: Vec<&str> = opts.host_calls.to_vec();
     for (mi, m) in modules.iter().enumerate() {
-        if called_by_name(&m.key, opts) {
-            names.extend(
-                m.program
-                    .functions
-                    .iter()
-                    .filter(|f| !f.is_gen)
-                    .map(|f| f.name.as_str()),
-            );
+        match runtime_module(&m.key, opts).map(|rt| &rt.entries) {
+            Some(Entries::Every) => {
+                let fns = m.program.functions.iter().filter(|f| !f.is_gen);
+                names.extend(fns.map(|f| f.name.as_str()));
+            }
+            Some(Entries::Named(entries)) => names.extend(entries.iter().map(|e| unprefixed(e))),
+            None => {}
         }
         for f in m.program.functions.iter().filter(|f| !unparsed(mi, f)) {
             if let Some(b) = f.body.written() {
@@ -5828,20 +5865,30 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     Ok(())
 }
 
-/// Whether `key` is a runtime module ([`RT_MODULES`]) other than `std/runtime`:
-/// the emitter and the desugars call each of its functions but its gen fns by
-/// its reserved spelling, which no source spells, so each is a root.
-fn called_by_name(key: &str, opts: &LoadOptions) -> bool {
+/// The runtime module ([`RT_MODULES`]) `key` is, if it is one.
+fn runtime_module(key: &str, opts: &LoadOptions) -> Option<&'static RtModule> {
     let spec = import_specifier("", key, opts.std_root.as_deref());
-    spec != RUNTIME_SPEC && RT_MODULES.iter().any(|rt| rt.spec == spec)
+    RT_MODULES.iter().find(|rt| rt.spec == spec)
+}
+
+/// Whether the link keeps the function `name`, as linked, though no body
+/// spells it: an entry of the runtime module whose prefix it carries
+/// ([`RtModule::entries`]), or a flattened impl method (`Copy$json$Json$copy`),
+/// which dispatch reaches by type.
+fn called_by_name(name: &str) -> bool {
+    let own = |rt: &&RtModule| (name.strip_prefix(rt.prefix)).is_some_and(|n| !n.contains('$'));
+    match RT_MODULES.iter().find(own).map(|rt| &rt.entries) {
+        Some(Entries::Every) => true,
+        Some(Entries::Named(entries)) => entries.contains(&name),
+        None => name.contains('$'),
+    }
 }
 
 /// The modules whose unreached functions, tests and benches the link drops:
 /// every `std/` module but the root and a module this load writes the rows of
-/// ([`writes`]). A runtime module's other functions stay,
-/// because the emitter and the desugars call them by name ([`called_by_name`]);
-/// only its unreached gen fns leave. `std/runtime` keeps what [`RUNTIME_CALLS`]
-/// names.
+/// ([`writes`]). A runtime module keeps the functions the emitter and the
+/// desugars call by name ([`called_by_name`]), and `std/runtime` what
+/// [`RUNTIME_CALLS`] names.
 /// Std checks each of its bodies as the root of its own load
 /// (`tests/std_suite.rs`, the corpus), and a body no root reaches adds no
 /// verdict to another program's.
@@ -6004,11 +6051,9 @@ fn assert_parsed(
 /// state, each other name their bodies spell, a builtin's included, and the
 /// functions a reached builtin routes to. A local that shares a function's
 /// name reaches the function. A given body's names reach by their written
-/// name too ([`Body::Given`]). Its implicit roots are every `$` name but
-/// `std/runtime`'s and a gen fn's (an injected runtime module's, which the
-/// emitter calls by name, and an impl's flattened method, which dispatch
-/// reaches by type) and every name a contract default, an impl method or a
-/// projection spells.
+/// name too ([`Body::Given`]). Its implicit roots are each function but a gen
+/// fn that is [`called_by_name`], and every name a contract default, an impl
+/// method or a projection spells.
 fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str> {
     let by_name: HashMap<&str, &Function> = (program.functions.iter())
         .map(|f| (f.name.as_str(), f))
@@ -6026,7 +6071,7 @@ fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str>
     }
     work.extend(
         (program.functions.iter())
-            .filter(|f| f.name.contains('$') && !f.name.starts_with(RUNTIME_PREFIX) && !f.is_gen)
+            .filter(|f| !f.is_gen && called_by_name(&f.name))
             .map(|f| f.name.as_str()),
     );
     let defaults = (program.contracts.iter().flat_map(|c| &c.members)).filter_map(|m| m.default());
