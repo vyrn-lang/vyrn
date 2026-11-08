@@ -21,7 +21,16 @@ pub fn sha256_hex(data: &[u8]) -> String {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
     ];
-    // The input, its padding of at most 64 bytes and its length, in one block.
+    compress(&mut h, &padded(data));
+    let mut hex = String::with_capacity(64);
+    for x in h {
+        let _ = write!(hex, "{x:08x}");
+    }
+    hex
+}
+
+/// `data`, its padding of at most 64 bytes and its length, as whole blocks.
+fn padded(data: &[u8]) -> Vec<u8> {
     let mut msg = Vec::with_capacity(data.len() + 72);
     msg.extend_from_slice(data);
     let bit_len = (data.len() as u64).wrapping_mul(8);
@@ -30,8 +39,28 @@ pub fn sha256_hex(data: &[u8]) -> String {
         msg.push(0);
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
+    msg
+}
 
-    for chunk in msg.chunks_exact(64) {
+/// Runs the compression function over each 64-byte block of `blocks`: with
+/// the SHA extensions on an x86_64 CPU that has them, else with the portable
+/// code, which every other target runs (aarch64, wasm).
+fn compress(h: &mut [u32; 8], blocks: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("sha")
+        && is_x86_feature_detected!("ssse3")
+        && is_x86_feature_detected!("sse4.1")
+    {
+        // SAFETY: the three checks above detect every feature compress_ni
+        // enables but sse2, which every x86_64 CPU has.
+        return unsafe { compress_ni(h, blocks) };
+    }
+    compress_soft(h, blocks)
+}
+
+/// The compression function in portable code.
+fn compress_soft(h: &mut [u32; 8], blocks: &[u8]) {
+    for chunk in blocks.chunks_exact(64) {
         let mut w = [0u32; 64];
         for (i, word) in chunk.chunks_exact(4).enumerate() {
             w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
@@ -75,11 +104,54 @@ pub fn sha256_hex(data: &[u8]) -> String {
         h[6] = h[6].wrapping_add(g);
         h[7] = h[7].wrapping_add(hh);
     }
-    let mut hex = String::with_capacity(64);
-    for x in h {
-        let _ = write!(hex, "{x:08x}");
+}
+
+/// Runs the SHA-256 compression function over each 64-byte block of `blocks`
+/// with the x86 SHA extensions.
+///
+/// # Safety
+///
+/// The CPU must have the `sha`, `sse2`, `ssse3` and `sse4.1` features.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+unsafe fn compress_ni(h: &mut [u32; 8], blocks: &[u8]) {
+    use std::arch::x86_64::*;
+    let k = |i: usize| _mm_loadu_si128(K.as_ptr().add(4 * i).cast());
+    let mask = _mm_set_epi64x(0x0c0d_0e0f_0809_0a0b, 0x0405_0607_0001_0203);
+    let dcba = _mm_loadu_si128(h.as_ptr().cast());
+    let hgfe = _mm_loadu_si128(h.as_ptr().add(4).cast());
+    let cdab = _mm_shuffle_epi32(dcba, 0xb1);
+    let efgh = _mm_shuffle_epi32(hgfe, 0x1b);
+    let mut abef = _mm_alignr_epi8(cdab, efgh, 8);
+    let mut cdgh = _mm_blend_epi16(efgh, cdab, 0xf0);
+    for block in blocks.chunks_exact(64) {
+        let (abef0, cdgh0) = (abef, cdgh);
+        let p = block.as_ptr().cast::<__m128i>();
+        let mut w = [
+            _mm_shuffle_epi8(_mm_loadu_si128(p), mask),
+            _mm_shuffle_epi8(_mm_loadu_si128(p.add(1)), mask),
+            _mm_shuffle_epi8(_mm_loadu_si128(p.add(2)), mask),
+            _mm_shuffle_epi8(_mm_loadu_si128(p.add(3)), mask),
+        ];
+        for i in 0..16 {
+            if i >= 4 {
+                let t = _mm_add_epi32(
+                    _mm_sha256msg1_epu32(w[i % 4], w[(i + 1) % 4]),
+                    _mm_alignr_epi8(w[(i + 3) % 4], w[(i + 2) % 4], 4),
+                );
+                w[i % 4] = _mm_sha256msg2_epu32(t, w[(i + 3) % 4]);
+            }
+            let t = _mm_add_epi32(w[i % 4], k(i));
+            cdgh = _mm_sha256rnds2_epu32(cdgh, abef, t);
+            abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32(t, 0x0e));
+        }
+        abef = _mm_add_epi32(abef, abef0);
+        cdgh = _mm_add_epi32(cdgh, cdgh0);
     }
-    hex
+    let feba = _mm_shuffle_epi32(abef, 0x1b);
+    let dchg = _mm_shuffle_epi32(cdgh, 0xb1);
+    _mm_storeu_si128(h.as_mut_ptr().cast(), _mm_blend_epi16(feba, dchg, 0xf0));
+    _mm_storeu_si128(h.as_mut_ptr().add(4).cast(), _mm_alignr_epi8(dchg, feba, 8));
 }
 
 #[cfg(test)]
@@ -105,5 +177,27 @@ mod tests {
             sha256_hex(&[b'a'; 64]),
             "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
         );
+    }
+
+    #[test]
+    fn the_extensions_compress_each_block_as_the_portable_code_does() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let random: Vec<u8> = (0..1 << 20)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        let inputs: [&[u8]; 4] = [b"", b"abc", &[b'a'; 64], &random];
+        for input in inputs {
+            let (mut a, mut b) = ([0x6a09e667u32; 8], [0x6a09e667u32; 8]);
+            for (i, block) in padded(input).chunks_exact(64).enumerate() {
+                compress(&mut a, block);
+                compress_soft(&mut b, block);
+                assert_eq!(a, b, "block {i} of {} bytes", input.len());
+            }
+        }
     }
 }
