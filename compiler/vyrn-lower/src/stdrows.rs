@@ -1,7 +1,7 @@
 //! Std's stored rows: what each given function of a std module
 //! ([`Body::Given`]) leaves its importers, written by the module's own load
-//! and read where `vyrn check` takes std as its interface
-//! ([`loader::std_given`]).
+//! and read by a load that gives std bodies: `vyrn check`
+//! ([`loader::std_given`]), and an emit host for what only gen fns reach.
 //!
 //! A row is what the judgment memo keeps of a body ([`Judgment`]): its frames
 //! as the effect judgment walks them, the answer the kernel read, its fact
@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use vyrn_frontend::ast::{Body, Function, Program, Type};
-use vyrn_frontend::checker::{Fenced, StoredLambda, StoredSource};
+use vyrn_frontend::checker::{Fenced, Recorded, StoredLambda, StoredSource};
 use vyrn_frontend::core::check::{Fact, Word};
 use vyrn_frontend::diagnostics::Diagnostic;
 use vyrn_frontend::effects::{Call, Effect, Effects, Mark, Walked};
@@ -125,6 +125,24 @@ impl Given {
         Ok(out)
     }
 
+    /// The rows `program` carries ([`Program::given`]); none for a program no
+    /// load gave a body.
+    pub(crate) fn of(program: &Program) -> Arc<Given> {
+        let rows = program
+            .given
+            .0
+            .clone()
+            .and_then(|r| r.downcast::<Given>().ok());
+        rows.unwrap_or_default()
+    }
+
+    /// `record`, the checker's record of the program, with the function values
+    /// the given bodies store and pass.
+    pub(crate) fn record(&self, mut record: Recorded) -> Recorded {
+        record.stored.sources.extend(self.sources.iter().cloned());
+        record
+    }
+
     /// The row of the given function `f` of `program`, under the program's
     /// names; `None` for a written one.
     fn stored(&self, program: &Program, f: &Function) -> Option<Stored> {
@@ -138,12 +156,17 @@ impl Given {
     }
 
     /// The row the placer serves the given function `func` of `program`, with
-    /// the memo key it is served under; `None` for a written one.
+    /// the memo key it is served under. A written one with a row, an impl
+    /// method, is served only to a host that emits nothing, because an
+    /// emitter walks the body the placer states.
     pub(crate) fn serve(
         &self,
         program: &Program,
         func: &Function,
     ) -> Option<(JudgmentKey, Judgment)> {
+        if func.body.written().is_some() && vyrn_frontend::movecheck::emitting() {
+            return None;
+        }
         let mut s = self.stored(program, func)?;
         s.judgment.calls.clear();
         let m = func.module.clone()?;
@@ -368,7 +391,9 @@ impl Entry {
         let text = resolver.read(m).map_err(|_| unread())?;
         let session = Session::rows_writer();
         let own = loader::rows_writer(opts, m, session.clone());
-        let (loaded, _) = crate::pipeline::load_warned(&text, m, &own, resolver, engine);
+        let (loaded, _) = vyrn_frontend::movecheck::emitting_nothing(|| {
+            crate::pipeline::load_warned(&text, m, &own, resolver, engine)
+        });
         let (program, world) = loaded?;
         let mut judged = session.take_judgments();
         let root = program.spellings.root.as_str();

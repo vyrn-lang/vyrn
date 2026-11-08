@@ -639,12 +639,7 @@ fn placed_reach(
     program: &vyrn_frontend::ast::Program,
     world: &crate::World,
 ) -> Vec<(Option<String>, Effects)> {
-    let world = crate::world::analyzed(
-        program,
-        world.ownership.record.clone(),
-        false,
-        Default::default(),
-    );
+    let world = crate::world::analyzed(program, world.ownership.record.clone(), false);
     let own = &world.ownership;
     let lowered = crate::lower_with(program, own);
     let mut bodies = Vec::new();

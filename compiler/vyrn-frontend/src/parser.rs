@@ -531,6 +531,7 @@ fn build(
         prove: None,
         proved: Default::default(),
         fenced: Default::default(),
+        given: Default::default(),
         session: Default::default(),
         lazy: None,
     };

@@ -126,8 +126,12 @@ the playground serves an embedded `std/`. The loader:
   key and its text hash, in the generator cache's directory. Under `vyrn
   check` (`loader::std_given`) each non-generic function's body is
   `ast::Body::Given`, unparsed and untyped, and its module's stored row stands
-  for it (below). The load lexes and parses any other cut body from the
-  module's text only where a root can reach it by spelling (`parse_reached`),
+  for it (below). Under a host that emits a module (`movecheck::Host::Emit`)
+  each non-generic function that only gen fn bodies reach is given the same
+  way, because no run enters it, unless `VYRN_NO_GEN_CACHE` leaves no rows
+  entry to keep; a runtime module's functions stay written. The load lexes and parses any other cut
+  body from the module's text only where a root can reach it by spelling
+  (`parse_reached`),
   drops each function no spelling reaches before the link, and drops each
   function, test and bench of such a module that no root reaches by name
   (`drop_unreached`), following a given body's stored names, so an importer
@@ -416,11 +420,12 @@ No later pass reads a fact, and the check prover takes none as a premise.
 (`movecheck::in_source_order`) and memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
 keystroke re-judges only the bodies whose key changed.
 
-`vyrn check` reads a stored row for each given std function
+A load reads a stored row for each given std function
 (`vyrn_lower::stdrows`), written by its module's own load into the generator
-cache's directory. That load expands projections and names its sites as an
-importer's does (`loader::rows_writer`), so a row judges the body an importer
-runs. A row holds the judgment the memo keeps of a body, the calls the
+cache's directory. That load emits nothing under any host
+(`movecheck::emitting_nothing`), and expands projections and names its sites
+as an importer's does (`loader::rows_writer`), so a row judges the body an
+importer runs. A row holds the judgment the memo keeps of a body, the calls the
 worklist follows out of it, and what the generation fence reads of it
 (`checker::Fenced`); each module adds the function values its bodies store and
 pass. `stdrows::Given::read` reads them before the check, and names each
@@ -428,7 +433,9 @@ declaration by its written name and module, so a program that renames one
 apart reads it under the program's name. The fence reads `Program::fenced`,
 the effect judgment the stored sources in the record, the worklist roots a
 given function and follows its stored calls, and the placer serves its row as
-it serves a memo entry and never builds it. A module whose rows a load is
+it serves a memo entry and never builds it. A written impl method has a row
+too, which only a host that emits nothing is served, because an emitter walks
+the body the placer states. A module whose rows a load is
 writing, or whose generator import wrote the root, is written in that load
 (`loader::rows_writer`), so the runtime modules that inject each other write
 no cycle.

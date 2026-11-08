@@ -8368,7 +8368,7 @@ struct Refused {
 /// refuses for another reason (a double free, a use after release), is left
 /// as the plan had it.
 pub fn augment(program: &Program, w: &mut World, judging: bool) {
-    let given = std::mem::take(&mut w.given);
+    let given = crate::stdrows::Given::of(program);
     let own = &mut w.ownership;
     let mut r = Refused::default();
     let _p = vyrn_frontend::prof::phase("placer");
@@ -8384,7 +8384,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         .flatten();
     drop(js);
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
-    let mut lowered = crate::lowered(program, own, memo.is_some(), &given);
+    let mut lowered = crate::lowered(program, own, memo.is_some());
     drop(lw);
     w.unresolved = (memo.is_none()).then(|| std::mem::take(&mut lowered.unresolved));
     w.fns = Fns::lowered(&lowered);
@@ -8916,7 +8916,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // after one that built at least one of them, since only a new body's
     // placement adds to `placed`.
     while dispatches {
-        let mut again = crate::lowered(program, own, false, &given);
+        let mut again = crate::lowered(program, own, false);
         w.unresolved = Some(std::mem::take(&mut again.unresolved));
         let mut placed: Vec<Release> = Vec::new();
         for inst in &again.instances {

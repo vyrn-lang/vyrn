@@ -103,28 +103,36 @@ fn check(
     pending: Option<floor::Pending>,
     linker: Option<symbols::Linker<'_>>,
 ) -> (symbols::Judged, Option<Arc<crate::World>>) {
-    // A load that took std as its interface reads each given body's row
-    // before the check: the generation fence reads it.
-    let mut given = match linker {
-        Some((_, opts, resolver)) if loader::std_given(opts) => {
-            match crate::stdrows::Given::read(program, opts, resolver, engine) {
-                Ok(given) => given,
-                Err(diagnostics) => {
-                    let judged = symbols::Judged {
-                        diagnostics,
-                        binders: Default::default(),
-                        memory: Default::default(),
-                        cost: Vec::new(),
-                        waits: Vec::new(),
-                    };
-                    return (judged, None);
+    // A load that gave std bodies reads each given body's row before the
+    // check: the generation fence reads it. A program checked again without
+    // its load keeps the rows it carries. This check's record takes the
+    // function values the given bodies store and pass; the program keeps a
+    // copy only where a host that emits may analyze it again.
+    let mut sources = Vec::new();
+    if let Some((_, opts, resolver)) = linker {
+        match crate::stdrows::Given::read(program, opts, resolver, engine) {
+            Ok(mut given) => {
+                program.fenced = Arc::new(std::mem::take(&mut given.fenced));
+                sources = std::mem::take(&mut given.sources);
+                if vyrn_frontend::movecheck::emitting() {
+                    given.sources.clone_from(&sources);
                 }
+                program.given = ast::GivenRef(Some(Arc::new(given)));
+            }
+            Err(diagnostics) => {
+                let judged = symbols::Judged {
+                    diagnostics,
+                    binders: Default::default(),
+                    memory: Default::default(),
+                    cost: Vec::new(),
+                    waits: Vec::new(),
+                };
+                return (judged, None);
             }
         }
-        _ => Default::default(),
-    };
-    program.fenced = Arc::new(std::mem::take(&mut given.fenced));
-    let mut sources = std::mem::take(&mut given.sources);
+    } else {
+        sources.clone_from(&crate::stdrows::Given::of(program).sources);
+    }
     let (mut diags, refused, binders, record) =
         vyrn_frontend::check_and_synthesize(program, engine, linker);
     // One type record for the readers below: the check's own, or a new one
@@ -141,7 +149,7 @@ fn check(
     let mut judged = None;
     if diags.is_empty() {
         let _p = prof::phase("movecheck");
-        let (found, world) = refusals(program, record(program), given);
+        let (found, world) = refusals(program, record(program));
         diags.extend(found);
         memory = world.ownership.memory.clone();
         judged = Some(world);
@@ -150,7 +158,7 @@ fn check(
         // Each typed refusal stands before the first of the checker's in its
         // file at a later line, so the list keeps the checker's own order.
         let record = record(program);
-        for d in lower_typed(program, refused, &record, given) {
+        for d in lower_typed(program, refused, &record) {
             let at = diags
                 .iter()
                 .position(|c| c.file == d.file && c.line > d.line)
@@ -187,11 +195,10 @@ fn check(
 pub fn refusals(
     program: &ast::Program,
     record: Arc<checker::Recorded>,
-    given: crate::stdrows::Given,
 ) -> (Vec<Diagnostic>, Arc<crate::World>) {
     // The placer judges a core body for every instance. Only this analysis
     // may reuse a judgment (`movecheck::Judgments`) or serve a stored row.
-    let world = crate::world::analyzed(program, record, true, given);
+    let world = crate::world::analyzed(program, record, true);
     // A program the typed judgment refuses gets those refusals alone.
     let mut diags = match world.typed_diagnostics() {
         [] => world.refusal_diagnostics(),
@@ -268,7 +275,6 @@ fn lower_typed(
     program: &mut ast::Program,
     mut out: HashSet<String>,
     record: &checker::Recorded,
-    given: crate::stdrows::Given,
 ) -> Vec<Diagnostic> {
     // A method of a refused impl is reached by name, or by a call the checker
     // dispatched on its receiver's type key. A receiver typed by a type
@@ -370,7 +376,7 @@ fn lower_typed(
     // `record` typed the functions just moved out, so the analysis checks
     // again.
     let record = Arc::new(checker::record(program));
-    let typed = crate::world::analyzed(program, record, false, given)
+    let typed = crate::world::analyzed(program, record, false)
         .typed_diagnostics()
         .to_vec();
     let kept = std::mem::take(&mut program.functions);

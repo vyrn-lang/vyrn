@@ -198,8 +198,8 @@ pub struct Judgment {
 }
 
 thread_local! {
-    /// Set by [`emit_nothing`].
-    static NO_EMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set by [`declare`].
+    static HOST: std::cell::Cell<Host> = const { std::cell::Cell::new(Host::Report) };
     /// `(judged, reused)` since [`reset_judgment_tally`].
     static TALLY: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
 }
@@ -209,15 +209,44 @@ thread_local! {
 /// needs eviction.
 pub(crate) type Judged = (u64, HashMap<JudgmentKey, Judgment>);
 
-/// Declares that this host emits nothing from the program it checks (`vyrn
-/// check`), so the placer skips the facts only an emitter reads.
-pub fn emit_nothing() {
-    NO_EMIT.with(|r| r.set(true));
+/// What a host does with the program it checks, which decides what a load
+/// reads of std and what the placer builds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Host {
+    /// Emits nothing (`vyrn check`): every non-generic std body is given, and
+    /// the placer skips the facts only an emitter reads.
+    Check,
+    /// Emits, and reports on every body it judges, so it reads each body
+    /// whole: `vyrn why`, the editor and the test suites. A host that
+    /// declares nothing is one.
+    Report,
+    /// Emits a module and reports on nothing a run does not reach, so a std
+    /// body only gen fns reach is given (`loader::parse_reached`).
+    Emit,
 }
 
-/// Whether the host emits from the program it checks: no after [`emit_nothing`].
+/// Declares what this thread's host does with the programs it checks.
+pub fn declare(host: Host) {
+    HOST.with(|h| h.set(host));
+}
+
+/// What this thread's host does ([`declare`]).
+pub fn host() -> Host {
+    HOST.with(std::cell::Cell::get)
+}
+
+/// Whether the host emits from the program it checks.
 pub fn emitting() -> bool {
-    !NO_EMIT.with(|r| r.get())
+    host() != Host::Check
+}
+
+/// Runs `f` as a [`Host::Check`], then restores the host: a std module's own
+/// load writes the rows `vyrn check` would, under any host.
+pub fn emitting_nothing<T>(f: impl FnOnce() -> T) -> T {
+    let host = HOST.with(|h| h.replace(Host::Check));
+    let out = f();
+    HOST.with(|h| h.set(host));
+    out
 }
 
 /// The judgment cache of the program's session, open for one analysis. It

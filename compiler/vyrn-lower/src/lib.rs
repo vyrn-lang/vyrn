@@ -310,11 +310,10 @@ pub fn lower_with<'a>(
     program: &'a Program,
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Lowered<'a> {
-    lowered(program, ownership, false, &Default::default())
+    lowered(program, ownership, false)
 }
 
-/// [`lower_with`] for the placer, where `given` holds the stored row of every
-/// given body ([`vyrn_frontend::ast::Body::Given`]). With `reuse`, for a host
+/// [`lower_with`] for the placer. With `reuse`, for a host
 /// that runs no emitter, an instance whose walk [`Walks`] holds takes the
 /// calls the walk found, and adds no facts and no lambda body; [`walked`]
 /// gives the facts to a reader that builds it.
@@ -322,11 +321,11 @@ pub(crate) fn lowered<'a>(
     program: &'a Program,
     ownership: &vyrn_frontend::own::Ownership,
     reuse: bool,
-    given: &crate::stdrows::Given,
 ) -> Lowered<'a> {
     let recorded = ownership.record.clone();
     let build_span = vyrn_frontend::prof::phase("lower: build");
-    let mut lowered = build(program, &recorded, ownership, reuse, given);
+    let given = crate::stdrows::Given::of(program);
+    let mut lowered = build(program, &recorded, ownership, reuse, &given);
     drop(build_span);
     // A spelling allocates, so only the instances of one generic, which tie on
     // the name, spell their type arguments, each once.

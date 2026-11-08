@@ -248,6 +248,25 @@ pub fn unplaced(x: &impl std::fmt::Debug) -> String {
     out
 }
 
+/// The stored rows a program's given bodies stand for: `vyrn_lower::stdrows`
+/// writes and reads them, and the frontend only carries them. They follow
+/// from the program's module hashes, so every two compare equal and print
+/// alike, as [`crate::session::SessionRef`]s do.
+#[derive(Clone, Default)]
+pub struct GivenRef(pub Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
+
+impl std::fmt::Debug for GivenRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GivenRef")
+    }
+}
+
+impl PartialEq for GivenRef {
+    fn eq(&self, _: &GivenRef) -> bool {
+        true
+    }
+}
+
 /// A whole program. `main` is the entry point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
@@ -317,6 +336,10 @@ pub struct Program {
     /// linked name: its module's stored row (`vyrn_lower::stdrows`), written
     /// before the check. Empty for a program with no given body.
     pub fenced: std::sync::Arc<std::collections::BTreeMap<String, crate::checker::Fenced>>,
+    /// The stored rows of the [`Body::Given`] functions, read before the
+    /// check, which every analysis of the program and of a host's program
+    /// built from it reads.
+    pub given: GivenRef,
     /// The modules whose unreached functions the load dropped: every `std/`
     /// module but the root. `None` where the load dropped nothing, as a
     /// generator's own load and a program that calls `derive` do. An emitted
@@ -930,8 +953,8 @@ impl Function {
     ///
     /// # Panics
     ///
-    /// On a given body, which only a load that emits nothing holds
-    /// ([`crate::loader::std_given`]).
+    /// On a given body, which no run enters ([`crate::loader::std_given`],
+    /// `loader::parse_reached`).
     pub fn block(&self) -> &Block {
         (self.body.written()).unwrap_or_else(|| panic!("`{}` is given and emitted", self.name))
     }
