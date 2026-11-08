@@ -1853,6 +1853,7 @@ fn load_modules(
                     prove: None,
                     proved: Default::default(),
                     fenced: Default::default(),
+                    given: Default::default(),
                     session: Default::default(),
                     lazy: None,
                 },
@@ -2265,6 +2266,13 @@ struct Cut {
 }
 
 impl Bodies {
+    /// The names the body of the given function `fi` of the parse spells;
+    /// `None` where it is not given ([`is_given`]).
+    fn names_of(&self, fi: usize) -> Option<GivenNames> {
+        let i = (self.given).binary_search_by_key(&fi, |(f, _)| *f).ok()?;
+        Some(GivenNames::new(self.names.clone(), self.given[i].1.clone()))
+    }
+
     fn cut(&self, f: &Function) -> Option<&Cut> {
         let i = (self.cuts).binary_search_by_key(&(f.line, f.col), |c| c.at);
         Some(&self.cuts[i.ok()?])
@@ -2344,6 +2352,20 @@ pub fn in_std(key: &str, opts: &LoadOptions) -> bool {
 /// generator's load and the floor read bodies.
 pub fn std_given(opts: &LoadOptions) -> bool {
     !crate::movecheck::emitting() && opts.nest.depth == 0 && opts.artifacts.is_none()
+}
+
+/// Whether this load gives each non-generic std function no run reaches
+/// ([`parse_reached`]): the outermost load of a [`Host::Emit`], which reads
+/// the rows as [`std_given`]'s does, where the cache keeps the rows entries.
+/// Without the cache an own load would write rows no later run reads. A
+/// generator's load runs its gen fn.
+///
+/// [`Host::Emit`]: crate::movecheck::Host::Emit
+fn gives_unrun(opts: &LoadOptions) -> bool {
+    crate::movecheck::host() == crate::movecheck::Host::Emit
+        && opts.nest.depth == 0
+        && opts.artifacts.is_none()
+        && !gen_cache_off()
 }
 
 /// Whether `f`, a top-level function of an imported std module whose
@@ -5878,6 +5900,19 @@ fn generator_calls(modules: &[Module]) -> impl Iterator<Item = &str> {
     })
 }
 
+/// Moves each function `n` names, or that the builtin `n` routes to, from
+/// `waiting` to `work`.
+fn reach(
+    n: &str,
+    waiting: &mut HashMap<&str, Vec<(usize, usize)>>,
+    work: &mut Vec<(usize, usize)>,
+) {
+    work.extend(waiting.remove(n).into_iter().flatten());
+    for r in routes_of(n) {
+        work.extend(waiting.remove(unprefixed(r)).into_iter().flatten());
+    }
+}
+
 /// Parses the cut body ([`Parsed::bodies`]) of each function a root can reach
 /// by its spelling, and drops each function with a cut body no spelling
 /// reaches, before the link spends work on it. A given body ([`Body::Given`])
@@ -5890,6 +5925,12 @@ fn generator_calls(modules: &[Module]) -> impl Iterator<Item = &str> {
 /// that declares it, and a namespace member `ns.f` is the field `f`: the
 /// link's walk ([`drop_unreached`]) drops every function dropped here. A
 /// program that calls `derive` parses every cut body.
+///
+/// Under a build ([`gives_unrun`]) gen fns and their bodies reach last,
+/// because a gen fn runs in no run: a function only they reach takes its
+/// stored row ([`Body::Given`]) where it may ([`is_given`]), unparsed. A
+/// runtime module's functions stay written, because the emitter calls them
+/// by name.
 fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<Diagnostic>> {
     let generators: HashSet<String> = generator_calls(modules).map(str::to_string).collect();
     // The functions with a cut body no spelling reached yet, by name.
@@ -5912,7 +5953,19 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             .get(f.name.as_str())
             .is_some_and(|w| w.iter().any(|(m, _)| *m == mi))
     };
+    // A test or bench body may call a gen fn, which then runs.
+    let mut tested: Vec<&str> = Vec::new();
+    for t in (modules.iter()).flat_map(|m| m.program.tests.iter().chain(&m.program.benches)) {
+        crate::ast::spelled(&t.body, &mut tested);
+    }
+    let gives = gives_unrun(opts) && {
+        let fns = modules.iter().flat_map(|m| &m.program.functions);
+        let gens: HashSet<&str> = fns.filter(|f| f.is_gen).map(|f| f.name.as_str()).collect();
+        !tested.iter().any(|n| gens.contains(n))
+    };
     let mut names: Vec<&str> = opts.host_calls.to_vec();
+    // What the gen fn bodies outside a cut spell, under `gives`.
+    let mut unrun: Vec<&str> = Vec::new();
     for (mi, m) in modules.iter().enumerate() {
         match runtime_module(&m.key, opts).map(|rt| &rt.entries) {
             Some(Entries::Every) => {
@@ -5923,10 +5976,12 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             None => {}
         }
         for f in m.program.functions.iter().filter(|f| !unparsed(mi, f)) {
-            f.body.spelled(&mut names);
-        }
-        for t in m.program.tests.iter().chain(&m.program.benches) {
-            crate::ast::spelled(&t.body, &mut names);
+            let to = if gives && f.is_gen {
+                &mut unrun
+            } else {
+                &mut names
+            };
+            f.body.spelled(to);
         }
         for f in (m.program.impls.iter()).flat_map(|im| im.methods.iter().chain(&im.places)) {
             if let Some(b) = f.body.written() {
@@ -5952,25 +6007,50 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
         let imported = imports.map(|n| n.original.as_str());
         names.extend(imported.filter(|n| !generators.contains(*n)));
     }
+    names.append(&mut tested);
     names.extend(RUNTIME_CALLS.iter().map(|(n, ..)| *n));
     if opts.nest.gen.is_some() {
         names.extend(GEN_HOST.calls());
     }
-    let mut derive = names.contains(&"derive");
+    let mut derive = names.contains(&"derive") || unrun.contains(&"derive");
     let mut work: Vec<(usize, usize)> = Vec::new();
-    // Each body parsed here, set after the walk, which borrows `modules`.
+    // Each body parsed here and each function given, set after the walk,
+    // which borrows `modules`.
     let mut parsed: Vec<(usize, usize, Block)> = Vec::new();
+    let mut given: Vec<(usize, usize, GivenNames)> = Vec::new();
+    // Whether the walk reaches from `unrun`, after every run's reach, and
+    // each gen fn a run's reach met: a gen fn runs in no run.
+    let mut giving = false;
+    let mut deferred: Vec<(usize, usize)> = Vec::new();
     for n in names {
-        work.extend(waiting.remove(n).into_iter().flatten());
-        for r in routes_of(n) {
-            work.extend(waiting.remove(unprefixed(r)).into_iter().flatten());
-        }
+        reach(n, &mut waiting, &mut work);
     }
     loop {
         while let Some((mi, fi)) = work.pop() {
             let m = &modules[mi];
             let f = &m.program.functions[fi];
-            let cut = (m.cut.as_ref().and_then(|p| p.bodies.as_ref()))
+            if gives && f.is_gen && !giving && !derive {
+                deferred.push((mi, fi));
+                continue;
+            }
+            let bodies = m.cut.as_ref().and_then(|p| p.bodies.as_ref());
+            // The emitter calls a runtime module's functions by name.
+            let owner = generated_importer(&m.key).unwrap_or(&m.key);
+            let gift = (bodies.filter(|_| giving && !derive))
+                .filter(|_| is_given(f, Gives::of(owner, opts)))
+                .filter(|_| runtime_module(&m.key, opts).is_none())
+                .and_then(|b| b.names_of(fi));
+            if let Some(g) = gift {
+                let at = given.len();
+                given.push((mi, fi, g));
+                let names: Vec<&str> = given[at].2.iter().collect();
+                derive |= names.contains(&"derive");
+                for n in names {
+                    reach(n, &mut waiting, &mut work);
+                }
+                continue;
+            }
+            let cut = bodies
                 .and_then(|b| Some((b, b.cut(f)?)))
                 .filter(|_| f.body.written().is_some_and(|b| b.stmts.is_empty()));
             let body = match cut.map(|(b, cut)| b.parse(cut, &f.type_params)) {
@@ -5992,18 +6072,25 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             }
             derive |= names.contains(&"derive");
             for n in names {
-                work.extend(waiting.remove(n).into_iter().flatten());
-                for r in routes_of(n) {
-                    work.extend(waiting.remove(unprefixed(r)).into_iter().flatten());
-                }
+                reach(n, &mut waiting, &mut work);
             }
             parsed.extend(body.map(|b| (mi, fi, b)));
         }
         // A `derive` generator writes calls after the check, to any function.
-        if !derive || waiting.is_empty() {
+        if derive && !(waiting.is_empty() && given.is_empty() && deferred.is_empty()) {
+            work.append(&mut deferred);
+            work.extend(given.drain(..).map(|(mi, fi, _)| (mi, fi)));
+            work.extend(waiting.drain().flat_map(|(_, at)| at));
+            continue;
+        }
+        if giving || (unrun.is_empty() && deferred.is_empty()) {
             break;
         }
-        work.extend(waiting.drain().flat_map(|(_, at)| at));
+        giving = true;
+        work.append(&mut deferred);
+        for n in std::mem::take(&mut unrun) {
+            reach(n, &mut waiting, &mut work);
+        }
     }
     // A gen fn an import line names stays for the link to resolve the import
     // ([`drop_unreached`] drops it after).
@@ -6012,6 +6099,9 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
         .collect();
     for (mi, fi, body) in parsed {
         modules[mi].program.functions[fi].body = Body::Written(body);
+    }
+    for (mi, fi, names) in given {
+        modules[mi].program.functions[fi].body = Body::Given(names);
     }
     left.sort_unstable();
     for (mi, m) in modules.iter_mut().enumerate() {

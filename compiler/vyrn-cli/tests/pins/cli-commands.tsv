@@ -4,7 +4,7 @@ serve, dev	697	6
 bench	500	11
 dev	408	15
 build	355	20
-(dispatch)	336	4
+(dispatch)	341	4
 doc	293	9
 routes	226	1
 run	209	2
@@ -22,4 +22,4 @@ new	54	5
 emit-gen	33	3
 emit-wat, emit-lowered	23	0
 serve	15	2
-check	12	0
+check	11	0

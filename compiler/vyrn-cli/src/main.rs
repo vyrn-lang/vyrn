@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use vyrn_frontend::movecheck::Host;
 use vyrn_frontend::project::Expansions;
 use vyrn_genwasm::engine;
 use vyrn_lower::insight::{self, CostFn, CostTable};
@@ -313,6 +314,7 @@ fn dispatch(args: &mut Vec<String>) -> Outcome {
         );
         return Err(ExitCode::from(2));
     };
+    vyrn_frontend::movecheck::declare(cmd.host);
     (cmd.run)(&Call::parse(cmd, flags, &args[2..])?)
 }
 
@@ -321,6 +323,8 @@ fn dispatch(args: &mut Vec<String>) -> Outcome {
 /// command or a flag is stated once.
 struct Cmd {
     name: &'static str,
+    /// What the command does with the programs it checks.
+    host: Host,
     pos: Pos,
     flags: &'static [Flag],
     /// The usage screen's gloss of the command.
@@ -367,6 +371,7 @@ const WORKERS: Flag = Flag(
 /// A [`Cmd`] row by position, so the table reads one command to a line.
 const fn cmd(
     name: &'static str,
+    host: Host,
     pos: Pos,
     run: fn(&Call) -> Outcome,
     about: &'static str,
@@ -374,6 +379,7 @@ const fn cmd(
 ) -> Cmd {
     Cmd {
         name,
+        host,
         pos,
         flags,
         about,
@@ -384,15 +390,15 @@ const fn cmd(
 /// Every command, in the order of the usage screen and `docs/tooling.md`.
 #[rustfmt::skip]
 const COMMANDS: &[Cmd] = &[
-    cmd("run", Pos::Program, run_cmd, "compiles and runs; trailing args reach the program's args()", &[]),
-    cmd("check", Pos::File, check_cmd, "loads, checks and judges the program, runs every generator, and prints ok", &[]),
-    cmd("fix", Pos::File, fix_cmd, "braces each leading-bar enum and applies the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused", &[]),
-    cmd("build", Pos::File, build, "a native executable: the module through wasm2c and clang (needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)", &[
+    cmd("run", Host::Emit, Pos::Program, run_cmd, "compiles and runs; trailing args reach the program's args()", &[]),
+    cmd("check", Host::Check, Pos::File, check_cmd, "loads, checks and judges the program, runs every generator, and prints ok", &[]),
+    cmd("fix", Host::Report, Pos::File, fix_cmd, "braces each leading-bar enum and applies the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused", &[]),
+    cmd("build", Host::Emit, Pos::File, build, "a native executable: the module through wasm2c and clang (needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)", &[
         Flag("-o", Some("out"), ""),
         Flag("--target", Some("wasm"), "writes the module itself, with no LLVM, clang or sysroot"),
     ]),
-    cmd("test", Pos::File, test_cmd, "runs the root file's `test` blocks", &[Flag("--name", Some("substring"), "")]),
-    cmd("bench", Pos::File, bench_cmd, "times the root file's `bench` blocks natively", &[
+    cmd("test", Host::Emit, Pos::File, test_cmd, "runs the root file's `test` blocks", &[Flag("--name", Some("substring"), "")]),
+    cmd("bench", Host::Emit, Pos::File, bench_cmd, "times the root file's `bench` blocks natively", &[
         Flag("--name", Some("substring"), ""),
         Flag("--check", None, "runs each once, compiled, with no timing; excludes --json and --compare"),
         Flag("--json", None, "the machine-readable report"),
@@ -400,44 +406,44 @@ const COMMANDS: &[Cmd] = &[
         Flag("--threshold", Some("factor"), "the regression factor for --compare (default 1.5)"),
         Flag("--ungate", Some("file"), "bench names, one per line, whose regressions --compare reports and does not fail"),
     ]),
-    cmd("serve", Pos::File, serve_cmd, "an HTTP host for `fn handle(req: Request) -> Response`", &[PORT, WORKERS]),
-    cmd("dev", Pos::None, dev_cmd, "fullstack: builds vyrn.json's `client` to wasm, then serves its `server`, static files and the runtimes", &[PORT, WORKERS]),
-    cmd("fmt", Pos::Many("file.vyrn"), fmt_cmd, "the canonical formatter; no files = the project's main and its local imports", &[
+    cmd("serve", Host::Emit, Pos::File, serve_cmd, "an HTTP host for `fn handle(req: Request) -> Response`", &[PORT, WORKERS]),
+    cmd("dev", Host::Emit, Pos::None, dev_cmd, "fullstack: builds vyrn.json's `client` to wasm, then serves its `server`, static files and the runtimes", &[PORT, WORKERS]),
+    cmd("fmt", Host::Emit, Pos::Many("file.vyrn"), fmt_cmd, "the canonical formatter; no files = the project's main and its local imports", &[
         Flag("--check", None, "writes nothing and lists the files that would change"),
         Flag("--from-json", Some("file.json"), "prints the JSON file as VON instead, headed by `import type`"),
         Flag("--as", Some("Type"), "the type --from-json names (default Config)"),
         Flag("--from", Some("module"), "the module --from-json imports it from (default ./config.vyrn)"),
     ]),
-    cmd("doc", Pos::Maybe("file|dir"), doc_cmd, "Markdown API docs", &[
+    cmd("doc", Host::Report, Pos::Maybe("file|dir"), doc_cmd, "Markdown API docs", &[
         Flag("-o", Some("dir"), "default docs/api/"),
         Flag("--std", None, "documents the std modules too, or the whole std library alone"),
         Flag("--verify", None, "writes nothing and fails on drift"),
     ]),
-    cmd("why", Pos::One("file"), why_cmd, "a module's audience, the path segment that decided it, and every import chain that reaches it", &[
+    cmd("why", Host::Report, Pos::One("file"), why_cmd, "a module's audience, the path segment that decided it, and every import chain that reaches it", &[
         Flag("--contract", None, "which module contract governs the file, and every export's status against it"),
         Flag("--cost", None, "per line: what it allocates, copies and grows, and the checks it keeps"),
         Flag("--provenance", None, "per function returning an array: which parameter positions the result's positions read"),
         Flag("--capability", Some("capability"), "every import chain that pulls the capability into the artifact the file argument names"),
     ]),
-    cmd("routes", Pos::File, routes_cmd, "the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source", &[
+    cmd("routes", Host::Report, Pos::File, routes_cmd, "the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source", &[
         Flag("--json", None, "attaches each route's declaration from the symbol map"),
     ]),
-    cmd("emit-wat", Pos::File, emit_wat, "the module `build --target wasm` writes, as WAT", &[]),
-    cmd("emit-lowered", Pos::File, emit_lowered, "the named core the emitter reads, root module only", &[]),
-    cmd("emit-gen", Pos::File, emit_gen, "the source of every generated module, each under a banner naming its call site", &[
+    cmd("emit-wat", Host::Emit, Pos::File, emit_wat, "the module `build --target wasm` writes, as WAT", &[]),
+    cmd("emit-lowered", Host::Report, Pos::File, emit_lowered, "the named core the emitter reads, root module only", &[]),
+    cmd("emit-gen", Host::Report, Pos::File, emit_gen, "the source of every generated module, each under a banner naming its call site", &[
         Flag("--maps", None, "each generated module's symbol map instead, one JSON document per line"),
     ]),
-    cmd("new", Pos::One("name"), scaffold, "scaffolds vyrn.json, src/main.vyrn and .gitignore", &[]),
-    cmd("add", Pos::One("github:|gist:|https: specifier"), add, "fetches and pins a remote module and adds it to `dependencies`", &[
+    cmd("new", Host::Report, Pos::One("name"), scaffold, "scaffolds vyrn.json, src/main.vyrn and .gitignore", &[]),
+    cmd("add", Host::Report, Pos::One("github:|gist:|https: specifier"), add, "fetches and pins a remote module and adds it to `dependencies`", &[
         Flag("--name", Some("alias"), ""),
     ]),
-    cmd("update", Pos::Maybe("alias|tool"), update, "re-resolves and re-pins the remote dependencies and toolchain tools", &[
+    cmd("update", Host::Report, Pos::Maybe("alias|tool"), update, "re-resolves and re-pins the remote dependencies and toolchain tools", &[
         Flag("--locked", None, "reads through the existing pins and never writes the lock"),
     ]),
-    cmd("vendor", Pos::None, vendor, "copies every locked blob into vyrn_vendor/", &[
+    cmd("vendor", Host::Report, Pos::None, vendor, "copies every locked blob into vyrn_vendor/", &[
         Flag("--check", None, "verifies each one is there and intact"),
     ]),
-    cmd("deps", Pos::Maybe("artifact"), deps, "every declared artifact's module graph, then the toolchain", &[]),
+    cmd("deps", Host::Report, Pos::Maybe("artifact"), deps, "every declared artifact's module graph, then the toolchain", &[]),
 ];
 
 impl Cmd {
@@ -620,7 +626,6 @@ impl Call {
 /// A5.2).
 fn check_cmd(call: &Call) -> Outcome {
     let (p, path) = call.root()?;
-    vyrn_frontend::movecheck::emit_nothing();
     let (_, world) = p.checked(&path, &read_source(&path)?)?;
     failed(vyrn_codegen::check_instantiations(&world))?;
     println!("ok");

@@ -121,7 +121,7 @@ fn check_here(root: &str) -> String {
 /// process, then the first again, print what a fresh `vyrn check` prints for each.
 #[test]
 fn a_check_in_one_process_prints_what_a_fresh_process_prints() {
-    vyrn_frontend::movecheck::emit_nothing();
+    vyrn_frontend::movecheck::declare(vyrn_frontend::movecheck::Host::Check);
     let path = |name: &str| {
         let p = check_dir()
             .join(name)
