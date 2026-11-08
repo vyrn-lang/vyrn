@@ -16,7 +16,9 @@
 //! authenticated by the per-user secret, and records every file its load read
 //! ([`Inputs`]). A foreign, damaged or stale entry reads as a miss, and the
 //! miss writes it again. `VYRN_NO_GEN_CACHE` reads and writes none: each load
-//! writes the entries it needs in memory, once per thread.
+//! writes the entries it needs in memory, once per thread. A read indexes an
+//! entry's rows by the line count each row's header ends with, and decodes a
+//! row only for a function the program links.
 //!
 //! A row names a declaration by its written name and module, so a program
 //! that renames one apart reads it under the program's name. [`Given::read`]
@@ -25,6 +27,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 use std::sync::Arc;
 
 use vyrn_frontend::ast::{Body, Function, Program, Type};
@@ -38,16 +41,15 @@ use vyrn_frontend::movecheck::{Judgment, JudgmentKey};
 use vyrn_frontend::session::Session;
 
 /// The format word that opens an entry.
-const TAG: &str = "stdrows2";
+const TAG: &str = "stdrows3";
 
-/// The stored rows of a program's given functions: each std module's entry
-/// and how the program names what it names.
+/// The stored rows of a program's given functions, each decoded once from
+/// its module's entry and named as the program names it.
 #[derive(Default)]
 pub struct Given {
-    /// By std module key: the module's entry, which holds the rows of the
-    /// modules its generator imports wrote too, and each name the entry holds
-    /// that the program links under another.
-    modules: HashMap<String, (Arc<Entry>, HashMap<String, String>)>,
+    /// By linked name: the row of each function of the program whose module's
+    /// entry holds one, the given functions and a std module's impl methods.
+    rows: HashMap<String, Stored>,
     /// What the generation fence reads of each given function, by linked
     /// name; empty for a program with no written gen fn, whose fence reads
     /// no given body.
@@ -84,31 +86,42 @@ impl Given {
             .map(|(l, (w, m))| ((w.as_str(), m.as_str()), l.as_str()))
             .collect();
         let mut seen = Seen::default();
-        let mut entries: BTreeMap<&str, Arc<Entry>> = BTreeMap::new();
+        let mut entries: BTreeMap<&str, (Arc<Entry>, HashMap<String, String>)> = BTreeMap::new();
         for f in &given {
             let m = f.module.as_deref().expect("a given function is imported");
             let owner = loader::generated_importer(m).unwrap_or(m);
             if !entries.contains_key(owner) {
                 let e = entry(owner, program, opts, resolver, engine, &mut seen)?;
-                entries.insert(owner, e);
-            }
-            if row(&entries[owner], program, f).is_none() {
-                return Err(vec![missing(&f.name, m)]);
+                let names: HashMap<String, String> = (e.homes())
+                    .filter_map(|(own, w, m)| {
+                        let to = *linked.get(&(w, m)).unwrap_or(&w);
+                        (to != own).then(|| (own.to_string(), to.to_string()))
+                    })
+                    .collect();
+                for s in &e.sources {
+                    let mut s = s.clone();
+                    source_names(&mut s, &mut |n| rename(&names, n));
+                    out.sources.push(s);
+                }
+                entries.insert(owner, (e, names));
             }
         }
-        for (owner, e) in entries {
-            let names: HashMap<String, String> = (e.homes.iter())
-                .filter_map(|(own, (w, m))| {
-                    let to = *linked.get(&(w.as_str(), m.as_str())).unwrap_or(&w.as_str());
-                    (to != own).then(|| (own.clone(), to.to_string()))
-                })
-                .collect();
-            for s in &e.sources {
-                let mut s = s.clone();
-                source_names(&mut s, &mut |n| rename(&names, n));
-                out.sources.push(s);
+        for f in &program.functions {
+            let Some(m) = f.module.as_deref() else {
+                continue;
+            };
+            let owner = loader::generated_importer(m).unwrap_or(m);
+            let Some((e, names)) = entries.get(owner) else {
+                continue;
+            };
+            match e.row(m, program.spellings.written(&f.name)) {
+                Some(mut s) => {
+                    each_name(&mut s, &mut |n| rename(names, n));
+                    out.rows.insert(f.name.clone(), s);
+                }
+                None if matches!(f.body, Body::Given(_)) => return Err(vec![missing(&f.name, m)]),
+                None => {}
             }
-            out.modules.insert(owner.to_string(), (e, names));
         }
         out.sources.sort_by_key(source_key);
         out.sources.dedup_by(|a, b| source_key(a) == source_key(b));
@@ -118,8 +131,8 @@ impl Given {
             .any(|f| f.is_gen && matches!(f.body, Body::Written(_)))
         {
             for f in &given {
-                let s = out.stored(program, f).expect("checked above");
-                out.fenced.insert(f.name.clone(), s.fenced);
+                let s = &out.rows[&f.name];
+                out.fenced.insert(f.name.clone(), s.fenced.clone());
             }
         }
         Ok(out)
@@ -143,22 +156,10 @@ impl Given {
         record
     }
 
-    /// The row of the given function `f` of `program`, under the program's
-    /// names; `None` for a written one.
-    fn stored(&self, program: &Program, f: &Function) -> Option<Stored> {
-        let m = f.module.as_deref()?;
-        let (e, names) = self
-            .modules
-            .get(loader::generated_importer(m).unwrap_or(m))?;
-        let mut s = row(e, program, f)?.clone();
-        each_name(&mut s, &mut |n| rename(names, n));
-        Some(s)
-    }
-
-    /// The row the placer serves the given function `func` of `program`, with
-    /// the memo key it is served under. A written one with a row, an impl
-    /// method, is served only to a host that emits nothing, because an
-    /// emitter walks the body the placer states.
+    /// The row the placer serves the given function `func`, with the memo key
+    /// it is served under. A written one with a row, an impl method, is served
+    /// only to a host that emits nothing, because an emitter walks the body
+    /// the placer states.
     pub(crate) fn serve(
         &self,
         program: &Program,
@@ -167,37 +168,32 @@ impl Given {
         if func.body.written().is_some() && vyrn_frontend::movecheck::emitting() {
             return None;
         }
-        let mut s = self.stored(program, func)?;
-        s.judgment.calls.clear();
+        let j = &self.rows.get(&func.name)?.judgment;
+        let judgment = Judgment {
+            verdict: j.verdict.clone(),
+            frames: j.frames.clone(),
+            state: j.state.clone(),
+            summary: j.summary.clone(),
+            calls: Vec::new(),
+        };
         let m = func.module.clone()?;
         let hash = program.module_hashes.get(&m).cloned().unwrap_or_default();
-        Some(((m, hash, func.name.clone()), s.judgment))
+        Some(((m, hash, func.name.clone()), judgment))
     }
 
-    /// The calls the worklist follows out of the given function `f` of
-    /// `program`.
+    /// The calls the worklist follows out of the given function `f`.
     ///
     /// # Panics
     ///
     /// Where `f` has no row: [`Given::read`] gives every given function one,
     /// and only the placer's lowering walks a given body.
-    pub(crate) fn calls(
-        &self,
-        program: &Program,
-        f: &Function,
-    ) -> Vec<(String, HashMap<String, Type>)> {
-        let s = self.stored(program, f);
+    pub(crate) fn calls(&self, f: &Function) -> Vec<(String, HashMap<String, Type>)> {
+        let s = self.rows.get(&f.name);
         let s = s.unwrap_or_else(|| panic!("the given `{}` has no stored row", f.name));
-        (s.judgment.calls.into_iter())
-            .map(|(c, subst)| (c, subst.into_iter().collect()))
+        (s.judgment.calls.iter())
+            .map(|(c, subst)| (c.clone(), subst.iter().cloned().collect()))
             .collect()
     }
-}
-
-/// The row entry `e` holds of the given function `f` of `program`.
-fn row<'e>(e: &'e Entry, program: &Program, f: &Function) -> Option<&'e Stored> {
-    let m = f.module.as_deref()?;
-    e.rows.get(m)?.get(program.spellings.written(&f.name))
 }
 
 /// Renames `n` to the name `names` gives it, if any.
@@ -253,16 +249,17 @@ fn entry(
     let cached = (!off)
         .then(|| resolver.gen_cache_get(&key))
         .flatten()
-        .and_then(|text| Entry::read(&key, &text))
+        .and_then(|text| Entry::read(&key, text))
         .filter(|e| e.fresh(program, resolver, seen));
     let e = match cached {
         Some(e) => e,
         None => {
-            let e = Entry::written(owner, opts, resolver, engine)?;
+            let body = Entry::written(owner, opts, resolver, engine)?;
             if !off {
-                resolver.gen_cache_put(&key, &e.render(&key));
+                let tag = loader::gen_cache_tag(&key, body.as_bytes());
+                resolver.gen_cache_put(&key, &format!("{TAG} {tag}\n{body}"));
             }
-            e
+            Entry::parse(body).ok_or_else(|| vec![missing("its own rows", owner)])?
         }
     };
     let e = Arc::new(e);
@@ -349,19 +346,37 @@ fn type_names(t: &mut Type, f: &mut impl FnMut(&mut String)) {
     t.children_mut().for_each(|c| type_names(c, f));
 }
 
-/// One module's stored rows.
+/// One module's stored rows: the entry's text, which a load indexes once and
+/// decodes a row of only where the program links its function.
 struct Entry {
     /// The files the module's own load read.
     inputs: Inputs,
     /// The text hash of each generated module the own load linked, by key.
     generated: Vec<(String, String)>,
-    /// The declaration each name the rows hold names in the own load: its
-    /// written name and module key.
-    homes: BTreeMap<String, (String, String)>,
-    /// Each given function's row, by module key and written name.
-    rows: BTreeMap<String, BTreeMap<String, Stored>>,
+    /// The entry's text after its tag line.
+    text: String,
+    /// The homes' lines in `text`, `name<TAB>written<TAB>module` each: the
+    /// declaration each name the rows hold names in the own load.
+    homes: Range<usize>,
+    /// Each row's header line and its other lines in `text`, in the order of
+    /// their module key and written name ([`Entry::key`]).
+    rows: Vec<(Range<usize>, Range<usize>)>,
     /// The function values the module's bodies store and pass.
     sources: Vec<StoredSource>,
+}
+
+/// Reads a text a line at a time, keeping the offset of the next line.
+struct Cursor<'t> {
+    text: &'t str,
+    at: usize,
+}
+
+impl<'t> Cursor<'t> {
+    fn line(&mut self) -> Option<&'t str> {
+        let (line, _) = self.text.get(self.at..)?.split_once('\n')?;
+        self.at += line.len() + 1;
+        Some(line)
+    }
 }
 
 impl Entry {
@@ -372,9 +387,11 @@ impl Entry {
         self.generated.iter().all(same) && self.inputs.fresh(resolver, seen)
     }
 
-    /// Loads module `m` as its own root and keeps the row of each function an
-    /// importer takes as given: the module's own, and those of each module
-    /// its generator imports wrote.
+    /// Loads module `m` as its own root and writes the row of each function
+    /// an importer takes as given, the module's own and those of each module
+    /// its generator imports wrote, as the entry's text after its tag line:
+    /// [`Inputs::render`], the generated modules, the homes, each row after a
+    /// header that counts its lines, and each source.
     ///
     /// # Errors
     ///
@@ -385,7 +402,7 @@ impl Entry {
         opts: &LoadOptions,
         resolver: &dyn ModuleResolver,
         engine: Option<&GenEngine>,
-    ) -> Result<Entry, Vec<Diagnostic>> {
+    ) -> Result<String, Vec<Diagnostic>> {
         let _p = vyrn_frontend::prof::phase("std rows: write");
         let unread = || vec![missing("its inputs", m)];
         let text = resolver.read(m).map_err(|_| unread())?;
@@ -463,41 +480,23 @@ impl Entry {
         let (generated, files): (Vec<_>, Vec<_>) = (program.module_hashes.iter())
             .partition(|(k, _)| loader::generated_importer(k).is_some());
         let files = (files.into_iter().map(|(k, _)| k.clone())).chain([root.to_string()]);
-        Ok(Entry {
-            inputs: Inputs::now(files, resolver).ok_or_else(unread)?,
-            generated: (generated.into_iter())
-                .map(|(k, h)| (k.clone(), h.clone()))
-                .collect(),
-            homes,
-            rows,
-            sources,
-        })
-    }
-
-    /// The entry as text: the tag line, then [`Inputs::render`], the
-    /// generated modules, the homes, each row and each source.
-    fn render(&self, key: &str) -> String {
-        let mut body = String::new();
-        self.inputs.render(&mut body);
-        body.push_str(&format!("{}\n", self.generated.len()));
-        for (k, h) in &self.generated {
-            body.push_str(&format!("{k}\t{h}\n"));
+        let inputs = Inputs::now(files, resolver).ok_or_else(unread)?;
+        let mut out = String::new();
+        inputs.render(&mut out);
+        out.push_str(&format!("{}\n", generated.len()));
+        for (k, h) in &generated {
+            out.push_str(&format!("{k}\t{h}\n"));
         }
-        body.push_str(&format!("{}\n", self.homes.len()));
-        for (n, (w, m)) in &self.homes {
-            body.push_str(&format!("{n}\t{w}\t{m}\n"));
+        out.push_str(&format!("{}\n", homes.len()));
+        for (n, (w, m)) in &homes {
+            out.push_str(&format!("{n}\t{w}\t{m}\n"));
         }
-        let rows = (self.rows.iter()).flat_map(|(m, r)| r.iter().map(move |(n, s)| (n, m, s)));
-        body.push_str(&format!("{}\n", rows.clone().count()));
+        let rows = (rows.iter()).flat_map(|(m, r)| r.iter().map(move |(n, s)| (n, m, s)));
+        out.push_str(&format!("{}\n", rows.clone().count()));
         for (name, module, s) in rows {
             let j = &s.judgment;
             let impure = s.fenced.impure.as_deref().unwrap_or("-");
-            body.push_str(&format!(
-                "{name}\t{module}\t{}\t{}\t{}\t{impure}\n",
-                j.frames.len(),
-                j.summary.len(),
-                j.calls.len(),
-            ));
+            let mut body = String::new();
             for (f, state) in j.frames.iter().zip(&j.state) {
                 write_frame(&mut body, f);
                 let state: Vec<String> = (state.iter())
@@ -522,106 +521,71 @@ impl Entry {
             }
             body.push_str(&s.fenced.calls.join("\t"));
             body.push('\n');
+            let lines = body.matches('\n').count();
+            let (frames, summary, calls) = (j.frames.len(), j.summary.len(), j.calls.len());
+            out.push_str(&format!(
+                "{name}\t{module}\t{frames}\t{summary}\t{calls}\t{impure}\t{lines}\n"
+            ));
+            out.push_str(&body);
         }
-        body.push_str(&format!("{}\n", self.sources.len()));
-        for s in &self.sources {
-            write_type(&mut body, &s.sig);
+        out.push_str(&format!("{}\n", sources.len()));
+        for s in &sources {
+            write_type(&mut out, &s.sig);
             let named = s.named.as_deref().unwrap_or("-");
             match &s.lambda {
-                Some(l) => body.push_str(&format!(
+                Some(l) => out.push_str(&format!(
                     "\t{named}\t{}\t{}\t{}\n",
                     l.defined_in, l.line, l.col
                 )),
-                None => body.push_str(&format!("\t{named}\n")),
+                None => out.push_str(&format!("\t{named}\n")),
             }
         }
-        let tag = loader::gen_cache_tag(key, body.as_bytes());
-        format!("{TAG} {tag}\n{body}")
+        Ok(out)
     }
 
-    /// Reads what [`Entry::render`] wrote under `key`; `None` for a foreign,
+    /// Reads the entry `text` stored under `key`; `None` for a foreign,
     /// damaged or other-format entry.
-    fn read(key: &str, text: &str) -> Option<Entry> {
+    fn read(key: &str, mut text: String) -> Option<Entry> {
         let (head, body) = text.split_once('\n')?;
         let tag = head.strip_prefix(TAG)?.strip_prefix(' ')?;
         if loader::gen_cache_tag(key, body.as_bytes()) != tag {
             return None;
         }
-        let mut lines = body.split('\n');
-        let mut line = || lines.next();
+        let head = head.len() + 1;
+        text.replace_range(..head, "");
+        Entry::parse(text)
+    }
+
+    /// Indexes the text [`Entry::written`] wrote and decodes all of it but the
+    /// homes and the rows; `None` where it does not hold that shape.
+    fn parse(text: String) -> Option<Entry> {
+        let mut cur = Cursor { text: &text, at: 0 };
         let count = |l: Option<&str>| l?.parse::<usize>().ok();
-        let inputs = Inputs::read(&mut line)?;
-        let generated = (0..count(line())?)
+        let inputs = Inputs::read(&mut || cur.line())?;
+        let generated = (0..count(cur.line())?)
             .map(|_| {
-                let (k, h) = line()?.split_once('\t')?;
+                let (k, h) = cur.line()?.split_once('\t')?;
                 Some((k.to_string(), h.to_string()))
             })
             .collect::<Option<_>>()?;
-        let mut homes = BTreeMap::new();
-        for _ in 0..count(line())? {
-            let mut f = line()?.split('\t');
-            let (n, w, m) = (f.next()?, f.next()?, f.next()?);
-            homes.insert(n.to_string(), (w.to_string(), m.to_string()));
+        let n = count(cur.line())?;
+        let start = cur.at;
+        for _ in 0..n {
+            cur.line()?.split('\t').nth(2)?;
         }
-        let mut rows = BTreeMap::new();
-        for _ in 0..count(line())? {
-            let mut h = line()?.split('\t');
-            let (name, module) = (h.next()?.to_string(), h.next()?.to_string());
-            let (nf, ns, nc) = (count(h.next())?, count(h.next())?, count(h.next())?);
-            let impure = Some(h.next()?).filter(|i| *i != "-").map(String::from);
-            let (mut frames, mut state) = (Vec::new(), Vec::new());
-            for _ in 0..nf {
-                frames.push(read_frame(&mut line)?);
-                let answer = (line()?.split('\t').filter(|s| !s.is_empty()))
-                    .map(|e| {
-                        let (c, gs) = e.split_once('=')?;
-                        let gs = gs.split(',').filter(|g| !g.is_empty()).map(String::from);
-                        Some((c.to_string(), gs.collect()))
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                state.push(answer);
+        let homes = start..cur.at;
+        let mut rows = Vec::new();
+        for _ in 0..count(cur.line())? {
+            let at = cur.at;
+            let header = cur.line()?;
+            let lines: usize = header.rsplit('\t').next()?.parse().ok()?;
+            let from = cur.at;
+            for _ in 0..lines {
+                cur.line()?;
             }
-            let summary = (0..ns)
-                .map(|_| {
-                    let (w, t) = line()?.split_once('\t')?;
-                    let word = [Word::Sorted, Word::Strict]
-                        .into_iter()
-                        .find(|x| x.spelled() == w)?;
-                    Some(Fact {
-                        word,
-                        order: whole_type(t)?,
-                    })
-                })
-                .collect::<Option<_>>()?;
-            let calls = (0..nc)
-                .map(|_| {
-                    let mut f = line()?.split('\t');
-                    let callee = f.next()?.to_string();
-                    let mut subst = Vec::new();
-                    while let Some(p) = f.next() {
-                        subst.push((p.to_string(), whole_type(f.next()?)?));
-                    }
-                    Some((callee, subst))
-                })
-                .collect::<Option<_>>()?;
-            let fence = line()?
-                .split('\t')
-                .filter(|s| !s.is_empty())
-                .map(String::from);
-            let judgment = Judgment {
-                verdict: Vec::new(),
-                frames,
-                state,
-                summary,
-                calls,
-            };
-            let fenced = Fenced {
-                impure,
-                calls: fence.collect(),
-            };
-            let at = rows.entry(module).or_insert_with(BTreeMap::new);
-            at.insert(name, Stored { judgment, fenced });
+            rows.push((at..at + header.len(), from..cur.at));
         }
+        let mut line = || cur.line();
         let sources = (0..count(line())?)
             .map(|_| {
                 let mut f = line()?.split('\t');
@@ -638,13 +602,99 @@ impl Entry {
                 Some(StoredSource { sig, named, lambda })
             })
             .collect::<Option<_>>()?;
-        Some(Entry {
+        let end = cur.at;
+        let key = |r| Entry::key(&text, r);
+        let sorted = rows.windows(2).all(|w| key(&w[0]) < key(&w[1]));
+        (sorted && end == text.len()).then_some(Entry {
             inputs,
             generated,
             homes,
             rows,
             sources,
+            text,
         })
+    }
+
+    /// The module key and written name the header of row `r` names.
+    fn key<'t>(text: &'t str, r: &(Range<usize>, Range<usize>)) -> (&'t str, &'t str) {
+        let mut f = text[r.0.clone()].split('\t');
+        let name = f.next().unwrap_or("");
+        (f.next().unwrap_or(""), name)
+    }
+
+    /// Each home: a name the rows hold, and the written name and module key
+    /// of the declaration it names in the own load.
+    fn homes(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        (self.text[self.homes.clone()].lines()).filter_map(|l| {
+            let mut f = l.split('\t');
+            Some((f.next()?, f.next()?, f.next()?))
+        })
+    }
+
+    /// The row of the function written `name` in module `m`, decoded; `None`
+    /// where the entry holds none.
+    fn row(&self, m: &str, name: &str) -> Option<Stored> {
+        let i = (self.rows)
+            .binary_search_by(|r| Entry::key(&self.text, r).cmp(&(m, name)))
+            .ok()?;
+        let (header, body) = &self.rows[i];
+        let mut h = self.text[header.clone()].split('\t').skip(2);
+        let mut lines = self.text[body.clone()].split_terminator('\n');
+        let mut line = || lines.next();
+        let count = |l: Option<&str>| l?.parse::<usize>().ok();
+        let (nf, ns, nc) = (count(h.next())?, count(h.next())?, count(h.next())?);
+        let impure = Some(h.next()?).filter(|i| *i != "-").map(String::from);
+        let (mut frames, mut state) = (Vec::new(), Vec::new());
+        for _ in 0..nf {
+            frames.push(read_frame(&mut line)?);
+            let answer = (line()?.split('\t').filter(|s| !s.is_empty()))
+                .map(|e| {
+                    let (c, gs) = e.split_once('=')?;
+                    let gs = gs.split(',').filter(|g| !g.is_empty()).map(String::from);
+                    Some((c.to_string(), gs.collect()))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            state.push(answer);
+        }
+        let summary = (0..ns)
+            .map(|_| {
+                let (w, t) = line()?.split_once('\t')?;
+                let word = [Word::Sorted, Word::Strict]
+                    .into_iter()
+                    .find(|x| x.spelled() == w)?;
+                Some(Fact {
+                    word,
+                    order: whole_type(t)?,
+                })
+            })
+            .collect::<Option<_>>()?;
+        let calls = (0..nc)
+            .map(|_| {
+                let mut f = line()?.split('\t');
+                let callee = f.next()?.to_string();
+                let mut subst = Vec::new();
+                while let Some(p) = f.next() {
+                    subst.push((p.to_string(), whole_type(f.next()?)?));
+                }
+                Some((callee, subst))
+            })
+            .collect::<Option<_>>()?;
+        let fence = line()?
+            .split('\t')
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let judgment = Judgment {
+            verdict: Vec::new(),
+            frames,
+            state,
+            summary,
+            calls,
+        };
+        let fenced = Fenced {
+            impure,
+            calls: fence.collect(),
+        };
+        Some(Stored { judgment, fenced })
     }
 }
 

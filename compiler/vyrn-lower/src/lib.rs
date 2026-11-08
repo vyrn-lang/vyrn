@@ -723,7 +723,7 @@ fn walk_of<'a>(
         vyrn_frontend::ast::Body::Written(b) => walk(recorded, program, b, subst),
         vyrn_frontend::ast::Body::Given(_) => Walked {
             facts: NodeTypes::default(),
-            calls: given.calls(program, f),
+            calls: given.calls(f),
             lambda_bodies: Default::default(),
         },
     }
