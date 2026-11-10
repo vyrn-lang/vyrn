@@ -4419,18 +4419,8 @@ fn entry_tag(key: &str, body: &str) -> String {
 /// authenticates both.
 pub fn gen_cache_tag(key: &str, body: &[u8]) -> String {
     let secret = gen_cache_secret();
-    let mut inner = Vec::with_capacity(secret.len() + key.len() + body.len() + 2);
-    inner.extend_from_slice(secret);
-    inner.push(0);
-    inner.extend_from_slice(key.as_bytes());
-    inner.push(0);
-    inner.extend_from_slice(body);
-    let inner = crate::hash::sha256_hex(&inner);
-    let mut outer = Vec::with_capacity(secret.len() + inner.len() + 1);
-    outer.extend_from_slice(secret);
-    outer.push(0);
-    outer.extend_from_slice(inner.as_bytes());
-    crate::hash::sha256_hex(&outer)
+    let inner = crate::hash::sha256_hex_of(&[secret, b"\0", key.as_bytes(), b"\0", body]);
+    crate::hash::sha256_hex_of(&[secret, b"\0", inner.as_bytes()])
 }
 
 static GEN_CACHE_SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
@@ -7365,6 +7355,26 @@ mod tests {
         assert_eq!(read.stamps, stamps);
         assert_eq!(read.gens, Some(gens));
         assert_eq!(read.written, written);
+    }
+
+    /// A torn write or a flipped byte reads as a miss, with no panic.
+    #[test]
+    fn a_damaged_cache_entry_reads_as_a_miss() {
+        let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
+        let output = text("export fn n() -> Int64 { return 1 }");
+        let entry = render_cache_entry("k", &inputs, &Stamps::new(), None, &output);
+        for cut in 0..entry.len() {
+            assert!(
+                read_cache_entry("k", &entry[..cut], None).is_none(),
+                "cut at {cut}"
+            );
+        }
+        for at in 0..entry.len() {
+            let mut bytes = entry.clone().into_bytes();
+            bytes[at] ^= 1;
+            let flipped = String::from_utf8(bytes).expect("an ASCII entry");
+            assert!(read_cache_entry("k", &flipped, None).is_none(), "byte {at}");
+        }
     }
 
     /// A hit is linked without re-running the generator, so an entry written by

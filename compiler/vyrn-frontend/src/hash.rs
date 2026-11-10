@@ -17,29 +17,45 @@ const K: [u32; 64] = [
 
 /// Returns the SHA-256 digest of `data` in lowercase hex.
 pub fn sha256_hex(data: &[u8]) -> String {
+    sha256_hex_of(&[data])
+}
+
+/// Returns the SHA-256 digest of the concatenation of `parts` in lowercase
+/// hex. Whole blocks compress in place, so no part is copied.
+pub fn sha256_hex_of(parts: &[&[u8]]) -> String {
     let mut h: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
     ];
-    compress(&mut h, &padded(data));
+    // The bytes of the block in progress, then room for the padding.
+    let mut tail = [0u8; 128];
+    let (mut held, mut len) = (0, 0u64);
+    for &part in parts {
+        len += part.len() as u64;
+        let take = part.len().min((64 - held) % 64);
+        tail[held..held + take].copy_from_slice(&part[..take]);
+        held += take;
+        if held == 64 {
+            compress(&mut h, &tail[..64]);
+            held = 0;
+        }
+        let rest = &part[take..];
+        let whole = rest.len() - rest.len() % 64;
+        compress(&mut h, &rest[..whole]);
+        tail[held..held + rest.len() - whole].copy_from_slice(&rest[whole..]);
+        held += rest.len() - whole;
+    }
+    // The padding: a one bit, zeros, and the length in bits, to whole blocks.
+    let end = if held < 56 { 64 } else { 128 };
+    tail[held] = 0x80;
+    tail[held + 1..end - 8].fill(0);
+    tail[end - 8..end].copy_from_slice(&len.wrapping_mul(8).to_be_bytes());
+    compress(&mut h, &tail[..end]);
     let mut hex = String::with_capacity(64);
     for x in h {
         let _ = write!(hex, "{x:08x}");
     }
     hex
-}
-
-/// `data`, its padding of at most 64 bytes and its length, as whole blocks.
-fn padded(data: &[u8]) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(data.len() + 72);
-    msg.extend_from_slice(data);
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-    msg
 }
 
 /// Runs the compression function over each 64-byte block of `blocks`: with
@@ -180,6 +196,16 @@ mod tests {
     }
 
     #[test]
+    fn a_split_hashes_as_the_whole() {
+        let data: Vec<u8> = (0..300u32).map(|i| (i * 7) as u8).collect();
+        for cut in [0, 1, 55, 56, 63, 64, 65, 127, 128, 200, 300] {
+            let (a, b) = data.split_at(cut);
+            let (b, c) = b.split_at(b.len() / 3);
+            assert_eq!(sha256_hex_of(&[a, b, c]), sha256_hex(&data), "cut at {cut}");
+        }
+    }
+
+    #[test]
     fn the_extensions_compress_each_block_as_the_portable_code_does() {
         let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
         let random: Vec<u8> = (0..1 << 20)
@@ -190,10 +216,10 @@ mod tests {
                 x as u8
             })
             .collect();
-        let inputs: [&[u8]; 4] = [b"", b"abc", &[b'a'; 64], &random];
+        let inputs: [&[u8]; 2] = [&[b'a'; 64], &random];
         for input in inputs {
             let (mut a, mut b) = ([0x6a09e667u32; 8], [0x6a09e667u32; 8]);
-            for (i, block) in padded(input).chunks_exact(64).enumerate() {
+            for (i, block) in input.chunks_exact(64).enumerate() {
                 compress(&mut a, block);
                 compress_soft(&mut b, block);
                 assert_eq!(a, b, "block {i} of {} bytes", input.len());

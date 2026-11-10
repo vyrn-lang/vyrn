@@ -1,5 +1,6 @@
 import { endsWith } from "std/strpred"
 import { includes } from "std/arrays"
+import { substring } from "std/strings"
 import { importsOf } from "./guidecode"
 import { quotedList, branch, lookup, entriesOf, vyrnStems, fenced } from "./gensrc"
 
@@ -13,14 +14,31 @@ gen fn usesOf(dir: String, name: String, shown: String) -> Uses {
     return Uses { path: shown.copy(), uses: importsOf(lex(src)).uses.copy() }
 }
 
+/// The subdirectories of `dir`. A file listed as a directory is an input the
+/// cache lists again on every hit.
+gen fn dirsOf(dir: String) -> Array<String> {
+    let names = match listDirKinds(dir) {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+    let mut out: Array<String> = []
+    for name in names {
+        if endsWith(name, "/") {
+            out.push(substring(name, 0, name.byteLength - 1))
+        }
+    }
+    return out
+}
+
 gen fn walk(root: String, sub: String, depth: Int64) -> Array<Uses> {
     let dir = if sub.byteLength == 0 { root.copy() } else { root + "/" + sub }
+    let dirs = dirsOf(dir)
     let mut out: Array<Uses> = []
     for entry in entriesOf(dir) {
         let shown = if sub.byteLength == 0 { entry.copy() } else { sub + "/" + entry }
         if endsWith(entry, ".vyrn") {
             out.push(usesOf(dir, entry, shown))
-        } else if depth > 0 {
+        } else if depth > 0 && includes(dirs, entry) {
             for deeper in walk(root, shown, depth - 1) {
                 out.push(deeper)
             }
