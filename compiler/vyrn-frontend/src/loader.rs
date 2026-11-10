@@ -3599,7 +3599,7 @@ pub(crate) fn generation(
         })?;
         let out = crate::gen::generate(
             &checked.program,
-            &checked.name,
+            own_gen(&checked.program, name).unwrap_or(name),
             call.consts,
             crate::gen::GenInputs {
                 engine,
@@ -3777,8 +3777,6 @@ pub(crate) type CheckedGens = Vec<(String, String, Rc<CheckedGen>)>;
 /// transitive sources and the fingerprint the engine keys its artifact on.
 pub(crate) struct CheckedGen {
     program: Program,
-    /// The gen fn's name in `program` ([`own_gen`]).
-    name: String,
     /// Each source of the generator's closure with its content hash.
     sources: Vec<(String, String)>,
     /// Whether every source has a readable file, or is a generated module whose
@@ -3829,8 +3827,14 @@ fn checked_generator(
     engine: Option<&crate::gen::GenEngine>,
     (read, held): (&mut HashMap<String, Option<String>>, &mut CheckedGens),
 ) -> Result<Rc<CheckedGen>, Result<Vec<Diagnostic>, String>> {
+    // The gen fn the program serves: `name`, or for a std module every gen fn
+    // it exports, written as the empty name ([`keep_reached`]).
+    let serves = match in_std(gen_mod_key, inner) {
+        true => "",
+        false => name,
+    };
     let this = |(m, n, c): &&(String, String, Rc<CheckedGen>)| {
-        m == gen_mod_key && n == name && (c.checked || !check)
+        m == gen_mod_key && n == serves && (c.checked || !check)
     };
     if let Some((_, _, c)) = held.iter().find(this) {
         return Ok(c.clone());
@@ -3841,7 +3845,7 @@ fn checked_generator(
         aliases.sort();
         let n = &inner.nest;
         format!(
-            "{gen_mod_key}\u{0}{name}\u{0}{std_root:?}\u{0}{}\u{0}{:?}\u{0}{aliases:?}",
+            "{gen_mod_key}\u{0}{serves}\u{0}{std_root:?}\u{0}{}\u{0}{:?}\u{0}{aliases:?}",
             n.depth, n.deriving
         )
     });
@@ -3883,7 +3887,7 @@ fn checked_generator(
     // The fingerprint names every input of the check, so an artifact the engine
     // holds for it was compiled from a program that passed this check: the
     // closure's keys and content hashes (`gen_graph` holds the generator, its
-    // imports and the runtime modules the load links), the gen fn the link
+    // imports and the runtime modules the load links), the gen fns the link
     // keeps, the std root the contract restamping resolves against, and the
     // nest, because a `derive` in the check refuses a generator already
     // deriving and runs its own loads one deeper. The engine adds the
@@ -3891,7 +3895,7 @@ fn checked_generator(
     let fingerprint = describable.then(|| {
         let n = &inner.nest;
         let mut fp = format!(
-            "{gen_mod_key}\u{0}{name}\u{0}{}\u{0}{}\u{0}{:?}\u{0}",
+            "{gen_mod_key}\u{0}{serves}\u{0}{}\u{0}{}\u{0}{:?}\u{0}",
             std_root.unwrap_or(""),
             n.depth,
             n.deriving
@@ -3919,14 +3923,13 @@ fn checked_generator(
     restamp_contracts(&mut gen_program, gen_mod_key, std_root);
 
     let checked = Rc::new(CheckedGen {
-        name: own_gen(&gen_program, name).unwrap_or(name).to_string(),
         program: gen_program,
         sources: gen_sources,
         describable,
         fingerprint,
         checked,
     });
-    held.push((gen_mod_key.to_string(), name.to_string(), checked.clone()));
+    held.push((gen_mod_key.to_string(), serves.to_string(), checked.clone()));
     if let Some(k) = memo_key {
         CHECKED_GENS.with(|m| {
             let mut m = m.borrow_mut();
@@ -6044,7 +6047,7 @@ fn link(
             .collect();
     }
     match &opts.nest.gen {
-        Some(gen) => keep_reached(&mut program, gen),
+        Some(gen) => keep_reached(&mut program, gen, in_std(root_key, opts)),
         None => drop_unreached(&mut program, lazy, named, &generators),
     }
     program.number();
@@ -6427,15 +6430,24 @@ fn drop_unreached(
 
 /// Keeps what the gen fn `gen` reaches ([`reached`]) in every module and drops
 /// each other function and module-state binding, and every test and bench: a
-/// generator's own load ([`Nest::gen`]). The roots are `gen`, each
+/// generator's own load ([`Nest::gen`]). The roots are `gen`, every gen fn
+/// the root exports where `std` says it is a std module, so one program and
+/// one artifact serve each of them ([`checked_generator`]), each
 /// `std/runtime` function the emitter calls by name ([`RUNTIME_CALLS`]), each
 /// call the engine adds after the load ([`GEN_HOST`]) and each name a `where`
 /// predicate spells.
-fn keep_reached(program: &mut Program, gen: &str) {
+fn keep_reached(program: &mut Program, gen: &str, std: bool) {
     let calls: Vec<String> = (RUNTIME_CALLS.iter())
         .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
         .collect();
     let mut roots: Vec<&str> = own_gen(program, gen).into_iter().collect();
+    if std {
+        let gens = program.functions.iter().filter(|f| f.module.is_none());
+        roots.extend(
+            gens.filter(|f| f.is_gen && f.exported)
+                .map(|f| f.name.as_str()),
+        );
+    }
     roots.extend(calls.iter().map(String::as_str));
     roots.extend(GEN_HOST.calls());
     for p in program
