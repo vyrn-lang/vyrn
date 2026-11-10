@@ -121,18 +121,21 @@ the playground serves an embedded `std/`. The loader:
   one pair;
 - takes an imported `std/` module as its interface: the load lexes and parses
   the module's interface entry (`loader::interface_parse`), its text with each
-  top-level function body cut to its newlines, each cut body's place and the
-  names a given body spells, keyed by the compiler's identity, the module's
-  key and its text hash, in the generator cache's directory. Under `vyrn
+  top-level function that has a body cut out to its newlines, a row per cut
+  function (its name, flags, type parameters and places), the method-form
+  names the module answers to and the names a given body spells, keyed by the
+  compiler's identity, the module's key and its text hash, in the generator
+  cache's directory. Under `vyrn
   check` (`loader::std_given`) each non-generic function's body is
   `ast::Body::Given`, unparsed and untyped, and its module's stored row stands
   for it (below). Under a host that emits a module (`movecheck::Host::Emit`)
   each non-generic function that only gen fn bodies reach is given the same
   way, because no run enters it, unless `VYRN_NO_GEN_CACHE` leaves no rows
-  entry to keep; a runtime module's functions stay written. The load lexes and parses any other cut
-  body from the module's text only where a root can reach it by spelling
-  (`parse_reached`),
-  drops each function no spelling reaches before the link, and drops each
+  entry to keep; a runtime module's functions stay written. The load lexes and
+  parses a cut function's declaration, and its body unless it is given, from
+  the module's text only where a root can reach it by spelling
+  (`parse_reached`), in source order, so a function no spelling reaches is
+  never lexed, nor a gen fn no import line names, and it drops each
   function, test and bench of such a module that no root reaches by name
   (`drop_unreached`), following a given body's stored names, so an importer
   pays to read the module's interface and to parse and check what it calls. A
