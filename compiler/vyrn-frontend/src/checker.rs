@@ -7131,7 +7131,7 @@ pub struct Fenced {
 
 /// One source of a stored function value: a named function or a lambda
 /// literal, one defunctionalization variant each, in collection order.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StoredSource {
     /// The `fn(P..) -> R` signature, aliases resolved.
     pub sig: Type,
@@ -7140,7 +7140,7 @@ pub struct StoredSource {
 }
 
 /// A lambda source, by the key its frame is found under.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StoredLambda {
     /// The function whose body contains the literal.
     pub defined_in: String,

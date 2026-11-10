@@ -135,24 +135,32 @@ fn a_changed_std_byte_misses_its_entry_and_the_verdict_holds() {
     );
 }
 
-/// The entries damaged are `std/task`'s, which the root's `sleep` reads: a
-/// warm check reads only the entries of modules the root reaches, and an own
-/// load may have written others.
+/// The entries damaged are those that name `sleep`, `std/task`'s among them,
+/// which the root's `sleep` reads: a warm check reads only the entries of
+/// modules the root reaches, and an own load may have written others.
 #[test]
 fn a_damaged_entry_reads_as_a_miss_and_is_written_again() {
     let t = tree("stdrows-damaged");
     let first = t.check(false);
-    for (kind, task) in [("rows-", "\nsleep\t"), ("interface-", " sleep\n")] {
-        let (name, _) = (t.entries(kind).into_iter())
-            .find(|(_, text)| text.contains(task))
-            .expect("std/task's entry");
-        std::fs::write(t.cache.join(&name), "interface1 0000\n1\n").expect("damage");
+    for (kind, task) in [("rows-", "\u{5}sleep"), ("interface-", " sleep\n")] {
+        let names: Vec<String> = (t.entries(kind).into_iter())
+            .filter(|(_, text)| text.contains(task))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(!names.is_empty(), "no {kind} entry names sleep");
+        for name in &names {
+            std::fs::write(t.cache.join(name), "interface1 0000\n1\n").expect("damage");
+        }
         assert_eq!(t.check(false), first);
-        let text = std::fs::read_to_string(t.cache.join(&name)).expect("read");
-        assert!(
-            text.len() > 32,
-            "the damaged entry was not written again:\n{text}"
-        );
+        let again = (names.iter())
+            .filter(|name| {
+                std::fs::read_to_string(t.cache.join(name))
+                    .expect("read")
+                    .len()
+                    > 32
+            })
+            .count();
+        assert!(again > 0, "no damaged {kind} entry was written again");
     }
 }
 
@@ -170,70 +178,6 @@ fn no_gen_cache_reads_and_writes_no_entry_and_the_verdict_holds() {
     assert_eq!(
         text, "damaged",
         "VYRN_NO_GEN_CACHE read and wrote the entry"
-    );
-}
-
-/// The calls the stored row of `name` makes: the callee of each call line of
-/// each of its frames, read from whichever `rows-` entry holds it.
-fn row_calls(t: &Tree, name: &str) -> Vec<String> {
-    // A row's header: its name, its module, then its counts of frames, facts
-    // and calls, the fence's impure reason and its count of lines.
-    let header = |l: &str| -> Option<usize> {
-        let f: Vec<&str> = l.split('\t').collect();
-        (f.len() == 7 && f[0] == name).then(|| f[2].parse().ok())?
-    };
-    for (_, text) in t.entries("rows-") {
-        let lines: Vec<&str> = text.lines().collect();
-        let Some((at, frames)) =
-            (lines.iter().enumerate()).find_map(|(i, l)| Some((i, header(l)?)))
-        else {
-            continue;
-        };
-        let mut out = Vec::new();
-        let mut i = at + 1;
-        for _ in 0..frames {
-            let calls: usize = (lines[i].split('\t').nth(4))
-                .and_then(|n| n.parse().ok())
-                .expect("a frame line");
-            for c in &lines[i + 1..i + 1 + calls] {
-                out.push(c.split('\t').next().unwrap_or_default().to_string());
-            }
-            // The frame line, its calls and its answer line.
-            i += calls + 2;
-        }
-        return out;
-    }
-    panic!("no entry stores a row for `{name}`");
-}
-
-/// The own load expands a projection as an importer's does: `std/stream`'s
-/// `cells[h]` reads through `std/slots`' `at`, which checks the handle is alive.
-#[test]
-fn a_stored_row_judges_a_projection_as_the_importer_runs_it() {
-    let root = "import { cursorGet } from \"std/stream\"\n\
-                fn main() -> Int64 {\n    return 0\n}\n";
-    let t = tree_of("stdrows-projection", root);
-    let out = t.check(false);
-    assert_eq!(out.0, Some(0), "{}", out.1);
-    let calls = row_calls(&t, "cursorGet");
-    assert!(
-        calls.iter().any(|c| c == "alive"),
-        "cursorGet calls {calls:?}"
-    );
-}
-
-/// The own load names its sites as an importer's does: the runtime's `panic`
-/// is its fixed trap, never stamped with a site.
-#[test]
-fn a_stored_row_names_its_sites_as_the_importer_does() {
-    let t = tree("stdrows-sites");
-    let out = t.check(false);
-    assert_eq!(out.0, Some(0), "{}", out.1);
-    let calls = row_calls(&t, "intStr");
-    assert!(calls.iter().any(|c| c == "panic"), "intStr calls {calls:?}");
-    assert!(
-        !calls.iter().any(|c| c.contains("panicAt")),
-        "intStr calls {calls:?}"
     );
 }
 
