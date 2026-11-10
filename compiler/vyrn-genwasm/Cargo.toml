@@ -14,7 +14,7 @@ description = "Runs `gen fn` generators as compiled wasm in an embedded wasmtime
 vyrn-frontend = { path = "../vyrn-frontend" }
 vyrn-lower = { path = "../vyrn-lower" }
 vyrn-codegen = { path = "../vyrn-codegen" }
-wasmtime = { version = "47", optional = true, default-features = false, features = [
+wasmtime = { version = "48", optional = true, default-features = false, features = [
     "cranelift",
     "runtime",
     "std",
