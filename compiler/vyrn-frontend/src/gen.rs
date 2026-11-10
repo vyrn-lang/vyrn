@@ -907,7 +907,6 @@ pub fn derive(
         }
         let mut inner = crate::loader::generator_opts(opts);
         inner.nest.deriving.push(identity);
-        let mut read = HashMap::new();
         let root = program.spellings.root.as_str();
         let refused = |ds: Vec<Diagnostic>| -> String {
             ds.into_iter()
@@ -930,16 +929,19 @@ pub fn derive(
             aliased: Vec::new(),
         };
         let gen = crate::loader::generation;
-        let written = gen(
-            key,
-            name,
-            call,
-            (true, false),
-            &inner,
-            resolver,
-            engine,
-            (&mut read, &mut Vec::new()),
-        );
+        let written = program.seen.with(|read| {
+            let cache = (true, false);
+            gen(
+                key,
+                name,
+                call,
+                cache,
+                &inner,
+                resolver,
+                engine,
+                (read, &mut Vec::new()),
+            )
+        });
         let written = written.map_err(|f| match f {
             crate::loader::GenFault::Load(ds) => unplaced(refused(ds)),
             crate::loader::GenFault::Reread(why) => {

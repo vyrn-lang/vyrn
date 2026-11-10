@@ -1036,7 +1036,8 @@ struct Work {
     /// `key -> manifest::real_path(key)`. A file's identity does not change
     /// during a load, and [`runtime_fence`] asks for the same keys on every edge.
     real_paths: HashMap<String, Option<String>>,
-    /// Each generation input's hash as this load read it ([`current_input_hash`]).
+    /// Each generation input's hash as this load read it ([`current_input_hash`]),
+    /// which the linked program carries on ([`Seen`]).
     inputs: HashMap<String, Option<String>>,
     /// Each generator program this load checked ([`checked_generator`]).
     checked: CheckedGens,
@@ -1601,7 +1602,7 @@ fn load_with_origins_inner(
     drop(read_parse);
     match loaded {
         Err((diags, origins)) => (Err(diags), origins, Vec::new(), Vec::new(), None),
-        Ok((modules, root_key, origins, warnings, pending)) => {
+        Ok((modules, root_key, origins, warnings, pending, seen)) => {
             let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
             // The floor's judgment reads the effects of every instance, so a
@@ -1613,6 +1614,7 @@ fn load_with_origins_inner(
             let linked = link(modules, &root_key, &lazy, opts).map(|mut p| {
                 p.expansions = opts.expansions.clone();
                 p.session = crate::session::SessionRef(opts.session.clone());
+                p.seen = seen;
                 p
             });
             (linked, origins, warnings, graph, pending)
@@ -1666,7 +1668,7 @@ pub fn capability_graph(
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
 ) -> Result<(crate::floor::Graph, String), Vec<Diagnostic>> {
-    let (mut modules, root_key, _, _, _) =
+    let (mut modules, root_key, ..) =
         load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
     Ok((floor_graph(&mut modules), root_key))
 }
@@ -1689,7 +1691,7 @@ pub fn module_graph(
     engine: Option<&crate::gen::GenEngine>,
 ) -> (Result<ModuleGraph, Vec<Diagnostic>>, Warnings) {
     match load_modules(root_source, root_path, opts, resolver, engine) {
-        Ok((modules, _, _, warnings, _)) => (Ok(graph_of(&modules)), warnings),
+        Ok((modules, _, _, warnings, ..)) => (Ok(graph_of(&modules)), warnings),
         Err((diags, _)) => (Err(diags), Vec::new()),
     }
 }
@@ -1715,6 +1717,7 @@ fn load_modules(
         crate::origin::OriginMaps,
         Vec<Diagnostic>,
         Option<crate::floor::Pending>,
+        Seen,
     ),
     (Vec<Diagnostic>, crate::origin::OriginMaps),
 > {
@@ -1856,6 +1859,7 @@ fn load_modules(
                     given: Default::default(),
                     session: Default::default(),
                     lazy: None,
+                    seen: Default::default(),
                 },
                 import_targets: Vec::new(),
                 generated: None,
@@ -2187,7 +2191,8 @@ fn load_modules(
         }
     }
 
-    Ok((w.modules, root_key, w.origins, w.warnings, pending))
+    let seen = Seen::of(w.inputs);
+    Ok((w.modules, root_key, w.origins, w.warnings, pending, seen))
 }
 
 /// A load's failure: every diagnostic remapped onto the input file a generator
@@ -4307,9 +4312,42 @@ fn read_input_line(l: &str, inputs: &mut Vec<(String, String)>, stamps: &mut Sta
     Some(())
 }
 
-/// What one load's validations of [`Inputs`] found, by path.
-#[derive(Default)]
-pub struct Seen(HashMap<String, Option<String>>);
+/// What one load found of each file a cache entry records: the hash its
+/// settled stamp vouched for or its bytes gave, by path, `None` for an
+/// absent file. The load owns it: it fills it from its first generator entry
+/// on, and the program it links carries it ([`Program::seen`]) to the last
+/// entry its check validates, a rows entry or a `derive` generation's, so no
+/// file is stat-ed or read twice for one load. Every copy of the program
+/// shares it, and two compare equal and print alike, as
+/// [`crate::session::SessionRef`]s do.
+#[derive(Clone, Default)]
+pub struct Seen(Option<std::sync::Arc<std::sync::Mutex<HashMap<String, Option<String>>>>>);
+
+impl Seen {
+    fn of(found: HashMap<String, Option<String>>) -> Seen {
+        Seen(Some(std::sync::Arc::new(std::sync::Mutex::new(found))))
+    }
+
+    /// Runs `f` on the table; on an empty one where no load filled it.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut HashMap<String, Option<String>>) -> R) -> R {
+        match &self.0 {
+            Some(m) => f(&mut m.lock().unwrap_or_else(|e| e.into_inner())),
+            None => f(&mut HashMap::new()),
+        }
+    }
+}
+
+impl std::fmt::Debug for Seen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Seen")
+    }
+}
+
+impl PartialEq for Seen {
+    fn eq(&self, _: &Seen) -> bool {
+        true
+    }
+}
 
 /// The files a cache entry other than a generation's was made from, each with
 /// its content hash and its settled stamp where it has one, recorded and
@@ -4336,9 +4374,10 @@ impl Inputs {
 
     /// Whether every file still has its stamp, or else still hashes the same.
     /// An entry that records no file describes nothing, so it is never fresh.
-    /// `seen` keeps each file's answer for the next entry one load validates.
-    pub fn fresh(&self, resolver: &dyn ModuleResolver, seen: &mut Seen) -> bool {
-        !self.hashes.is_empty() && all_fresh(&self.hashes, &self.stamps, resolver, &mut seen.0)
+    /// `seen` keeps each file's answer for the next entry the load validates.
+    pub fn fresh(&self, resolver: &dyn ModuleResolver, seen: &Seen) -> bool {
+        let fresh = |read: &mut _| all_fresh(&self.hashes, &self.stamps, resolver, read);
+        !self.hashes.is_empty() && seen.with(fresh)
     }
 
     /// Appends the count, then one [`input_line`] per file.

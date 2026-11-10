@@ -346,6 +346,10 @@ pub struct Program {
     /// module runs a function of one only where an entry calls it
     /// (`vyrn_lower::World::runs`).
     pub lazy: Option<std::sync::Arc<std::collections::BTreeSet<String>>>,
+    /// What the load that linked the program found of each file a cache
+    /// entry records, which its check's entries go on from. Empty for a
+    /// program no load linked.
+    pub seen: crate::loader::Seen,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only
