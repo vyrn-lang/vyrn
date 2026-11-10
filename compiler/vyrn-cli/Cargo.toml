@@ -29,7 +29,7 @@ vyrn-genwasm = { path = "../vyrn-genwasm" }
 # The same crate, version and features `vyrn-genwasm` embeds, so one build
 # compiles it once. What the workspace defends is "builds and
 # tests with no LLVM, clang or sysroot" (../Cargo.toml), and this is pure Rust.
-wasmtime = { version = "47", default-features = false, features = [
+wasmtime = { version = "48", default-features = false, features = [
     "cranelift",
     "runtime",
     "std",
