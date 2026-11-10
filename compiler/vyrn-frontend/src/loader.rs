@@ -2133,12 +2133,19 @@ fn load_modules(
         // `print` bring nearly every program here. Skip what cannot be read, so
         // a partial std tree (an in-memory or editor resolver) still loads a
         // program that formats no float. A present but broken module still fails.
-        if !w.states.contains_key(&target) && resolver.read(&target).is_err() {
-            continue;
-        }
         if !w.states.contains_key(&target) {
+            let Ok(text) = resolver.read(&target) else {
+                continue;
+            };
             if let Err(diags) = visit(
-                &target, None, None, opts, resolver, engine, &mut w, &root_key,
+                &target,
+                Some(&text),
+                None,
+                opts,
+                resolver,
+                engine,
+                &mut w,
+                &root_key,
             ) {
                 return Err(failed(diags, w.origins));
             }
