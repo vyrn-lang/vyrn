@@ -2,7 +2,7 @@ census	count
 roots	446
 roots that do not check	35
 members BoolLambda	5
-members Condition	3987
+members Condition	3988
 members KeyBlockLambda	3
 members KeyLambda	57
 members MoreStatements	21
@@ -79,16 +79,16 @@ key and other lambdas, across the corpus: L2 pairs	14
 key and other lambdas, across the corpus: most atoms at L2	0
 key and other lambdas, across the corpus: most diagram nodes at L2	0
 key and other lambdas, across the corpus: decided at L2 by step Whole	60
-conditions, within one function: members	3987
-conditions, within one function: L0 identities	3842
+conditions, within one function: members	3988
+conditions, within one function: L0 identities	3843
 conditions, within one function: L0 pairs	194
 conditions, within one function: L0 complement pairs	2
-conditions, within one function: L1 identities	3842
+conditions, within one function: L1 identities	3843
 conditions, within one function: L1 pairs	194
 conditions, within one function: L1 complement pairs	23
-conditions, within one function: L2 identities	3842
+conditions, within one function: L2 identities	3843
 conditions, within one function: L2 pairs	194
 conditions, within one function: L2 complement pairs	39
 conditions, within one function: most atoms at L2	14
 conditions, within one function: most diagram nodes at L2	38
-conditions, within one function: decided at L2 by step Whole	3987
+conditions, within one function: decided at L2 by step Whole	3988

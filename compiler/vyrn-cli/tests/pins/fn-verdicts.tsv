@@ -1933,7 +1933,8 @@ site/app/demohl.vyrn	fieldAfter	no, it keeps an index check	no, its effect set i
 site/app/demohl.vyrn	unescapeJson	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
 site/app/demohl.vyrn	looksLikeSource	yes	no, its effect set is alloc
 site/app/deps.vyrn	usesOf	no, it calls `importsOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
-site/app/deps.vyrn	walk	no, it calls `usesOf`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+site/app/deps.vyrn	dirsOf	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, fs-list, trap
+site/app/deps.vyrn	walk	no, it calls `dirsOf`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 site/app/deps.vyrn	depthOf	yes	no, its effect set is alloc
 site/app/deps.vyrn	moduleDeps	no, it calls `vyrnStems`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 site/app/docs.vyrn	apiModules	yes	no, its effect set is alloc
