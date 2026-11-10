@@ -1036,7 +1036,8 @@ struct Work {
     /// `key -> manifest::real_path(key)`. A file's identity does not change
     /// during a load, and [`runtime_fence`] asks for the same keys on every edge.
     real_paths: HashMap<String, Option<String>>,
-    /// Each generation input's hash as this load read it ([`current_input_hash`]).
+    /// Each generation input's hash as this load read it ([`current_input_hash`]),
+    /// which the linked program carries on ([`Seen`]).
     inputs: HashMap<String, Option<String>>,
     /// Each generator program this load checked ([`checked_generator`]).
     checked: CheckedGens,
@@ -1601,7 +1602,7 @@ fn load_with_origins_inner(
     drop(read_parse);
     match loaded {
         Err((diags, origins)) => (Err(diags), origins, Vec::new(), Vec::new(), None),
-        Ok((modules, root_key, origins, warnings, pending)) => {
+        Ok((modules, root_key, origins, warnings, pending, seen)) => {
             let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
             // The floor's judgment reads the effects of every instance, so a
@@ -1613,6 +1614,7 @@ fn load_with_origins_inner(
             let linked = link(modules, &root_key, &lazy, opts).map(|mut p| {
                 p.expansions = opts.expansions.clone();
                 p.session = crate::session::SessionRef(opts.session.clone());
+                p.seen = seen;
                 p
             });
             (linked, origins, warnings, graph, pending)
@@ -1666,7 +1668,7 @@ pub fn capability_graph(
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
 ) -> Result<(crate::floor::Graph, String), Vec<Diagnostic>> {
-    let (mut modules, root_key, _, _, _) =
+    let (mut modules, root_key, ..) =
         load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
     Ok((floor_graph(&mut modules), root_key))
 }
@@ -1689,7 +1691,7 @@ pub fn module_graph(
     engine: Option<&crate::gen::GenEngine>,
 ) -> (Result<ModuleGraph, Vec<Diagnostic>>, Warnings) {
     match load_modules(root_source, root_path, opts, resolver, engine) {
-        Ok((modules, _, _, warnings, _)) => (Ok(graph_of(&modules)), warnings),
+        Ok((modules, _, _, warnings, ..)) => (Ok(graph_of(&modules)), warnings),
         Err((diags, _)) => (Err(diags), Vec::new()),
     }
 }
@@ -1715,6 +1717,7 @@ fn load_modules(
         crate::origin::OriginMaps,
         Vec<Diagnostic>,
         Option<crate::floor::Pending>,
+        Seen,
     ),
     (Vec<Diagnostic>, crate::origin::OriginMaps),
 > {
@@ -1856,6 +1859,7 @@ fn load_modules(
                     given: Default::default(),
                     session: Default::default(),
                     lazy: None,
+                    seen: Default::default(),
                 },
                 import_targets: Vec::new(),
                 generated: None,
@@ -2008,7 +2012,9 @@ fn load_modules(
                 // A name this module did not import reads any loaded module, so
                 // the module another import left out loads here.
                 if bound.is_none()
-                    && !(w.modules.iter()).any(|m| exported_gen(&m.program, name).is_some())
+                    && !(w.modules.iter()).any(|m| {
+                        exported_gen(&m.program, name).is_some() || gen_row(m, name).is_some()
+                    })
                 {
                     let left_out = (w.unlinked.iter())
                         .find(|(k, g)| gen_fn(g, name).is_some() && !w.states.contains_key(*k))
@@ -2020,9 +2026,8 @@ fn load_modules(
                 let home = (bound.and_then(|t| w.unlinked.get_key_value(t)))
                     .and_then(|(k, g)| Some((k.as_str(), gen_fn(g, name)?.clone())))
                     .or_else(|| {
-                        (w.modules.iter()).find_map(|m| {
-                            Some((m.key.as_str(), GenFn::of(exported_gen(&m.program, name)?)))
-                        })
+                        (w.modules.iter())
+                            .find_map(|m| Some((m.key.as_str(), module_gen(m, name)?)))
                     });
                 let (gen_key, generated) = run_generator(
                     key,
@@ -2128,12 +2133,19 @@ fn load_modules(
         // `print` bring nearly every program here. Skip what cannot be read, so
         // a partial std tree (an in-memory or editor resolver) still loads a
         // program that formats no float. A present but broken module still fails.
-        if !w.states.contains_key(&target) && resolver.read(&target).is_err() {
-            continue;
-        }
         if !w.states.contains_key(&target) {
+            let Ok(text) = resolver.read(&target) else {
+                continue;
+            };
             if let Err(diags) = visit(
-                &target, None, None, opts, resolver, engine, &mut w, &root_key,
+                &target,
+                Some(&text),
+                None,
+                opts,
+                resolver,
+                engine,
+                &mut w,
+                &root_key,
             ) {
                 return Err(failed(diags, w.origins));
             }
@@ -2186,7 +2198,8 @@ fn load_modules(
         }
     }
 
-    Ok((w.modules, root_key, w.origins, w.warnings, pending))
+    let seen = Seen::of(w.inputs);
+    Ok((w.modules, root_key, w.origins, w.warnings, pending, seen))
 }
 
 /// A load's failure: every diagnostic remapped onto the input file a generator
@@ -2227,30 +2240,54 @@ struct Parsed {
     /// (attribution, panic sites, the dropped `std/result` import) moves a
     /// reference name.
     refs: Rc<HashSet<String>>,
-    /// The top-level function bodies an imported std module's parse cut;
-    /// `program` holds an empty block for each.
+    /// The top-level functions an imported std module's parse cut: `program`
+    /// holds an empty block for each, and an [`interface_parse`]'s leaves them
+    /// out.
     bodies: Option<Bodies>,
     /// The identifiers of the cut bodies; empty for every other parse.
     mentions: HashSet<String>,
 }
 
-/// The top-level function bodies an imported std module's parse cut ([`skims`]):
-/// each one's text in the module's source, which a load lexes and parses only
-/// where a root reaches its function ([`parse_reached`]).
+/// The top-level functions with a body that an imported std module's parse
+/// cut ([`skims`]): each one's declaration and body as text of the module,
+/// which a load lexes and parses only where a spelling reaches it
+/// ([`parse_reached`]).
 struct Bodies {
     /// The module's text.
     source: Rc<str>,
-    /// The method-form names the module answers to, which a body's parse reads.
+    /// The method-form names the module answers to, which a body's and a
+    /// declaration's parse read.
     answers: HashSet<String>,
+    /// A line per row: the numbers [`Row::read`] reads, then its name and its
+    /// type parameters, each after a space. The interface entry holds it.
+    table: Rc<str>,
     /// By the line and column of the function's name.
-    cuts: Vec<Cut>,
+    rows: Vec<Row>,
     /// The names the given bodies spell ([`Interface::spells`]), which every
     /// [`Body::Given`] of the module shares; empty in a [`module_parse`].
     names: std::sync::Arc<str>,
-    /// Each given function ([`is_given`]) by its index in the parse's
-    /// functions, and the names its body spells as a range of `names`; empty
-    /// in a [`module_parse`].
+    /// Each given function the parse holds, a flattened impl method, by its
+    /// index in the parse's functions, and the names its body spells as a
+    /// range of `names`; empty in a [`module_parse`].
     given: Vec<(usize, std::ops::Range<usize>)>,
+}
+
+/// One top-level function with a cut body.
+struct Row {
+    /// Its name and its type parameters, space-separated, as a range of
+    /// [`Bodies::table`].
+    names: std::ops::Range<usize>,
+    gen: bool,
+    exported: bool,
+    /// The line and column of its declaration's first token.
+    start: (usize, usize),
+    /// The byte offset of that token in [`Bodies::source`]; the declaration
+    /// runs from there to its body's `{`.
+    from: usize,
+    cut: Cut,
+    /// The names its body spells, as a range of [`Bodies::names`], where it
+    /// is given ([`is_given`]).
+    given: Option<std::ops::Range<usize>>,
 }
 
 /// One cut body.
@@ -2260,22 +2297,103 @@ struct Cut {
     /// The line and column of its `{`.
     open: (usize, usize),
     /// Its text, `{` to `}`, as a byte range of [`Bodies::source`]. Only
-    /// [`cuts_of`] and [`Cut::read`] build a cut, and both check that the
+    /// [`Bodies::of`] and [`Row::read`] build a cut, and both check that the
     /// range holds those braces.
     span: std::ops::Range<usize>,
 }
 
 impl Bodies {
-    /// The names the body of the given function `fi` of the parse spells;
-    /// `None` where it is not given ([`is_given`]).
-    fn names_of(&self, fi: usize) -> Option<GivenNames> {
-        let i = (self.given).binary_search_by_key(&fi, |(f, _)| *f).ok()?;
-        Some(GivenNames::new(self.names.clone(), self.given[i].1.clone()))
+    /// The row of each function of `program` whose body the skim `s` of
+    /// `text` left.
+    fn of(program: &Program, s: parser::Skimmed, text: &str) -> Result<Bodies, Diagnostic> {
+        // Each line's byte offset, and a column's within it.
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let at = |(line, col): (usize, usize)| -> Option<usize> {
+            let start = *starts.get(line.checked_sub(1)?)?;
+            let (i, _) = text[start..].char_indices().nth(col.checked_sub(1)?)?;
+            Some(start + i)
+        };
+        let bytes = text.as_bytes();
+        let mut found = Vec::new();
+        for f in &program.functions {
+            let (Some((open, close)), Some(start)) = (s.braces(f), s.start(f)) else {
+                continue;
+            };
+            let (from, span) = match (at(start), at(open), at(close)) {
+                (Some(from), Some(a), Some(z)) if bytes[a] == b'{' && bytes[z] == b'}' => {
+                    (from, a..z + 1)
+                }
+                _ => {
+                    let why = format!(
+                        "internal error: the braces of `{}` lie where no brace is",
+                        f.name
+                    );
+                    return Err(Diagnostic::error(f.line, 0, "load", why));
+                }
+            };
+            found.push((f, open, span, start, from));
+        }
+        found.sort_unstable_by_key(|(f, ..)| (f.line, f.col));
+        found.dedup_by_key(|(f, ..)| (f.line, f.col));
+        let mut table = String::new();
+        for (f, (open_line, open_col), span, (line, col), from) in &found {
+            let (start, end) = (span.start, span.end);
+            table.push_str(&format!(
+                "{} {} {open_line} {open_col} {start} {end} {line} {col} {from} {} {} {}",
+                f.line,
+                f.col,
+                u8::from(f.is_gen),
+                u8::from(f.exported),
+                f.name
+            ));
+            for p in &f.type_params {
+                table.push(' ');
+                table.push_str(p);
+            }
+            table.push('\n');
+        }
+        let rows = Row::table(&table, text).ok_or_else(|| {
+            let why = "internal error: a module's cut bodies do not read back".to_string();
+            Diagnostic::error(0, 0, "load", why)
+        })?;
+        Ok(Bodies {
+            source: text.into(),
+            answers: s.into_answers(),
+            table: table.into(),
+            rows,
+            names: "".into(),
+            given: Vec::new(),
+        })
     }
 
-    fn cut(&self, f: &Function) -> Option<&Cut> {
-        let i = (self.cuts).binary_search_by_key(&(f.line, f.col), |c| c.at);
-        Some(&self.cuts[i.ok()?])
+    /// The row of `f`, a function of the parse with a cut body.
+    fn row(&self, f: &Function) -> Option<&Row> {
+        let i = (self.rows).binary_search_by_key(&(f.line, f.col), |r| r.cut.at);
+        Some(&self.rows[i.ok()?])
+    }
+
+    /// The name of row `r`.
+    fn name(&self, r: &Row) -> &str {
+        let names = &self.table[r.names.clone()];
+        names.split(' ').next().unwrap_or(names)
+    }
+
+    /// The type parameters of row `r`.
+    fn params(&self, r: &Row) -> Vec<String> {
+        let names = self.table[r.names.clone()].split(' ').skip(1);
+        names.map(str::to_string).collect()
+    }
+
+    /// Whether a row declares `name`.
+    fn declares(&self, name: &str) -> bool {
+        self.rows.iter().any(|r| self.name(r) == name)
+    }
+
+    /// The names row `r`'s body spells, where it is given ([`is_given`]).
+    fn names_of(&self, r: &Row) -> Option<GivenNames> {
+        Some(GivenNames::new(self.names.clone(), r.given.clone()?))
     }
 
     /// Lexes and parses the body `cut` of the function with `type_params`.
@@ -2285,11 +2403,54 @@ impl Bodies {
         parser::body(tokens, &self.answers, type_params)
     }
 
+    /// Lexes and parses the declarations of rows `rows`, in source order, of
+    /// module `key` under root `root_key`, in one parse. Each body is the empty block an interface's
+    /// cut leaves, and each function names no module.
+    fn declarations(
+        &self,
+        rows: &[usize],
+        key: &str,
+        root_key: &str,
+    ) -> Result<Vec<Function>, Vec<Diagnostic>> {
+        let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
+            ds.into_iter()
+                .map(|d| in_module(d, key, root_key))
+                .collect()
+        };
+        let brace = |tok: lexer::Tok, (line, col): (usize, usize)| lexer::Token { tok, line, col };
+        let mut tokens = Vec::new();
+        let mut end = (1, 1);
+        for &ri in rows {
+            let r = &self.rows[ri];
+            let text = &self.source[r.from..r.cut.span.start];
+            let mut piece = lexer::lex_at(text, r.start).map_err(|d| in_key(vec![d]))?;
+            piece.pop();
+            tokens.append(&mut piece);
+            let (line, col) = r.cut.open;
+            end = (line, col + 1);
+            tokens.push(brace(lexer::Tok::LBrace, r.cut.open));
+            tokens.push(brace(lexer::Tok::RBrace, end));
+        }
+        tokens.push(brace(lexer::Tok::Eof, (end.0, end.1 + 1)));
+        let (program, errors) = parser::parse_answered(tokens, &self.answers);
+        if !errors.is_empty() {
+            return Err(in_key(errors));
+        }
+        let read = program.functions;
+        let same = read.len() == rows.len()
+            && (read.iter().zip(rows)).all(|(f, &ri)| f.name == self.name(&self.rows[ri]));
+        if !same {
+            let why = format!("internal error: the interface of `{key}` does not match the module");
+            return Err(vec![Diagnostic::error(0, 0, "load", why)]);
+        }
+        Ok(read)
+    }
+
     /// Gives the functions of `program`, module `key`'s, the bodies this load
-    /// reads: in a module whose rows it writes ([`writes`]) each cut body
-    /// parsed, under [`std_given`] each given function its names, and
-    /// otherwise each cut body the empty block [`parse_reached`] fills where a
-    /// root reaches it. Returns whether a body stays cut.
+    /// reads: in a module whose rows it writes ([`writes`]) every row's
+    /// declaration with its body parsed, and under [`std_given`] each given
+    /// function the parse holds its names; every other row waits for
+    /// [`parse_reached`]. Returns whether a row stays cut.
     fn settle(
         &self,
         program: &mut Program,
@@ -2299,15 +2460,18 @@ impl Bodies {
     ) -> Result<bool, Vec<Diagnostic>> {
         let owner = generated_importer(key).unwrap_or(key);
         if writes(owner, root_key, opts) {
-            for f in &mut program.functions {
-                let Some(cut) = self.cut(f) else { continue };
-                let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
-                    ds.into_iter()
-                        .map(|d| in_module(d, key, root_key))
-                        .collect()
-                };
-                f.body = Body::Written(self.parse(cut, &f.type_params).map_err(in_key)?);
+            let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
+                ds.into_iter()
+                    .map(|d| in_module(d, key, root_key))
+                    .collect()
+            };
+            let every: Vec<usize> = (0..self.rows.len()).collect();
+            let mut read = self.declarations(&every, key, root_key)?;
+            for (f, r) in read.iter_mut().zip(&self.rows) {
+                f.module = Some(key.to_string());
+                f.body = Body::Written(self.parse(&r.cut, &f.type_params).map_err(in_key)?);
             }
+            place(&mut program.functions, read);
             return Ok(false);
         }
         if std_given(opts) {
@@ -2318,6 +2482,61 @@ impl Bodies {
         }
         Ok(true)
     }
+}
+
+impl Row {
+    /// The rows a table [`Bodies::of`] wrote holds, of the module text
+    /// `source`, or `None` for a damaged table.
+    fn table(table: &str, source: &str) -> Option<Vec<Row>> {
+        let mut rows = Vec::new();
+        let mut at = 0;
+        for line in table.split_terminator('\n') {
+            rows.push(Row::read(line, at, source)?);
+            at += line.len() + 1;
+        }
+        let sorted = rows.windows(2).all(|w| w[0].cut.at < w[1].cut.at);
+        (sorted && at == table.len()).then_some(rows)
+    }
+
+    /// The row that `line`, at byte `at` of a [`Bodies::table`], states.
+    fn read(line: &str, at: usize, source: &str) -> Option<Row> {
+        let mut words = line.splitn(12, ' ');
+        let mut num = || words.next()?.parse::<usize>().ok();
+        let cut = Cut {
+            at: (num()?, num()?),
+            open: (num()?, num()?),
+            span: num()?..num()?,
+        };
+        let (start, from) = ((num()?, num()?), num()?);
+        let flag = |n: usize| (n < 2).then_some(n == 1);
+        let (gen, exported) = (flag(num()?)?, flag(num()?)?);
+        let names = words.next()?;
+        let body = source.get(cut.span.clone())?;
+        let head = source.get(from..cut.span.start)?;
+        let ok = body.starts_with('{') && body.ends_with('}') && !head.is_empty();
+        let row = Row {
+            names: at + line.len() - names.len()..at + line.len(),
+            gen,
+            exported,
+            start,
+            from,
+            cut,
+            given: None,
+        };
+        ok.then_some(row)
+    }
+}
+
+/// Puts the declarations `read` among the top-level functions of
+/// `functions` by line and column; the flattened impl methods, whose names
+/// hold a `$` no source spells, stay last.
+fn place(functions: &mut Vec<Function>, read: Vec<Function>) {
+    let top = (functions.iter())
+        .position(|f| f.name.contains('$'))
+        .unwrap_or(functions.len());
+    let n = top + read.len();
+    functions.splice(top..top, read);
+    functions[..n].sort_by_key(|f| (f.line, f.col));
 }
 
 thread_local! {
@@ -2461,23 +2680,16 @@ fn module_parse(
     }
     let (bodies, mentions) = match skimmed {
         Some(s) => {
-            let cuts = cuts_of(&program, &s, text).map_err(|d| in_key(vec![d]))?;
             // A body that may mention a runtime builtin is parsed here, so
             // `refs` holds every mention the scan in [`load_modules`] reads.
             let rt: Vec<bool> = (program.functions.iter())
                 .map(|f| s.tokens(f).is_some_and(mentions_runtime))
                 .collect();
             let mentions = s.idents();
-            let bodies = Bodies {
-                source: text.into(),
-                answers: s.into_answers(),
-                cuts,
-                names: "".into(),
-                given: Vec::new(),
-            };
+            let bodies = Bodies::of(&program, s, text).map_err(|d| in_key(vec![d]))?;
             for (f, _) in (program.functions.iter_mut()).zip(rt).filter(|(_, rt)| *rt) {
-                if let Some(cut) = bodies.cut(f) {
-                    f.body = Body::Written(bodies.parse(cut, &f.type_params).map_err(in_key)?);
+                if let Some(r) = bodies.row(f) {
+                    f.body = Body::Written(bodies.parse(&r.cut, &f.type_params).map_err(in_key)?);
                 }
             }
             (Some(bodies), mentions)
@@ -2512,54 +2724,15 @@ fn skims(key: &str, root_key: &str, opts: &LoadOptions) -> bool {
     key != root_key && opts.artifacts.is_none() && in_std(owner, opts)
 }
 
-/// The body of each function of `program` that the skim `s` of `text` left,
-/// as [`Bodies::cuts`] holds them.
-fn cuts_of(program: &Program, s: &parser::Skimmed, text: &str) -> Result<Vec<Cut>, Diagnostic> {
-    // Each line's byte offset, and a column's within it.
-    let starts: Vec<usize> = std::iter::once(0)
-        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
-        .collect();
-    let at = |(line, col): (usize, usize)| -> Option<usize> {
-        let start = *starts.get(line.checked_sub(1)?)?;
-        let (i, _) = text[start..].char_indices().nth(col.checked_sub(1)?)?;
-        Some(start + i)
-    };
-    let mut cuts = Vec::new();
-    for f in &program.functions {
-        let Some((open, close)) = s.braces(f) else {
-            continue;
-        };
-        let span = match (at(open), at(close)) {
-            (Some(a), Some(z)) if text.as_bytes()[a] == b'{' && text.as_bytes()[z] == b'}' => {
-                a..z + 1
-            }
-            _ => {
-                let why = format!(
-                    "internal error: the braces of `{}` lie where no brace is",
-                    f.name
-                );
-                return Err(Diagnostic::error(f.line, 0, "load", why));
-            }
-        };
-        cuts.push(Cut {
-            at: (f.line, f.col),
-            open,
-            span,
-        });
-    }
-    cuts.sort_unstable_by_key(|c| c.at);
-    cuts.dedup_by_key(|c| c.at);
-    Ok(cuts)
-}
-
 /// The format word that opens a std module's interface entry.
-const INTERFACE_TAG: &str = "interface3";
+const INTERFACE_TAG: &str = "interface4";
 
-/// The parse of imported std module `key` as its interface ([`skims`]): each
-/// top-level function body cut ([`Parsed::bodies`]), for [`Bodies::settle`]
-/// and [`parse_reached`] to fill. Read from the module's interface entry,
-/// beside the generator cache's entries, and written there on a miss;
-/// `VYRN_NO_GEN_CACHE` reads and writes none. Memoized as [`module_parse`] is.
+/// The parse of imported std module `key` as its interface ([`skims`]): its
+/// declarations but each top-level function with a body, which waits as a
+/// row ([`Parsed::bodies`]) for [`Bodies::settle`] and [`parse_reached`].
+/// Read from the module's interface entry, beside the generator cache's
+/// entries, and written there on a miss; `VYRN_NO_GEN_CACHE` reads and writes
+/// none. Memoized as [`module_parse`] is.
 fn interface_parse(
     key: &str,
     text: &str,
@@ -2596,57 +2769,51 @@ fn interface_parse(
             .map(|d| in_module(d, key, root_key))
             .collect()
     };
+    let mismatch = || {
+        let why = format!("internal error: the interface of `{key}` does not match the module");
+        in_key(vec![Diagnostic::error(0, 0, "load", why)])
+    };
     let scan = lexer::scan(&interface.text).map_err(|d| in_key(vec![d]))?;
-    let (program, errors, skimmed) = parser::parse_imported(lexer::tokens(scan), false);
+    let (program, errors) = parser::parse_answered(lexer::tokens(scan), &interface.answers);
     if !errors.is_empty() {
         return Err(in_key(errors));
     }
+    let mut rows = Row::table(&interface.rows, text).ok_or_else(mismatch)?;
     let owner = generated_importer(key).unwrap_or(key);
-    // One line per given function, in source order: its name, then each
-    // name its body spells, each followed by a space.
-    let spells = &interface.spells;
-    let mut given = Vec::new();
-    let mut at = 0;
     let gives = Gives::of(owner, opts);
-    for (fi, f) in (program.functions.iter().enumerate()).filter(|(_, f)| is_given(f, gives)) {
-        let line = spells[at..].split_once('\n').map(|(l, _)| l);
-        let names = line.and_then(|l| l.strip_prefix(f.name.as_str())?.strip_prefix(' '));
-        let (Some(line), Some(names)) = (line, names) else {
-            let d = Diagnostic::error(
-                f.line,
-                0,
-                "load",
-                format!(
-                    "internal error: the interface of `{key}` holds no names for `{}`",
-                    f.name
-                ),
-            );
-            return Err(in_key(vec![d]));
-        };
+    // One line per given function, rows first, then the flattened impl
+    // methods the parse holds, each in source order: its name, then each name
+    // its body spells, each followed by a space.
+    let spells = &interface.spells;
+    let mut at = 0;
+    let mut next = |name: &str| -> Option<std::ops::Range<usize>> {
+        let line = spells[at..].split_once('\n')?.0;
+        let names = line.strip_prefix(name)?.strip_prefix(' ')?;
         let from = at + line.len() - names.len();
-        given.push((fi, from..from + names.len()));
         at += line.len() + 1;
-    }
-    let cuts: Option<Vec<Cut>> = (interface.cuts.lines())
-        .map(|l| Cut::read(l, text))
-        .collect();
-    let (true, Some(mut cuts)) = (at == spells.len(), cuts) else {
-        let d = Diagnostic::error(
-            0,
-            0,
-            "load",
-            format!("internal error: the interface of `{key}` does not match the module"),
-        );
-        return Err(in_key(vec![d]));
+        Some(from..from + names.len())
     };
-    cuts.sort_unstable_by_key(|c| c.at);
+    for r in &mut rows {
+        let names = &interface.rows[r.names.clone()];
+        if gives.0 && !names.contains(' ') {
+            r.given = Some(next(names).ok_or_else(mismatch)?);
+        }
+    }
+    let mut given = Vec::new();
+    for (fi, f) in (program.functions.iter().enumerate()).filter(|(_, f)| is_given(f, gives)) {
+        given.push((fi, next(&f.name).ok_or_else(mismatch)?));
+    }
+    if at != spells.len() {
+        return Err(mismatch());
+    }
     let p = Rc::new(Parsed {
         program,
         refs: Rc::new(interface.refs),
         bodies: Some(Bodies {
             source: text.into(),
-            answers: skimmed.into_answers(),
-            cuts,
+            answers: interface.answers,
+            table: interface.rows.into(),
+            rows,
             names: spells.clone(),
             given,
         }),
@@ -2656,35 +2823,22 @@ fn interface_parse(
     Ok(p)
 }
 
-impl Cut {
-    /// The cut body of the module text `source` that a line of
-    /// [`Interface::cuts`] states, or `None` for a damaged line.
-    fn read(line: &str, source: &str) -> Option<Cut> {
-        let mut words = line.split(' ').map(|w| w.parse::<usize>().ok());
-        let mut num = || words.next().flatten();
-        let cut = Cut {
-            at: (num()?, num()?),
-            open: (num()?, num()?),
-            span: num()?..num()?,
-        };
-        let text = source.get(cut.span.clone())?;
-        (text.starts_with('{') && text.ends_with('}')).then_some(cut)
-    }
-}
-
 /// What a load reads of a std module it takes as its interface: the module's
-/// text with each top-level function body's statements cut and its newlines
-/// kept, so every other line and column stands, and the names the cut bodies
-/// would add to [`Parsed::refs`] and [`Parsed::mentions`].
+/// text with each top-level function with a body cut out, its newlines kept,
+/// so every other line stands; a row per cut function; and the names the cut
+/// bodies would add to [`Parsed::refs`] and [`Parsed::mentions`].
 struct Interface {
     refs: HashSet<String>,
     mentions: HashSet<String>,
+    /// The method-form names the module answers to ([`Bodies::answers`]),
+    /// which its text, cut of its functions, may not declare.
+    answers: HashSet<String>,
     /// The names each given body spells ([`Body::Given`]), a line per given
-    /// function in source order.
+    /// function: the rows', then the flattened impl methods', each in source
+    /// order.
     spells: std::sync::Arc<str>,
-    /// A line per cut body ([`Cut`]): the line and column of its function's
-    /// name and of its `{`, then its byte range in the module's text.
-    cuts: String,
+    /// The cut functions, as [`Bodies::table`] holds them.
+    rows: String,
     text: String,
 }
 
@@ -2707,12 +2861,15 @@ impl Interface {
         };
         let mut spells = String::new();
         let gives = Gives::of(owner, opts);
-        for f in (full.program.functions.iter()).filter(|f| is_given(f, gives)) {
-            let cut = b
-                .cut(f)
+        // The rows' given functions, then the flattened methods'.
+        let given = (full.program.functions.iter()).filter(|f| is_given(f, gives));
+        let (cut, flat): (Vec<&Function>, Vec<&Function>) = given.partition(|f| b.row(f).is_some());
+        for f in cut.into_iter().chain(flat) {
+            let row = b
+                .row(f)
                 .filter(|_| f.body.written().is_some_and(|b| b.stmts.is_empty()));
-            let parsed = match cut {
-                Some(cut) => Some(b.parse(cut, &f.type_params).map_err(in_key)?),
+            let parsed = match row {
+                Some(r) => Some(b.parse(&r.cut, &f.type_params).map_err(in_key)?),
                 None => None,
             };
             let mut names: Vec<&str> = Vec::new();
@@ -2729,38 +2886,30 @@ impl Interface {
             }
             spells.push('\n');
         }
-        let mut cuts = String::new();
-        for c in &b.cuts {
-            let ((line, col), (open_line, open_col)) = (c.at, c.open);
-            let (start, end) = (c.span.start, c.span.end);
-            cuts.push_str(&format!(
-                "{line} {col} {open_line} {open_col} {start} {end}\n"
-            ));
-        }
         let mut out = String::with_capacity(text.len() / 4);
         let mut from = 0;
-        for c in &b.cuts {
-            let (a, z) = (c.span.start + 1, c.span.end - 1);
-            out.push_str(&text[from..a]);
-            out.extend(text[a..z].chars().filter(|c| *c == '\n'));
-            from = z;
+        for r in &b.rows {
+            out.push_str(&text[from..r.from]);
+            out.extend(text[r.from..r.cut.span.end].chars().filter(|c| *c == '\n'));
+            from = r.cut.span.end;
         }
         out.push_str(&text[from..]);
         Ok(Interface {
             refs: (*full.refs).clone(),
             mentions: full.mentions.clone(),
+            answers: b.answers.clone(),
             spells: spells.into(),
-            cuts,
+            rows: b.table.to_string(),
             text: out,
         })
     }
 
-    /// The entry as text: the tag line, the counted refs and mentions, the
-    /// given bodies' names and the cuts, each after its length in bytes, then
-    /// the cut text.
+    /// The entry as text: the tag line, the counted refs, mentions and
+    /// answers, the given bodies' names and the rows, each after its length in
+    /// bytes, then the cut text.
     fn render(&self, key: &str) -> String {
         let mut body = String::new();
-        for names in [&self.refs, &self.mentions] {
+        for names in [&self.refs, &self.mentions, &self.answers] {
             let mut names: Vec<&String> = names.iter().collect();
             names.sort();
             body.push_str(&format!("{}\n", names.len()));
@@ -2769,7 +2918,7 @@ impl Interface {
                 body.push('\n');
             }
         }
-        for table in [&*self.spells, &self.cuts] {
+        for table in [&*self.spells, &self.rows] {
             body.push_str(&format!("{}\n", table.len()));
             body.push_str(table);
         }
@@ -2798,7 +2947,7 @@ impl Interface {
                 })
                 .collect()
         };
-        let (refs, mentions) = (names()?, names()?);
+        let (refs, mentions, answers) = (names()?, names()?, names()?);
         let mut table = || -> Option<&str> {
             let (n, tail) = rest.split_once('\n')?;
             let n: usize = n.parse().ok()?;
@@ -2806,12 +2955,13 @@ impl Interface {
             rest = tail.get(n..)?;
             Some(table)
         };
-        let (spells, cuts) = (table()?, table()?);
+        let (spells, rows) = (table()?, table()?);
         Some(Interface {
             refs,
             mentions,
+            answers,
             spells: spells.into(),
-            cuts: cuts.to_string(),
+            rows: rows.to_string(),
             text: rest.to_string(),
         })
     }
@@ -2820,6 +2970,25 @@ impl Interface {
 /// The `gen fn` `name` that program `p` exports.
 fn exported_gen<'a>(p: &'a Program, name: &str) -> Option<&'a Function> {
     (p.functions.iter()).find(|f| f.name == name && f.is_gen && f.exported)
+}
+
+/// The row of the `gen fn` `name` that module `m` exports, where its parse
+/// left the declaration out ([`interface_parse`]).
+fn gen_row<'a>(m: &'a Module, name: &str) -> Option<(&'a Bodies, usize)> {
+    let b = m.cut.as_ref()?.bodies.as_ref()?;
+    let ri = (b.rows.iter()).position(|r| r.gen && r.exported && b.name(r) == name)?;
+    Some((b, ri))
+}
+
+/// The `gen fn` `name` that module `m` exports, its declaration parsed
+/// from its row where the parse left it out.
+fn module_gen(m: &Module, name: &str) -> Option<GenFn> {
+    if let Some(f) = exported_gen(&m.program, name) {
+        return Some(GenFn::of(f));
+    }
+    let (b, ri) = gen_row(m, name)?;
+    let f = b.declarations(&[ri], &m.key, "").ok()?.pop()?;
+    Some(GenFn::of(&f))
 }
 
 /// An exported `gen fn` as a load reads it: what a generator import checks its
@@ -2909,6 +3078,7 @@ fn unlinked_import(
             && !parsed.refs.contains(name)
             && !parsed.mentions.contains(name)
             && !decls(program).any(|d| d.name == name)
+            && !parsed.bodies.as_ref().is_some_and(|b| b.declares(name))
     });
     if !only_named || !in_std(target, opts) {
         return None;
@@ -4149,9 +4319,42 @@ fn read_input_line(l: &str, inputs: &mut Vec<(String, String)>, stamps: &mut Sta
     Some(())
 }
 
-/// What one load's validations of [`Inputs`] found, by path.
-#[derive(Default)]
-pub struct Seen(HashMap<String, Option<String>>);
+/// What one load found of each file a cache entry records: the hash its
+/// settled stamp vouched for or its bytes gave, by path, `None` for an
+/// absent file. The load owns it: it fills it from its first generator entry
+/// on, and the program it links carries it ([`Program::seen`]) to the last
+/// entry its check validates, a rows entry or a `derive` generation's, so no
+/// file is stat-ed or read twice for one load. Every copy of the program
+/// shares it, and two compare equal and print alike, as
+/// [`crate::session::SessionRef`]s do.
+#[derive(Clone, Default)]
+pub struct Seen(Option<std::sync::Arc<std::sync::Mutex<HashMap<String, Option<String>>>>>);
+
+impl Seen {
+    fn of(found: HashMap<String, Option<String>>) -> Seen {
+        Seen(Some(std::sync::Arc::new(std::sync::Mutex::new(found))))
+    }
+
+    /// Runs `f` on the table; on an empty one where no load filled it.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut HashMap<String, Option<String>>) -> R) -> R {
+        match &self.0 {
+            Some(m) => f(&mut m.lock().unwrap_or_else(|e| e.into_inner())),
+            None => f(&mut HashMap::new()),
+        }
+    }
+}
+
+impl std::fmt::Debug for Seen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Seen")
+    }
+}
+
+impl PartialEq for Seen {
+    fn eq(&self, _: &Seen) -> bool {
+        true
+    }
+}
 
 /// The files a cache entry other than a generation's was made from, each with
 /// its content hash and its settled stamp where it has one, recorded and
@@ -4178,9 +4381,10 @@ impl Inputs {
 
     /// Whether every file still has its stamp, or else still hashes the same.
     /// An entry that records no file describes nothing, so it is never fresh.
-    /// `seen` keeps each file's answer for the next entry one load validates.
-    pub fn fresh(&self, resolver: &dyn ModuleResolver, seen: &mut Seen) -> bool {
-        !self.hashes.is_empty() && all_fresh(&self.hashes, &self.stamps, resolver, &mut seen.0)
+    /// `seen` keeps each file's answer for the next entry the load validates.
+    pub fn fresh(&self, resolver: &dyn ModuleResolver, seen: &Seen) -> bool {
+        let fresh = |read: &mut _| all_fresh(&self.hashes, &self.stamps, resolver, read);
+        !self.hashes.is_empty() && seen.with(fresh)
     }
 
     /// Appends the count, then one [`input_line`] per file.
@@ -5913,17 +6117,18 @@ fn reach(
     }
 }
 
-/// Parses the cut body ([`Parsed::bodies`]) of each function a root can reach
-/// by its spelling, and drops each function with a cut body no spelling
-/// reaches, before the link spends work on it. A given body ([`Body::Given`])
-/// is not parsed: its names are its spellings.
+/// Parses the declaration and the cut body ([`Parsed::bodies`]) of each
+/// function a root can reach by its spelling, in its module's source order. A
+/// function no spelling reaches is never lexed, so the link spends no work on
+/// it. A given body ([`Body::Given`]) is not parsed: its names are its
+/// spellings.
 ///
 /// The spellings a root reaches are [`crate::ast::spelled`] of every body but a
 /// cut one, every imported name and every name in
 /// [`LoadOptions::host_calls`]. A reached function's spellings are reached too.
 /// They are taken before `link` renames, so a spelling reaches every function
 /// that declares it, and a namespace member `ns.f` is the field `f`: the
-/// link's walk ([`drop_unreached`]) drops every function dropped here. A
+/// link's walk ([`drop_unreached`]) drops every function left out here. A
 /// program that calls `derive` parses every cut body.
 ///
 /// Under a build ([`gives_unrun`]) gen fns and their bodies reach last,
@@ -5933,25 +6138,26 @@ fn reach(
 /// by name.
 fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<Diagnostic>> {
     let generators: HashSet<String> = generator_calls(modules).map(str::to_string).collect();
-    // The functions with a cut body no spelling reached yet, by name.
+    // Each module's cut functions, held apart from `modules`, which the end
+    // writes.
+    let cuts: Vec<Option<Rc<Parsed>>> = modules.iter().map(|m| m.cut.clone()).collect();
+    let bodies: Vec<Option<&Bodies>> = (cuts.iter())
+        .map(|p| p.as_deref().and_then(|p| p.bodies.as_ref()))
+        .collect();
+    // The rows no spelling reached yet, by name: a module and a row.
     let mut waiting: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
-    for (mi, m) in modules.iter().enumerate() {
-        let Some(b) = m.cut.as_ref().and_then(|p| p.bodies.as_ref()) else {
-            continue;
-        };
-        for (fi, f) in m.program.functions.iter().enumerate() {
-            if b.cut(f).is_some() {
-                waiting.entry(&f.name).or_default().push((mi, fi));
-            }
+    for (mi, b) in bodies.iter().enumerate() {
+        let Some(b) = b else { continue };
+        for (ri, r) in b.rows.iter().enumerate() {
+            waiting.entry(b.name(r)).or_default().push((mi, ri));
         }
     }
     if waiting.is_empty() {
         return Ok(());
     }
-    let unparsed = |mi: usize, f: &Function| {
-        waiting
-            .get(f.name.as_str())
-            .is_some_and(|w| w.iter().any(|(m, _)| *m == mi))
+    let row = |mi: usize, ri: usize| -> (&Bodies, &Row) {
+        let b = bodies[mi].expect("a row's module has its cut functions");
+        (b, &b.rows[ri])
     };
     // A test or bench body may call a gen fn, which then runs.
     let mut tested: Vec<&str> = Vec::new();
@@ -5960,7 +6166,10 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     }
     let gives = gives_unrun(opts) && {
         let fns = modules.iter().flat_map(|m| &m.program.functions);
-        let gens: HashSet<&str> = fns.filter(|f| f.is_gen).map(|f| f.name.as_str()).collect();
+        let mut gens: HashSet<&str> = fns.filter(|f| f.is_gen).map(|f| f.name.as_str()).collect();
+        for b in bodies.iter().flatten() {
+            gens.extend(b.rows.iter().filter(|r| r.gen).map(|r| b.name(r)));
+        }
         !tested.iter().any(|n| gens.contains(n))
     };
     let mut names: Vec<&str> = opts.host_calls.to_vec();
@@ -5971,11 +6180,14 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             Some(Entries::Every) => {
                 let fns = m.program.functions.iter().filter(|f| !f.is_gen);
                 names.extend(fns.map(|f| f.name.as_str()));
+                if let Some(b) = bodies[mi] {
+                    names.extend(b.rows.iter().filter(|r| !r.gen).map(|r| b.name(r)));
+                }
             }
             Some(Entries::Named(entries)) => names.extend(entries.iter().map(|e| unprefixed(e))),
             None => {}
         }
-        for f in m.program.functions.iter().filter(|f| !unparsed(mi, f)) {
+        for f in &m.program.functions {
             let to = if gives && f.is_gen {
                 &mut unrun
             } else {
@@ -6014,9 +6226,10 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     }
     let mut derive = names.contains(&"derive") || unrun.contains(&"derive");
     let mut work: Vec<(usize, usize)> = Vec::new();
-    // Each body parsed here and each function given, set after the walk,
-    // which borrows `modules`.
+    // Each row reached, by module and row, and the body it takes: parsed here,
+    // given under [`std_given`], or given here to what only gen fns reach.
     let mut parsed: Vec<(usize, usize, Block)> = Vec::new();
+    let mut stored: Vec<(usize, usize, GivenNames)> = Vec::new();
     let mut given: Vec<(usize, usize, GivenNames)> = Vec::new();
     // Whether the walk reaches from `unrun`, after every run's reach, and
     // each gen fn a run's reach met: a gen fn runs in no run.
@@ -6026,60 +6239,44 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
         reach(n, &mut waiting, &mut work);
     }
     loop {
-        while let Some((mi, fi)) = work.pop() {
-            let m = &modules[mi];
-            let f = &m.program.functions[fi];
-            if gives && f.is_gen && !giving && !derive {
-                deferred.push((mi, fi));
+        while let Some((mi, ri)) = work.pop() {
+            let (m, (b, r)) = (&modules[mi], row(mi, ri));
+            if gives && r.gen && !giving && !derive {
+                deferred.push((mi, ri));
                 continue;
             }
-            let bodies = m.cut.as_ref().and_then(|p| p.bodies.as_ref());
             // The emitter calls a runtime module's functions by name.
-            let owner = generated_importer(&m.key).unwrap_or(&m.key);
-            let gift = (bodies.filter(|_| giving && !derive))
-                .filter(|_| is_given(f, Gives::of(owner, opts)))
-                .filter(|_| runtime_module(&m.key, opts).is_none())
-                .and_then(|b| b.names_of(fi));
-            if let Some(g) = gift {
-                let at = given.len();
-                given.push((mi, fi, g));
-                let names: Vec<&str> = given[at].2.iter().collect();
+            let gift = (b.names_of(r).filter(|_| giving && !derive))
+                .filter(|_| runtime_module(&m.key, opts).is_none());
+            let kept = b.names_of(r).filter(|_| std_given(opts));
+            if let Some(g) = gift.or(kept) {
+                let list = if giving { &mut given } else { &mut stored };
+                list.push((mi, ri, g));
+                let names: Vec<&str> = list[list.len() - 1].2.iter().collect();
                 derive |= names.contains(&"derive");
                 for n in names {
                     reach(n, &mut waiting, &mut work);
                 }
                 continue;
             }
-            let cut = bodies
-                .and_then(|b| Some((b, b.cut(f)?)))
-                .filter(|_| f.body.written().is_some_and(|b| b.stmts.is_empty()));
-            let body = match cut.map(|(b, cut)| b.parse(cut, &f.type_params)) {
-                Some(body) => {
-                    let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
-                        ds.into_iter().map(|d| in_module(d, &m.key, "")).collect()
-                    };
-                    let mut body = body.map_err(in_key)?;
-                    let site = site_file(&m.key, "", opts.std_root.as_deref());
-                    crate::project::walk_block(&mut body, &mut site_stamp(&site, &m.key));
-                    Some(body)
-                }
-                None => None,
+            let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
+                ds.into_iter().map(|d| in_module(d, &m.key, "")).collect()
             };
+            let mut body = b.parse(&r.cut, &b.params(r)).map_err(in_key)?;
+            let site = site_file(&m.key, "", opts.std_root.as_deref());
+            crate::project::walk_block(&mut body, &mut site_stamp(&site, &m.key));
             let mut names: Vec<&str> = Vec::new();
-            match &body {
-                Some(b) => crate::ast::spelled(b, &mut names),
-                None => f.body.spelled(&mut names),
-            }
+            crate::ast::spelled(&body, &mut names);
             derive |= names.contains(&"derive");
             for n in names {
                 reach(n, &mut waiting, &mut work);
             }
-            parsed.extend(body.map(|b| (mi, fi, b)));
+            parsed.push((mi, ri, body));
         }
         // A `derive` generator writes calls after the check, to any function.
         if derive && !(waiting.is_empty() && given.is_empty() && deferred.is_empty()) {
             work.append(&mut deferred);
-            work.extend(given.drain(..).map(|(mi, fi, _)| (mi, fi)));
+            work.extend(given.drain(..).map(|(mi, ri, _)| (mi, ri)));
             work.extend(waiting.drain().flat_map(|(_, at)| at));
             continue;
         }
@@ -6093,27 +6290,43 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
         }
     }
     // A gen fn an import line names stays for the link to resolve the import
-    // ([`drop_unreached`] drops it after).
-    let mut left: Vec<(usize, usize)> = (waiting.into_values().flatten())
-        .filter(|&(mi, fi)| !modules[mi].program.functions[fi].is_gen)
+    // ([`drop_unreached`] drops it after), and so does a runtime module's.
+    let named: HashSet<&str> = (modules.iter().flat_map(|m| &m.program.imports))
+        .flat_map(|imp| &imp.names)
+        .map(|n| n.original.as_str())
+        .chain(generators.iter().map(String::as_str))
         .collect();
-    for (mi, fi, body) in parsed {
-        modules[mi].program.functions[fi].body = Body::Written(body);
+    let left = (waiting.into_values().flatten()).filter(|&(mi, ri)| {
+        let (b, r) = row(mi, ri);
+        r.gen && (named.contains(b.name(r)) || runtime_module(&modules[mi].key, opts).is_some())
+    });
+    // By module, each row it reads and its body: `None` keeps the empty block.
+    let mut read: Vec<Vec<(usize, Option<Body>)>> =
+        (0..modules.len()).map(|_| Vec::new()).collect();
+    for (mi, ri) in left {
+        read[mi].push((ri, None));
     }
-    for (mi, fi, names) in given {
-        modules[mi].program.functions[fi].body = Body::Given(names);
+    for (mi, ri, body) in parsed {
+        read[mi].push((ri, Some(Body::Written(body))));
     }
-    left.sort_unstable();
-    for (mi, m) in modules.iter_mut().enumerate() {
-        let gone = &left[left.partition_point(|&(i, _)| i < mi)..];
-        let gone = &gone[..gone.partition_point(|&(i, _)| i == mi)];
-        if !gone.is_empty() {
-            let mut fi = 0;
-            m.program.functions.retain(|_| {
-                fi += 1;
-                gone.binary_search(&(mi, fi - 1)).is_err()
-            });
+    for (mi, ri, names) in stored.into_iter().chain(given) {
+        read[mi].push((ri, Some(Body::Given(names))));
+    }
+    for (mi, mut rows) in read.into_iter().enumerate() {
+        let Some(b) = bodies[mi].filter(|_| !rows.is_empty()) else {
+            continue;
+        };
+        rows.sort_unstable_by_key(|(ri, _)| *ri);
+        let at: Vec<usize> = rows.iter().map(|(ri, _)| *ri).collect();
+        let m = &mut modules[mi];
+        let mut fns = b.declarations(&at, &m.key, "")?;
+        for (f, (_, body)) in fns.iter_mut().zip(rows) {
+            f.module = Some(m.key.clone());
+            if let Some(body) = body {
+                f.body = body;
+            }
         }
+        place(&mut m.program.functions, fns);
     }
     Ok(())
 }

@@ -96,8 +96,12 @@ impl Skimmed {
     /// The tokens of `f`'s skimmed body, or `None` when the parse did not skim
     /// it.
     pub fn tokens(&self, f: &Function) -> Option<&[Token]> {
-        let (_, range) = self.bodies.iter().find(|(at, _)| *at == (f.line, f.col))?;
+        let (_, _, range) = self.body(f)?;
         Some(&self.tokens[range.clone()])
+    }
+
+    fn body(&self, f: &Function) -> Option<&SkimmedBody> {
+        self.bodies.iter().find(|(at, ..)| *at == (f.line, f.col))
     }
 
     /// The line and column of `f`'s skimmed body's braces, or `None` when the
@@ -107,10 +111,17 @@ impl Skimmed {
         Some(((open.line, open.col), (close.line, close.col)))
     }
 
+    /// The line and column of the first token of `f`'s declaration, its first
+    /// doc line or its `export` included, or `None` when the parse did not
+    /// skim its body.
+    pub fn start(&self, f: &Function) -> Option<(usize, usize)> {
+        Some(self.body(f)?.1)
+    }
+
     /// Every identifier a skimmed body spells.
     pub fn idents(&self) -> HashSet<String> {
         (self.bodies.iter())
-            .flat_map(|(_, range)| &self.tokens[range.clone()])
+            .flat_map(|(_, _, range)| &self.tokens[range.clone()])
             .filter_map(|t| match &t.tok {
                 Tok::Ident(s) => Some(s.clone()),
                 _ => None,
@@ -162,7 +173,42 @@ fn parse_with(
         };
         run = recognizer::file(&tokens, cx);
     }
-    let (mut program, bodies) = build(&mut tokens, &mut run, &answers, imported);
+    let (program, errors, bodies) = finish(&mut tokens, run, &answers, imported);
+    let skimmed = Skimmed {
+        bodies,
+        answers,
+        tokens,
+    };
+    (program, errors, skimmed)
+}
+
+/// [`parse_imported`], without its skim, of declarations cut from a module
+/// that answers to the method-form names `answers` ([`Skimmed::into_answers`]):
+/// the module's other declarations, which may not declare those names, read
+/// as they read in the whole module.
+pub fn parse_answered(
+    mut tokens: Vec<Token>,
+    answers: &HashSet<String>,
+) -> (Program, Vec<Diagnostic>) {
+    let cx = Cx {
+        answers,
+        imported: true,
+        skim: false,
+    };
+    let run = recognizer::file(&tokens, cx);
+    let (program, errors, _) = finish(&mut tokens, run, answers, true);
+    (program, errors)
+}
+
+/// The program a run of `tokens` read, with its errors and the bodies it
+/// skimmed: the prelude for a root, each `impl` method flattened, numbered.
+fn finish(
+    tokens: &mut [Token],
+    mut run: recognizer::Run,
+    answers: &HashSet<String>,
+    imported: bool,
+) -> (Program, Vec<Diagnostic>, Vec<SkimmedBody>) {
+    let (mut program, bodies) = build(tokens, &mut run, answers, imported);
     let errors = run.errors;
     // The prelude: the declarations every program gets, stated in `prelude.vyrn`.
     // Only the root's parse carries them, so a linked program holds one copy.
@@ -201,12 +247,7 @@ fn parse_with(
     }
     program.functions.extend(flat);
     program.number();
-    let skimmed = Skimmed {
-        bodies,
-        answers,
-        tokens,
-    };
-    (program, errors, skimmed)
+    (program, errors, bodies)
 }
 
 /// Returns how a binary operator is written, for a diagnostic that quotes one.
@@ -534,6 +575,7 @@ fn build(
         given: Default::default(),
         session: Default::default(),
         lazy: None,
+        seen: Default::default(),
     };
     let mut bodies = Vec::new();
     let events = std::mem::take(&mut run.events);
@@ -546,8 +588,9 @@ fn build(
     (program, bodies)
 }
 
-/// A body a skim left unread: its function's line and column, and its tokens.
-type SkimmedBody = ((usize, usize), std::ops::Range<usize>);
+/// A body a skim left unread: its function's line and column, the line and
+/// column of its declaration's first token, and its tokens.
+type SkimmedBody = ((usize, usize), (usize, usize), std::ops::Range<usize>);
 
 /// Where a read gets its tokens. A check during the run reads them; the one read
 /// after the run takes their payloads.
@@ -836,6 +879,10 @@ impl<'a> Build<'a> {
         imported: bool,
         skips: &[std::ops::Range<usize>],
     ) {
+        let start = match self.event() {
+            Event::Token(_) | Event::Word(_) | Event::Open(..) => (self.line(), self.col()),
+            _ => (0, 0),
+        };
         let doc = self.take_docs();
         let exported = self.eat(&Tok::Export);
         let export_to = self.export_to();
@@ -843,7 +890,7 @@ impl<'a> Build<'a> {
         let is_mut = self.eat(&Tok::Mut);
         match self.peek() {
             Tok::Fn => {
-                let mut f = self.function(is_gen, skips, bodies);
+                let mut f = self.function(is_gen, start, skips, bodies);
                 f.doc = doc;
                 f.exported = exported;
                 f.export_to = export_to;
@@ -1502,6 +1549,7 @@ impl<'a> Build<'a> {
     fn function(
         &mut self,
         is_gen: bool,
+        start: (usize, usize),
         skips: &[std::ops::Range<usize>],
         bodies: &mut Vec<SkimmedBody>,
     ) -> Function {
@@ -1520,7 +1568,7 @@ impl<'a> Build<'a> {
         let body = match self.event() {
             Event::Skipped(k) => {
                 self.at += 1;
-                bodies.push(((line, col), skips[k as usize].clone()));
+                bodies.push(((line, col), start, skips[k as usize].clone()));
                 Block {
                     id: Id::NEW,
                     stmts: Vec::new(),

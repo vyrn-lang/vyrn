@@ -142,7 +142,7 @@ fn a_changed_std_byte_misses_its_entry_and_the_verdict_holds() {
 fn a_damaged_entry_reads_as_a_miss_and_is_written_again() {
     let t = tree("stdrows-damaged");
     let first = t.check(false);
-    for (kind, task) in [("rows-", "\nsleep\t"), ("interface-", "fn sleep(")] {
+    for (kind, task) in [("rows-", "\nsleep\t"), ("interface-", " sleep\n")] {
         let (name, _) = (t.entries(kind).into_iter())
             .find(|(_, text)| text.contains(task))
             .expect("std/task's entry");

@@ -36,7 +36,7 @@ use vyrn_frontend::core::check::{Fact, Word};
 use vyrn_frontend::diagnostics::Diagnostic;
 use vyrn_frontend::effects::{Call, Effect, Effects, Mark, Walked};
 use vyrn_frontend::gen::GenEngine;
-use vyrn_frontend::loader::{self, Inputs, LoadOptions, ModuleResolver, Seen};
+use vyrn_frontend::loader::{self, Inputs, LoadOptions, ModuleResolver};
 use vyrn_frontend::movecheck::{Judgment, JudgmentKey};
 use vyrn_frontend::session::Session;
 
@@ -85,13 +85,12 @@ impl Given {
         let linked: HashMap<(&str, &str), &str> = (program.spellings.decls.iter())
             .map(|(l, (w, m))| ((w.as_str(), m.as_str()), l.as_str()))
             .collect();
-        let mut seen = Seen::default();
         let mut entries: BTreeMap<&str, (Arc<Entry>, HashMap<String, String>)> = BTreeMap::new();
         for f in &given {
             let m = f.module.as_deref().expect("a given function is imported");
             let owner = loader::generated_importer(m).unwrap_or(m);
             if !entries.contains_key(owner) {
-                let e = entry(owner, program, opts, resolver, engine, &mut seen)?;
+                let e = entry(owner, program, opts, resolver, engine)?;
                 let names: HashMap<String, String> = (e.homes())
                     .filter_map(|(own, w, m)| {
                         let to = *linked.get(&(w, m)).unwrap_or(&w);
@@ -233,7 +232,6 @@ fn entry(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&GenEngine>,
-    seen: &mut Seen,
 ) -> Result<Arc<Entry>, Vec<Diagnostic>> {
     let hash = program.module_hashes.get(owner).map_or("", String::as_str);
     // The cache key names the compiler, so only a load that reads or writes
@@ -250,7 +248,7 @@ fn entry(
         .then(|| resolver.gen_cache_get(&key))
         .flatten()
         .and_then(|text| Entry::read(&key, text))
-        .filter(|e| e.fresh(program, resolver, seen));
+        .filter(|e| e.fresh(program, resolver));
     let e = match cached {
         Some(e) => e,
         None => {
@@ -382,9 +380,9 @@ impl<'t> Cursor<'t> {
 impl Entry {
     /// Whether every file still holds what the own load read, and `program`
     /// links each generated module with the text the own load linked.
-    fn fresh(&self, program: &Program, resolver: &dyn ModuleResolver, seen: &mut Seen) -> bool {
+    fn fresh(&self, program: &Program, resolver: &dyn ModuleResolver) -> bool {
         let same = |(k, h): &(String, String)| program.module_hashes.get(k) == Some(h);
-        self.generated.iter().all(same) && self.inputs.fresh(resolver, seen)
+        self.generated.iter().all(same) && self.inputs.fresh(resolver, &program.seen)
     }
 
     /// Loads module `m` as its own root and writes the row of each function
