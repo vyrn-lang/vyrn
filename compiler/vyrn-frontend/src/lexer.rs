@@ -1,4 +1,5 @@
-//! The lexer: [`scan`] reads the source once, and [`lex`] and the formatter read the scan.
+//! The lexer: one scan of the source builds the formatter's items ([`scan`]) or
+//! the parser's tokens ([`lex`]).
 
 #[rustfmt::skip]
 mod grammar;
@@ -127,8 +128,8 @@ impl Triv {
 
 /// One scan of a source file: every item in order, and the end position where
 /// [`lex`] puts `Eof`.
-pub struct Scan {
-    pub items: Vec<Triv>,
+pub struct Scan<I = Triv> {
+    pub items: Vec<I>,
     pub end_line: usize,
     pub end_col: usize,
 }
@@ -136,23 +137,24 @@ pub struct Scan {
 /// Scans `src` once into every lexical item and the end position.
 ///
 /// The rules are `vyrn.syntax`'s, as [`grammar`] states them; this module builds
-/// the items and decodes each literal's value. [`lex`] and the formatter both
-/// read the scan, so `vyrn fmt` formats only files `vyrn check` lexes. A
-/// literal's payload is decoded here and its raw text kept beside it, so
-/// neither reader scans again.
+/// the items and decodes each literal's value. [`lex`] runs the same scan and
+/// hooks, so `vyrn fmt` formats only files `vyrn check` lexes. A literal's
+/// payload is decoded here and its raw text kept beside it, so the formatter
+/// scans once.
 pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
     scan_as(src, false)
 }
 
 /// [`scan`] with `quote` saying whether `src` is a code quote's text, where a NUL is
 /// a hole.
-fn scan_as(src: &str, quote: bool) -> Result<Scan, Diagnostic> {
+fn scan_as<I: Item>(src: &str, quote: bool) -> Result<Scan<I>, Diagnostic> {
     let items = Items {
         src,
         quote,
         items: Vec::new(),
         escapes: Vec::new(),
         lines: LineCol::START,
+        start: 0,
         end: 0,
     };
     let mut scanner = grammar::Scanner::new(src, items);
@@ -212,21 +214,103 @@ enum Escape {
     Hole,
 }
 
+/// What a scan keeps of each item: the formatter's [`Triv`], or the parser's
+/// [`Token`], which drops a comment. One scan builds either, so [`lex`] copies
+/// no item.
+trait Item: Sized {
+    /// The item `kind` makes, starting at `at`, ending on `end_line` and
+    /// printed as `span`; `None` where this output keeps no such item.
+    fn of(
+        kind: TrivKind,
+        at: (usize, usize),
+        end_line: usize,
+        span: std::ops::Range<usize>,
+        space_before: bool,
+    ) -> Option<Self>;
+    /// The item's token where it is an identifier or a keyword, which lies on
+    /// one line, and that line.
+    fn word(&self) -> Option<(&Tok, usize)>;
+    /// Makes the item the identifier `text`, which a splice grew to end at `end`.
+    fn grow(&mut self, text: String, end: usize);
+}
+
+fn is_word(t: &Tok) -> bool {
+    matches!(t, Tok::Ident(_)) || t.keyword_text().is_some()
+}
+
+impl Item for Triv {
+    fn of(
+        kind: TrivKind,
+        (start_line, col): (usize, usize),
+        end_line: usize,
+        span: std::ops::Range<usize>,
+        space_before: bool,
+    ) -> Option<Self> {
+        Some(Triv {
+            kind,
+            span,
+            start_line,
+            col,
+            end_line,
+            space_before,
+        })
+    }
+
+    fn word(&self) -> Option<(&Tok, usize)> {
+        match &self.kind {
+            TrivKind::Tok(t) if is_word(t) => Some((t, self.start_line)),
+            _ => None,
+        }
+    }
+
+    fn grow(&mut self, text: String, end: usize) {
+        self.span.end = end;
+        self.kind = TrivKind::Tok(Tok::Ident(text));
+    }
+}
+
+impl Item for Token {
+    fn of(
+        kind: TrivKind,
+        (line, col): (usize, usize),
+        _: usize,
+        _: std::ops::Range<usize>,
+        _: bool,
+    ) -> Option<Self> {
+        let tok = match kind {
+            TrivKind::Comment => return None,
+            TrivKind::Doc(text) => Tok::Doc(text),
+            TrivKind::Tok(t) => t,
+        };
+        Some(Token { tok, line, col })
+    }
+
+    fn word(&self) -> Option<(&Tok, usize)> {
+        is_word(&self.tok).then_some((&self.tok, self.line))
+    }
+
+    fn grow(&mut self, text: String, _: usize) {
+        self.tok = Tok::Ident(text);
+    }
+}
+
 /// The items of one scan, built as the scanner reports its rules.
-struct Items<'s> {
+struct Items<'s, I> {
     src: &'s str,
     /// Whether the source is a code quote's text.
     quote: bool,
-    items: Vec<Triv>,
+    items: Vec<I>,
     /// The escapes of the string literal being scanned, each with its byte
     /// range from the backslash; the `string` hook empties it.
     escapes: Vec<(std::ops::Range<usize>, Escape)>,
     lines: LineCol,
+    /// The start of the last item, kept or not, for a splice to grow it.
+    start: usize,
     /// The end of the last item, so the next knows whether space precedes it.
     end: usize,
 }
 
-impl Items<'_> {
+impl<I: Item> Items<'_, I> {
     /// Pushes an item that starts at `at`, a line and column, and ends on
     /// `end_line`. `span` is its printed text, and its rule matched up to `end`.
     fn push(
@@ -238,14 +322,9 @@ impl Items<'_> {
         end: usize,
     ) {
         let space_before = self.items.is_empty() || self.end < span.start;
-        self.items.push(Triv {
-            kind,
-            span,
-            start_line: at.0,
-            col: at.1,
-            end_line,
-            space_before,
-        });
+        self.start = span.start;
+        self.items
+            .extend(I::of(kind, at, end_line, span, space_before));
         self.end = end;
     }
 
@@ -258,7 +337,7 @@ impl Items<'_> {
     }
 }
 
-impl grammar::Hooks for Items<'_> {
+impl<I: Item> grammar::Hooks for Items<'_, I> {
     fn refuse(&mut self, at: usize, rule: Rule) -> Box<Diagnostic> {
         let (line, col) = self.lines.of(self.src, at);
         Box::new(Diagnostic::refusal(line, col, "lex", rule))
@@ -296,15 +375,12 @@ impl grammar::Hooks for Items<'_> {
         if !self.quote {
             return Err(self.refuse(start, rule!(UnexpectedChar, c = "'\\0'")));
         }
-        let word = |t: &Tok| matches!(t, Tok::Ident(_)) || t.keyword_text().is_some();
         let src = self.src;
+        // A comment runs to the end of its line, so a splice that touches the
+        // last item touches a kept one.
         match self.items.last_mut() {
-            Some(last)
-                if self.end == start && matches!(&last.kind, TrivKind::Tok(t) if word(t)) =>
-            {
-                last.span.end = end;
-                let text = src[last.span.clone()].to_string();
-                last.kind = TrivKind::Tok(Tok::Ident(text));
+            Some(last) if self.end == start && last.word().is_some() => {
+                last.grow(src[self.start..end].to_string(), end);
                 self.end = end;
             }
             _ => {
@@ -420,9 +496,8 @@ impl grammar::Hooks for Items<'_> {
         // parser reads it, drops its closing indentation. Only here are the raw
         // delimiters known: `vyrn"\n"` is no multi-line quote.
         let quote = quotes == 3
-            && self.items.last().is_some_and(|t| {
-                t.end_line == at.0 && matches!(&t.kind, TrivKind::Tok(Tok::Ident(n)) if n == "vyrn")
-            });
+            && (self.items.last().and_then(I::word))
+                .is_some_and(|(t, line)| line == at.0 && matches!(t, Tok::Ident(n) if n == "vyrn"));
         let tok = if exprs.is_empty() {
             if quote {
                 dedent(std::slice::from_mut(&mut cur));
@@ -465,7 +540,7 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
 /// Tokenizes `src`: [`scan`]'s items without comments, closed by `Eof`. Returns
 /// an error diagnostic for the first malformed token.
 pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
-    Ok(tokens(scan(src)?))
+    Ok(with_eof(scan_as(src, false)?))
 }
 
 /// [`lex`] of `src`, a piece of a file that starts on `line` at `col`: each
@@ -497,24 +572,28 @@ pub(crate) fn moved((line, col): (usize, usize), from: (usize, usize)) -> (usize
 /// one. Only [`crate::parser::skeleton_refusal`] and the holes of the text it reads
 /// come here, and no part holds a NUL, because no string does.
 pub(crate) fn lex_quote(src: &str) -> Result<Vec<Token>, Diagnostic> {
-    Ok(tokens(scan_as(src, true)?))
+    Ok(with_eof(scan_as(src, true)?))
 }
 
-/// The tokens of a [`scan`], comments dropped and `Eof` last.
+/// The tokens of a [`scan`], comments dropped and `Eof` last, for a reader
+/// that also reads the items' spans.
 pub fn tokens(scanned: Scan) -> Vec<Token> {
-    let mut out = Vec::with_capacity(scanned.items.len() + 1);
-    for it in scanned.items {
-        let tok = match it.kind {
-            TrivKind::Comment => continue,
-            TrivKind::Doc(text) => Tok::Doc(text),
-            TrivKind::Tok(t) => t,
-        };
-        out.push(Token {
-            tok,
-            line: it.start_line,
-            col: it.col,
-        });
-    }
+    let mut items = Vec::with_capacity(scanned.items.len() + 1);
+    items.extend(
+        (scanned.items.into_iter())
+            .filter_map(|t| Token::of(t.kind, (t.start_line, t.col), 0, t.span, false)),
+    );
+    let (end_line, end_col) = (scanned.end_line, scanned.end_col);
+    with_eof(Scan {
+        items,
+        end_line,
+        end_col,
+    })
+}
+
+/// The tokens of `scanned` closed by `Eof`.
+fn with_eof(scanned: Scan<Token>) -> Vec<Token> {
+    let mut out = scanned.items;
     out.push(Token {
         tok: Tok::Eof,
         line: scanned.end_line,

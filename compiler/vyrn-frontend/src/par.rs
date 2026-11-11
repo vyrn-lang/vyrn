@@ -21,15 +21,14 @@ fn threads() -> usize {
 }
 
 /// The summed weight below which [`in_parallel`] works on the calling thread,
-/// because handing work to the helpers costs more than they save. Measured
-/// with 12 threads started per call, about 0.4 ms, on `examples/fib.vyrn`,
+/// because offering work to the helpers costs more than they save. Measured
+/// on 2026-11-11 with the helpers kept for the process, per call on one
+/// thread and on all, over a check and a build of hello, `examples/fib.vyrn`,
 /// `examples/bin/server.vyrn` and `site/export.vyrn`: every call of weight
-/// 441 or less ran slower on 12 threads than on 1, and every call of weight
-/// 746 or more ran faster but one typing call of 915 (0.47 ms to 0.54 ms).
-/// The callers weigh in their own units (expressions, statements, rows,
-/// items); the measurements cover each. The helpers persist across calls
-/// ([`offer`]), and the cut was not measured again with them.
-const SERIAL_BELOW: usize = 600;
+/// 400 to 600 ran faster on all threads, by 0.1 ms to 2.4 ms. The callers
+/// weigh in their own units (expressions, statements, rows, items), whose
+/// cost differs about 16 times, so one cut is approximate.
+const SERIAL_BELOW: usize = 400;
 
 /// Returns `work` of each of `items`, in `items`' order, run on up to
 /// [`threads`] of the [`helpers`], or on the calling thread alone when the

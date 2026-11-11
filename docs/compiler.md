@@ -69,8 +69,8 @@ import.
 
 ## The front end
 
-`lexer::scan` reads the source once; `lexer::lex` and the formatter read the
-scan. `lexer/grammar.rs` is `vyrn.syntax` written as Rust by `vyrn_syntax::lexer`.
+`lexer::scan` reads the source once into the formatter's items; `lexer::lex`
+runs the same scan into the parser's tokens, with no item copied. `lexer/grammar.rs` is `vyrn.syntax` written as Rust by `vyrn_syntax::lexer`.
 `Tok`, its lookups and `KEYWORDS` come from the `keyword` and `token` lines, and
 the variants with no spelling from one list in the generator. `CONTEXTUAL` holds
 the words of syntactic rules that no `keyword` line reserves. The scanner is one
