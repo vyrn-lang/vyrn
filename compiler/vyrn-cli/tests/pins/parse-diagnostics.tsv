@@ -1449,7 +1449,7 @@ std/imports.vyrn	0	cbf29ce484222325	20	18	409f686b6f933556
 std/json.vyrn	0	cbf29ce484222325	20	17	3b360934678d6034
 std/json5.vyrn	0	cbf29ce484222325	20	16	d198eaaadc5f3db1
 std/jsondec.vyrn	0	cbf29ce484222325	20	16	388b329bdabafed6
-std/jsonread.vyrn	0	cbf29ce484222325	20	17	de8d16e71b480160
+std/jsonread.vyrn	0	cbf29ce484222325	20	18	2ae887b45e93f465
 std/math.vyrn	0	cbf29ce484222325	20	17	e72ba77f63e61151
 std/mem.vyrn	0	cbf29ce484222325	20	17	25c1efb3bc391d61
 std/narrow.vyrn	0	cbf29ce484222325	20	20	85b6ac30dd37a2f3
