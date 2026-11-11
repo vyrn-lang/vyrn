@@ -5152,6 +5152,14 @@ fn spellings(
             }
         }
     }
+    // An impl method's linked name follows its type's rename even where no
+    // other module declares the method, and a std module's stored rows name it
+    // as written: its own load may not rename the type.
+    for ((key, written), linked) in renames {
+        if written.contains('$') && written != linked {
+            (out.decls.entry(linked.clone())).or_insert_with(|| (written.clone(), key.clone()));
+        }
+    }
     out
 }
 

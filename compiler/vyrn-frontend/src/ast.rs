@@ -1566,9 +1566,10 @@ impl<'a> std::fmt::Display for Said<'a> {
     }
 }
 
-/// Every declaration whose name two modules declare, and every declaration and
-/// variant of an injected runtime module, keyed by its linked name: the name
-/// its module wrote, and that module.
+/// Every declaration whose name two modules declare, every impl method its
+/// type's rename moved, and every declaration and variant of an injected
+/// runtime module, keyed by its linked name: the name its module wrote, and
+/// that module.
 /// The loader fills it where it renames apart (`log` becomes `log__from1`, and
 /// `Json` of `std/json` becomes `json$Json`).
 /// A sentence reads it through a [`Speech`], so a refusal never names a

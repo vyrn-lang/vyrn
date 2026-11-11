@@ -2653,16 +2653,7 @@ fn a_refused_join_draws_one_sentence_and_names_no_temporary() {
 #[test]
 fn a_std_modules_own_refusal_names_its_file() {
     let dir = common::scratch("std-own-refusal");
-    let std_dir = dir.join("std");
-    std::fs::create_dir_all(&std_dir).expect("create the std copy");
-    let repo_std = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
-    for e in std::fs::read_dir(repo_std).expect("read std") {
-        let e = e.expect("a std entry").path();
-        if e.is_file() {
-            let name = e.file_name().expect("a std file name");
-            std::fs::copy(&e, std_dir.join(name)).expect("copy a std file");
-        }
-    }
+    let std_dir = std_copy(&dir);
     let strings = std_dir.join("strings.vyrn");
     let text = std::fs::read_to_string(&strings).expect("read strings.vyrn");
     let head = "export fn repeat(s: String, n: Int64) -> String {\n";
@@ -2683,4 +2674,77 @@ fn a_std_modules_own_refusal_names_its_file() {
     let says = format!("strings.vyrn:{line}:0: `bad` declared Int64 but initializer is String\n");
     assert!(!out.status.success(), "accepted");
     assert_eq!(err, format!("std/{says}"));
+}
+
+/// A copy of the repository's `std/` files in `dir/std`, for a test that
+/// edits std.
+fn std_copy(dir: &Path) -> PathBuf {
+    let std_dir = dir.join("std");
+    std::fs::create_dir_all(&std_dir).expect("create the std copy");
+    let repo_std = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    for e in std::fs::read_dir(repo_std).expect("read std") {
+        let e = e.expect("a std entry").path();
+        if e.is_file() {
+            let name = e.file_name().expect("a std file name");
+            std::fs::copy(&e, std_dir.join(name)).expect("copy a std file");
+        }
+    }
+    std_dir
+}
+
+/// A std module may import another whose `impl Owned` type has the name of
+/// one of its own types: the importer links the method under a renamed type,
+/// and reads its stored row by the name its module wrote.
+#[test]
+fn a_std_impl_method_of_a_renamed_type_reads_its_row() {
+    let dir = common::scratch("std-renamed-impl");
+    let std_dir = std_copy(&dir);
+    let aa = "export type Field = { name: String, n: Int64 }
+
+              impl Owned for Field {
+    fn release(consume self) {
+                      let nameKept = consume self.name
+    }
+}
+
+              export fn makeField(s: String) -> Field {
+                  return Field { name: s.copy(), n: 1 }
+}
+
+              export fn fieldLen(f: Field) -> Int64 {
+    return f.n
+}
+";
+    let bb = "import * as a from \"./aa\"
+
+              export type Field = { name: String, line: Int64 }
+
+              export fn both(s: String) -> Int64 {
+    let f = a.makeField(s)
+                  let g = Field { name: \"x\", line: 2 }
+    return a.fieldLen(f) + g.line
+}
+";
+    std::fs::write(std_dir.join("aa.vyrn"), aa).expect("write aa.vyrn");
+    std::fs::write(std_dir.join("bb.vyrn"), bb).expect("write bb.vyrn");
+    let main = "import { both } from \"std/bb\"
+
+                fn main() -> Int64 {
+    print(both(\"hi\"))
+    return 0
+}
+";
+    std::fs::write(dir.join("main.vyrn"), main).expect("write main.vyrn");
+    let out = vyrn()
+        .current_dir(&*dir)
+        .args(["check", "main.vyrn"])
+        .env("VYRN_STD", &std_dir)
+        .output()
+        .expect("vyrn check");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "refused:
+{err}"
+    );
 }
