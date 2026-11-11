@@ -13,7 +13,7 @@ tool:wabt@1.0.41/aarch64-linux	https://github.com/WebAssembly/wabt/releases/down
 tool:wabt@1.0.41/aarch64-macos	https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-macos-arm64.tar.gz	e5269d6bbe05dfeb179e4f21111b3a641d6ccaa38b0b21d472ae5c65f8c4ff5d
 tool:wabt@1.0.41/x86_64-linux	https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-linux-x64.tar.gz	83f8122e924745fcd70636e3594bc01c4c47f2d4c8f3c63b5d70d3f83a482677
 tool:wabt@1.0.41/x86_64-windows	https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-windows-x64.tar.gz	37285ec7244384ffd382841f93fd23335aae846c92016a132d765c60f27a2f31
-tool:wasmtime@49.0.3/aarch64-linux	https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-aarch64-linux.tar.xz	880fcb026da88ad7fc1713d572b0d03d139758b7da96cd3cb8c9cbf847a521df
-tool:wasmtime@49.0.3/aarch64-macos	https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-aarch64-macos.tar.xz	d7708ba1cc2da171db2c8273d8602f3e0684935dc7cab40148cdcca1da83c0f8
-tool:wasmtime@49.0.3/x86_64-linux	https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz	4001225413f208345b980525f31c4080e1873808b38d0ddc7918497340667fbb
-tool:wasmtime@49.0.3/x86_64-windows	https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-windows.zip	bee8f02158458a5f360412b232543d4fea379b71b94380b806e7980050596c18
+tool:wasmtime@49.0.5/aarch64-linux	https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.5/wasmtime-v49.0.5-aarch64-linux.tar.xz	55fa95b10e07167cc681593c06928199ac19306e2226e23652c62ac9e278c201
+tool:wasmtime@49.0.5/aarch64-macos	https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.5/wasmtime-v49.0.5-aarch64-macos.tar.xz	38c8a1b43a04a67f2d953498e470117aaf46ba155e1a7e3158aa7f87259bd750
+tool:wasmtime@49.0.5/x86_64-linux	https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.5/wasmtime-v49.0.5-x86_64-linux.tar.xz	101b181779afec556ac2cc6639a7ee3661de20c17f7948e0b290f63e9da9bdce
+tool:wasmtime@49.0.5/x86_64-windows	https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.5/wasmtime-v49.0.5-x86_64-windows.zip	84322b6af49159f5c0ecfb9f32596691df35f3a402689b9fdf92812cd3c7fd8f
