@@ -121,6 +121,13 @@ impl Diagnostic {
         }
     }
 
+    /// The file a reader sees the diagnostic in: `root` when it names none, and
+    /// a written module's key with its separators spelled
+    /// ([`crate::loader::readable`]), so no printed line holds a control byte.
+    pub fn shown_file(&self, root: &str) -> String {
+        crate::loader::readable(self.file.as_deref().unwrap_or(root))
+    }
+
     /// Places the diagnostic in `file`; `None` means the root module.
     pub fn in_file(self, file: Option<String>) -> Self {
         Diagnostic { file, ..self }

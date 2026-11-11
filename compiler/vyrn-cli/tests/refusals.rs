@@ -731,6 +731,13 @@ fn the_generation_refusals_are_what_the_engine_says() {
         let (ok, text) = refusal_in(dir().join("gen"), file, false);
         assert!(!ok, "{file}: accepted");
         assert_eq!(split_head(&text).1, says, "{file}");
+        // A written module's key separates its banners with a control byte.
+        let (_, whole) = whole_refusal_in(dir().join("gen"), file, false);
+        let control = whole.bytes().find(|b| *b < 0x20 && !b"\t\n".contains(b));
+        assert_eq!(
+            control, None,
+            "{file}: stderr holds a control byte\n{whole}"
+        );
     }
 }
 
