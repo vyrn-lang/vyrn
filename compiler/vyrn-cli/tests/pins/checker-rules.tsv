@@ -145,7 +145,7 @@ checker-rules.vyrn:789:0: `g` expects a String argument, but `applyTo` will pass
 checker-rules.vyrn:793:0: `same` is generic and cannot be passed as a function value in v1
 checker-rules.vyrn:797:0: `addPair` takes 2 argument(s), but `applyTo` argument 2 expects a 1-argument function
 checker-rules.vyrn:801:0: `byteCount` expects a String argument, but `applyTo` will pass it Int64
-checker-rules.vyrn:805:0: `applyTo` argument 2 must be a lambda `|..| ..`, a function name, or an expression of `fn` type; found Int64
+checker-rules.vyrn:805:0: `applyTo` argument 2 must be a lambda `x -> ..`, a function name, or an expression of `fn` type; found Int64
 checker-rules.vyrn:814:0: this lambda returns String, but the expected function type `fn(Int64) -> Int64` returns Int64
 checker-rules.vyrn:818:0: `addPair` takes 2 argument(s), but the expected function type `fn(Int64) -> Int64` takes 1
 checker-rules.vyrn:822:0: `byteCount` expects a String argument, but `fn(Int64) -> Int64` will pass it Int64
@@ -164,7 +164,7 @@ checker-rules.vyrn:274:0: `[:]` is a map literal, but Array<Int64> is not a map 
 checker-rules.vyrn:278:0: cannot infer the type of `[:]`; annotate it, e.g. `let m: Map<String, Int64> = [:];`
 checker-rules.vyrn:282:0: the map is keyed by String, but this key is Int64
 checker-rules.vyrn:286:0: map values must share a type: expected Int64, found String
-checker-rules.vyrn:290:0: a lambda `|..|` needs a function type from context: pass it to a `fn`-typed parameter, or give the binding a function type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`)
+checker-rules.vyrn:290:0: a lambda `x -> ..` needs a function type from context: pass it to a `fn`-typed parameter, or give the binding a function type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`)
 checker-rules.vyrn:309:0: cannot infer the element type of `[]`; annotate it, e.g. `let a: Array<Int64> = [];`
 checker-rules.vyrn:433:0: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
 checker-rules.vyrn:563:0: call to unknown function `Label`

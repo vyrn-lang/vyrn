@@ -23,6 +23,7 @@ compiler/vyrn-cli/tests/boundaries/where-result.vyrn	0	cbf29ce484222325	20	16	51
 compiler/vyrn-cli/tests/boundaries/where-scalar.vyrn	0	cbf29ce484222325	20	16	aa7111aaccbf3ec3
 compiler/vyrn-cli/tests/check/a_binder_in_an_initializer_shadows_later_state.vyrn	0	cbf29ce484222325	20	18	86839997e2b4ac2c
 compiler/vyrn-cli/tests/check/a_binding_shadows_a_variant_of_its_name.vyrn	0	cbf29ce484222325	20	18	29433420f3540ac3
+compiler/vyrn-cli/tests/check/a_block_lambda_to_a_generic_parameter_needs_its_return_type.vyrn	0	cbf29ce484222325	20	16	89dd7fc339e31d52
 compiler/vyrn-cli/tests/check/a_borrow_of_module_state_ends_at_an_await.vyrn	0	cbf29ce484222325	20	19	8aae02ddc1a6fff6
 compiler/vyrn-cli/tests/check/a_both_without_await_runs_its_calls_in_order.vyrn	0	cbf29ce484222325	20	17	17bd575f4c0ae3f1
 compiler/vyrn-cli/tests/check/a_bounded_receiver_cannot_dispatch_a_projection.vyrn	0	cbf29ce484222325	20	17	b22218861c83683d

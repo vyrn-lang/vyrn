@@ -404,7 +404,7 @@ rules! {
         "map values must share a type: expected {val_ty}, \
         found {vt}";
     LambdaNeedsFnType {}
-        "a lambda `|..|` needs a function type from context: \
+        "a lambda `x -> ..` needs a function type from context: \
         pass it to a `fn`-typed parameter, or give the binding a function \
         type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`)";
     RecordFailsPredicate { name, pred } "`{name} {{ .. }}` violates `where {pred}`";
@@ -625,7 +625,7 @@ rules! {
     InferLambdaReturn {}
         "cannot infer the return type of a \
         block-bodied lambda passed to a generic `fn` parameter; \
-        use an expression body `|..| expr`";
+        use an expression body `x -> expr`";
     ArgNotFn { callee, arg, vn }
         "`{callee}` argument {arg} expects a function; `{vn}` is \
         neither a lambda nor a known function";
@@ -1355,7 +1355,7 @@ rules! {
         "`{vn}` takes {got} argument(s), but `{callee}` argument {n} expects a {want}-argument \
         function";
     NotFnArg { callee, n, aty }
-        "`{callee}` argument {n} must be a lambda `|..| ..`, a function name, or an expression \
+        "`{callee}` argument {n} must be a lambda `x -> ..`, a function name, or an expression \
         of `fn` type; found {aty}";
     LambdaReturnsSlot { t, exp, r }
         "this lambda returns {t}, but the expected function type `{exp}` returns {r}";

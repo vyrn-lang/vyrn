@@ -1,0 +1,10 @@
+fn apply<T, U>(x: T, f: fn(T) -> U) -> U {
+    return f(x)
+}
+
+fn main() -> Int64 {
+    let y = apply(1, x -> {
+        return x + 1
+    })
+    return y
+}
