@@ -783,8 +783,10 @@ compiler/vyrn-cli/tests/proved/core/scan.vyrn	0	cbf29ce484222325	20	17	3431b081d
 compiler/vyrn-cli/tests/proved/main.vyrn	0	cbf29ce484222325	20	20	0675d2ea83189a6a
 compiler/vyrn-cli/tests/refusals/gen/badcopy.vyrn	0	cbf29ce484222325	20	18	c428268aab6f62ee
 compiler/vyrn-cli/tests/refusals/gen/badname.vyrn	0	cbf29ce484222325	20	14	19b5c5dc40e07a7c
+compiler/vyrn-cli/tests/refusals/gen/deep.vyrn	0	cbf29ce484222325	20	18	13c8e604a978ebab
 compiler/vyrn-cli/tests/refusals/gen/r74_a_name_that_is_no_identifier.vyrn	0	cbf29ce484222325	20	17	75704bf4405ec6f4
 compiler/vyrn-cli/tests/refusals/gen/r75_code_at_text_the_input_does_not_hold.vyrn	0	cbf29ce484222325	20	17	fbd3ed1628601e84
+compiler/vyrn-cli/tests/refusals/gen/r84_a_generator_output_that_calls_its_generator_deeper.vyrn	0	cbf29ce484222325	20	17	f775e94def6266cd
 compiler/vyrn-cli/tests/refusals/r01_store_element.vyrn	0	cbf29ce484222325	20	17	27b3b0efce9a911c
 compiler/vyrn-cli/tests/refusals/r02_store_read_parameter_field.vyrn	0	cbf29ce484222325	20	17	737c53bdca9ebe92
 compiler/vyrn-cli/tests/refusals/r03_store_projection.vyrn	0	cbf29ce484222325	20	16	88d5d88e0a2990d6

@@ -1,0 +1,3 @@
+import { g } from "./deep"
+import { x } from g(0)
+fn main() -> Int64 { return x() }

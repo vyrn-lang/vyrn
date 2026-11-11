@@ -923,7 +923,8 @@ pub fn derive(
                 "generator `{g}` reaches `derive({g}, ..)`"
             )));
         }
-        let mut inner = crate::loader::generator_opts(opts);
+        let mut inner =
+            crate::loader::generator_opts(opts, key).map_err(|r| unplaced(r.render()))?;
         inner.nest.deriving.push(identity);
         let root = program.spellings.root.as_str();
         let refused = |ds: Vec<Diagnostic>| -> String {

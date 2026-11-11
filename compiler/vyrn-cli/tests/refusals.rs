@@ -721,6 +721,11 @@ fn the_generation_refusals_are_what_the_engine_says() {
             "generator `badCopy(\"./input.txt\")` failed: `codeAt` was given text that \
              `./input.txt` does not hold at 1:1",
         ),
+        (
+            "r84_a_generator_output_that_calls_its_generator_deeper.vyrn",
+            "generator imports nest more than 32 deep — a generator likely imports \
+             itself with a growing argument",
+        ),
     ];
     for (file, says) in rows {
         let (ok, text) = refusal_in(dir().join("gen"), file, false);
