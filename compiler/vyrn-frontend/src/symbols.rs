@@ -96,7 +96,7 @@ pub struct Analysis {
     /// User protocol methods per implementing type (`impl P for T` gives `T`'s
     /// methods), for member completion on a concrete receiver. Indexed from the
     /// linked program when there is one, so imported impls count.
-    pub impl_members: Vec<(Type, Completion)>,
+    pub impl_members: Vec<(Type, String, Completion)>,
     /// Each protocol's methods by protocol name, for member completion on a
     /// bounded generic receiver (`x: T` with `T: Show` offers `Show`'s methods).
     pub protocol_members: Vec<(String, Completion)>,
@@ -356,9 +356,9 @@ fn analyze_inner(
         Err(d) => return empty_analysis(vec![d]),
     };
     // Cache identifier tokens, for cursor mapping and for each declaration
-    // name's column, plus `.` tokens: [`member_completions`] finds the receiver
-    // before a `.foo` through them. No name is `.`, so they do not affect
-    // [`resolve`] or the name-column search.
+    // name's column, plus `.` and `::` tokens: [`member_completions`] finds the
+    // receiver before a `.foo` or `::P` through them. No name is `.` or `::`, so
+    // they do not affect [`resolve`] or the name-column search.
     let tok_info: Vec<TokenInfo> = tokens
         .iter()
         .filter_map(|t| match &t.tok {
@@ -373,6 +373,12 @@ fn analyze_inner(
                 line: t.line,
                 col: t.col,
                 end_col: t.col + 1,
+            }),
+            Tok::ColonColon => Some(TokenInfo {
+                text: "::".to_string(),
+                line: t.line,
+                col: t.col,
+                end_col: t.col + 2,
             }),
             _ => None,
         })
@@ -543,6 +549,7 @@ fn analyze_inner(
                 .or_else(|| signature_doc(&member_src.protocols, &imp.protocol, &m.name));
             impl_members.push((
                 imp.ty.clone(),
+                imp.protocol.clone(),
                 Completion {
                     label: m.name.clone(),
                     kind: SymbolKind::Method,
@@ -934,10 +941,14 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         let c = (member_completions(analysis, tok.line, tok.col).into_iter())
             .find(|c| c.label == tok.text)?;
         // A user protocol or impl method is an indexed symbol, so it keeps its
-        // declaration site. A field or builtin method hovers without a jump.
-        let decl = (analysis.symbols.iter())
-            .filter(|s| s.name == c.label && s.kind == SymbolKind::Method)
-            .max_by_key(|s| (s.file.is_none(), s.line));
+        // declaration site; `x::P.m` jumps to `P`'s. A field or builtin method
+        // hovers without a jump.
+        let decl = match protocol_qualifier(analysis, tok.line, tok.col) {
+            Some(p) => protocol_member_symbol(analysis, &p.text, &c.label),
+            None => (analysis.symbols.iter())
+                .filter(|s| s.name == c.label && s.kind == SymbolKind::Method)
+                .max_by_key(|s| (s.file.is_none(), s.line)),
+        };
         Some((c, decl))
     };
     let at = |s: &Symbol, h: Hover| Resolution {
@@ -1157,8 +1168,8 @@ pub fn scope_completions(analysis: &Analysis, line: usize) -> Vec<Completion> {
     out
 }
 
-/// Whether the 1-based `(line, col)` cursor of `source` follows a `.` and an
-/// optional partial member name: the line scan that routes completion to
+/// Whether the 1-based `(line, col)` cursor of `source` follows a `.` or a `::`
+/// and an optional partial name: the line scan that routes completion to
 /// [`member_completions`]. The receiver must be on the same line.
 pub fn member_context(source: &str, line: usize, col: usize) -> bool {
     let Some(line_text) = source.lines().nth(line.saturating_sub(1)) else {
@@ -1180,7 +1191,7 @@ pub fn member_context(source: &str, line: usize, col: usize) -> bool {
         }
         i -= 1;
     }
-    i < chars.len() && chars[i] == '.'
+    i < chars.len() && (chars[i] == '.' || (chars[i] == ':' && i > 0 && chars[i - 1] == ':'))
 }
 
 /// Whether an odd number of unescaped `"` precede the 1-based `(line, col)`
@@ -1214,9 +1225,20 @@ pub fn string_context(source: &str, line: usize, col: usize) -> bool {
 /// exports. A typed local offers the builtin methods of its type, the `length`
 /// or `byteLength` field, a record's fields, the methods of every matching
 /// `impl P for T`, and for a bounded generic receiver each bound protocol's
-/// methods, as the checker dispatches. Empty when the receiver cannot be typed:
-/// not a simple identifier, not in the local index, or of unknown type.
+/// methods, as the checker dispatches. After `x::` it offers the protocols
+/// `x`'s type implements or is bounded by, and after `x::P.` the methods `P`
+/// declares. Empty when the receiver cannot be typed: not a simple
+/// identifier, not in the local index, or of unknown type.
 pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<Completion> {
+    if let Some(recv) = protocol_link(analysis, line, col) {
+        return receiver_protocols(analysis, recv, line);
+    }
+    if let Some(p) = protocol_qualifier(analysis, line, col) {
+        return (analysis.protocol_members.iter())
+            .filter(|(pn, _)| *pn == p.text)
+            .map(|(_, c)| c.clone())
+            .collect();
+    }
     // A receiver naming an unshadowed namespace offers that module's exports.
     if let Some(recv) = receiver_before_dot(analysis, line, col) {
         if local_at(analysis, recv).is_none() {
@@ -1302,7 +1324,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
     }
     // Concrete receiver: every `impl P for T` whose `T` is the receiver's type
     // (`n: Int64` with `impl Show for Int64` offers `n.show`).
-    for (t, c) in &analysis.impl_members {
+    for (t, _, c) in &analysis.impl_members {
         if *t == ty {
             out.push(c.clone());
         }
@@ -1642,6 +1664,72 @@ fn receiver_before_dot(analysis: &Analysis, line: usize, col: usize) -> Option<&
         .filter(|t| t.line == line && t.text != "." && t.end_col <= dot.col)
         .max_by_key(|t| t.end_col)?;
     Some(recv)
+}
+
+/// The token just before `t` on its line.
+fn token_before<'a>(analysis: &'a Analysis, t: &TokenInfo) -> Option<&'a TokenInfo> {
+    (analysis.tokens.iter())
+        .filter(|u| u.line == t.line && u.end_col <= t.col)
+        .max_by_key(|u| u.end_col)
+}
+
+/// The receiver of the `::` the cursor completes after: `x` in `x::|` or
+/// `x::Pa|`.
+fn protocol_link(analysis: &Analysis, line: usize, col: usize) -> Option<&TokenInfo> {
+    let link = (analysis.tokens.iter())
+        .filter(|t| t.line == line && (t.text == "." || t.text == "::") && t.col <= col)
+        .max_by_key(|t| t.col)?;
+    (link.text == "::").then(|| token_before(analysis, link))?
+}
+
+/// The protocol `P` of `x::P.` before the cursor's member name.
+fn protocol_qualifier(analysis: &Analysis, line: usize, col: usize) -> Option<&TokenInfo> {
+    let p = receiver_before_dot(analysis, line, col)?;
+    (token_before(analysis, p)?.text == "::").then_some(p)
+}
+
+/// The protocols `recv`'s type implements, then those its bound names, each
+/// once, in declaration order.
+fn receiver_protocols(analysis: &Analysis, recv: &TokenInfo, line: usize) -> Vec<Completion> {
+    let Some(ty) = local_at(analysis, recv).and_then(|b| b.ty.clone()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<&str> = (analysis.impl_members.iter())
+        .filter(|(t, ..)| *t == ty)
+        .map(|(_, p, _)| p.as_str())
+        .collect();
+    if let (Type::Named(n) | Type::Param(n), Some(fl)) = (&ty, enclosing_fn_line(analysis, line)) {
+        for (l, tp, bounds) in &analysis.type_param_bounds {
+            if *l == fl && tp == n {
+                names.extend(bounds.iter().map(String::as_str));
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    names.retain(|n| seen.insert(*n));
+    (names.into_iter())
+        .filter_map(|n| top_symbol(analysis, n).filter(|s| s.kind == SymbolKind::Type))
+        .map(|s| Completion {
+            label: s.name.clone(),
+            kind: s.kind,
+            detail: s.detail.clone(),
+            doc: s.doc.clone(),
+        })
+        .collect()
+}
+
+/// The method `method` as protocol `protocol` declares it: among the member
+/// symbols indexed right after the protocol's own.
+fn protocol_member_symbol<'a>(
+    analysis: &'a Analysis,
+    protocol: &str,
+    method: &str,
+) -> Option<&'a Symbol> {
+    let at =
+        (analysis.symbols.iter()).position(|s| s.name == protocol && s.kind == SymbolKind::Type)?;
+    (analysis.symbols[at + 1..].iter())
+        .take_while(|s| s.kind == SymbolKind::Method)
+        .find(|s| s.name == method)
 }
 
 /// The type of the receiver before the dot at the cursor. Only a local is a

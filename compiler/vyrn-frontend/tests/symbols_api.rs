@@ -653,6 +653,72 @@ fn member_completion_offers_protocol_methods() {
     );
 }
 
+/// `t::P.m()` names the protocol: completion after `::` offers the receiver's
+/// protocols, after `::P.` the methods `P` declares, and hover and definition
+/// reach `P` and `P`'s method.
+#[test]
+fn a_protocol_call_completes_and_resolves_through_its_protocol() {
+    let src = "protocol A {
+    fn name(self) -> String
+}
+protocol B {
+    fn name(self) -> String
+}
+type T = { x: Int64 }
+impl A for T {
+    fn name(self) -> String { return \"a\" }
+}
+impl B for T {
+    fn name(self) -> String { return \"b\" }
+}
+fn main() -> Int64 {
+    let t = T { x: 1 }
+    let s = t::B.name()
+    return 0
+}
+";
+    let a = analyze(src);
+    assert!(
+        a.diagnostics.is_empty(),
+        "clean program: {:?}",
+        a.diagnostics
+    );
+    // Line 16 `    let s = t::B.name()`: `::` at col 14, `B` at 16, `.` at 17.
+    assert!(
+        member_context(src, 16, 16),
+        "`t::` routes to member completion"
+    );
+    let labels: Vec<String> = member_completions(&a, 16, 16)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert_eq!(labels, ["A", "B"], "the protocols T implements");
+    let labels: Vec<String> = member_completions(&a, 16, 18)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert_eq!(labels, ["name"], "the methods B declares");
+    let p = resolve(&a, 16, 16).expect("the protocol resolves");
+    assert_eq!(
+        (p.name.as_str(), p.target_line, p.definition),
+        ("B", 4, true)
+    );
+    let m = resolve(&a, 16, 18).expect("the method resolves");
+    assert_eq!(
+        (m.name.as_str(), m.target_line, m.definition),
+        ("name", 5, true)
+    );
+    let refs = vyrn_frontend::references(&a, 16, 16);
+    assert!(
+        refs.iter().any(|r| (r.line, r.col) == (16, 16)),
+        "B's use is a reference: {refs:?}"
+    );
+    assert!(
+        refs.iter().any(|r| r.line == 11),
+        "the impl head is one too: {refs:?}"
+    );
+}
+
 #[test]
 fn member_completion_offers_record_fields() {
     let src = "type User = { age: Int64 where value >= 18, name: String }\nfn main() -> Int64 {\n    let u: User = User { age: 21, name: \"max\" }\n    let a = u.age\n    return 0\n}\n";
