@@ -173,10 +173,18 @@ pub mod observe {
         ON.with(|o| o.get())
     }
 
-    /// Records on this thread as the thread that started a parallel pass does: `on` is its
-    /// [`on`].
-    pub(crate) fn follow(on: bool) {
-        ON.with(|o| o.set(on));
+    /// Runs `f` recording on this thread as the thread that started a parallel pass does (`on`
+    /// is its [`on`]), then restores this thread's own setting, on unwind too: a helper thread
+    /// outlives the pass and keeps no setting past the item.
+    pub(crate) fn following<T>(on: bool, f: impl FnOnce() -> T) -> T {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ON.with(|o| o.set(self.0));
+            }
+        }
+        let _restore = Restore(ON.with(|o| o.replace(on)));
+        f()
     }
 
     /// The crossings and typings one body recorded, which its merge hands back in body order.

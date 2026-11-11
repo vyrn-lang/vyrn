@@ -496,6 +496,24 @@ impl World {
         self.body_at(self.fn_id(name)?)
     }
 
+    /// Decides the body of each of `fs` ([`World::body_of`]) on every thread.
+    /// When an undecided body no manifest proves reads the summaries, they
+    /// are solved first, on this thread, so their solve has every worker:
+    /// the first body to read them would solve them while the others wait.
+    pub fn decide(&self, fs: &[&vyrn_frontend::ast::Function]) {
+        let undecided = |f: &&vyrn_frontend::ast::Function| {
+            (self
+                .fn_id(&f.name)
+                .and_then(|id| self.bodies.get(&id)?.as_ref()))
+            .is_some_and(|s| s.decided.get().is_none() && !self.proves(&s.body))
+        };
+        if crate::core::decides() && fs.iter().any(undecided) {
+            self.summaries();
+        }
+        let weight = |f: &&vyrn_frontend::ast::Function| f.block().stmts.len();
+        vyrn_frontend::par::in_parallel(fs, weight, || (), |(), f| _ = self.body_of(&f.name));
+    }
+
     /// [`World::body_of`] for the function table's row `id`. A body of a
     /// module the manifest proves is decided by the demanded walk, which the
     /// typed judgment refuses its kept rows by ([`crate::elide::demanded`]).
