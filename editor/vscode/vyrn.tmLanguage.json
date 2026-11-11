@@ -32,7 +32,7 @@
     { "name": "entity.name.function.vyrn", "match": "(?<=\\bfn\\s)[a-z_][A-Za-z0-9_]*" },
     { "name": "entity.name.function.vyrn", "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\(|\")" },
     { "name": "variable.other.vyrn", "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b" },
-    { "name": "keyword.operator.vyrn", "match": "\\-\\>|\\=\\>|\\=\\~|\\=\\=|\\!\\=|\\<\\=|\\>\\=|\\&\\&|\\|\\||\\?\\?|\\<\\<|\\>\\>|\\+|\\-|\\*|\\/|\\%|\\=|\\<|\\>|\\!|\\?|\\||\\&|\\^|\\~" },
+    { "name": "keyword.operator.vyrn", "match": "\\-\\>|\\:\\:|\\=\\>|\\=\\~|\\=\\=|\\!\\=|\\<\\=|\\>\\=|\\&\\&|\\|\\||\\?\\?|\\<\\<|\\>\\>|\\+|\\-|\\*|\\/|\\%|\\=|\\<|\\>|\\!|\\?|\\||\\&|\\^|\\~" },
     { "name": "punctuation.section.braces.vyrn", "match": "\\{|\\}" },
     { "name": "punctuation.section.brackets.vyrn", "match": "\\[|\\]" },
     { "name": "punctuation.section.parens.vyrn", "match": "\\(|\\)" },

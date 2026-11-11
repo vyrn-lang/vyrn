@@ -31,6 +31,7 @@ keyword Continue 'continue'
 
 // Punctuation, two characters first. A literal yields to a longer spelling.
 token Arrow '->'
+token ColonColon '::'
 token FatArrow '=>'
 token TildeMatch '=~'
 token EqEq '=='
@@ -311,8 +312,10 @@ nest Unary = '-' Unary / '!' Unary / '~' Unary
 // The host refuses `await` over no call as this closes.
 AwaitTail = 'await' Postfix
 // Each link adds a node the later walks recurse into, so each counts toward `nest`.
-Postfix = Primary many Link until !('?' / '.' / '[') recover nest
+Postfix = Primary many Link until !('?' / '.' / '[' / '::') recover nest
+// `x::P.m(..)` calls `m` as protocol `P` declares it; `x::P` alone is no value.
 Link = '?' / '.' Ident Args? / '[' -nostruct(Expr) ']'
+     / c:'::' p:Ident (&('.' ident '(') '.' Ident Args / ^ProtocolCallNoValue(protocol=p)@c)
 Args = '(' -nostruct(list Expr sep ',' until ')') ')'
 
 Primary = &(ident '->') Lambda

@@ -547,6 +547,38 @@ fn census() -> Vec<Row> {
             "`alt` may not be returned — it is a `read` parameter, and a return is owned",
             Kernel::Its,
         ),
+        row(
+            "r79_a_protocol_call_names_no_protocol.vyrn",
+            "the protocol of `x::P.m(..)` is a protocol",
+            "`Square` is not a protocol, so `x::Square.area(..)` calls nothing",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r80_a_protocol_call_names_a_method_the_protocol_lacks.vyrn",
+            "the protocol of `x::P.m(..)` declares `m`",
+            "protocol `Shape` declares no method `area`",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r81_a_protocol_call_through_copy.vyrn",
+            "a compiler-known protocol with no declaration has no method to call",
+            "protocol `Copy` declares no method `copy`",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r82_two_impls_declare_one_method.vyrn",
+            "a method two impls declare for one receiver names its protocol",
+            "`area` is ambiguous: protocols Area, Solid all implement it for this receiver; \
+             call `x::Area.area(..)` to pick one",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r83_two_bounds_declare_one_method.vyrn",
+            "a method two bounds declare names its protocol",
+            "`area` is ambiguous: protocols Area, Solid all declare it for this receiver; call \
+             `x::Area.area(..)` to pick one",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

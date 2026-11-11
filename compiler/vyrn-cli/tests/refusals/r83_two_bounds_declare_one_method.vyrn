@@ -1,0 +1,24 @@
+// Two bounds declare `area`, so the call names one.
+protocol Area {
+    fn area(read self) -> Int64
+}
+
+type Square = { side: Int64 }
+
+impl Area for Square {
+    fn area(read self) -> Int64 {
+        return self.side * self.side
+    }
+}
+
+protocol Solid {
+    fn area(read self) -> Int64
+}
+
+fn both<T: Area + Solid>(x: T) -> Int64 {
+    return x.area()
+}
+
+fn main() -> Int64 {
+    return 0
+}

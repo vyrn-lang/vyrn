@@ -1,0 +1,17 @@
+// `x::P.m(..)` names a protocol; `Square` is a type.
+protocol Area {
+    fn area(read self) -> Int64
+}
+
+type Square = { side: Int64 }
+
+impl Area for Square {
+    fn area(read self) -> Int64 {
+        return self.side * self.side
+    }
+}
+
+fn main() -> Int64 {
+    let s = Square { side: 2 }
+    return s::Square.area()
+}

@@ -376,7 +376,7 @@ fn site_stamp<'a>(file: &'a str, key: &'a str) -> impl FnMut(&mut Expr) + 'a {
     let runtime = file.strip_suffix(".vyrn") == Some(RUNTIME_SPEC);
     move |e: &mut Expr| {
         if let Expr::Call {
-            dot: _,
+            form: _,
             awaits: _,
             name,
             args,
@@ -5372,7 +5372,7 @@ impl BodyVisitMut for NsResolver<'_> {
             // `ns.fn(args)` and `ns.Enum.Variant(payload)` both arrive as method
             // sugar with the namespace as the first argument, which goes.
             Expr::Call {
-                dot,
+                form,
                 awaits: _,
                 name,
                 args,
@@ -5388,6 +5388,10 @@ impl BodyVisitMut for NsResolver<'_> {
                 }
                 // `ns.member(rest)`: the first argument is the bare namespace. The
                 // parser wrote `ns.remove(k)` as `@remove`; the member is `remove`.
+                // `recv::P.name(..)` names a protocol member, never a module's.
+                if matches!(form, CallForm::Protocol(_)) {
+                    return true;
+                }
                 if let Some(Expr::Var { name: head, .. }) = args.first() {
                     if self.is_ns(head, locals) {
                         let head = head.clone();
@@ -5396,7 +5400,7 @@ impl BodyVisitMut for NsResolver<'_> {
                             *name = sym;
                         }
                         args.remove(0);
-                        *dot = false;
+                        *form = CallForm::Plain;
                         return true;
                     }
                 }
@@ -5417,7 +5421,7 @@ impl BodyVisitMut for NsResolver<'_> {
                             // Variants are not renamed; drop the qualifier and
                             // keep the call name.
                             args.remove(0);
-                            *dot = false;
+                            *form = CallForm::Plain;
                         }
                     }
                 }
@@ -5911,7 +5915,7 @@ fn link(
             // Scope-aware: a local (param, `let`, loop or lambda variable, match
             // bind) shadows a like-named foreign export.
             for c in fn_body_ref_names(f) {
-                check_name(&c.0, c.1, "function", &mut errors);
+                check_name(&c.0, c.1, c.2, &mut errors);
             }
             for p in &f.params {
                 for n in type_names(&p.ty) {
@@ -5943,7 +5947,7 @@ fn link(
             // A projection's body is checked like a function's.
             for pl in &imp.places {
                 for c in fn_body_ref_names(pl) {
-                    check_name(&c.0, c.1, "function", &mut errors);
+                    check_name(&c.0, c.1, c.2, &mut errors);
                 }
                 for p in &pl.params {
                     for n in type_names(&p.ty) {
@@ -6699,7 +6703,9 @@ fn clash_diagnostics(
 /// shadows a like-named foreign export. Type-position names are always kept,
 /// since a value local never shadows a type. The scope starts with the
 /// function's params.
-fn fn_body_ref_names(f: &Function) -> Vec<(String, usize)> {
+/// Each name `f`'s body references, with its line and the noun a refusal
+/// calls it by.
+fn fn_body_ref_names(f: &Function) -> Vec<(String, usize, &'static str)> {
     let mut v = RefNames {
         out: Vec::new(),
         ns: &HashSet::new(),
@@ -6720,7 +6726,7 @@ fn is_sum_arm(name: &str) -> bool {
 
 /// The reference collector at each site of [`body_scope_descent`].
 struct RefNames<'a> {
-    out: Vec<(String, usize)>,
+    out: Vec<(String, usize, &'static str)>,
     /// The module's namespace bindings, so method sugar `ns.f(x)` is recorded
     /// qualified and a flat call of the same spelling bare.
     ns: &'a HashSet<String>,
@@ -6739,7 +6745,7 @@ impl BodyVisit<'_> for RefNames<'_> {
         } = s
         {
             for n in type_names(t) {
-                self.out.push((n, *line));
+                self.out.push((n, *line, "function"));
             }
         }
     }
@@ -6750,7 +6756,7 @@ impl BodyVisit<'_> for RefNames<'_> {
             // first argument. When the receiver names one of the module's
             // namespaces, record the dotted spelling, not a bare `f`.
             Expr::Call {
-                dot: _,
+                form,
                 awaits: _,
                 name,
                 args,
@@ -6758,16 +6764,19 @@ impl BodyVisit<'_> for RefNames<'_> {
                 type_args: _,
                 id: _,
             } => {
+                if let CallForm::Protocol(p) = form {
+                    self.out.push((p.clone(), *line, "protocol"));
+                }
                 let mut sugar = false;
                 if let Some(Expr::Var { name: recv, .. }) = args.first() {
                     sugar = !locals.contains(recv) && self.ns.contains(recv);
                 }
                 if sugar {
                     if let Some(Expr::Var { name: recv, .. }) = args.first() {
-                        self.out.push((format!("{recv}.{name}"), *line));
+                        self.out.push((format!("{recv}.{name}"), *line, "function"));
                     }
                 } else if !locals.contains(name) {
-                    self.out.push((name.clone(), *line));
+                    self.out.push((name.clone(), *line, "function"));
                     // `f(x)` is also how method sugar `x.f()` arrives. For
                     // `program_ref_kinds`, count it, so a name seen only here is
                     // told apart from one also used as a variable, a type or a
@@ -6781,7 +6790,7 @@ impl BodyVisit<'_> for RefNames<'_> {
             | Expr::TryConstruct { name, line, .. }
             | Expr::Var { name, line, id: _ } => {
                 if !locals.contains(name) {
-                    self.out.push((name.clone(), *line));
+                    self.out.push((name.clone(), *line, "function"));
                 }
             }
             _ => {}
@@ -6794,7 +6803,7 @@ impl BodyVisit<'_> for RefNames<'_> {
         // four built-in sum names have no declaration.
         if let Pattern::Variant(v, _) = p {
             if !locals.contains(v) && !is_sum_arm(v) {
-                self.out.push((v.clone(), line));
+                self.out.push((v.clone(), line, "function"));
             }
         }
     }
@@ -6911,8 +6920,12 @@ impl BodyVisitMut for Renamer<'_> {
                 name,
                 args,
                 type_args,
+                form,
                 ..
             } => {
+                if let CallForm::Protocol(p) = form {
+                    *p = ren(self.map, p);
+                }
                 // A type argument is renamed too: `fromJson<Pt>(s)` names a type
                 // this module may have renamed for privacy.
                 for t in type_args.iter_mut() {
@@ -7090,7 +7103,7 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
                 amb: split_ambiguous.then_some(&mut amb),
             };
             body_block(b, &mut locals, &mut v);
-            for (n, _) in v.out {
+            for (n, ..) in v.out {
                 *totals.entry(n.clone()).or_default() += 1;
                 out.insert(n);
             }

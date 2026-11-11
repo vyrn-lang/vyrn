@@ -2304,13 +2304,13 @@ impl<'a> Build<'a> {
         }
     }
 
-    /// Postfix `?`, `.field`, `.name(..)` and `[i]`, binding tighter than unary and
+    /// Postfix `?`, `.field`, `.name(..)`, `::P.name(..)` and `[i]`, binding tighter than unary and
     /// binary operators.
     fn postfix(&mut self) -> Expr {
         let mut e = self.primary();
         loop {
             let line = match self.peek() {
-                Tok::Question | Tok::Dot | Tok::LBracket => self.line(),
+                Tok::Question | Tok::Dot | Tok::LBracket | Tok::ColonColon => self.line(),
                 _ => return e,
             };
             e = self.postfix_step(e, line);
@@ -2325,6 +2325,27 @@ impl<'a> Build<'a> {
                 expr: Box::new(e),
                 line,
             },
+            Tok::ColonColon => {
+                let protocol = self.ident();
+                self.at += 1;
+                let id = match self.line() == line {
+                    true => self.spelled(),
+                    false => Id::NEW,
+                };
+                let name = self.ident();
+                self.at += 1;
+                let mut args = vec![e];
+                self.exprs_to_paren(&mut args);
+                Expr::Call {
+                    id,
+                    form: CallForm::Protocol(protocol),
+                    awaits: false,
+                    name,
+                    args,
+                    type_args: Vec::new(),
+                    line,
+                }
+            }
             Tok::Dot => {
                 // A name on another line than its dot has no column a fix can use.
                 let id = match self.line() == line {
@@ -2387,7 +2408,10 @@ impl<'a> Build<'a> {
                 // and it is always concrete.
                 Expr::Call {
                     id: Id::NEW,
-                    dot: args.len() > n,
+                    form: match args.len() > n {
+                        true => CallForm::Method,
+                        false => CallForm::Plain,
+                    },
                     awaits: false,
                     name,
                     args,
@@ -2407,7 +2431,7 @@ impl<'a> Build<'a> {
                 Expr::Call {
                     name: "@at".to_string(),
                     args: vec![e, idx],
-                    dot: false,
+                    form: CallForm::Plain,
                     awaits: false,
                     type_args: Vec::new(),
                     line,
@@ -2595,7 +2619,7 @@ impl<'a> Build<'a> {
             } else {
                 Expr::Call {
                     id: spelled,
-                    dot: false,
+                    form: CallForm::Plain,
                     awaits: false,
                     name,
                     args,
@@ -2820,7 +2844,7 @@ impl<'a> Build<'a> {
         // into the type argument `fromJson<T>(s)` takes.
         let decode = |t: &Expr, text: Expr| Expr::Call {
             id: Id::NEW,
-            dot: false,
+            form: CallForm::Plain,
             awaits: false,
             name: "fromJson".to_string(),
             args: vec![text],

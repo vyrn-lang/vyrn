@@ -594,10 +594,15 @@ rules! {
     VariantArity { name, want, got } "`{name}` takes {want} argument(s), got {got}";
     InferParam { tp, name } "cannot infer type parameter `{tp}` of `{name}`";
     NeedsReceiver { name } "`{name}` needs a `self` receiver";
-    AmbiguousBound { name, protocols }
-        "`{name}` is ambiguous: protocols {protocols} all declare it for this receiver";
-    AmbiguousImpl { name, protocols }
-        "`{name}` is ambiguous: protocols {protocols} all implement it for this receiver";
+    AmbiguousBound { name, protocols, first }
+        "`{name}` is ambiguous: protocols {protocols} all declare it for this receiver; \
+        call `x::{first}.{name}(..)` to pick one";
+    AmbiguousImpl { name, protocols, first }
+        "`{name}` is ambiguous: protocols {protocols} all implement it for this receiver; \
+        call `x::{first}.{name}(..)` to pick one";
+    ProtocolCallUnknown { protocol, name }
+        "`{protocol}` is not a protocol, so `x::{protocol}.{name}(..)` calls nothing";
+    ProtocolLacksMethod { protocol, name } "protocol `{protocol}` declares no method `{name}`";
     BoundAssociatedType { name, proto, a, t }
         "`{name}` mentions `{proto}`'s associated type `{a}`, and \
         a `<{t}: {proto}>` bound cannot name it — call `.{name}(..)` on a \
@@ -934,6 +939,9 @@ rules! {
     UnexpectedToken { found } "unexpected token in expression: {found}";
     InInterpolation { detail } "in interpolation: {detail}";
     InterpolationTrailing { src } "unexpected tokens after interpolation expression `{src}`";
+    ProtocolCallNoValue { protocol }
+        "`x::{protocol}` names the protocol of a method call and is not a value; \
+        write `x::{protocol}.method(..)`";
     IfLetExpr {}
         "`if let` is a statement, not an expression — use `match` to bind \
         a pattern in an expression position";

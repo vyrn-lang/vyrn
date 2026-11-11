@@ -984,6 +984,7 @@ fn check_accum_inner(
         variants: &variants,
         all_bounds: &all_bounds,
         protocol_methods: &protocol_methods,
+        protocols: &program.protocols,
         protocol_places: &protocol_places,
         impls: &program.impls,
         expansions: &program.expansions,
@@ -1640,6 +1641,8 @@ struct Cx<'a> {
     all_bounds: &'a HashMap<&'a str, &'a HashMap<String, Vec<String>>>,
     /// Method name to (protocol, signature).
     protocol_methods: &'a HashMap<String, Vec<(String, MethodSig)>>,
+    /// The declared protocols, the prelude's included.
+    protocols: &'a [crate::ast::ProtocolDecl],
     /// Projection names protocols declare.
     protocol_places: &'a std::collections::HashSet<String>,
     /// Every `impl` block, by type key.
@@ -3782,7 +3785,7 @@ impl<'a> Checker<'a> {
             name,
             line,
             id,
-            dot: false,
+            form: CallForm::Plain,
             ..
         } = expr
         {
@@ -4004,7 +4007,7 @@ impl<'a> Checker<'a> {
                 self.binop_type(*op, l, r, *line)
             }
             Expr::Call {
-                dot,
+                form,
                 awaits: _,
                 name,
                 args,
@@ -4012,7 +4015,7 @@ impl<'a> Checker<'a> {
                 line,
                 id: _,
             } => {
-                let at = (expr.id(), *dot);
+                let at = (expr.id(), form);
                 let t = self.call(name, at, args, type_args, *line, scope, expected, fn_ret)?;
                 // `schemaOf<T>()` lowers through the literal it stands for, so
                 // the checker types those nodes too (`project::schema`).
@@ -4931,12 +4934,12 @@ impl<'a> Checker<'a> {
         Ok(true)
     }
 
-    /// Types the call `at` (its node, and whether it is written `recv.name(..)`).
+    /// Types the call `at` (its node, and how it is written).
     #[allow(clippy::too_many_arguments)]
     fn call(
         &self,
         name: &str,
-        (node, dot): (NodeId, bool),
+        (node, form): (NodeId, &CallForm),
         args: &[Expr],
         written: &[Type],
         line: usize,
@@ -4944,6 +4947,12 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
+        // `recv::P.name(..)` names its callee: no binding, builtin or
+        // function answers for it.
+        if let CallForm::Protocol(p) = form {
+            return self.method_call(name, Some(p), args, scope, expected, fn_ret, line);
+        }
+        let dot = form.has_receiver();
         // A call resolves to the nearest binding in scope, before the builtins
         // and the declared functions: a binding of function type (parameter,
         // local or module state) is called through. A bare call that a local
@@ -4980,6 +4989,174 @@ impl<'a> Checker<'a> {
             }
         }
         self.call_declared(name, (args, dot), written, line, scope, expected, fn_ret)
+    }
+
+    /// Types the method call `recv.name(..)`, `args[0]` the receiver, by
+    /// dispatch on the receiver's type among the protocols that declare
+    /// `name`: only `via` where the call names it (`recv::P.name(..)`). A
+    /// bounded type-parameter receiver uses the protocol's signature, and
+    /// codegen dispatches.
+    #[allow(clippy::too_many_arguments)]
+    fn method_call(
+        &self,
+        name: &str,
+        via: Option<&str>,
+        args: &[Expr],
+        scope: &Scope,
+        expected: Option<&Type>,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<Type, Diagnostic> {
+        let mut candidates = self.protocol_methods.get(name).cloned().unwrap_or_default();
+        if let Some(p) = via {
+            candidates.retain(|(q, _)| q == p);
+            if candidates.is_empty() {
+                let declared = self.protocols.iter().any(|d| d.name == p)
+                    || crate::types::KNOWN_PROTOCOLS.iter().any(|(k, _)| *k == p);
+                return Err(match declared {
+                    true => cerr!(line, ProtocolLacksMethod, protocol = p, name),
+                    false => cerr!(line, ProtocolCallUnknown, protocol = p, name),
+                });
+            }
+        }
+        if args.is_empty() {
+            return Err(cerr!(line, NeedsReceiver, name));
+        }
+        // The raw receiver type, so an enum keeps its name.
+        let recv = self.expr(&args[0], scope, None, fn_ret)?;
+        // The impl table picks between protocols that declare the same
+        // name. With no impl, the first candidate reports below.
+        let (proto, sig) = {
+            let key = crate::types::type_key(&recv);
+            let matching: Vec<_> = candidates
+                .iter()
+                .filter(|(p, _)| key.as_ref().is_some_and(|k| self.implements(p, k)))
+                .collect();
+            match matching.len() {
+                1 => matching[0].clone(),
+                // A `Type::Param` has no impl-table key, so its bound picks
+                // the protocol, whichever candidate comes first.
+                0 if matches!(&recv, Type::Param(_)) => {
+                    let Type::Param(t) = &recv else {
+                        unreachable!("guarded by the match arm above")
+                    };
+                    let bounded: Vec<_> = candidates
+                        .iter()
+                        .filter(|(p, _)| self.param_has_bound(t, p))
+                        .collect();
+                    match bounded.len() {
+                        1 => bounded[0].clone(),
+                        0 => candidates[0].clone(),
+                        _ => {
+                            return Err(cerr!(
+                                line,
+                                AmbiguousBound,
+                                name,
+                                first = bounded[0].0,
+                                protocols = bounded
+                                    .iter()
+                                    .map(|(p, _)| p.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+                        }
+                    }
+                }
+                0 => candidates[0].clone(),
+                _ => {
+                    return Err(cerr!(
+                        line,
+                        AmbiguousImpl,
+                        name,
+                        first = matching[0].0,
+                        protocols = matching
+                            .iter()
+                            .map(|(p, _)| p.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+        };
+        if let Type::Param(t) = &recv {
+            if self.param_has_bound(t, &proto) {
+                // No impl is selected, so an associated type has nothing to
+                // resolve against and Vyrn has no `T::Output` spelling.
+                // Refused by name; typed as the bare parameter it would
+                // reach codegen as `void`.
+                let mut assoc = None;
+                for ty in sig.params.iter().chain(std::iter::once(&sig.ret)) {
+                    walk_type(ty, &mut |t| {
+                        if let Type::Param(a) = t {
+                            assoc.get_or_insert_with(|| a.clone());
+                        }
+                    });
+                }
+                if let Some(a) = assoc {
+                    return Err(cerr!(line, BoundAssociatedType, name, proto, a, t));
+                }
+                // The protocol member is the declaration (conformance made
+                // the impls agree with it), capabilities included.
+                let mut params = vec![recv.clone()];
+                params.extend(sig.params.iter().cloned());
+                let mut caps = vec![sig.recv];
+                caps.extend(sig.param_caps.iter().copied());
+                let every = (self.impls.iter())
+                    .filter(|i| i.protocol == proto)
+                    .filter_map(|i| crate::types::type_key(&i.ty))
+                    .map(|key| crate::types::impl_method_name(&proto, &key, name));
+                self.dispatch(every);
+                return self.check_declared_call(
+                    &DeclaredCall {
+                        key: name,
+                        shown: name,
+                        params: &params,
+                        ret: &sig.ret,
+                        type_params: None,
+                        caps: Some(&caps),
+                        bounds: None,
+                        recv: Some(&recv),
+                        written: &[],
+                    },
+                    args,
+                    scope,
+                    expected,
+                    fn_ret,
+                    line,
+                );
+            }
+        }
+        match crate::types::type_key(&recv) {
+            Some(key) if self.implements(&proto, &key) => {
+                let mangled = crate::types::impl_method_name(&proto, &key, name);
+                self.dispatch([mangled.clone()]);
+                // Dispatch ends here; the impl method is read as any
+                // declaration, its receiver's capability at index 0.
+                let (mparams, mret) = self
+                    .sig(&mangled)
+                    .ok_or_else(|| cerr!(line, NotImplemented, recv, proto, name))?;
+                let mcaps = self.caps(&mangled);
+                return self.check_declared_call(
+                    &DeclaredCall {
+                        key: mangled.as_str(),
+                        shown: name,
+                        params: mparams,
+                        ret: mret,
+                        type_params: self.type_params(&mangled),
+                        caps: mcaps.as_ref(),
+                        bounds: self.all_bounds.get(mangled.as_str()).copied(),
+                        recv: Some(&recv),
+                        written: &[],
+                    },
+                    args,
+                    scope,
+                    expected,
+                    fn_ret,
+                    line,
+                );
+            }
+            _ => return Err(cerr!(line, NotImplemented, recv, proto, name)),
+        }
     }
 
     /// Types a call that no binding answers for: a builtin, a constructor, a
@@ -5548,146 +5725,8 @@ impl<'a> Checker<'a> {
             return self.check_construction(decl, args, line, scope, fn_ret);
         }
 
-        // Protocol method `x.m(..)`, desugared to `m(x, ..)`: dispatch on the
-        // receiver's type. A bounded type-parameter receiver uses the
-        // protocol's signature, and codegen dispatches.
-        if let Some(candidates) = self.protocol_methods.get(name).cloned() {
-            if args.is_empty() {
-                return Err(cerr!(line, NeedsReceiver, name));
-            }
-            // The raw receiver type, so an enum keeps its name.
-            let recv = self.expr(&args[0], scope, None, fn_ret)?;
-            // The impl table picks between protocols that declare the same
-            // name. With no impl, the first candidate reports below.
-            let (proto, sig) = {
-                let key = crate::types::type_key(&recv);
-                let matching: Vec<_> = candidates
-                    .iter()
-                    .filter(|(p, _)| key.as_ref().is_some_and(|k| self.implements(p, k)))
-                    .collect();
-                match matching.len() {
-                    1 => matching[0].clone(),
-                    // A `Type::Param` has no impl-table key, so its bound picks
-                    // the protocol, whichever candidate comes first.
-                    0 if matches!(&recv, Type::Param(_)) => {
-                        let Type::Param(t) = &recv else {
-                            unreachable!("guarded by the match arm above")
-                        };
-                        let bounded: Vec<_> = candidates
-                            .iter()
-                            .filter(|(p, _)| self.param_has_bound(t, p))
-                            .collect();
-                        match bounded.len() {
-                            1 => bounded[0].clone(),
-                            0 => candidates[0].clone(),
-                            _ => {
-                                return Err(cerr!(
-                                    line,
-                                    AmbiguousBound,
-                                    name,
-                                    protocols = bounded
-                                        .iter()
-                                        .map(|(p, _)| p.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                ));
-                            }
-                        }
-                    }
-                    0 => candidates[0].clone(),
-                    _ => {
-                        return Err(cerr!(
-                            line,
-                            AmbiguousImpl,
-                            name,
-                            protocols = matching
-                                .iter()
-                                .map(|(p, _)| p.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ));
-                    }
-                }
-            };
-            if let Type::Param(t) = &recv {
-                if self.param_has_bound(t, &proto) {
-                    // No impl is selected, so an associated type has nothing to
-                    // resolve against and Vyrn has no `T::Output` spelling.
-                    // Refused by name; typed as the bare parameter it would
-                    // reach codegen as `void`.
-                    let mut assoc = None;
-                    for ty in sig.params.iter().chain(std::iter::once(&sig.ret)) {
-                        walk_type(ty, &mut |t| {
-                            if let Type::Param(a) = t {
-                                assoc.get_or_insert_with(|| a.clone());
-                            }
-                        });
-                    }
-                    if let Some(a) = assoc {
-                        return Err(cerr!(line, BoundAssociatedType, name, proto, a, t));
-                    }
-                    // The protocol member is the declaration (conformance made
-                    // the impls agree with it), capabilities included.
-                    let mut params = vec![recv.clone()];
-                    params.extend(sig.params.iter().cloned());
-                    let mut caps = vec![sig.recv];
-                    caps.extend(sig.param_caps.iter().copied());
-                    let every = (self.impls.iter())
-                        .filter(|i| i.protocol == proto)
-                        .filter_map(|i| crate::types::type_key(&i.ty))
-                        .map(|key| crate::types::impl_method_name(&proto, &key, name));
-                    self.dispatch(every);
-                    return self.check_declared_call(
-                        &DeclaredCall {
-                            key: name,
-                            shown: name,
-                            params: &params,
-                            ret: &sig.ret,
-                            type_params: None,
-                            caps: Some(&caps),
-                            bounds: None,
-                            recv: Some(&recv),
-                            written: &[],
-                        },
-                        args,
-                        scope,
-                        expected,
-                        fn_ret,
-                        line,
-                    );
-                }
-            }
-            match crate::types::type_key(&recv) {
-                Some(key) if self.implements(&proto, &key) => {
-                    let mangled = crate::types::impl_method_name(&proto, &key, name);
-                    self.dispatch([mangled.clone()]);
-                    // Dispatch ends here; the impl method is read as any
-                    // declaration, its receiver's capability at index 0.
-                    let (mparams, mret) = self
-                        .sig(&mangled)
-                        .ok_or_else(|| cerr!(line, NotImplemented, recv, proto, name))?;
-                    let mcaps = self.caps(&mangled);
-                    return self.check_declared_call(
-                        &DeclaredCall {
-                            key: mangled.as_str(),
-                            shown: name,
-                            params: mparams,
-                            ret: mret,
-                            type_params: self.type_params(&mangled),
-                            caps: mcaps.as_ref(),
-                            bounds: self.all_bounds.get(mangled.as_str()).copied(),
-                            recv: Some(&recv),
-                            written: &[],
-                        },
-                        args,
-                        scope,
-                        expected,
-                        fn_ret,
-                        line,
-                    );
-                }
-                _ => return Err(cerr!(line, NotImplemented, recv, proto, name)),
-            }
+        if self.protocol_methods.contains_key(name) {
+            return self.method_call(name, None, args, scope, expected, fn_ret, line);
         }
 
         // `x.f(..)` naming a projection on `x`'s type is an access, typed as
@@ -6380,13 +6419,18 @@ impl<'a> Checker<'a> {
             /// A call through a function value reads every argument. A method
             /// is each protocol's that declares it, narrowed by the type of a
             /// receiver bound outside the lambda.
-            fn consumes(&self, name: &str, args: &[Expr], k: usize) -> bool {
+            fn consumes(&self, name: &str, form: &CallForm, args: &[Expr], k: usize) -> bool {
                 let ck = self.ck;
                 let typed = |n: &str| ck.lookup(self.outer, n).map(|b| b.ty);
-                if typed(name).is_some_and(|t| matches!(ck.base(&t), Type::Fn(..))) {
+                let via = match form {
+                    CallForm::Protocol(p) => Some(p),
+                    _ => None,
+                };
+                if via.is_none() && typed(name).is_some_and(|t| matches!(ck.base(&t), Type::Fn(..)))
+                {
                     return false;
                 }
-                if let Some(cs) = ck.caps(name) {
+                if let Some(cs) = ck.caps(name).filter(|_| via.is_none()) {
                     return cs.get(k) == Some(&Capability::Consume);
                 }
                 let key = match args.first() {
@@ -6396,6 +6440,7 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 (ck.protocol_methods.get(name).into_iter().flatten())
+                    .filter(|(p, _)| via.is_none_or(|v| p == v))
                     .filter(|(p, _)| key.as_ref().is_none_or(|key| ck.implements(p, key)))
                     .any(|(_, m)| {
                         let mut cs = std::iter::once(m.recv).chain(m.param_caps.iter().copied());
@@ -6435,7 +6480,7 @@ impl<'a> Checker<'a> {
                 }
                 match e {
                     Expr::Call {
-                        dot: _,
+                        form,
                         awaits: _,
                         name,
                         args,
@@ -6446,7 +6491,7 @@ impl<'a> Checker<'a> {
                         // Each argument is checked before it is walked, so the
                         // first violation in source order is reported.
                         for (k, a) in args.iter().enumerate() {
-                            if self.consumes(name, args, k) {
+                            if self.consumes(name, form, args, k) {
                                 if let Expr::Var { name: vn, .. } = a {
                                     if self.is_capture(vn, locals) {
                                         self.fail(rule!(LambdaConsumesCapture, name = vn, line));

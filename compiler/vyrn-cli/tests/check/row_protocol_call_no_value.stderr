@@ -1,0 +1,1 @@
+row_protocol_call_no_value.vyrn:16:14: `x::Area` names the protocol of a method call and is not a value; write `x::Area.method(..)`

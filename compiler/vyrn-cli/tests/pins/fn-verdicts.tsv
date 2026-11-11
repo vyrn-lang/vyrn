@@ -1081,6 +1081,12 @@ examples/protocol_extra.vyrn		does not check	does not check
 examples/protocol_incomplete.vyrn		does not check	does not check
 examples/protocol_overlap.vyrn		does not check	does not check
 examples/protocol_scalar.vyrn		does not check	does not check
+examples/protocolcall.vyrn	main	yes	no, its effect set is alloc, write-output
+examples/protocolcall.vyrn	Flat$Square$area	yes	no, `self` is Square, not an integer, Bool or a read array of one
+examples/protocolcall.vyrn	Solid$Square$area	yes	no, `self` is Square, not an integer, Bool or a read array of one
+examples/protocolcall.vyrn	Solid$Square$label	yes	no, its effect set is alloc
+examples/protocolcall.vyrn	Named$Square$label	yes	no, its effect set is alloc
+examples/protocolcall.vyrn	surplus	yes	no, `x` is Square, not an integer, Bool or a read array of one
 examples/protoplace.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/protoplace.vyrn	Shelf$Crate$size	yes	no, `self` is Crate, not an integer, Bool or a read array of one
 examples/protoplace.vyrn	Shelf$Bin$size	yes	no, `self` is Bin, not an integer, Bool or a read array of one

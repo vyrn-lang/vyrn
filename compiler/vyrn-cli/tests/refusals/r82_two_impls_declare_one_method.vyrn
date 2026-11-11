@@ -1,0 +1,27 @@
+// Two protocols declare `area` for `Square`, so the call names one.
+protocol Area {
+    fn area(read self) -> Int64
+}
+
+type Square = { side: Int64 }
+
+impl Area for Square {
+    fn area(read self) -> Int64 {
+        return self.side * self.side
+    }
+}
+
+protocol Solid {
+    fn area(read self) -> Int64
+}
+
+impl Solid for Square {
+    fn area(read self) -> Int64 {
+        return 6 * self.side * self.side
+    }
+}
+
+fn main() -> Int64 {
+    let s = Square { side: 2 }
+    return s.area()
+}

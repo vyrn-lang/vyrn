@@ -684,6 +684,7 @@ compiler/vyrn-cli/tests/check/row_lazy_where.vyrn	1	b12d55371ae92acc	20	20	36e82
 compiler/vyrn-cli/tests/check/row_needs_field.vyrn	1	a2d3087c2b049ded	20	20	14993d82dd77c0d5
 compiler/vyrn-cli/tests/check/row_nesting_too_deep.vyrn	1	e764a911f82f8d86	20	20	f8e8d67bf2168142
 compiler/vyrn-cli/tests/check/row_nul_in_string.vyrn	1	09bff29913e44554	0	0	cbf29ce484222325
+compiler/vyrn-cli/tests/check/row_protocol_call_no_value.vyrn	1	a8fb13a5bb86f71b	20	20	bbb479aa2e416a83
 compiler/vyrn-cli/tests/check/row_recovery_after_a_statement_and_a_declaration.vyrn	3	2f352b6ff64c79da	20	20	a591381346adb6f8
 compiler/vyrn-cli/tests/check/row_single_quoted_string.vyrn	1	495512f2bb13d9af	0	0	cbf29ce484222325
 compiler/vyrn-cli/tests/check/row_skeleton_detail.vyrn	1	4aca155d85c34b75	20	20	a887388c93318324
@@ -860,6 +861,11 @@ compiler/vyrn-cli/tests/refusals/r73_an_option_of_code_in_a_hole.vyrn	0	cbf29ce4
 compiler/vyrn-cli/tests/refusals/r76_release_moves_self.vyrn	0	cbf29ce484222325	20	20	3d223da14c26fc6d
 compiler/vyrn-cli/tests/refusals/r77_an_impl_of_a_kernel_protocol_outside_its_types_module.vyrn	0	cbf29ce484222325	20	19	f4a21c9fe96c086d
 compiler/vyrn-cli/tests/refusals/r78_a_protocol_method_named_like_an_unreached_std_function.vyrn	0	cbf29ce484222325	20	20	39b90f180b76a121
+compiler/vyrn-cli/tests/refusals/r79_a_protocol_call_names_no_protocol.vyrn	0	cbf29ce484222325	20	18	0430c18584140732
+compiler/vyrn-cli/tests/refusals/r80_a_protocol_call_names_a_method_the_protocol_lacks.vyrn	0	cbf29ce484222325	20	16	d04903bb9e00cbb6
+compiler/vyrn-cli/tests/refusals/r81_a_protocol_call_through_copy.vyrn	0	cbf29ce484222325	20	19	0161b4928db247d1
+compiler/vyrn-cli/tests/refusals/r82_two_impls_declare_one_method.vyrn	0	cbf29ce484222325	20	18	3a18cd210871e52a
+compiler/vyrn-cli/tests/refusals/r83_two_bounds_declare_one_method.vyrn	0	cbf29ce484222325	20	19	a5c9192dfab4da66
 compiler/vyrn-cli/tests/shapes/a-body-taken-whole-lifts-a-lambda-that-captures-a-later-let.vyrn	0	cbf29ce484222325	20	16	414820b60f79ac03
 compiler/vyrn-cli/tests/shapes/a-borrow-of-a-field-whose-root-is-consumed-after-the-borrow-ends.vyrn	0	cbf29ce484222325	20	14	0a6ed13d107754e1
 compiler/vyrn-cli/tests/shapes/a-borrow-rebound-in-a-let-mut-is-a-copy.vyrn	0	cbf29ce484222325	20	17	cbc0ba2678b9e985
@@ -1244,6 +1250,7 @@ examples/protocol_extra.vyrn	0	cbf29ce484222325	20	15	85c87d056d50e632
 examples/protocol_incomplete.vyrn	0	cbf29ce484222325	20	18	9370830fbf31465f
 examples/protocol_overlap.vyrn	0	cbf29ce484222325	20	19	9d6eec8348a0a73e
 examples/protocol_scalar.vyrn	0	cbf29ce484222325	20	18	70c6509a41c1ee05
+examples/protocolcall.vyrn	0	cbf29ce484222325	20	18	6781bff86f70b716
 examples/protoplace.vyrn	0	cbf29ce484222325	20	17	8a7849a722718e7e
 examples/protorec.vyrn	0	cbf29ce484222325	20	16	d7677362e48ea727
 examples/recdepth.vyrn	0	cbf29ce484222325	20	15	d8d4a71e51234e8f
