@@ -96,6 +96,7 @@ compiler/vyrn-cli/tests/check/a_grammar_that_does_not_load_is_a_report_at_its_pl
 compiler/vyrn-cli/tests/check/a_hashable_record_keys_a_map.vyrn	0	cbf29ce484222325	20	18	b1b802ac9116573f
 compiler/vyrn-cli/tests/check/a_heap_field_store_in_a_region_is_refused.vyrn	0	cbf29ce484222325	20	18	dae812600eb1cfd3
 compiler/vyrn-cli/tests/check/a_hit_prologue_binds_after_the_miss_is_decided.vyrn	0	cbf29ce484222325	20	15	87cbe204f4c13eb7
+compiler/vyrn-cli/tests/check/a_host_builtin_operand_is_checked_against_its_row.vyrn	0	cbf29ce484222325	20	16	f61e014872524c90
 compiler/vyrn-cli/tests/check/a_known_protocols_impl_takes_the_declared_capabilities_1.vyrn	0	cbf29ce484222325	20	19	3896c5a4ff5ad47a
 compiler/vyrn-cli/tests/check/a_known_protocols_impl_takes_the_declared_capabilities_2.vyrn	0	cbf29ce484222325	20	19	04cdfefc81137462
 compiler/vyrn-cli/tests/check/a_known_protocols_impl_takes_the_declared_capabilities_3.vyrn	0	cbf29ce484222325	20	20	861320edafb70740

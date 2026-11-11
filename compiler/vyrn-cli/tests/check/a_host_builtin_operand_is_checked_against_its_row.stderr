@@ -1,0 +1,1 @@
+a_host_builtin_operand_is_checked_against_its_row.vyrn:2:0: `codeAt` argument 1 expects String, found Result<String, String>

@@ -4722,13 +4722,10 @@ impl<'a> Checker<'a> {
     ) -> Result<Type, Diagnostic> {
         for (i, (a, want)) in args.iter().zip(&row.params).enumerate() {
             let t = self.base(&self.expr(a, scope, Some(want), fn_ret)?);
-            let Some(refuse) = row.wrong_type else {
-                continue;
-            };
             match t {
                 Type::Err if i < row.stops => return Ok(Type::Err),
                 Type::Err => {}
-                t if t != *want => return Err(cerr!(line; refuse(name, i, want, &t))),
+                t if t != *want => return Err(cerr!(line; (row.wrong_type)(name, i, want, &t))),
                 _ => {}
             }
         }
