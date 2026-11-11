@@ -1,0 +1,1 @@
+a_protocol_method_named_like_a_std_function_is_refused_at_the_method.vyrn:4:0: protocol Cut's method `slice` collides with the function `slice` of a module that does not import Cut: method names dispatch to impls before free functions, so that function could never run; rename the method

@@ -70,6 +70,7 @@ compiler/vyrn-cli/tests/check/a_fn_field_reads_the_same_solve_in_either_literal_
 compiler/vyrn-cli/tests/check/a_fn_value_parameter_takes_a_wider_record.vyrn	0	cbf29ce484222325	20	17	0a37ba3d827b1d3c
 compiler/vyrn-cli/tests/check/a_for_loop_types_over_a_user_container.vyrn	0	cbf29ce484222325	20	19	74f209861c323e8d
 compiler/vyrn-cli/tests/check/a_free_function_cannot_return_a_capability.vyrn	1	d5fcdf69ade6c81d	20	20	ca13c26ae161b31b
+compiler/vyrn-cli/tests/check/a_function_named_like_a_protocol_method_is_refused.vyrn	0	cbf29ce484222325	20	16	b33cd28d3657f30c
 compiler/vyrn-cli/tests/check/a_function_that_does_not_wait_is_a_value_of_a_waiting_type.vyrn	0	cbf29ce484222325	20	15	720abe3d460f33a4
 compiler/vyrn-cli/tests/check/a_function_that_reaches_a_wait_waits.vyrn	0	cbf29ce484222325	20	16	e38ebdd97db323db
 compiler/vyrn-cli/tests/check/a_gen_fn_calls_a_function_named_like_a_host_extern.vyrn	0	cbf29ce484222325	20	18	797c55e45754fe63
@@ -187,6 +188,7 @@ compiler/vyrn-cli/tests/check/a_protocol_may_not_name_self_1.vyrn	0	cbf29ce48422
 compiler/vyrn-cli/tests/check/a_protocol_may_not_name_self_2.vyrn	0	cbf29ce484222325	20	19	d8735e0f96e67f4a
 compiler/vyrn-cli/tests/check/a_protocol_may_not_name_self_3.vyrn	0	cbf29ce484222325	20	16	b541ccd6e2239604
 compiler/vyrn-cli/tests/check/a_protocol_may_not_name_self_4.vyrn	0	cbf29ce484222325	20	17	3465825de262d2db
+compiler/vyrn-cli/tests/check/a_protocol_method_named_like_a_std_function_is_refused_at_the_method.vyrn	0	cbf29ce484222325	20	18	bd488e64d1209d7a
 compiler/vyrn-cli/tests/check/a_protocol_projection_is_satisfied_by_a_places_member.vyrn	0	cbf29ce484222325	20	17	3cfad832c7d08338
 compiler/vyrn-cli/tests/check/a_protocol_signature_names_types_that_exist_1.vyrn	0	cbf29ce484222325	20	20	c23e9eafe0664e86
 compiler/vyrn-cli/tests/check/a_protocol_signature_names_types_that_exist_2.vyrn	0	cbf29ce484222325	20	18	d23a7768c06c902d

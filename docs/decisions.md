@@ -75,6 +75,7 @@ pull request.
 - An impl of `MustUse`, `Owned` or `Copy` is declared in its type's module, and a built-in type takes none (decided 2026-11-05 by the user). The kernel reads the three in every body that holds the type, so an impl elsewhere would change verdicts that module's own load gave (`loader::foreign_kernel_impls`).
 - A generic call or record literal solves its callee's type parameters renamed apart (`T'n`, fresh per instantiation), so a caller's `T` never meets the callee's. A sentence and the check's record carry the written name.
 - Protocols take associated types, not type parameters. No `protocol P<T>` and no `T::Output`: an operator like `?` has nowhere to name the instance.
+- A free function named like a protocol method is refused, because a call of the name dispatches to an impl first, program-wide. The refusal sits on the function where its module imports the protocol, else on the method: the function's module checks alone without it, and may be std.
 - A type declares its properties by implementing compiler-known protocols (`Owned`, `MustUse`, `Fallible`, `Copy`, `Iterate`, `Hashable`, `Show`). Built-ins have seeded rows and a declared row wins, so no hand-written list can fall out of date.
 - A scalar renders through the language's own lowering; `impl Show` is consulted only for a type the language cannot render. Records get no derived `Show`.
 - Any expression may be a method receiver, evaluated exactly once.

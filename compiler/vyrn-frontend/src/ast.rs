@@ -1595,6 +1595,23 @@ impl Spellings {
         }
     }
 
+    /// Whether module `from` is `to` or imports it, through any chain of
+    /// path imports.
+    pub fn reaches(&self, from: &str, to: &str) -> bool {
+        let mut seen = std::collections::BTreeSet::from([from]);
+        let mut next = vec![from];
+        while let Some(m) = next.pop() {
+            if m == to {
+                return true;
+            }
+            let imported = (self.paths.keys())
+                .filter(|(i, _)| i == m)
+                .map(|(_, t)| t.as_str());
+            next.extend(imported.filter(|t| seen.insert(t)));
+        }
+        false
+    }
+
     /// The name the declaration `linked` was written as.
     pub fn written<'a>(&'a self, linked: &'a str) -> &'a str {
         self.decls.get(linked).map_or(linked, |(w, _)| w)
