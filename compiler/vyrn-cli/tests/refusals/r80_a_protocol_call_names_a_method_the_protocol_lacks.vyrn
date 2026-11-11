@@ -1,0 +1,21 @@
+// `x::P.m(..)` calls a method `P` declares.
+protocol Area {
+    fn area(read self) -> Int64
+}
+
+type Square = { side: Int64 }
+
+impl Area for Square {
+    fn area(read self) -> Int64 {
+        return self.side * self.side
+    }
+}
+
+protocol Shape {
+    fn sides(read self) -> Int64
+}
+
+fn main() -> Int64 {
+    let s = Square { side: 2 }
+    return s::Shape.area()
+}

@@ -670,6 +670,22 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
         assert_eq!(refs[0].line, 5);
     }
 
+    /// A rename of a protocol reaches the protocol a call names, `t::Area`,
+    /// and leaves the method name after it.
+    #[test]
+    fn a_protocol_rename_reaches_the_protocol_a_call_names() {
+        let src = "protocol Area {\n    fn area(read self) -> Int64\n}\n\
+type Square = { side: Int64 }\n\
+impl Area for Square {\n    fn area(read self) -> Int64 {\n        return self.side\n    }\n}\n\
+fn main() -> Int64 {\n    let t = Square { side: 2 }\n    return t::Area.area()\n}\n";
+        let a = analyze(src);
+        let target = target_at(&a, "main.vyrn", 1, 10).expect("the protocol renames");
+        assert_eq!(target.name, "Area");
+        let refs = references_to(&a, "Area", &[]);
+        let at: Vec<(usize, usize)> = refs.iter().map(|r| (r.line, r.col)).collect();
+        assert_eq!(at, [(1, 10), (5, 6), (12, 15)], "{refs:?}");
+    }
+
     fn ns_import(ns: &str, source: ImportSource) -> ImportDecl {
         ImportDecl {
             names: Vec::new(),

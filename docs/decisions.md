@@ -78,6 +78,7 @@ pull request.
 - A type declares its properties by implementing compiler-known protocols (`Owned`, `MustUse`, `Fallible`, `Copy`, `Iterate`, `Hashable`, `Show`). Built-ins have seeded rows and a declared row wins, so no hand-written list can fall out of date.
 - A scalar renders through the language's own lowering; `impl Show` is consulted only for a type the language cannot render. Records get no derived `Show`.
 - Any expression may be a method receiver, evaluated exactly once.
+- `x::P.m(args)` names the protocol whose `m` a method call means (decided 2026-11-05 by the user), so two protocols that declare one method name, from modules a program does not own, stay callable. The checker resolves it and `x.m(args)` in one function, `Checker::method_call`, with the protocol given or searched; the call stays an `Expr::Call` whose `CallForm::Protocol` the lowering's dispatch reads. `x::P` is no value; the spelling leaves room for a later view of `x` as `P`.
 - A call names a function or a binding. No call on an arbitrary expression (`r.f()` on a field, `xs[0](x)`); bind it first.
 - A bare call `f(x)` resolves to the nearest binding first: a local of `fn` type is called through, a local of another type is refused, and only an unbound name reaches a function. Lexical scope, so a local never silently loses to a function.
 - A dot call `x.m(a)` is taken by a local `m` of `fn` type and skips a local `m` of another type, which cannot be its target. `let count = xs.count()` beside `ys.count()` stays legal.

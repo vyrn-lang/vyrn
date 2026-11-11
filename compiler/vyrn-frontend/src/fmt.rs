@@ -95,6 +95,7 @@ fn semi_separates(prev: Option<&Triv>, rest: &[Triv]) -> bool {
             QuestionQuestion
                 | Question
                 | Dot
+                | ColonColon
                 | LBracket
                 | LParen
                 | LBrace
@@ -252,7 +253,7 @@ fn wants_space(
     if matches!(next, RParen | RBracket) {
         return false;
     }
-    if matches!(prev, Dot) || matches!(next, Dot) {
+    if matches!(prev, Dot | ColonColon) || matches!(next, Dot | ColonColon) {
         return false;
     }
     if matches!(next, Comma | Semi | Colon | Question) {

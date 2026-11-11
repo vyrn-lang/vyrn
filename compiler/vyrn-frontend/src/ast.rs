@@ -1828,6 +1828,26 @@ pub enum UnOp {
     BitNot,
 }
 
+/// How a call was written.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallForm {
+    /// `name(args)`, or a call a desugaring made.
+    Plain,
+    /// `recv.name(..)`: `args[0]` is the receiver, and a refusal numbers the
+    /// arguments after it (#577).
+    Method,
+    /// `recv::P.name(..)`: a method call that means `name` as protocol `P`
+    /// declares it. `P` is spelled as an impl head spells it.
+    Protocol(String),
+}
+
+impl CallForm {
+    /// Whether `args[0]` is a written receiver.
+    pub fn has_receiver(&self) -> bool {
+        !matches!(self, CallForm::Plain)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Int(i64, Id),
@@ -1860,9 +1880,7 @@ pub enum Expr {
     Call {
         name: String,
         args: Vec<Expr>,
-        /// Written `recv.name(..)`: `args[0]` is the receiver, and a refusal
-        /// numbers the arguments after it (#577).
-        dot: bool,
+        form: CallForm,
         /// Written `await f(..)`: the call waits, and the mark says so.
         awaits: bool,
         /// Explicit type arguments, as in `fromJson<Shape>(s)`; usually empty.
@@ -2107,7 +2125,7 @@ impl Expr {
         Expr::Call {
             name: name.into(),
             args,
-            dot: false,
+            form: CallForm::Plain,
             awaits: false,
             type_args: Vec::new(),
             line,

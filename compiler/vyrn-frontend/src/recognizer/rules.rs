@@ -2193,7 +2193,7 @@ impl Recognizer<'_> {
         let hit = ({
             let p0 = me.save();
             (me._primary()?
-                && (({ let mut links = 0u32; loop { if !(matches!(me.peek(), Tok::Question) || matches!(me.peek(), Tok::Dot) || matches!(me.peek(), Tok::LBracket)) { break; } links += 1; if me.depth.saturating_add(links) >= 1024 { me.refuse((me.here().0, me.here().1), |me| rule!(NestingTooDeep, max = "1024"))?; } let p = me.cur; if !me._link()? { me.expected("LBracket")?; } if me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?)))
+                && (({ let mut links = 0u32; loop { if !(matches!(me.peek(), Tok::Question) || matches!(me.peek(), Tok::Dot) || matches!(me.peek(), Tok::LBracket) || matches!(me.peek(), Tok::ColonColon)) { break; } links += 1; if me.depth.saturating_add(links) >= 1024 { me.refuse((me.here().0, me.here().1), |me| rule!(NestingTooDeep, max = "1024"))?; } let p = me.cur; if !me._link()? { me.expected("ColonColon")?; } if me.cur == p { break; } } true }) || (me.committed(p0) && me.expected("\"\"")?)))
             || { me.back(p0); false }
         });
         Ok(hit)
@@ -2214,6 +2214,23 @@ impl Recognizer<'_> {
                 (me.eat(&Tok::LBracket)
                     && (({ let old = std::mem::replace(&mut me.flags.nostruct, false); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?))
                     && (me.eat(&Tok::RBracket) || (me.committed(p0) && me.expected("RBracket")?)))
+                || { me.back(p0); false }
+            })
+            || ({
+                let p0 = me.save();
+                (({ let from = me.cur; me.eat(&Tok::ColonColon) && ({ let l_c = Capture { from, to: me.cur };
+                    ({ let from = me.cur; (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)) && ({ let l_p = Capture { from, to: me.cur };
+                    ((
+                    ({
+                        let p0 = me.save();
+                        ((matches!(me.peek(), Tok::Dot) && matches!(me.ahead(1), Tok::Ident(_)) && matches!(me.ahead(2), Tok::LParen))
+                            && (me.eat(&Tok::Dot) || (me.committed(p0) && me.expected("Dot")?))
+                            && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                            && (me._args()? || (me.committed(p0) && me.expected("LParen")?)))
+                        || { me.back(p0); false }
+                    })
+                    || me.refuse((me.line_of(l_c), me.col_of(l_c)), |me| rule!(ProtocolCallNoValue, protocol = me.text(l_p)))?
+                ) || (me.committed(p0) && me.refuse((me.line_of(l_c), me.col_of(l_c)), |me| rule!(ProtocolCallNoValue, protocol = me.text(l_p)))?)) }) }) }) }))
                 || { me.back(p0); false }
             });
         Ok(hit)

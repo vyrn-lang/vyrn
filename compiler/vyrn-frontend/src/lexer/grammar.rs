@@ -58,6 +58,7 @@ pub enum Tok {
     Break,
     Continue,
     Arrow,
+    ColonColon,
     FatArrow,
     TildeMatch,
     EqEq,
@@ -131,6 +132,7 @@ impl Tok {
     pub(super) fn punct_text(&self) -> Option<&'static str> {
         Some(match self {
             Self::Arrow => "->",
+            Self::ColonColon => "::",
             Self::FatArrow => "=>",
             Self::TildeMatch => "=~",
             Self::EqEq => "==",
@@ -206,6 +208,7 @@ pub(super) fn keyword(word: &str) -> Option<Tok> {
 pub(crate) fn punct_tok(text: &str) -> Option<Tok> {
     Some(match text {
         "->" => Tok::Arrow,
+        "::" => Tok::ColonColon,
         "=>" => Tok::FatArrow,
         "=~" => Tok::TildeMatch,
         "==" => Tok::EqEq,
@@ -276,6 +279,7 @@ pub const KEYWORDS: &[&str] = &[
 /// Every punctuation spelling, longest first.
 pub const PUNCT_SPELLINGS: &[&str] = &[
     "->",
+    "::",
     "=>",
     "=~",
     "==",
@@ -518,6 +522,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
     fn punct(&mut self) -> Result<bool, Box<Diagnostic>> {
         let (tok, n) = match &self.src.as_bytes()[self.pos..] {
             [b'-', b'>', ..] => (Tok::Arrow, 2),
+            [b':', b':', ..] => (Tok::ColonColon, 2),
             [b'=', b'>', ..] => (Tok::FatArrow, 2),
             [b'=', b'~', ..] => (Tok::TildeMatch, 2),
             [b'=', b'=', ..] => (Tok::EqEq, 2),

@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use crate::effects::Waiting;
 use vyrn_frontend::ast::{
-    ArmBody, At, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
-    MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Step, Stmt, Type, TypeDecl,
-    UnOp,
+    ArmBody, At, BinOp, Binder, Block, CallForm, Capability, Expr, FnId, Function, Id, LambdaBody,
+    MatchArm, MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Step, Stmt, Type,
+    TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
 use vyrn_frontend::diagnostics::{Diagnostic, Fix};
@@ -791,14 +791,14 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
             Expr::Call {
                 args,
                 type_args,
-                dot,
+                form,
                 ..
             } => {
                 let d = call_decl(own, e.id())?;
                 let ([], [shown]) = sp.say([], [&d.shown]);
                 // Counts are of what the reader wrote after the dot (#577). A
                 // callee with no parameters has no receiver slot.
-                let dot = usize::from(*dot && !d.params.is_empty());
+                let dot = usize::from(form.has_receiver() && !d.params.is_empty());
                 if d.params.len() != args.len() {
                     let (want, got) = (d.params.len() - dot, args.len() - dot);
                     return Some(rule!(CallArity, shown, want, got).render());
@@ -1933,13 +1933,18 @@ impl<'a> Builder<'a> {
     /// `recv` is a bounded type parameter of the body as written. The checker
     /// dispatched the call through that bound, not through the first
     /// protocol that declares `name`.
-    fn protocol_member(&self, name: &str, recv: &Expr) -> Option<(MethodId, &'a MethodSig)> {
+    fn protocol_member(
+        &self,
+        name: &str,
+        recv: &Expr,
+        via: Option<&str>,
+    ) -> Option<(MethodId, &'a MethodSig)> {
         let Type::Param(t) = node_ty(self.own, recv.id())? else {
             return None;
         };
         let bound = self.bounds?.get(&t)?;
         (self.program.protocols.iter().enumerate()).find_map(|(i, p)| {
-            let j = (bound.contains(&p.name))
+            let j = (bound.contains(&p.name) && via.is_none_or(|v| v == p.name))
                 .then(|| p.methods.iter().position(|m| m.name == name))??;
             let id = MethodId {
                 protocol: i as u32,
@@ -6164,7 +6169,7 @@ impl<'a> Builder<'a> {
                 Ok(Rhs::Read(Place::Field(Box::new(place), field.clone())))
             }
             Expr::Call {
-                dot: _,
+                form: _,
                 awaits: _,
                 name,
                 args,
@@ -6184,7 +6189,7 @@ impl<'a> Builder<'a> {
             // `xs[i]` of a heapless element, a String's byte and a map entry
             // are reads, not calls.
             Expr::Call {
-                dot: _,
+                form: _,
                 awaits: _,
                 name,
                 args,
@@ -6891,11 +6896,18 @@ impl<'a> Builder<'a> {
             }
         }
         let decls = self.proto.types();
+        let via = match dest {
+            Some(Expr::Call {
+                form: CallForm::Protocol(p),
+                ..
+            }) => Some(p.as_str()),
+            _ => None,
+        };
         // A method call takes the capabilities of the impl it dispatches to:
         // two protocols may declare one method name with different ones.
         let method = (self.program.impls.iter())
             .any(|i| i.methods.iter().any(|m| m.name == name))
-            .then(|| self.dispatched(name, args.first()?))
+            .then(|| self.dispatched(name, args.first()?, via))
             .flatten()
             .and_then(|(f, solved)| Some((self.fn_id(&f)?, f, solved)));
         // A seeded row whose result is its receiver's own type hands the
@@ -6952,7 +6964,9 @@ impl<'a> Builder<'a> {
         } else if let Some(p) = self.placed(name, args.first()) {
             kind = Callee::Projection;
             p.params.iter().map(|p| p.capability).collect()
-        } else if let Some((id, sig)) = (args.first()).and_then(|r| self.protocol_member(name, r)) {
+        } else if let Some((id, sig)) =
+            (args.first()).and_then(|r| self.protocol_member(name, r, via))
+        {
             // A protocol member no impl answers, called on a bounded type
             // parameter in a generic read as written: its signature is what
             // a caller reads (`MethodSig::recv`).
@@ -7258,15 +7272,21 @@ impl<'a> Builder<'a> {
     /// program declares under a name some protocol with that method mangles.
     /// A receiver that is a bounded type parameter as written dispatches
     /// through the protocol its bound names ([`Builder::protocol_member`]).
-    fn dispatched(&self, name: &str, recv: &Expr) -> Option<(String, Vec<(String, Type)>)> {
+    fn dispatched(
+        &self,
+        name: &str,
+        recv: &Expr,
+        via: Option<&str>,
+    ) -> Option<(String, Vec<(String, Type)>)> {
         let rty = self.ty_of(recv).ok()?;
         let key = vyrn_frontend::types::type_key(&rty)?;
-        let bound = (self.protocol_member(name, recv))
-            .map(|(id, _)| &self.program.protocols[id.protocol as usize].name);
+        let bound = (self.protocol_member(name, recv, via))
+            .map(|(id, _)| self.program.protocols[id.protocol as usize].name.as_str())
+            .or(via);
         let fs: std::collections::BTreeMap<String, Vec<(String, Type)>> = (self.program.impls)
             .of_key(&key)
             .filter(|i| i.methods.iter().any(|m| m.name == name))
-            .filter(|i| bound.is_none_or(|p| &i.protocol == p))
+            .filter(|i| bound.is_none_or(|p| i.protocol == p))
             .filter_map(|i| {
                 let f = vyrn_frontend::types::impl_method_name(&i.protocol, &key, name);
                 Some((f.clone(), self.impl_args(i, &f, &rty)?))
