@@ -1,0 +1,5 @@
+export fn f() -> Int64 { return 1 }
+fn f() -> Int64 { return 2 }
+impl Nope for Int64 {
+    fn g(read self) -> Int64 { return 1 }
+}

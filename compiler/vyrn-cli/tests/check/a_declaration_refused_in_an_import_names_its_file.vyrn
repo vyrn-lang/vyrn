@@ -1,0 +1,2 @@
+import { f } from "./a_declaration_refused_in_an_import_names_its_file_lib"
+fn main() -> Int64 { return f() }

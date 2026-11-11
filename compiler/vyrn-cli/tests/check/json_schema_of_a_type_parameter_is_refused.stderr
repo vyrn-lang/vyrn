@@ -1,0 +1,1 @@
+json_schema_of_a_type_parameter_is_refused.vyrn:4:0: `jsonSchema` reads the declaration of its type, and `T` is a type parameter; write the type itself

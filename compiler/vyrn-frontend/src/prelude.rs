@@ -259,8 +259,8 @@ pub struct Typed {
     /// reads a prefix.
     pub params: Vec<Type>,
     pub ret: Type,
-    /// `None` types each operand against its parameter and refuses none.
-    pub wrong_type: Option<RefuseType>,
+    /// The refusal of an operand at another type than its parameter's.
+    pub wrong_type: RefuseType,
     /// How many leading operands, already refused (`Err`), make the call
     /// `Err`. A later refused operand is passed, so the call keeps `ret` and
     /// a use of it can be refused too: `render`'s operand and `bytes`'
@@ -385,14 +385,16 @@ impl Builtin {
     /// Types a call's operands and result from the row. `refuse` is the
     /// refusal of an operand at another type than its parameter's, from the
     /// row's name, the operand's index, the parameter and the type found;
-    /// `None` refuses none. A row with no spec gets [`Spec::Typed`] of them.
+    /// `None` refuses as a call to a declared function does. A row with no
+    /// spec gets [`Spec::Typed`] of them.
     fn typed(self, params: Vec<Type>, ret: Type, wrong_type: Option<RefuseType>) -> Self {
         let stops = params.len();
         let held = Spec::Typed(params.clone(), ret.clone());
         let typed = Typed {
             params,
             ret,
-            wrong_type,
+            wrong_type: wrong_type
+                .unwrap_or(|name, i, pty, aty| rule!(FnValueArgType, name, arg = i + 1, pty, aty)),
             stops,
         };
         Builtin {

@@ -550,7 +550,7 @@ fn census() -> Vec<Row> {
         row(
             "r79_a_protocol_call_names_no_protocol.vyrn",
             "the protocol of `x::P.m(..)` is a protocol",
-            "`Square` is not a protocol, so `x::Square.area(..)` calls nothing",
+            "`Square` is not a protocol, so `s::Square.area(..)` calls nothing",
             Kernel::Elsewhere,
         ),
         row(
@@ -569,7 +569,7 @@ fn census() -> Vec<Row> {
             "r82_two_impls_declare_one_method.vyrn",
             "a method two impls declare for one receiver names its protocol",
             "`area` is ambiguous: protocols Area, Solid all implement it for this receiver; \
-             call `x::Area.area(..)` to pick one",
+             call `s::Area.area(..)` to pick one",
             Kernel::Elsewhere,
         ),
         row(
@@ -577,6 +577,20 @@ fn census() -> Vec<Row> {
             "a method two bounds declare names its protocol",
             "`area` is ambiguous: protocols Area, Solid all declare it for this receiver; call \
              `x::Area.area(..)` to pick one",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r84_main_calls_a_gen_fn.vyrn",
+            "only a gen fn, a test or a bench calls a gen fn",
+            "`g` is a `gen fn`, so only a `gen fn`, a test, a bench or the `from` of an import may \
+             call it; make the caller a `gen fn`",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r85_schema_of_a_type_parameter.vyrn",
+            "schemaOf and jsonSchema read a declaration, never a type parameter",
+            "`schemaOf` reads the declaration of its type, and `T` is a type parameter; write the \
+             type itself",
             Kernel::Elsewhere,
         ),
     ]
@@ -2632,4 +2646,44 @@ fn a_refused_join_draws_one_sentence_and_names_no_temporary() {
         );
         assert!(!text.contains('@'), "{f}: names a temporary:\n{text}");
     }
+}
+
+/// A std module whose own load refuses one of its bodies names that module's
+/// file, not the importer's.
+#[test]
+fn a_std_modules_own_refusal_names_its_file() {
+    let dir = common::scratch("std-own-refusal");
+    let std_dir = dir.join("std");
+    std::fs::create_dir_all(&std_dir).expect("create the std copy");
+    let repo_std = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    for e in std::fs::read_dir(repo_std).expect("read std") {
+        let e = e.expect("a std entry").path();
+        if e.is_file() {
+            let name = e.file_name().expect("a std file name");
+            std::fs::copy(&e, std_dir.join(name)).expect("copy a std file");
+        }
+    }
+    let strings = std_dir.join("strings.vyrn");
+    let text = std::fs::read_to_string(&strings).expect("read strings.vyrn");
+    let head = "export fn repeat(s: String, n: Int64) -> String {\n";
+    let at = text.find(head).expect("strings.vyrn declares repeat") + head.len();
+    let line = text[..at].lines().count() + 1;
+    let bad = format!("{}    let bad: Int64 = \"x\"\n{}", &text[..at], &text[at..]);
+    std::fs::write(&strings, bad).expect("write strings.vyrn");
+    let main = "import { repeat } from \"std/strings\"\nfn main() -> Int64 {\n    \
+                print(repeat(\"a\", 2))\n    return 0\n}\n";
+    std::fs::write(dir.join("main.vyrn"), main).expect("write main.vyrn");
+    let out = vyrn()
+        .current_dir(&*dir)
+        .args(["check", "main.vyrn"])
+        .env("VYRN_STD", &std_dir)
+        .output()
+        .expect("vyrn check");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    let says = format!("strings.vyrn:{line}:0: `bad` declared Int64 but initializer is String\n");
+    assert!(!out.status.success(), "accepted");
+    assert!(
+        err.ends_with(&says) && !err.starts_with("main.vyrn"),
+        "{err}"
+    );
 }

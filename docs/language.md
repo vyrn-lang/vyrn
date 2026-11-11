@@ -235,7 +235,7 @@ type User = {
 - An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a validated type, or a generic record applied to another argument (see Records). A record with one field is not distinct: it fits wherever a record with that one field is wanted.
 - A `String` type whose regular expression denotes a finite language is a finite string type. An interpolation whose holes are all finite types has a finite type too, and assigning it to a validated `String` type is proven by automaton containment at compile time, or refused with the key that escapes.
 
-`schemaOf<T>()` reads a validated type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type, and a union's as the `anyOf` of its members' schemas. `schemaOf` of a union is refused, because one `Schema` describes one declaration. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
+`schemaOf<T>()` reads a validated type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type, and a union's as the `anyOf` of its members' schemas. `schemaOf` of a union is refused, because one `Schema` describes one declaration. Either is refused over a type parameter, because the answer is computed where the call is checked. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
 
 ### Proofs
 
@@ -627,6 +627,7 @@ import { squareOf } from squares()
 ```
 
 - The loader runs the call with constant arguments, caches the result by content, and links the returned code as an ordinary module. An imported generator that does not return `Code` is refused. `vyrn emit-gen file.vyrn` prints what each generator wrote.
+- Only a `gen fn`, a test, a bench or the `from` of an import calls a `gen fn`, because no run reaches one. A lambda inside one of them counts as inside it.
 - A generator is comptime-pure, and so is everything it calls: no `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, clock, entropy, logging sink or wait. A call to one is refused, naming it. So a generator gives the same answer on every machine.
 - A generator may read with `readFile`, `listDir` and `listDirKinds`, limited to the paths its caller passed.
 - `moduleInterface(path)` reflects a module's exported functions and types as a `ModuleInterface` record. `moduleCode(path)` answers the same record inside a `ModuleCode`, with each type a generator writes paired with itself as `Code`. `contractOf(Name)` reflects a contract. All three work only during generation.

@@ -1,0 +1,3 @@
+export gen fn copy(path: String) -> Code {
+    return codeAt(readFile(path), 1, 1, path)
+}

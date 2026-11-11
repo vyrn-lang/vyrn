@@ -64,6 +64,16 @@ pub(crate) fn line_of(l: impl std::borrow::Borrow<usize>) -> usize {
     *l.borrow()
 }
 
+/// The receiver of a protocol-call sentence as the source wrote it: a name or a
+/// field path, else `x`, because no other expression keeps its spelling.
+fn receiver_text(e: Option<&Expr>) -> String {
+    match e {
+        Some(Expr::Var { name, .. }) => name.clone(),
+        Some(Expr::Field { expr, field, .. }) => format!("{}.{field}", receiver_text(Some(expr))),
+        _ => "x".to_string(),
+    }
+}
+
 /// Whether a body is checked as generation code: its own `gen fn` marker, or a
 /// whole-program generator host.
 fn in_gen_of(f: &Function, host: Host) -> bool {
@@ -534,11 +544,14 @@ fn check_accum_inner(
         if let Some(vs) = crate::types::declared_variants(&t.base) {
             for (v, id) in vs.iter().zip(&mut ids) {
                 if RESERVED.contains(&v.name.as_str()) {
-                    out.push(cerr!(t.line, ReservedName, name = v.name));
+                    out.push(cerr!(t.line, ReservedName, name = v.name).in_file(t.module.clone()));
                     continue;
                 }
                 if variants.contains_key(&v.name) {
-                    out.push(cerr!(t.line, EnumVariantDefinedTwice, name = v.name));
+                    out.push(
+                        cerr!(t.line, EnumVariantDefinedTwice, name = v.name)
+                            .in_file(t.module.clone()),
+                    );
                     continue;
                 }
                 if let Some((_, ty)) = types.get(v.name.as_str()) {
@@ -557,7 +570,10 @@ fn check_accum_inner(
                             format!(" declared in `{shown}`")
                         })
                         .unwrap_or_default();
-                    out.push(cerr!(t.line, VariantClashesWithType, name = v.name, from));
+                    out.push(
+                        cerr!(t.line, VariantClashesWithType, name = v.name, from)
+                            .in_file(t.module.clone()),
+                    );
                     continue;
                 }
                 variants.insert(
@@ -583,38 +599,25 @@ fn check_accum_inner(
         .collect();
     let mut fn_decls: HashMap<&str, DeclId> = HashMap::new();
     for (i, f) in program.functions.iter().enumerate() {
-        if RESERVED.contains(&f.name.as_str()) {
-            out.push(cerr_at!(f.line, f.name_span(), ReservedName, name = f.name));
+        let name = &f.name;
+        let refused = if RESERVED.contains(&name.as_str()) {
+            rule!(ReservedName, name)
+        } else if variants.contains_key(name) {
+            rule!(FunctionIsVariant, name)
+        } else if fn_decls.contains_key(name.as_str()) {
+            rule!(FunctionDefinedTwice, name)
+        } else if types.contains_key(name.as_str()) {
+            rule!(FunctionIsType, name)
+        } else {
+            fn_decls.insert(name, DeclId::nth(DeclKind::Fn, i));
             continue;
-        }
-        if variants.contains_key(&f.name) {
-            out.push(cerr_at!(
-                f.line,
-                f.name_span(),
-                FunctionIsVariant,
-                name = f.name
-            ));
-            continue;
-        }
-        if fn_decls.contains_key(f.name.as_str()) {
-            out.push(cerr_at!(
-                f.line,
-                f.name_span(),
-                FunctionDefinedTwice,
-                name = f.name
-            ));
-            continue;
-        }
-        if types.contains_key(f.name.as_str()) {
-            out.push(cerr_at!(
-                f.line,
-                f.name_span(),
-                FunctionIsType,
-                name = f.name
-            ));
-            continue;
-        }
-        fn_decls.insert(&f.name, DeclId::nth(DeclKind::Fn, i));
+        };
+        let (col, end_col) = f.name_span();
+        out.push(
+            cerr!(f.line; refused)
+                .at(col, end_col)
+                .in_file(f.module.clone()),
+        );
     }
     let all_bounds: HashMap<&str, &HashMap<String, Vec<String>>> = program
         .functions
@@ -653,13 +656,16 @@ fn check_accum_inner(
                 .iter()
                 .map(|(p, _)| p.as_str())
                 .collect();
-            out.push(cerr_at!(
-                f.line,
-                f.name_span(),
-                FunctionShadowsProtocolMethod,
-                name = f.name,
-                owners = owners.join(", ")
-            ));
+            out.push(
+                cerr_at!(
+                    f.line,
+                    f.name_span(),
+                    FunctionShadowsProtocolMethod,
+                    name = f.name,
+                    owners = owners.join(", ")
+                )
+                .in_file(f.module.clone()),
+            );
         }
     }
     // The program's own declaration of a prelude protocol's name replaces it.
@@ -938,6 +944,9 @@ fn check_accum_inner(
         }
         // A refused impl refuses every method it provides or its protocol
         // declares, under the impl's key.
+        for d in &mut out[mark..] {
+            d.file.clone_from(&imp.module);
+        }
         if out.len() > mark {
             in_bodies += out.len() - mark;
             if let Some(key) = crate::types::type_key(&imp.ty) {
@@ -4722,13 +4731,10 @@ impl<'a> Checker<'a> {
     ) -> Result<Type, Diagnostic> {
         for (i, (a, want)) in args.iter().zip(&row.params).enumerate() {
             let t = self.base(&self.expr(a, scope, Some(want), fn_ret)?);
-            let Some(refuse) = row.wrong_type else {
-                continue;
-            };
             match t {
                 Type::Err if i < row.stops => return Ok(Type::Err),
                 Type::Err => {}
-                t if t != *want => return Err(cerr!(line; refuse(name, i, want, &t))),
+                t if t != *want => return Err(cerr!(line; (row.wrong_type)(name, i, want, &t))),
                 _ => {}
             }
         }
@@ -5008,6 +5014,7 @@ impl<'a> Checker<'a> {
         line: usize,
     ) -> Result<Type, Diagnostic> {
         let mut candidates = self.protocol_methods.get(name).cloned().unwrap_or_default();
+        let written = receiver_text(args.first());
         if let Some(p) = via {
             candidates.retain(|(q, _)| q == p);
             if candidates.is_empty() {
@@ -5015,7 +5022,13 @@ impl<'a> Checker<'a> {
                     || crate::types::KNOWN_PROTOCOLS.iter().any(|(k, _)| *k == p);
                 return Err(match declared {
                     true => cerr!(line, ProtocolLacksMethod, protocol = p, name),
-                    false => cerr!(line, ProtocolCallUnknown, protocol = p, name),
+                    false => cerr!(
+                        line,
+                        ProtocolCallUnknown,
+                        recv = written,
+                        protocol = p,
+                        name
+                    ),
                 });
             }
         }
@@ -5052,6 +5065,7 @@ impl<'a> Checker<'a> {
                                 line,
                                 AmbiguousBound,
                                 name,
+                                recv = written,
                                 first = bounded[0].0,
                                 protocols = bounded
                                     .iter()
@@ -5068,6 +5082,7 @@ impl<'a> Checker<'a> {
                         line,
                         AmbiguousImpl,
                         name,
+                        recv = written,
                         first = matching[0].0,
                         protocols = matching
                             .iter()
@@ -5182,6 +5197,16 @@ impl<'a> Checker<'a> {
             && !self.host.test
         {
             return Err(cerr!(line, BlackBoxOutsideBench));
+        }
+        // A `gen fn` runs while the program compiles, so no run reaches it.
+        if self.gen_fns.contains(name)
+            && !self.frame.borrow().in_gen
+            && !*self.in_test.borrow()
+            && !*self.in_bench.borrow()
+            && !self.host.test
+            && self.lookup(scope, name).is_none()
+        {
+            return Err(cerr!(line, GenFnCall, name = DeclName(name)));
         }
         // The core reads each conjunct of a `prove` as one comparison.
         if Some(name) == self.prove {
@@ -5510,6 +5535,13 @@ impl<'a> Checker<'a> {
                     _ => "",
                 }
             ));
+        }
+        // The answer is computed from the declaration where the check reads
+        // the call, and a type parameter names none there.
+        if let ("schemaOf" | "jsonSchema", [t]) = (name, written) {
+            if crate::types::mentions_param(t) {
+                return Err(cerr!(line, SchemaOfParam, name, t));
+            }
         }
         // A `Schema` describes one declaration, and a union is none of its own.
         if let ("schemaOf", [t]) = (name, written) {

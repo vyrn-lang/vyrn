@@ -5319,10 +5319,13 @@ impl<'a> Builder<'a> {
                 }
                 // A function's name as a value (`sortWith(es, byCount)`), or
                 // a type's as an argument (`fromJson(Bag, src)`): static, and
-                // the checker types neither as an expression.
-                None if self.declared(name).is_some()
+                // the checker types neither as an expression. A name it typed
+                // `Err` stood where a value goes (`let j = Json`), and the
+                // statement refuses it as unknown.
+                None if (self.declared(name).is_some()
                     || self.program.contracts.iter().any(|c| &c.name == name)
-                    || self.proto.types().contains_key(name) =>
+                    || self.proto.types().contains_key(name))
+                    && self.types.get(&e.id()) != Some(&Type::Err) =>
                 {
                     Ok(Val::Lit(Lit::Opaque(Opaque::Static)))
                 }

@@ -594,14 +594,14 @@ rules! {
     VariantArity { name, want, got } "`{name}` takes {want} argument(s), got {got}";
     InferParam { tp, name } "cannot infer type parameter `{tp}` of `{name}`";
     NeedsReceiver { name } "`{name}` needs a `self` receiver";
-    AmbiguousBound { name, protocols, first }
+    AmbiguousBound { name, protocols, recv, first }
         "`{name}` is ambiguous: protocols {protocols} all declare it for this receiver; \
-        call `x::{first}.{name}(..)` to pick one";
-    AmbiguousImpl { name, protocols, first }
+        call `{recv}::{first}.{name}(..)` to pick one";
+    AmbiguousImpl { name, protocols, recv, first }
         "`{name}` is ambiguous: protocols {protocols} all implement it for this receiver; \
-        call `x::{first}.{name}(..)` to pick one";
-    ProtocolCallUnknown { protocol, name }
-        "`{protocol}` is not a protocol, so `x::{protocol}.{name}(..)` calls nothing";
+        call `{recv}::{first}.{name}(..)` to pick one";
+    ProtocolCallUnknown { recv, protocol, name }
+        "`{protocol}` is not a protocol, so `{recv}::{protocol}.{name}(..)` calls nothing";
     ProtocolLacksMethod { protocol, name } "protocol `{protocol}` declares no method `{name}`";
     BoundAssociatedType { name, proto, a, t }
         "`{name}` mentions `{proto}`'s associated type `{a}`, and \
@@ -637,6 +637,9 @@ rules! {
     ExternFnValue {}
         "an `extern` function cannot be used as a function \
         value — the host boundary dispatches by name";
+    GenFnCall { name }
+        "`{name}` is a `gen fn`, so only a `gen fn`, a test, a bench or the `from` of an import \
+        may call it; make the caller a `gen fn`";
     GenFnValue {}
         "a `gen fn` runs at generation time and cannot be \
         used as a function value";
@@ -939,9 +942,9 @@ rules! {
     UnexpectedToken { found } "unexpected token in expression: {found}";
     InInterpolation { detail } "in interpolation: {detail}";
     InterpolationTrailing { src } "unexpected tokens after interpolation expression `{src}`";
-    ProtocolCallNoValue { protocol }
-        "`x::{protocol}` names the protocol of a method call and is not a value; \
-        write `x::{protocol}.method(..)`";
+    ProtocolCallNoValue { receiver, protocol }
+        "`{receiver}::{protocol}` names the protocol of a method call and is not a value; \
+        write `{receiver}::{protocol}.method(..)`";
     IfLetExpr {}
         "`if let` is a statement, not an expression — use `match` to bind \
         a pattern in an expression position";
@@ -1328,6 +1331,9 @@ rules! {
     ForgetsHeap { shown, t }
         "`{shown}` forgets or overwrites elements without releasing them, and `{t}` owns heap \
         \u{2014} move the elements one at a time instead";
+    SchemaOfParam { name, t }
+        "`{name}` reads the declaration of its type, and `{t}` is a type parameter; write the type \
+        itself";
     NotCodable { shown, off } "`{shown}` cannot decode into `{off}` (not a codable type)";
     LambdaArgArity { got, callee, n, want }
         "this lambda takes {got} parameter(s), but `{callee}` argument {n} expects {want}";

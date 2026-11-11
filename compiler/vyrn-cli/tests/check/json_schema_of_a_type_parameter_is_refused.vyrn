@@ -1,0 +1,10 @@
+type Age = Int64 where value >= 0
+
+fn describe<T>() -> String {
+    return jsonSchema<T>()
+}
+
+fn main() -> Int64 {
+    print(describe<Age>())
+    return 0
+}
