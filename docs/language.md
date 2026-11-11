@@ -524,6 +524,7 @@ fn label<T: Show>(x: T) -> String {
 - An impl must provide every method with the protocol's signature and receiver capability. A missing method, an extra method or a mismatched receiver is refused. There are no inherent methods: a helper is a top-level `fn`, which `x.helper()` calls.
 - Dispatch keys on the type constructor, so a protocol has at most one impl per constructor: `impl Show for Option<Int64>` beside `impl<T> Show for Option<T>` is refused.
 - A record dispatches by its static type, so a value assigned into a slot of another record type with the same shape uses that type's impl.
+- Where two protocols the receiver implements, or two of its bounds, declare one method name, `x.m()` is refused as ambiguous. `x::P.m(args)` calls `m` as protocol `P` declares it, on receiver `x`: `P` is named as an impl head names it, declared or imported flat, and `x`'s type implements `P` by an impl or a bound. The form is allowed where `x.m()` is not ambiguous, and means the same call. `x::P` alone is no value.
 - `impl<T> P for Box<T>` is a generic impl, specialized per instantiation.
 - A protocol may declare an associated type, `type Output`, that each impl fixes: `type Output = Int64`. A method signature names it.
 - An impl for a validated scalar type is refused. Give the type a record shape instead.
@@ -819,4 +820,5 @@ Each line is a program the compiler refuses, and the reason.
 - Two modules' exports of one name imported flat: a top-level name is program-wide.
 - An enum variant name declared twice.
 - An `impl` of a protocol for a validated scalar type.
+- `x.m()` where two protocols declare `m` for the receiver: name one, `x::P.m()`.
 - An extern signature with a type the host boundary cannot carry.
