@@ -421,7 +421,15 @@ impl Entry {
         let (loaded, _) = vyrn_frontend::movecheck::emitting_nothing(|| {
             crate::pipeline::load_warned(&text, m, &own, resolver, engine)
         });
-        let (program, world) = loaded?;
+        // The own load's root is `m`, which the importer's diagnostics name.
+        let in_m = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
+            let file = |d: Diagnostic| match d.file {
+                None => d.in_file(Some(m.to_string())),
+                Some(_) => d,
+            };
+            ds.into_iter().map(file).collect()
+        };
+        let (program, world) = loaded.map_err(in_m)?;
         let mut judged = session.take_judgments();
         let root = program.spellings.root.as_str();
         // The module a function the entry holds is in: the root, or one its

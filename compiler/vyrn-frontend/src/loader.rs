@@ -4595,10 +4595,13 @@ fn decls(p: &Program) -> impl Iterator<Item = Decl<'_>> {
 /// same-module initializer rule, and an impl member's keeps the editor's root
 /// index to the root. Separate from [`decls`] because the borrow is unique.
 fn decl_modules_mut(p: &mut Program) -> impl Iterator<Item = &mut Option<String>> {
-    let members = (p.impls.iter_mut()).flat_map(|i| i.methods.iter_mut().chain(&mut i.places));
+    let impls = (p.impls.iter_mut()).flat_map(|i| {
+        let members = i.methods.iter_mut().chain(&mut i.places);
+        std::iter::once(&mut i.module).chain(members.map(|f| &mut f.module))
+    });
     (p.type_decls.iter_mut().map(|t| &mut t.module))
         .chain(p.functions.iter_mut().map(|f| &mut f.module))
-        .chain(members.map(|f| &mut f.module))
+        .chain(impls)
         .chain(p.protocols.iter_mut().map(|pr| &mut pr.module))
         .chain(p.contracts.iter_mut().map(|c| &mut c.module))
         .chain(p.globals.iter_mut().map(|g| &mut g.module))

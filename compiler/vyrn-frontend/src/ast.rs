@@ -828,6 +828,8 @@ pub struct ImplBlock {
     /// The body ends in a [`Stmt::Return`]. The result's capability is not
     /// stored: the parser makes it equal `params[0].capability`.
     pub places: Vec<Function>,
+    /// `None` for the root module.
+    pub module: Option<String>,
     pub line: usize,
     /// 1-based column of the `impl` keyword, in Unicode scalar values; `0` for a
     /// synthesized block. See [`crate::diagnostics`] for the convention.

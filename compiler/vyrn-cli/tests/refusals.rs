@@ -2633,3 +2633,43 @@ fn a_refused_join_draws_one_sentence_and_names_no_temporary() {
         assert!(!text.contains('@'), "{f}: names a temporary:\n{text}");
     }
 }
+
+/// A std module whose own load refuses one of its bodies names that module's
+/// file, not the importer's.
+#[test]
+fn a_std_modules_own_refusal_names_its_file() {
+    let dir = common::scratch("std-own-refusal");
+    let std_dir = dir.join("std");
+    std::fs::create_dir_all(&std_dir).expect("create the std copy");
+    let repo_std = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    for e in std::fs::read_dir(repo_std).expect("read std") {
+        let e = e.expect("a std entry").path();
+        if e.is_file() {
+            let name = e.file_name().expect("a std file name");
+            std::fs::copy(&e, std_dir.join(name)).expect("copy a std file");
+        }
+    }
+    let strings = std_dir.join("strings.vyrn");
+    let text = std::fs::read_to_string(&strings).expect("read strings.vyrn");
+    let head = "export fn repeat(s: String, n: Int64) -> String {\n";
+    let at = text.find(head).expect("strings.vyrn declares repeat") + head.len();
+    let line = text[..at].lines().count() + 1;
+    let bad = format!("{}    let bad: Int64 = \"x\"\n{}", &text[..at], &text[at..]);
+    std::fs::write(&strings, bad).expect("write strings.vyrn");
+    let main = "import { repeat } from \"std/strings\"\nfn main() -> Int64 {\n    \
+                print(repeat(\"a\", 2))\n    return 0\n}\n";
+    std::fs::write(dir.join("main.vyrn"), main).expect("write main.vyrn");
+    let out = vyrn()
+        .current_dir(&*dir)
+        .args(["check", "main.vyrn"])
+        .env("VYRN_STD", &std_dir)
+        .output()
+        .expect("vyrn check");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    let says = format!("strings.vyrn:{line}:0: `bad` declared Int64 but initializer is String\n");
+    assert!(!out.status.success(), "accepted");
+    assert!(
+        err.ends_with(&says) && !err.starts_with("main.vyrn"),
+        "{err}"
+    );
+}

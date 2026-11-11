@@ -1186,6 +1186,7 @@ impl<'a> Build<'a> {
             assoc,
             methods,
             places,
+            module: None,
             line,
             col,
         }

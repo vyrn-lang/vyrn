@@ -534,11 +534,14 @@ fn check_accum_inner(
         if let Some(vs) = crate::types::declared_variants(&t.base) {
             for (v, id) in vs.iter().zip(&mut ids) {
                 if RESERVED.contains(&v.name.as_str()) {
-                    out.push(cerr!(t.line, ReservedName, name = v.name));
+                    out.push(cerr!(t.line, ReservedName, name = v.name).in_file(t.module.clone()));
                     continue;
                 }
                 if variants.contains_key(&v.name) {
-                    out.push(cerr!(t.line, EnumVariantDefinedTwice, name = v.name));
+                    out.push(
+                        cerr!(t.line, EnumVariantDefinedTwice, name = v.name)
+                            .in_file(t.module.clone()),
+                    );
                     continue;
                 }
                 if let Some((_, ty)) = types.get(v.name.as_str()) {
@@ -557,7 +560,10 @@ fn check_accum_inner(
                             format!(" declared in `{shown}`")
                         })
                         .unwrap_or_default();
-                    out.push(cerr!(t.line, VariantClashesWithType, name = v.name, from));
+                    out.push(
+                        cerr!(t.line, VariantClashesWithType, name = v.name, from)
+                            .in_file(t.module.clone()),
+                    );
                     continue;
                 }
                 variants.insert(
@@ -583,38 +589,25 @@ fn check_accum_inner(
         .collect();
     let mut fn_decls: HashMap<&str, DeclId> = HashMap::new();
     for (i, f) in program.functions.iter().enumerate() {
-        if RESERVED.contains(&f.name.as_str()) {
-            out.push(cerr_at!(f.line, f.name_span(), ReservedName, name = f.name));
+        let name = &f.name;
+        let refused = if RESERVED.contains(&name.as_str()) {
+            rule!(ReservedName, name)
+        } else if variants.contains_key(name) {
+            rule!(FunctionIsVariant, name)
+        } else if fn_decls.contains_key(name.as_str()) {
+            rule!(FunctionDefinedTwice, name)
+        } else if types.contains_key(name.as_str()) {
+            rule!(FunctionIsType, name)
+        } else {
+            fn_decls.insert(name, DeclId::nth(DeclKind::Fn, i));
             continue;
-        }
-        if variants.contains_key(&f.name) {
-            out.push(cerr_at!(
-                f.line,
-                f.name_span(),
-                FunctionIsVariant,
-                name = f.name
-            ));
-            continue;
-        }
-        if fn_decls.contains_key(f.name.as_str()) {
-            out.push(cerr_at!(
-                f.line,
-                f.name_span(),
-                FunctionDefinedTwice,
-                name = f.name
-            ));
-            continue;
-        }
-        if types.contains_key(f.name.as_str()) {
-            out.push(cerr_at!(
-                f.line,
-                f.name_span(),
-                FunctionIsType,
-                name = f.name
-            ));
-            continue;
-        }
-        fn_decls.insert(&f.name, DeclId::nth(DeclKind::Fn, i));
+        };
+        let (col, end_col) = f.name_span();
+        out.push(
+            cerr!(f.line; refused)
+                .at(col, end_col)
+                .in_file(f.module.clone()),
+        );
     }
     let all_bounds: HashMap<&str, &HashMap<String, Vec<String>>> = program
         .functions
@@ -653,13 +646,16 @@ fn check_accum_inner(
                 .iter()
                 .map(|(p, _)| p.as_str())
                 .collect();
-            out.push(cerr_at!(
-                f.line,
-                f.name_span(),
-                FunctionShadowsProtocolMethod,
-                name = f.name,
-                owners = owners.join(", ")
-            ));
+            out.push(
+                cerr_at!(
+                    f.line,
+                    f.name_span(),
+                    FunctionShadowsProtocolMethod,
+                    name = f.name,
+                    owners = owners.join(", ")
+                )
+                .in_file(f.module.clone()),
+            );
         }
     }
     // The program's own declaration of a prelude protocol's name replaces it.
@@ -938,6 +934,9 @@ fn check_accum_inner(
         }
         // A refused impl refuses every method it provides or its protocol
         // declares, under the impl's key.
+        for d in &mut out[mark..] {
+            d.file.clone_from(&imp.module);
+        }
         if out.len() > mark {
             in_bodies += out.len() - mark;
             if let Some(key) = crate::types::type_key(&imp.ty) {

@@ -38,6 +38,8 @@ compiler/vyrn-cli/tests/check/a_consume_parameter_of_an_element_names_its_contai
 compiler/vyrn-cli/tests/check/a_consume_parameter_of_an_element_names_its_container_at_depth_2.vyrn	0	cbf29ce484222325	20	17	ca7ed09edd50d647
 compiler/vyrn-cli/tests/check/a_consume_result_is_spelled_arrow_t.vyrn	1	f6fb2442358e752a	20	19	f6e696246d7b41a7
 compiler/vyrn-cli/tests/check/a_contract_member_must_declare_its_type.vyrn	1	b8fc49547bec88c2	20	20	85fdca53930eb005
+compiler/vyrn-cli/tests/check/a_declaration_refused_in_an_import_names_its_file.vyrn	0	cbf29ce484222325	20	18	ddc07b67b6e3d9b8
+compiler/vyrn-cli/tests/check/a_declaration_refused_in_an_import_names_its_file_lib.vyrn	0	cbf29ce484222325	20	16	2faf8a3752d13caf
 compiler/vyrn-cli/tests/check/a_declared_show_renders_in_all_three_renderers_1.vyrn	0	cbf29ce484222325	20	19	07732b8f73e3049b
 compiler/vyrn-cli/tests/check/a_declared_show_renders_in_all_three_renderers_2.vyrn	0	cbf29ce484222325	20	17	0e40c44ddcefd36b
 compiler/vyrn-cli/tests/check/a_declared_show_renders_in_all_three_renderers_3.vyrn	0	cbf29ce484222325	20	16	4d83d2623f7a32ec
