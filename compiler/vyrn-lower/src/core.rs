@@ -41,7 +41,7 @@ use vyrn_frontend::core::{
     Site, St, Target, Test, Use, Val, Walk,
 };
 use vyrn_frontend::rule;
-use vyrn_frontend::rules::Rule;
+use vyrn_frontend::rules::{DeclName, Rule};
 
 /// The path a field read takes out of its unnamed receiver: `.q.s` for
 /// `mk().q.s`. `None` under an element. A `forced` read is a receiver of its
@@ -4229,11 +4229,12 @@ impl<'a> Builder<'a> {
 
     /// Whether a binding or module state answers `name`. Where none does,
     /// records the refusal `rule` states of the name.
-    fn known(&mut self, name: &str, line: usize, rule: fn(&str) -> Rule) -> bool {
+    fn known(&mut self, name: &str, line: usize, rule: fn(DeclName) -> Rule) -> bool {
         if self.answers(name) {
             return true;
         }
-        self.body.refused.push((line, rule(name).render()));
+        let refusal = rule(DeclName(name)).render_in(&self.body.speech());
+        self.body.refused.push((line, refusal));
         false
     }
 
@@ -4266,7 +4267,8 @@ impl<'a> Builder<'a> {
     fn unknown_of(&self, e: &Expr) -> Option<(usize, String)> {
         match e {
             Expr::Var { name, line, id: _ } if !self.answers(name) && !self.is_variant(name) => {
-                Some((*line, rule!(UnknownVariable, name).render()))
+                let refusal = rule!(UnknownVariable, name = DeclName(name));
+                Some((*line, refusal.render_in(&self.body.speech())))
             }
             Expr::TryConstruct { name, line, .. } if !self.proto.types().contains_key(name) => {
                 Some((*line, rule!(UnknownType, n = name).render()))

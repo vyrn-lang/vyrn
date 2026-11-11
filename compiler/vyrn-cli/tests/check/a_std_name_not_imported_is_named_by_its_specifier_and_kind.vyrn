@@ -1,0 +1,5 @@
+import { toFloat16 } from "std/narrow"
+fn main() -> Int64 {
+    let x: BFloat16 = toBFloat16(Float32(1.0))
+    return 0
+}

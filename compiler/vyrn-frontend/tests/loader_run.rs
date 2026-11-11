@@ -823,7 +823,7 @@ mod tests {
                     fn main() -> Int64 { let x = C { v: 1 } return x.area() }";
         let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b), ("c.vyrn", c)]);
         assert!(e.contains("`area` is defined in"), "{e}");
-        assert!(e.contains("a.vyrn") && e.contains("b.vyrn"), "{e}");
+        assert!(e.contains("defined in `./a`, `./b`"), "{e}");
     }
 
     #[test]

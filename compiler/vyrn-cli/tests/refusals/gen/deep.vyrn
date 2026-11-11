@@ -1,0 +1,8 @@
+export gen fn g(n: Int64) -> Code {
+    let next = n + 1
+    return vyrn"""
+        import { g } from "./deep"
+        import { x as inner } from g(\{next})
+        export fn x() -> Int64 { return inner() }
+        """
+}

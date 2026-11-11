@@ -59,9 +59,9 @@ fn step(p: modify JsonReader) -> Unit {
     }
 }
 
-/// `msg` prefixed with the cursor's 1-based `line N, col M:` position. A line
-/// ends at an LF.
-fn errAt(p: JsonReader, msg: String) -> String {
+/// `msg` prefixed with the 1-based `line N, col M:` position of the byte
+/// `back` bytes before the cursor, on the cursor's line. A line ends at an LF.
+fn errAt(p: JsonReader, back: Int64, msg: String) -> String {
     let mut line = 1
     let mut col = 1
     let mut i = 0
@@ -74,14 +74,15 @@ fn errAt(p: JsonReader, msg: String) -> String {
         }
         i = i + 1
     }
-    return "line " + line.toString() + ", col " + col.toString() + ": " + msg
+    return "line " + line.toString() + ", col " + (col - back).toString() + ": " + msg
 }
 
-/// Records `msg` at the cursor, unless the document is already refused, and
-/// moves the cursor to the end.
-fn refuse(p: modify JsonReader, msg: String) -> Unit {
+/// Records `msg` at the byte `back` bytes before the cursor, unless the
+/// document is already refused, and moves the cursor to the end. The cursor
+/// only moves forward, so a refusal behind it names its byte here.
+fn refuse(p: modify JsonReader, back: Int64, msg: String) -> Unit {
     if p.err.byteLength == 0 {
-        p.err = errAt(p, msg)
+        p.err = errAt(p, back, msg)
     }
     p.pos = p.n
 }
@@ -107,7 +108,7 @@ fn skipWs(p: modify JsonReader) -> Unit {
 export fn finishJson(p: modify JsonReader) -> Unit {
     skipWs(p)
     if p.pos < p.n {
-        refuse(p, "trailing content after the JSON value")
+        refuse(p, 0, "trailing content after the JSON value")
     }
 }
 
@@ -192,7 +193,7 @@ fn readHex4(p: modify JsonReader) -> Int64 {
     while i < 4 {
         let b = peek(p)
         if isHex(b) == false {
-            refuse(p, "invalid \\u escape: expected 4 hex digits")
+            refuse(p, 0, "invalid \\u escape: expected 4 hex digits")
             return -1
         }
         v = v * 16 + hexVal(b)
@@ -209,7 +210,8 @@ export fn readJsonString(p: modify JsonReader) -> String {
     // The string alternates runs of bytes held as they are with escapes. A
     // string that is one run is cut from the source at ASCII bytes, so `slice`
     // copies it with no UTF-8 check. Otherwise each run is copied into the
-    // decoded bytes, which `stringFromBytes` checks, for the NUL of `\u0000`.
+    // decoded bytes, which `stringFromBytes` checks. A `\u0000` is refused
+    // at its escape, because a String holds no NUL.
     let mut out: Array<UInt8> = []
     while true {
         let from = p.pos
@@ -234,7 +236,7 @@ export fn readJsonString(p: modify JsonReader) -> String {
             out.append(bytes(p.src, from, p.pos))
         }
         if b < 0 {
-            refuse(p, "unterminated string")
+            refuse(p, 0, "unterminated string")
             return ""
         }
         if b == '"' {
@@ -297,6 +299,9 @@ export fn readJsonString(p: modify JsonReader) -> String {
                 pushUtf8(out, cp)
             } else if hi >= 56320 && hi <= 57343 {
                 return refusedString(p, "unexpected low surrogate in \\u escape")
+            } else if hi == 0 {
+                refuse(p, 6, "string holds \\u0000, which a String cannot hold")
+                return ""
             } else {
                 pushUtf8(out, hi)
             }
@@ -310,7 +315,7 @@ export fn readJsonString(p: modify JsonReader) -> String {
 }
 
 fn refusedString(p: modify JsonReader, msg: String) -> String {
-    refuse(p, msg)
+    refuse(p, 0, msg)
     return ""
 }
 
@@ -363,7 +368,7 @@ export fn skipJsonNumber(p: modify JsonReader) -> Bool {
 }
 
 fn refusedNumber(p: modify JsonReader, msg: String) -> Bool {
-    refuse(p, msg)
+    refuse(p, 0, msg)
     return false
 }
 
@@ -385,7 +390,7 @@ export fn readJsonKeyword(p: modify JsonReader) -> Bool {
     let mut i = 0
     while i < word.byteLength {
         if peek(p) != Int64(word[i]) {
-            refuse(p, "invalid literal: expected `" + word + "`")
+            refuse(p, 0, "invalid literal: expected `" + word + "`")
             return false
         }
         step(p)
@@ -398,7 +403,7 @@ export fn readJsonKeyword(p: modify JsonReader) -> Bool {
 /// member, the cursor on it. An empty one is read whole.
 fn enter(p: modify JsonReader, close: Int64) -> Bool {
     if p.depth >= maxDepth() {
-        refuse(p, "nesting deeper than " + maxDepth().toString() + " levels")
+        refuse(p, 0, "nesting deeper than " + maxDepth().toString() + " levels")
         return false
     }
     p.depth = p.depth + 1
@@ -461,7 +466,7 @@ export fn readJsonKeyIf(p: modify JsonReader, name: String) -> Bool {
 export fn readJsonColon(p: modify JsonReader) -> Unit {
     skipWs(p)
     if peek(p) != ':' {
-        refuse(p, "expected ':' after object key")
+        refuse(p, 0, "expected ':' after object key")
         return
     }
     step(p)
@@ -487,7 +492,7 @@ fn next(p: modify JsonReader, close: Int64, trailing: String, open: String, othe
         step(p)
         skipWs(p)
         if peek(p) == close {
-            refuse(p, trailing)
+            refuse(p, 0, trailing)
             return false
         }
         return true
@@ -496,9 +501,9 @@ fn next(p: modify JsonReader, close: Int64, trailing: String, open: String, othe
         return leave(p)
     }
     if b < 0 {
-        refuse(p, open)
+        refuse(p, 0, open)
     } else {
-        refuse(p, other)
+        refuse(p, 0, other)
     }
     return false
 }
@@ -582,7 +587,7 @@ export fn admitJsonKey(p: modify JsonReader, seen: modify JsonKeySet, key: Strin
 
 /// Refuses `key` as a repeat of a key its object already holds.
 export fn refuseJsonDuplicate(p: modify JsonReader, key: String) -> Unit {
-    refuse(p, "duplicate object key: " + key)
+    refuse(p, 0, "duplicate object key: " + key)
 }
 
 /// Reads one value into a tree. `depth` is checked in `enter`, the one place.
@@ -608,7 +613,7 @@ fn parseValue(p: modify JsonReader) -> Json {
         return JNum(readJsonNumber(p))
     }
     let end = peek(p) < 0
-    refuse(p, if end { "unexpected end of input" } else { "unexpected character" })
+    refuse(p, 0, if end { "unexpected end of input" } else { "unexpected character" })
     return JNull
 }
 
@@ -722,6 +727,11 @@ test "rejects a lone high surrogate" {
 
 test "rejects a lone low surrogate" {
     assertEq(parseErr("\"\\uDE00\""), "line 1, col 8: unexpected low surrogate in \\u escape")
+}
+
+test "rejects a NUL escape at its backslash, since a String holds no NUL" {
+    assertEq(parseErr("\"\\u0000\""), "line 1, col 2: string holds \\u0000, which a String cannot hold")
+    assertEq(parseErr("[\"a\\n\\u0000\"]"), "line 1, col 6: string holds \\u0000, which a String cannot hold")
 }
 
 test "rejects a trailing comma in an array" {

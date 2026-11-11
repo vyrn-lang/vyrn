@@ -1834,11 +1834,7 @@ fn why_capability(flags: GlobalFlags, cap: &str, name: &str) -> Outcome {
         Err(diags) => {
             eprintln!("error: cannot link artifact `{}`", artifact.name);
             for d in diags.iter().take(3) {
-                eprintln!(
-                    "  {}: {}",
-                    d.file.as_deref().unwrap_or(&artifact.entry),
-                    d.message
-                );
+                eprintln!("  {}: {}", d.shown_file(&artifact.entry), d.message);
             }
             return Err(ExitCode::from(2));
         }
@@ -2811,7 +2807,10 @@ fn fix_cmd(call: &Call) -> Outcome {
         for d in &diags {
             let first = d.message.lines().next().unwrap_or_default();
             match (&d.file, d.fixes.as_slice()) {
-                (Some(f), _) => elsewhere.push(format!("{f}:{}: {first} (another file)", d.line)),
+                (Some(_), _) => {
+                    let f = d.shown_file(&root_key);
+                    elsewhere.push(format!("{f}:{}: {first} (another file)", d.line))
+                }
                 (None, []) => note(&mut refused, format!("{root_key}:{}: {first}", d.line)),
                 (None, fixes) => edits.extend_from_slice(fixes),
             }
@@ -2948,7 +2947,7 @@ fn print_diagnostics(diags: &[Diagnostic], root_key: &str, marker: &str) -> Stri
     use std::fmt::Write;
     let mut text = String::new();
     for d in diags {
-        let file = d.file.as_deref().unwrap_or(root_key);
+        let file = d.shown_file(root_key);
         let _ = writeln!(
             text,
             "{}:{}:{}: {}{}",

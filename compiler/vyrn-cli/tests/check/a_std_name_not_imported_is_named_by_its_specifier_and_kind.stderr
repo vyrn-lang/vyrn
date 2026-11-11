@@ -1,0 +1,2 @@
+a_std_name_not_imported_is_named_by_its_specifier_and_kind.vyrn:3:0: type `BFloat16` is defined in `std/narrow` but not imported here — add it to an `import { .. } from` list
+a_std_name_not_imported_is_named_by_its_specifier_and_kind.vyrn:3:0: function `toBFloat16` is defined in `std/narrow` but not imported here — add it to an `import { .. } from` list
