@@ -2641,8 +2641,7 @@ fn module_parse(
         return Ok(p);
     }
     let _p = crate::prof::phase("parse");
-    let scan = lexer::scan(text);
-    let tokens = lexer::tokens(scan.map_err(|d| vec![in_module(d, key, root_key)])?);
+    let tokens = lexer::lex(text).map_err(|d| vec![in_module(d, key, root_key)])?;
     let in_key = |errors: Vec<Diagnostic>| -> Vec<Diagnostic> {
         (errors.into_iter())
             .map(|d| in_module(d, key, root_key))
@@ -2756,8 +2755,8 @@ fn interface_parse(
         let why = format!("internal error: the interface of `{key}` does not match the module");
         in_key(vec![Diagnostic::error(0, 0, "load", why)])
     };
-    let scan = lexer::scan(&interface.text).map_err(|d| in_key(vec![d]))?;
-    let (program, errors) = parser::parse_answered(lexer::tokens(scan), &interface.answers);
+    let tokens = lexer::lex(&interface.text).map_err(|d| in_key(vec![d]))?;
+    let (program, errors) = parser::parse_answered(tokens, &interface.answers);
     if !errors.is_empty() {
         return Err(in_key(errors));
     }
