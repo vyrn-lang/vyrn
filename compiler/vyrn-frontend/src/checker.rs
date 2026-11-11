@@ -5790,7 +5790,7 @@ impl<'a> Checker<'a> {
             (None, None) => {
                 return Err(match moved_to_std(name) {
                     Some(g) => cerr!(line; g.rule(name)),
-                    None => cerr!(line, UnknownFunction, name),
+                    None => cerr!(line, UnknownFunction, name = DeclName(name)),
                 })
             }
         };

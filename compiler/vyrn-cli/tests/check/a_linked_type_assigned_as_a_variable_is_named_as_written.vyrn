@@ -1,0 +1,5 @@
+import { Json, emit } from "std/json"
+fn main() -> Int64 {
+    Json = 1
+    return 0
+}

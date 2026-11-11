@@ -115,6 +115,9 @@ compiler/vyrn-cli/tests/check/a_let_clause_compares_without_arithmetic.vyrn	0	cb
 compiler/vyrn-cli/tests/check/a_let_clause_states_a_rule_of_value_alone.vyrn	0	cbf29ce484222325	20	15	c101750e54e928da
 compiler/vyrn-cli/tests/check/a_let_may_promise_again_while_the_facts_hold.vyrn	0	cbf29ce484222325	20	19	4ecf2bb98b70347f
 compiler/vyrn-cli/tests/check/a_let_promise_holds_of_the_value_it_binds.vyrn	0	cbf29ce484222325	20	20	225980e4a6247bb7
+compiler/vyrn-cli/tests/check/a_linked_type_assigned_as_a_variable_is_named_as_written.vyrn	0	cbf29ce484222325	20	19	7536ffb8bdf2eb26
+compiler/vyrn-cli/tests/check/a_linked_type_called_as_a_function_is_named_as_written.vyrn	0	cbf29ce484222325	20	16	de0bf56f0d3e70b8
+compiler/vyrn-cli/tests/check/a_linked_type_read_as_a_variable_is_named_as_written.vyrn	0	cbf29ce484222325	20	18	692a04574ff782ac
 compiler/vyrn-cli/tests/check/a_literal_that_settles_nothing_names_the_annotation_1.vyrn	0	cbf29ce484222325	20	20	9114e7d64d71f753
 compiler/vyrn-cli/tests/check/a_literal_that_settles_nothing_names_the_annotation_2.vyrn	0	cbf29ce484222325	20	17	37fe8c6130106982
 compiler/vyrn-cli/tests/check/a_local_fn_value_shadows_a_consuming_function.vyrn	0	cbf29ce484222325	20	19	ddc3d21aea616754
