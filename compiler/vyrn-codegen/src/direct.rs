@@ -408,14 +408,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     // The first `body_of` of a function decides its checks, about a fifth of this compile. The
     // answer is memoized and the same on any thread, so the signatures below find it ready.
     let ck = vyrn_frontend::prof::phase("codegen: checks");
-    vyrn_frontend::par::in_parallel(
-        &user,
-        |f| f.block().stmts.len(),
-        || (),
-        |(), f| {
-            base.world.body_of(&f.name);
-        },
-    );
+    base.world.decide(&user);
     drop(ck);
     base.erased = vyrn_lower::verdict::erased(program, &base.world);
     let cx = Cx::new(&base, Reg::default());
@@ -508,11 +501,8 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     let emitted = vyrn_frontend::par::in_parallel_keep(
         &user,
         |f| f.block().stmts.len(),
-        || {
-            crate::observe::follow(observing);
-            Cx::new(base, Reg::default())
-        },
-        |w, f| emit(w, |log| lower_fn(log, f, w)),
+        || Cx::new(base, Reg::default()),
+        |w, f| crate::observe::following(observing, || emit(w, |log| lower_fn(log, f, w))),
         |w| cx.caches.get_mut().absorb(w.caches.into_inner()),
     );
     for (f, e) in user.iter().zip(emitted) {

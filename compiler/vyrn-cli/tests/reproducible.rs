@@ -205,3 +205,103 @@ fn a_program_compiled_after_another_in_one_process_is_the_same_bytes() {
         "fnvalarg.vyrn compiled before and after closures2.vyrn",
     );
 }
+
+/// Sixty functions that index arrays, so typing, placing, the summaries and the
+/// emitter each weigh above `par`'s serial cut. `edited` changes one body and adds
+/// an import, as an editor keystroke does.
+fn many(edited: bool) -> String {
+    let mut src = String::new();
+    if edited {
+        src.push_str("import { contains } from \"std/strpred\"\n\n");
+    }
+    for i in 0..60 {
+        let step = if edited && i == 3 { i + 1 } else { i };
+        src.push_str(&format!(
+            "fn f{i}(xs: Array<Int64>, k: Int64) -> Int64 {{\n    let mut s = k\n    \
+             let mut j = 0\n    while j < xs.length {{\n        s = s + xs[j] * {step}\n        \
+             j = j + 1\n    }}\n    return s\n}}\n\n"
+        ));
+    }
+    src.push_str("fn main() -> Int64 {\n    let xs: Array<Int64> = [1, 2, 3]\n    let mut t = 0\n");
+    for i in 0..60 {
+        src.push_str(&format!("    t = t + f{i}(xs, {i})\n"));
+    }
+    if edited {
+        src.push_str("    if contains(\"abc\", \"b\") {\n        t = t + 1\n    }\n");
+    }
+    src.push_str("    print(\"\\{t}\")\n    return 0\n}\n");
+    src
+}
+
+/// A helper thread of `par::in_parallel` outlives the call that used it, so a
+/// compile must find nothing an earlier one left there: in one process, A, then
+/// an edited B, then A again build the bytes a fresh `vyrn build` builds for
+/// each, and a compile that records nothing after one that did records nothing.
+#[test]
+fn a_helper_thread_carries_nothing_from_one_compile_to_the_next() {
+    struct Disk;
+    impl vyrn_frontend::loader::ModuleResolver for Disk {
+        fn read(&self, resolved: &str) -> Result<String, String> {
+            std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+        }
+    }
+    assert!(
+        std::thread::available_parallelism().map_or(1, |n| n.get()) > 1
+            && std::env::var("VYRN_THREADS").map_or(true, |n| n != "1"),
+        "the test needs more than one thread"
+    );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = common::scratch("helpers");
+    let (a, b) = (dir.join("a.vyrn"), dir.join("b.vyrn"));
+    std::fs::write(&a, many(false)).unwrap();
+    std::fs::write(&b, many(true)).unwrap();
+    let build = |path: &PathBuf| -> Vec<u8> {
+        let src = std::fs::read_to_string(path).expect("the root reads");
+        let key = path.to_string_lossy().replace('\\', "/");
+        let opts = vyrn_frontend::loader::LoadOptions {
+            std_root: Some(root.join("std").to_string_lossy().replace('\\', "/")),
+            expansions: vyrn_frontend::project::Expansions::shared(),
+            ..Default::default()
+        };
+        let engine = vyrn_genwasm::engine();
+        let (program, world) = vyrn_lower::load_warned(&src, &key, &opts, &Disk, Some(&*engine))
+            .0
+            .expect("the root loads");
+        vyrn_codegen::check_instantiations(&world).expect("the root instantiates");
+        vyrn_codegen::direct::compile(&program, world).expect("the root compiles")
+    };
+    let fresh = |path: &PathBuf| -> Vec<u8> {
+        let out = dir.join("fresh.wasm");
+        let o = vyrn()
+            .current_dir(&root)
+            .args(["build", &path.to_string_lossy(), "--target", "wasm", "-o"])
+            .arg(&out)
+            .output()
+            .expect("run vyrn");
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        std::fs::read(&out).expect("the build writes")
+    };
+    let observed = |path: &PathBuf| {
+        vyrn_codegen::observe::start();
+        let wasm = build(path);
+        vyrn_codegen::observe::stop();
+        (wasm, vyrn_codegen::observe::take_typings().len())
+    };
+    let (first, typed) = observed(&a);
+    assert!(typed > 0, "recording on, the emitter records its typings");
+    let edited = build(&b);
+    let unrecorded = vyrn_codegen::observe::take_typings().len();
+    let (again, typed_again) = observed(&a);
+    assert_eq!(
+        unrecorded, 0,
+        "a compile with recording off recorded typings"
+    );
+    assert_eq!(typed_again, typed, "A recorded another count of typings");
+    let (fresh_a, fresh_b) = (fresh(&a), fresh(&b));
+    all_equal(
+        &[fresh_a.clone(), first],
+        "A first in the process and fresh",
+    );
+    all_equal(&[fresh_b, edited], "B after A in the process and fresh");
+    all_equal(&[fresh_a, again], "A after B in the process and fresh");
+}
