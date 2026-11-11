@@ -199,6 +199,7 @@ compiler/vyrn-cli/tests/check/a_push_that_breaks_a_needed_order_is_named.vyrn	0	
 compiler/vyrn-cli/tests/check/a_rebuilt_receiver_keeps_its_alias.vyrn	0	cbf29ce484222325	20	17	affcdf468b369744
 compiler/vyrn-cli/tests/check/a_record_field_is_declared_once.vyrn	0	cbf29ce484222325	20	20	ae6992ef4ce2b2f6
 compiler/vyrn-cli/tests/check/a_record_is_no_member_of_a_union.vyrn	0	cbf29ce484222325	20	19	a7f983ad7fbe3ddd
+compiler/vyrn-cli/tests/check/a_record_type_name_is_not_a_value.vyrn	0	cbf29ce484222325	20	17	57f26fc991107d35
 compiler/vyrn-cli/tests/check/a_recursive_private_helper_keeps_its_summary.vyrn	0	cbf29ce484222325	20	19	56873952016bf893
 compiler/vyrn-cli/tests/check/a_refinement_alias_needs_a_scalar_base.vyrn	0	cbf29ce484222325	20	19	34ea51259bcc6ddf
 compiler/vyrn-cli/tests/check/a_refinement_predicate_must_be_bool.vyrn	0	cbf29ce484222325	20	18	c5b82f37972ddc79
@@ -313,6 +314,7 @@ compiler/vyrn-cli/tests/check/an_impl_of_an_undeclared_protocol_is_refused.vyrn	
 compiler/vyrn-cli/tests/check/an_impl_of_greet_for_pet_1.vyrn	0	cbf29ce484222325	20	20	4084d577cc1d13d9
 compiler/vyrn-cli/tests/check/an_impl_of_greet_for_pet_2.vyrn	0	cbf29ce484222325	20	20	4084d577cc1d13d9
 compiler/vyrn-cli/tests/check/an_impl_order_refusal_prints_the_type.vyrn	2	5d1a6af3929a072e	20	20	b7d986e2d596d5d5
+compiler/vyrn-cli/tests/check/an_imported_type_name_is_not_a_value.vyrn	0	cbf29ce484222325	20	15	4efab1cd300a6f6b
 compiler/vyrn-cli/tests/check/an_index_store_takes_the_key_type_a_lookup_takes.vyrn	0	cbf29ce484222325	20	17	8b1133f337c7bbe0
 compiler/vyrn-cli/tests/check/an_inline_refinement_in_an_enum_variant_is_a_diagnostic_not_a_panic.vyrn	1	2cbd3ef957bf6496	20	20	91e7d38bfe7cd8d6
 compiler/vyrn-cli/tests/check/an_inline_refinement_on_a_merged_record_is_a_diagnostic_not_a_panic.vyrn	1	2cbd3ef957bf6496	20	20	0f2105f665b0fc5b

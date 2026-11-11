@@ -1,0 +1,6 @@
+type R = { x: Int64 }
+
+fn main() -> Int64 {
+    print(R)
+    return 0
+}

@@ -1,0 +1,6 @@
+import { Json } from "std/json"
+
+fn main() -> Int64 {
+    let j = Json
+    return 0
+}
