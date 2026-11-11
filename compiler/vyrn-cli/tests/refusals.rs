@@ -586,6 +586,13 @@ fn census() -> Vec<Row> {
              call it; make the caller a `gen fn`",
             Kernel::Elsewhere,
         ),
+        row(
+            "r85_schema_of_a_type_parameter.vyrn",
+            "schemaOf and jsonSchema read a declaration, never a type parameter",
+            "`schemaOf` reads the declaration of its type, and `T` is a type parameter; write the \
+             type itself",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

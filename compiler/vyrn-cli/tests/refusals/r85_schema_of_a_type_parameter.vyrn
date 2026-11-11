@@ -1,0 +1,11 @@
+// A generic body cannot ask for the schema of its own type parameter.
+type Age = Int64 where value >= 0
+
+fn named<T>() -> String {
+    return schemaOf<T>().name
+}
+
+fn main() -> Int64 {
+    print(named<Age>())
+    return 0
+}

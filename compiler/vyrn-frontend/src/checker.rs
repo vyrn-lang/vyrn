@@ -5536,6 +5536,13 @@ impl<'a> Checker<'a> {
                 }
             ));
         }
+        // The answer is computed from the declaration where the check reads
+        // the call, and a type parameter names none there.
+        if let ("schemaOf" | "jsonSchema", [t]) = (name, written) {
+            if crate::types::mentions_param(t) {
+                return Err(cerr!(line, SchemaOfParam, name, t));
+            }
+        }
         // A `Schema` describes one declaration, and a union is none of its own.
         if let ("schemaOf", [t]) = (name, written) {
             if crate::types::union_of(t, self).is_some() {

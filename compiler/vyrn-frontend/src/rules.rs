@@ -1331,6 +1331,9 @@ rules! {
     ForgetsHeap { shown, t }
         "`{shown}` forgets or overwrites elements without releasing them, and `{t}` owns heap \
         \u{2014} move the elements one at a time instead";
+    SchemaOfParam { name, t }
+        "`{name}` reads the declaration of its type, and `{t}` is a type parameter; write the type \
+        itself";
     NotCodable { shown, off } "`{shown}` cannot decode into `{off}` (not a codable type)";
     LambdaArgArity { got, callee, n, want }
         "this lambda takes {got} parameter(s), but `{callee}` argument {n} expects {want}";

@@ -491,6 +491,7 @@ compiler/vyrn-cli/tests/check/io_builtins_are_not_constant_in_predicates.vyrn	0	
 compiler/vyrn-cli/tests/check/iterate_hold_a_push.vyrn	0	cbf29ce484222325	20	17	7222388ae6d22e16
 compiler/vyrn-cli/tests/check/iterate_hold_a_store.vyrn	0	cbf29ce484222325	20	18	d5f6dd823ab2ec3c
 compiler/vyrn-cli/tests/check/join_arm_yield_moves.vyrn	0	cbf29ce484222325	20	18	5796cf8505f84ec3
+compiler/vyrn-cli/tests/check/json_schema_of_a_type_parameter_is_refused.vyrn	0	cbf29ce484222325	20	17	a6f92a337331bf54
 compiler/vyrn-cli/tests/check/lambda_capture_accepted_reads_nothing.vyrn	0	cbf29ce484222325	20	15	78add8482a022c1e
 compiler/vyrn-cli/tests/check/lambda_capture_accepted_shadows_the_name.vyrn	0	cbf29ce484222325	20	18	74d549cea02fb273
 compiler/vyrn-cli/tests/check/lambda_capture_refused.vyrn	0	cbf29ce484222325	20	14	c23401c4856c9fed
@@ -879,6 +880,7 @@ compiler/vyrn-cli/tests/refusals/r81_a_protocol_call_through_copy.vyrn	0	cbf29ce
 compiler/vyrn-cli/tests/refusals/r82_two_impls_declare_one_method.vyrn	0	cbf29ce484222325	20	18	3a18cd210871e52a
 compiler/vyrn-cli/tests/refusals/r83_two_bounds_declare_one_method.vyrn	0	cbf29ce484222325	20	19	a5c9192dfab4da66
 compiler/vyrn-cli/tests/refusals/r84_main_calls_a_gen_fn.vyrn	0	cbf29ce484222325	20	17	e16f10649e32b795
+compiler/vyrn-cli/tests/refusals/r85_schema_of_a_type_parameter.vyrn	0	cbf29ce484222325	20	19	d5655904ea1a23a9
 compiler/vyrn-cli/tests/shapes/a-body-taken-whole-lifts-a-lambda-that-captures-a-later-let.vyrn	0	cbf29ce484222325	20	16	414820b60f79ac03
 compiler/vyrn-cli/tests/shapes/a-borrow-of-a-field-whose-root-is-consumed-after-the-borrow-ends.vyrn	0	cbf29ce484222325	20	14	0a6ed13d107754e1
 compiler/vyrn-cli/tests/shapes/a-borrow-rebound-in-a-let-mut-is-a-copy.vyrn	0	cbf29ce484222325	20	17	cbc0ba2678b9e985
