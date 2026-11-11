@@ -836,8 +836,7 @@ fn exported_only_to(
     importer: &str,
     opts: &LoadOptions,
 ) -> Rule {
-    let dir = dir_of(generated_importer(importer).unwrap_or(importer));
-    let shown = |key: &str| import_specifier(dir, key, opts.std_root.as_deref());
+    let shown = |key: &str| spoken(importer, key, opts);
     let importers = (to.iter())
         .map(|spec| match resolve_spec(spec, exporter, opts) {
             Ok(k) => format!("`{}`", shown(&k)),
@@ -846,6 +845,13 @@ fn exported_only_to(
         .collect::<Vec<_>>()
         .join(", ");
     rule!(ExportedOnlyTo, name, target = shown(exporter), importers)
+}
+
+/// The module `key` as a sentence in `importer` names it: the specifier
+/// `importer` would import it by, so the text holds no machine's path.
+fn spoken(importer: &str, key: &str, opts: &LoadOptions) -> String {
+    let dir = dir_of(generated_importer(importer).unwrap_or(importer));
+    import_specifier(dir, key, opts.std_root.as_deref())
 }
 
 /// Refuses an import of `std/mem` from anywhere but `std/runtime`, and of
@@ -5869,7 +5875,10 @@ fn link(
                         // either way.
                         let rule = match shut_out(name, def_module, m, (line, 1)) {
                             Some(to) => exported_only_to(name, to, def_module, &m.key, opts),
-                            None => rule!(NotImported, what, name, def_module),
+                            None => {
+                                let def_module = spoken(&m.key, def_module, opts);
+                                rule!(NotImported, what, name, def_module)
+                            }
                         };
                         errors.push(load_error(&m.key, root_key, line, rule));
                     }
@@ -5888,7 +5897,9 @@ fn link(
             }
             // No candidate is imported. Several candidates are all listed, since
             // naming one would be a guess.
-            let mut modules: Vec<&str> = candidates.iter().map(|(_, md)| md.as_str()).collect();
+            let mut modules: Vec<String> = (candidates.iter())
+                .map(|(_, md)| spoken(&m.key, md, opts))
+                .collect();
             modules.sort_unstable();
             modules.dedup();
             let list = modules.join("`, `");
@@ -6734,7 +6745,7 @@ impl BodyVisit<'_> for RefNames<'_> {
         } = s
         {
             for n in type_names(t) {
-                self.out.push((n, *line, "function"));
+                self.out.push((n, *line, "type"));
             }
         }
     }
@@ -6775,11 +6786,14 @@ impl BodyVisit<'_> for RefNames<'_> {
                     }
                 }
             }
-            Expr::StructLit { name, line, .. }
-            | Expr::TryConstruct { name, line, .. }
-            | Expr::Var { name, line, id: _ } => {
+            Expr::StructLit { name, line, .. } | Expr::TryConstruct { name, line, .. } => {
                 if !locals.contains(name) {
-                    self.out.push((name.clone(), *line, "function"));
+                    self.out.push((name.clone(), *line, "type"));
+                }
+            }
+            Expr::Var { name, line, id: _ } => {
+                if !locals.contains(name) {
+                    self.out.push((name.clone(), *line, "name"));
                 }
             }
             _ => {}
@@ -6792,7 +6806,7 @@ impl BodyVisit<'_> for RefNames<'_> {
         // four built-in sum names have no declaration.
         if let Pattern::Variant(v, _) = p {
             if !locals.contains(v) && !is_sum_arm(v) {
-                self.out.push((v.clone(), line, "function"));
+                self.out.push((v.clone(), line, "variant"));
             }
         }
     }

@@ -234,6 +234,7 @@ compiler/vyrn-cli/tests/check/a_show_against_the_prelude_returns_a_string.vyrn	0
 compiler/vyrn-cli/tests/check/a_show_that_is_not_a_string_is_refused.vyrn	0	cbf29ce484222325	20	19	cc5ed16a5c520176
 compiler/vyrn-cli/tests/check/a_sorted_array_can_be_searched.vyrn	0	cbf29ce484222325	20	20	14b6e9682642bbb9
 compiler/vyrn-cli/tests/check/a_statement_refusal_under_a_failed_type_list_stays.vyrn	9	7615108b2d3ddb60	20	20	c17153e01875ad68
+compiler/vyrn-cli/tests/check/a_std_name_not_imported_is_named_by_its_specifier_and_kind.vyrn	0	cbf29ce484222325	20	19	66236ff3302eb523
 compiler/vyrn-cli/tests/check/a_store_and_a_modify_call_may_break_a_promise.vyrn	0	cbf29ce484222325	20	17	f2e14ec27a224d38
 compiler/vyrn-cli/tests/check/a_stream_box_in_module_state_is_refused.vyrn	0	cbf29ce484222325	20	19	169acec92d0cf855
 compiler/vyrn-cli/tests/check/a_stream_box_pulled_after_unboxing_is_refused.vyrn	0	cbf29ce484222325	20	19	1a9619835812154a
