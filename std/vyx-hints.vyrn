@@ -1802,7 +1802,7 @@ gen fn checkOf(markup: String) -> String {
 }
 
 /// Whether the reports for `markup` mention `code`.
-fn fires(markup: String, code: String) -> Bool {
+gen fn fires(markup: String, code: String) -> Bool {
     return contains(checkOf(markup), code)
 }
 

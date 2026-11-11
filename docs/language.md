@@ -627,6 +627,7 @@ import { squareOf } from squares()
 ```
 
 - The loader runs the call with constant arguments, caches the result by content, and links the returned code as an ordinary module. An imported generator that does not return `Code` is refused. `vyrn emit-gen file.vyrn` prints what each generator wrote.
+- Only a `gen fn`, a test, a bench or the `from` of an import calls a `gen fn`, because no run reaches one. A lambda inside one of them counts as inside it.
 - A generator is comptime-pure, and so is everything it calls: no `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, clock, entropy, logging sink or wait. A call to one is refused, naming it. So a generator gives the same answer on every machine.
 - A generator may read with `readFile`, `listDir` and `listDirKinds`, limited to the paths its caller passed.
 - `moduleInterface(path)` reflects a module's exported functions and types as a `ModuleInterface` record. `moduleCode(path)` answers the same record inside a `ModuleCode`, with each type a generator writes paired with itself as `Code`. `contractOf(Name)` reflects a contract. All three work only during generation.

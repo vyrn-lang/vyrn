@@ -12,6 +12,10 @@ gen fn g() -> Int64 {
 }
 
 fn main() -> Int64 {
-    print(g())
+    print(0)
     return 0
+}
+
+test "g" {
+    assert(g() == g())
 }

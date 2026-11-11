@@ -5179,6 +5179,16 @@ impl<'a> Checker<'a> {
         {
             return Err(cerr!(line, BlackBoxOutsideBench));
         }
+        // A `gen fn` runs while the program compiles, so no run reaches it.
+        if self.gen_fns.contains(name)
+            && !self.frame.borrow().in_gen
+            && !*self.in_test.borrow()
+            && !*self.in_bench.borrow()
+            && !self.host.test
+            && self.lookup(scope, name).is_none()
+        {
+            return Err(cerr!(line, GenFnCall, name = DeclName(name)));
+        }
         // The core reads each conjunct of a `prove` as one comparison.
         if Some(name) == self.prove {
             let mut cs = args.iter().collect::<Vec<_>>();

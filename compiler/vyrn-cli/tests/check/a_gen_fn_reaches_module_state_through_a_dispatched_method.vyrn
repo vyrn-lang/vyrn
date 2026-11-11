@@ -31,6 +31,10 @@ gen fn g() -> Int64 {
 
 fn main() -> Int64 {
     let q = Q { y: 1 }
-    print(g() + q.describe())
+    print(q.describe())
     return 0
+}
+
+test "g" {
+    assert(g() == g())
 }

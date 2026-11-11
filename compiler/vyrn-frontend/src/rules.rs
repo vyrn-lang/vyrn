@@ -637,6 +637,9 @@ rules! {
     ExternFnValue {}
         "an `extern` function cannot be used as a function \
         value — the host boundary dispatches by name";
+    GenFnCall { name }
+        "`{name}` is a `gen fn`, so only a `gen fn`, a test, a bench or the `from` of an import \
+        may call it; make the caller a `gen fn`";
     GenFnValue {}
         "a `gen fn` runs at generation time and cannot be \
         used as a function value";

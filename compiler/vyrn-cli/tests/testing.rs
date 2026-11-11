@@ -193,10 +193,11 @@ fn an_imported_modules_tests_belong_to_that_module() {
     assert!(one.status.success(), "{}", norm(&one.stderr));
 }
 
-/// A function that calls a `gen fn` has no runtime lowering, so it is skipped
-/// rather than failing every importer's build (`std/vyx-hints`'s `checkOf`).
+/// A `gen fn` helper that calls a `gen fn` has no runtime lowering, so it is
+/// skipped rather than failing every importer's build (`std/vyx-hints`'s
+/// `fires`).
 #[test]
-fn a_function_that_calls_a_generator_does_not_fail_the_build() {
+fn a_gen_fn_that_calls_a_generator_does_not_fail_the_build() {
     let dir = scratch("gen-caller");
     let file = dir.join("t.vyrn");
     std::fs::write(
@@ -204,7 +205,7 @@ fn a_function_that_calls_a_generator_does_not_fail_the_build() {
         "gen fn quoted(s: String) -> String {
              return s + \"!\"
          }
-         fn onlyTestsCallThis() -> String {
+         gen fn onlyTestsCallThis() -> String {
              return quoted(\"x\")
          }
          fn main() -> Int64 {
@@ -225,7 +226,7 @@ fn a_function_that_calls_a_generator_does_not_fail_the_build() {
         norm(&out.stderr)
     );
 
-    // A call to the skipped function refuses at the call, naming it.
+    // A plain helper's call to a `gen fn` refuses at that call.
     let file = dir.join("u.vyrn");
     std::fs::write(
         &file,
@@ -245,7 +246,7 @@ fn a_function_that_calls_a_generator_does_not_fail_the_build() {
     let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
     let said = norm(&out.stderr);
     assert!(
-        !out.status.success() && said.contains("no lowering for the call `viaHelper`"),
+        !out.status.success() && said.contains(":5:0: `quoted` is a `gen fn`"),
         "{said}"
     );
 }

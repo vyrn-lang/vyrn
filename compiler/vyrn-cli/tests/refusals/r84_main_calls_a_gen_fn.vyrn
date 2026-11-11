@@ -1,0 +1,9 @@
+// main calls a gen fn, which runs only while the program compiles.
+gen fn g(n: Int64) -> Int64 {
+    return n + 1
+}
+
+fn main() -> Int64 {
+    print(g(1).toString())
+    return 0
+}

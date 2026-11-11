@@ -579,6 +579,13 @@ fn census() -> Vec<Row> {
              `x::Area.area(..)` to pick one",
             Kernel::Elsewhere,
         ),
+        row(
+            "r84_main_calls_a_gen_fn.vyrn",
+            "only a gen fn, a test or a bench calls a gen fn",
+            "`g` is a `gen fn`, so only a `gen fn`, a test, a bench or the `from` of an import may \
+             call it; make the caller a `gen fn`",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

@@ -603,6 +603,50 @@ fn main() -> Int64 { return 0 }
     );
 }
 
+/// A call to a `gen fn` from `main` is refused on the call's line.
+#[test]
+fn a_gen_fn_call_outside_a_generator_is_refused_at_the_call() {
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": init_id,
+        "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    let uri = "file:///gen/call.vyrn";
+    let src = "gen fn g(n: Int64) -> Int64 {
+    return n + 1
+}
+
+fn main() -> Int64 {
+                   print(g(1).toString())
+    return 0
+}
+";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": { "uri": uri, "languageId": "vyrn", "version": 1, "text": src }
+        }
+    }));
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif
+        .pointer("/params/diagnostics")
+        .and_then(|d| d.as_array())
+        .expect("a publishDiagnostics with the gen fn call");
+    let d = (diags.iter())
+        .find(|d| {
+            (d.get("message").and_then(|m| m.as_str())).is_some_and(|m| m.contains("is a `gen fn`"))
+        })
+        .unwrap_or_else(|| panic!("expected the gen fn call refusal: {diags:?}"));
+    let line = d.pointer("/range/start/line").and_then(|l| l.as_i64());
+    assert_eq!(line, Some(5), "on the call's line: {d}");
+}
+
 /// Offers the receiver type's methods, not the top-level symbols.
 #[test]
 fn member_completion_after_dot_lists_array_methods() {
