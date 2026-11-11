@@ -550,7 +550,7 @@ fn census() -> Vec<Row> {
         row(
             "r79_a_protocol_call_names_no_protocol.vyrn",
             "the protocol of `x::P.m(..)` is a protocol",
-            "`Square` is not a protocol, so `x::Square.area(..)` calls nothing",
+            "`Square` is not a protocol, so `s::Square.area(..)` calls nothing",
             Kernel::Elsewhere,
         ),
         row(
@@ -569,7 +569,7 @@ fn census() -> Vec<Row> {
             "r82_two_impls_declare_one_method.vyrn",
             "a method two impls declare for one receiver names its protocol",
             "`area` is ambiguous: protocols Area, Solid all implement it for this receiver; \
-             call `x::Area.area(..)` to pick one",
+             call `s::Area.area(..)` to pick one",
             Kernel::Elsewhere,
         ),
         row(

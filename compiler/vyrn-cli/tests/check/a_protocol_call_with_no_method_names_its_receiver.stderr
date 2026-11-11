@@ -1,0 +1,1 @@
+a_protocol_call_with_no_method_names_its_receiver.vyrn:4:17: `Json::JNull` names the protocol of a method call and is not a value; write `Json::JNull.method(..)`

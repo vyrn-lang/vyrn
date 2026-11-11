@@ -312,10 +312,11 @@ nest Unary = '-' Unary / '!' Unary / '~' Unary
 // The host refuses `await` over no call as this closes.
 AwaitTail = 'await' Postfix
 // Each link adds a node the later walks recurse into, so each counts toward `nest`.
-Postfix = Primary many Link until !('?' / '.' / '[' / '::') recover nest
-// `x::P.m(..)` calls `m` as protocol `P` declares it; `x::P` alone is no value.
-Link = '?' / '.' Ident Args? / '[' -nostruct(Expr) ']'
-     / c:'::' p:Ident (&('.' ident '(') '.' Ident Args / ^ProtocolCallNoValue(protocol=p)@c)
+// `x::P.m(..)` calls `m` as protocol `P` declares it; `x::P` alone is no value,
+// and its refusal spells the receiver as written.
+Postfix = r:(Primary many Link until !('?' / '.' / '[' / &('::' ident '.' ident '(')) recover nest)
+          (c:'::' p:Ident ^ProtocolCallNoValue(receiver=r, protocol=p)@c)?
+Link = '?' / '.' Ident Args? / '[' -nostruct(Expr) ']' / '::' Ident '.' Ident Args
 Args = '(' -nostruct(list Expr sep ',' until ')') ')'
 
 Primary = &(ident '->') Lambda

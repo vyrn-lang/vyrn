@@ -64,6 +64,16 @@ pub(crate) fn line_of(l: impl std::borrow::Borrow<usize>) -> usize {
     *l.borrow()
 }
 
+/// The receiver of a protocol-call sentence as the source wrote it: a name or a
+/// field path, else `x`, because no other expression keeps its spelling.
+fn receiver_text(e: Option<&Expr>) -> String {
+    match e {
+        Some(Expr::Var { name, .. }) => name.clone(),
+        Some(Expr::Field { expr, field, .. }) => format!("{}.{field}", receiver_text(Some(expr))),
+        _ => "x".to_string(),
+    }
+}
+
 /// Whether a body is checked as generation code: its own `gen fn` marker, or a
 /// whole-program generator host.
 fn in_gen_of(f: &Function, host: Host) -> bool {
@@ -5004,6 +5014,7 @@ impl<'a> Checker<'a> {
         line: usize,
     ) -> Result<Type, Diagnostic> {
         let mut candidates = self.protocol_methods.get(name).cloned().unwrap_or_default();
+        let written = receiver_text(args.first());
         if let Some(p) = via {
             candidates.retain(|(q, _)| q == p);
             if candidates.is_empty() {
@@ -5011,7 +5022,13 @@ impl<'a> Checker<'a> {
                     || crate::types::KNOWN_PROTOCOLS.iter().any(|(k, _)| *k == p);
                 return Err(match declared {
                     true => cerr!(line, ProtocolLacksMethod, protocol = p, name),
-                    false => cerr!(line, ProtocolCallUnknown, protocol = p, name),
+                    false => cerr!(
+                        line,
+                        ProtocolCallUnknown,
+                        recv = written,
+                        protocol = p,
+                        name
+                    ),
                 });
             }
         }
@@ -5048,6 +5065,7 @@ impl<'a> Checker<'a> {
                                 line,
                                 AmbiguousBound,
                                 name,
+                                recv = written,
                                 first = bounded[0].0,
                                 protocols = bounded
                                     .iter()
@@ -5064,6 +5082,7 @@ impl<'a> Checker<'a> {
                         line,
                         AmbiguousImpl,
                         name,
+                        recv = written,
                         first = matching[0].0,
                         protocols = matching
                             .iter()

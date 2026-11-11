@@ -182,6 +182,7 @@ compiler/vyrn-cli/tests/check/a_prologue_let_that_owns_is_not_a_root.vyrn	0	cbf2
 compiler/vyrn-cli/tests/check/a_promise_broken_in_a_loop_is_refused_at_the_write.vyrn	0	cbf29ce484222325	20	17	5bc3ca6796996dfe
 compiler/vyrn-cli/tests/check/a_promise_is_kept_through_insert_sorted.vyrn	0	cbf29ce484222325	20	20	3285f1e25ae36f8d
 compiler/vyrn-cli/tests/check/a_protocol_and_a_type_two_modules_implement.vyrn	0	cbf29ce484222325	20	17	4a2e22b35fe1a9eb
+compiler/vyrn-cli/tests/check/a_protocol_call_with_no_method_names_its_receiver.vyrn	1	4eee8aa39cc51aa9	20	20	0aa0213521d95041
 compiler/vyrn-cli/tests/check/a_protocol_may_not_name_self_1.vyrn	0	cbf29ce484222325	20	20	50195ce82cf57986
 compiler/vyrn-cli/tests/check/a_protocol_may_not_name_self_2.vyrn	0	cbf29ce484222325	20	19	d8735e0f96e67f4a
 compiler/vyrn-cli/tests/check/a_protocol_may_not_name_self_3.vyrn	0	cbf29ce484222325	20	16	b541ccd6e2239604
@@ -693,7 +694,7 @@ compiler/vyrn-cli/tests/check/row_lazy_where.vyrn	1	b12d55371ae92acc	20	20	36e82
 compiler/vyrn-cli/tests/check/row_needs_field.vyrn	1	a2d3087c2b049ded	20	20	14993d82dd77c0d5
 compiler/vyrn-cli/tests/check/row_nesting_too_deep.vyrn	1	e764a911f82f8d86	20	20	f8e8d67bf2168142
 compiler/vyrn-cli/tests/check/row_nul_in_string.vyrn	1	09bff29913e44554	0	0	cbf29ce484222325
-compiler/vyrn-cli/tests/check/row_protocol_call_no_value.vyrn	1	a8fb13a5bb86f71b	20	20	bbb479aa2e416a83
+compiler/vyrn-cli/tests/check/row_protocol_call_no_value.vyrn	1	2e5e91a1a89af81f	20	20	8c743afff7c2a47b
 compiler/vyrn-cli/tests/check/row_recovery_after_a_statement_and_a_declaration.vyrn	3	2f352b6ff64c79da	20	20	a591381346adb6f8
 compiler/vyrn-cli/tests/check/row_single_quoted_string.vyrn	1	495512f2bb13d9af	0	0	cbf29ce484222325
 compiler/vyrn-cli/tests/check/row_skeleton_detail.vyrn	1	4aca155d85c34b75	20	20	a887388c93318324
@@ -874,7 +875,7 @@ compiler/vyrn-cli/tests/refusals/r77_an_impl_of_a_kernel_protocol_outside_its_ty
 compiler/vyrn-cli/tests/refusals/r78_a_protocol_method_named_like_an_unreached_std_function.vyrn	0	cbf29ce484222325	20	20	39b90f180b76a121
 compiler/vyrn-cli/tests/refusals/r79_a_protocol_call_names_no_protocol.vyrn	0	cbf29ce484222325	20	18	0430c18584140732
 compiler/vyrn-cli/tests/refusals/r80_a_protocol_call_names_a_method_the_protocol_lacks.vyrn	0	cbf29ce484222325	20	16	d04903bb9e00cbb6
-compiler/vyrn-cli/tests/refusals/r81_a_protocol_call_through_copy.vyrn	0	cbf29ce484222325	20	19	0161b4928db247d1
+compiler/vyrn-cli/tests/refusals/r81_a_protocol_call_through_copy.vyrn	0	cbf29ce484222325	20	19	6c894e2781393801
 compiler/vyrn-cli/tests/refusals/r82_two_impls_declare_one_method.vyrn	0	cbf29ce484222325	20	18	3a18cd210871e52a
 compiler/vyrn-cli/tests/refusals/r83_two_bounds_declare_one_method.vyrn	0	cbf29ce484222325	20	19	a5c9192dfab4da66
 compiler/vyrn-cli/tests/refusals/r84_main_calls_a_gen_fn.vyrn	0	cbf29ce484222325	20	17	e16f10649e32b795
@@ -1262,7 +1263,7 @@ examples/protocol_extra.vyrn	0	cbf29ce484222325	20	15	85c87d056d50e632
 examples/protocol_incomplete.vyrn	0	cbf29ce484222325	20	18	9370830fbf31465f
 examples/protocol_overlap.vyrn	0	cbf29ce484222325	20	19	9d6eec8348a0a73e
 examples/protocol_scalar.vyrn	0	cbf29ce484222325	20	18	70c6509a41c1ee05
-examples/protocolcall.vyrn	0	cbf29ce484222325	20	18	6781bff86f70b716
+examples/protocolcall.vyrn	0	cbf29ce484222325	20	18	8c6ffb85cbc2ef74
 examples/protoplace.vyrn	0	cbf29ce484222325	20	17	8a7849a722718e7e
 examples/protorec.vyrn	0	cbf29ce484222325	20	16	d7677362e48ea727
 examples/recdepth.vyrn	0	cbf29ce484222325	20	15	d8d4a71e51234e8f

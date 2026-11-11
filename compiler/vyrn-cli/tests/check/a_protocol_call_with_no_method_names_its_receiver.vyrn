@@ -1,0 +1,6 @@
+import { Json } from "std/json"
+
+fn main() -> Int64 {
+    let k = Json::JNull
+    return 0
+}
