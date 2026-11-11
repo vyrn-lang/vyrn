@@ -46,19 +46,19 @@ fn census() -> Vec<Row> {
         row(
             "r01_store_element.vyrn",
             "rule 2: an element read may not be stored",
-            "`b.xs[0]` may not be stored into `push(..)` — it is read out of a place that owns it",
+            "`b.xs[0]` may not be stored into `push(..)`: it is read out of a place that owns it",
             Kernel::Its,
         ),
         row(
             "r02_store_read_parameter_field.vyrn",
             "rule 2: a field of a `read` parameter may not be stored",
-            "`h.meta[0]` may not be stored into `push(..)` — it is a `read` parameter",
+            "`h.meta[0]` may not be stored into `push(..)`: it is a `read` parameter",
             Kernel::Its,
         ),
         row(
             "r03_store_projection.vyrn",
             "rule 2: a projection is a borrow of its root, whatever the root is",
-            "`d.title` may not be stored into `push(..)` — it is read out of a place that owns it",
+            "`d.title` may not be stored into `push(..)`: it is read out of a place that owns it",
             Kernel::Its,
         ),
         row(
@@ -91,20 +91,20 @@ fn census() -> Vec<Row> {
         row(
             "r08_take_an_element.vyrn",
             "`consume` reaches a field, never an element",
-            "`xs[0]` may not be taken — an element is not a place a take reaches",
+            "`xs[0]` may not be taken: an element is not a place a take reaches",
             Kernel::Its,
         ),
         row(
             "r09_nothing_to_take.vyrn",
             "`consume` with nothing to take",
-            "`consume` here has nothing to take — the value is already owned, so there is no \
+            "`consume` here has nothing to take: the value is already owned, so there is no \
              place to leave a hole in",
             Kernel::Its,
         ),
         row(
             "r10_consume_module_state.vyrn",
             "module state may not be taken: a prefix `consume`",
-            "module state `names` may not be passed to a `consume` parameter via `take(..)` — \
+            "module state `names` may not be passed to a `consume` parameter via `take(..)`: \
              nothing may take ownership of module state (it lives for the whole module and is \
              never dropped)",
             Kernel::Its,
@@ -112,14 +112,14 @@ fn census() -> Vec<Row> {
         row(
             "r11_consume_a_read_parameter.vyrn",
             "rule 2: a prefix `consume` of a `read` parameter",
-            "`ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` \
+            "`ys` may not be passed to a `consume` parameter via `take(..)`: it is a `read` \
              parameter",
             Kernel::Its,
         ),
         row(
             "r12_module_state_to_a_consume_parameter.vyrn",
             "module state may not be taken: a `consume` parameter",
-            "module state `names` may not be passed to a `consume` parameter via `take(..)` — \
+            "module state `names` may not be passed to a `consume` parameter via `take(..)`: \
              nothing may take ownership of module state (it lives for the whole module and is \
              never dropped)",
             Kernel::Its,
@@ -127,47 +127,47 @@ fn census() -> Vec<Row> {
         row(
             "r13_read_parameter_to_a_consume_parameter.vyrn",
             "rule 2: a whole `read` parameter to a `consume` parameter",
-            "`ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` \
+            "`ys` may not be passed to a `consume` parameter via `take(..)`: it is a `read` \
              parameter",
             Kernel::Its,
         ),
         row(
             "r14_projection_to_a_consume_parameter.vyrn",
             "rule 2: a projection to a `consume` parameter",
-            "`d.title` may not be passed to a `consume` parameter via `take(..)` — it is read \
+            "`d.title` may not be passed to a `consume` parameter via `take(..)`: it is read \
              out of a place that owns it",
             Kernel::Its,
         ),
         row(
             "r15_return_module_state.vyrn",
             "module state may not be taken: a `return`",
-            "`names` may not be returned — it is module state, which nothing may take, and a \
+            "`names` may not be returned: it is module state, which nothing may take, and a \
              return is owned",
             Kernel::Its,
         ),
         row(
             "r16_return_a_field_of_a_read_parameter.vyrn",
             "rule 2 at the return: a field of a `read` parameter",
-            "`d.title` may not be returned — it is a `read` parameter, and a return is owned",
+            "`d.title` may not be returned: it is a `read` parameter, and a return is owned",
             Kernel::Its,
         ),
         row(
             "r17_export_returns_a_borrow.vyrn",
             "an exported function owns its result",
-            "`s` may not be returned from an exported function — it is a `read` parameter, and \
+            "`s` may not be returned from an exported function: it is a `read` parameter, and \
              the JS caller releases what it is handed",
             Kernel::Its,
         ),
         row(
             "r18_return_a_read_parameter.vyrn",
             "rule 2 at the return: a whole `read` parameter",
-            "`ys` may not be returned — it is a `read` parameter, and a return is owned",
+            "`ys` may not be returned: it is a `read` parameter, and a return is owned",
             Kernel::Its,
         ),
         row(
             "r19_read_parameter_wrapped_in_the_result.vyrn",
             "rule 2 through a wrapper: a `read` parameter put into the result",
-            "`s` may not be put into `Some(..)` — it is a `read` parameter",
+            "`s` may not be put into `Some(..)`: it is a `read` parameter",
             Kernel::Its,
         ),
         row(
@@ -179,20 +179,20 @@ fn census() -> Vec<Row> {
         row(
             "r21_drop_a_borrow.vyrn",
             "rule 4 at the drop: the place that owns a value releases it",
-            "`owned` may not be dropped — it is read out of a place that owns it",
+            "`owned` may not be dropped: it is read out of a place that owns it",
             Kernel::Its,
         ),
         row(
             "r22_drop_with_a_hole.vyrn",
             "`drop` releases the whole binding, and a take left a hole",
-            "`p` may not be dropped — `p.name` was taken out of it on line 17, and `drop` \
+            "`p` may not be dropped: `p.name` was taken out of it on line 17, and `drop` \
              releases the whole binding",
             Kernel::Its,
         ),
         row(
             "r23_modify_is_exclusive.vyrn",
             "a `modify` borrow is exclusive",
-            "`a` is passed to `bump` as `modify` and read again in the same call — a `modify` \
+            "`a` is passed to `bump` as `modify` and read again in the same call: a `modify` \
              borrow is exclusive",
             // The kernel states it by path, with the `consume` rule
             // (`Kernel::exclusive`).
@@ -203,7 +203,7 @@ fn census() -> Vec<Row> {
             "a closure that outlives the call may not capture a borrow",
             // The kernel reads which captures a lambda body reads from
             // `NameInfo::closure_reads`.
-            "`s` may not be captured by a closure that outlives this call — it is a `read` \
+            "`s` may not be captured by a closure that outlives this call: it is a `read` \
              parameter",
             Kernel::Its,
         ),
@@ -217,27 +217,27 @@ fn census() -> Vec<Row> {
         row(
             "r26_rebuild_a_borrowed_receiver.vyrn",
             "a rebuilding builtin takes its receiver",
-            "`mt` is read out of `h.meta` here — a place that owns it\nline 7: ... and \
+            "`mt` is read out of `h.meta` here: a place that owns it\nline 7: ... and \
              `push(..)` takes `mt`, so `mt` must be a value of its own",
             Kernel::Its,
         ),
         row(
             "r27_borrow_to_a_builtin_consume.vyrn",
             "rule 2: a `read` parameter to a builtin that declares `consume`",
-            "`xs` may not be stored into `fromArray(..)` — it is a `read` parameter",
+            "`xs` may not be stored into `fromArray(..)`: it is a `read` parameter",
             Kernel::Its,
         ),
         row(
             "r28_return_a_capture_from_a_closure.vyrn",
             "a closure's result is its caller's, and a capture is not its to give",
-            "`s` may not be returned from a closure — it is a captured binding, and the \
+            "`s` may not be returned from a closure: it is a captured binding, and the \
              closure's result is its caller's",
             Kernel::Its,
         ),
         row(
             "r29_for_in_consume_module_state.vyrn",
             "module state may not be taken: `for .. in consume`",
-            "module state `names` may not be consumed by the `for .. in consume` loop — nothing \
+            "module state `names` may not be consumed by the `for .. in consume` loop: nothing \
              may take ownership of module state (it lives for the whole module and is never \
              dropped)",
             Kernel::Its,
@@ -273,51 +273,51 @@ fn census() -> Vec<Row> {
         row(
             "r34_read_parameter_into_a_builtin_consume_slot.vyrn",
             "rule 2: a `read` parameter into a builtin's `consume` argument",
-            "`s` may not be stored into `push(..)` — it is a `read` parameter",
+            "`s` may not be stored into `push(..)`: it is a `read` parameter",
             Kernel::Its,
         ),
         row(
             "r35_write_into_a_second_name_for_a_read_parameter.vyrn",
             "rule 2: a store into a part of a second name for a parameter",
-            "`c` may not be written through the field `name` — it is a second name for the \
+            "`c` may not be written through the field `name`: it is a second name for the \
              `read` parameter `r`",
             Kernel::Its,
         ),
         row(
             "r36_modify_a_second_name_for_a_read_parameter.vyrn",
             "rule 2: a second name for a parameter into a `modify` argument",
-            "`c` may not be passed to a `modify` parameter via `lengthen(..)` — it is a second \
+            "`c` may not be passed to a `modify` parameter via `lengthen(..)`: it is a second \
              name for the `read` parameter `r`",
             Kernel::Its,
         ),
         row(
             "r37_join_of_a_borrow_then_an_owned_if_arm.vyrn",
             "rule 2: a join an arm owns may not hold another arm's borrow (#518)",
-            "`xs[0]` may not be stored into a store — it is a `read` parameter",
+            "`xs[0]` may not be stored into a store: it is a `read` parameter",
             Kernel::Its,
         ),
         row(
             "r38_join_of_an_owned_then_a_borrowed_if_arm.vyrn",
             "rule 2: the same, with the owned arm first (#518)",
-            "`xs[0]` may not be stored into a store — it is a `read` parameter",
+            "`xs[0]` may not be stored into a store: it is a `read` parameter",
             Kernel::Its,
         ),
         row(
             "r39_join_of_a_borrowed_then_an_owned_match_arm.vyrn",
             "rule 2: a match join an arm owns may not hold a borrowed payload binder (#518)",
-            "`s` may not be stored into a store — it is a second name for the `read` parameter `o`",
+            "`s` may not be stored into a store: it is a second name for the `read` parameter `o`",
             Kernel::Its,
         ),
         row(
             "r40_join_of_an_owned_then_a_borrowed_match_arm.vyrn",
             "rule 2: the same, with the owned arm first (#518)",
-            "`s` may not be stored into a store — it is a second name for the `read` parameter `o`",
+            "`s` may not be stored into a store: it is a second name for the `read` parameter `o`",
             Kernel::Its,
         ),
         row(
             "r41_read_parameter_of_a_type_parameter_into_consume_self.vyrn",
             "rule 2: a generic as written judges `T` as owning heap",
-            "`x` may not be passed to a `consume` parameter via `eat(..)` — it is a `read` parameter",
+            "`x` may not be passed to a `consume` parameter via `eat(..)`: it is a `read` parameter",
             Kernel::Its,
         ),
         row(
@@ -376,7 +376,7 @@ fn census() -> Vec<Row> {
         row(
             "r50_lambda_returns_its_read_parameter.vyrn",
             "rule 2: a lambda takes each parameter by `read`",
-            "`s` may not be returned — it is a `read` parameter, and a return is owned",
+            "`s` may not be returned: it is a `read` parameter, and a return is owned",
             Kernel::Its,
         ),
         row(
@@ -388,7 +388,7 @@ fn census() -> Vec<Row> {
         row(
             "r52_an_element_stored_from_its_sibling.vyrn",
             "rule 2: an element read may not be stored into an element",
-            "`xs[j]` may not be stored into `xs` — it is read out of a place that owns it",
+            "`xs[j]` may not be stored into `xs`: it is read out of a place that owns it",
             Kernel::Its,
         ),
         row(
@@ -530,7 +530,7 @@ fn census() -> Vec<Row> {
         row(
             "r76_release_moves_self.vyrn",
             "a release takes `self` apart, and nothing else may own it",
-            "`self` may not be moved out of its `release` — a new owner would release it again",
+            "`self` may not be moved out of its `release`: a new owner would release it again",
             Kernel::Its,
         ),
         row(
@@ -544,7 +544,7 @@ fn census() -> Vec<Row> {
             "r78_a_protocol_method_named_like_an_unreached_std_function.vyrn",
             "a std function no reached body calls or spells leaves the link, so a method \
              named like it collides with nothing",
-            "`alt` may not be returned — it is a `read` parameter, and a return is owned",
+            "`alt` may not be returned: it is a `read` parameter, and a return is owned",
             Kernel::Its,
         ),
         row(
@@ -737,7 +737,7 @@ fn the_generation_refusals_are_what_the_engine_says() {
         ),
         (
             "r84_a_generator_output_that_calls_its_generator_deeper.vyrn",
-            "generator imports nest more than 32 deep — a generator likely imports \
+            "generator imports nest more than 32 deep: a generator likely imports \
              itself with a growing argument",
         ),
     ];
@@ -817,20 +817,20 @@ fn counterexamples() -> Vec<Uncovered> {
         covered(
             "u09_for_in_consume_with_nothing_to_take.vyrn",
             "09",
-            "`consume` here has nothing to take — the loop already owns a container that is \
+            "`consume` here has nothing to take: the loop already owns a container that is \
              not a binding",
             "spelling",
         ),
         covered(
             "u11_prefix_consume_of_a_read_parameters_field.vyrn",
             "11",
-            "`d` may not be consumed — it is a `read` parameter",
+            "`d` may not be consumed: it is a `read` parameter",
             "spelling",
         ),
         covered(
             "u12_module_state_to_a_consume_parameter_heapless.vyrn",
             "12",
-            "module state `g` may not be passed to a `consume` parameter via `take(..)` — \
+            "module state `g` may not be passed to a `consume` parameter via `take(..)`: \
              nothing may take ownership of module state (it lives for the whole module and is \
              never dropped)",
             "heap",
@@ -838,7 +838,7 @@ fn counterexamples() -> Vec<Uncovered> {
         covered(
             "u13_an_arm_binder_to_a_consume_parameter.vyrn",
             "13",
-            "`v` may not be passed to a `consume` parameter via `take(..)` — it is a second \
+            "`v` may not be passed to a `consume` parameter via `take(..)`: it is a second \
              name for the `read` parameter `o`",
             "spelling",
         ),
@@ -904,8 +904,8 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
         (
             "an export stores into module state",
             vec![
-                "`arg` may not be stored into module state `kept` — it is a `read` parameter",
-                "fix: `arg.copy()` — an `export extern fn` may not take ownership",
+                "`arg` may not be stored into module state `kept`: it is a `read` parameter",
+                "fix: `arg.copy()`: an `export extern fn` may not take ownership",
             ],
             // An export may not take a String its JS caller releases, so the
             // menu does not offer `consume`.
@@ -915,7 +915,7 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
         (
             "a record literals field",
             vec![
-                "`x` may not be stored into the field `R.s` — it is a `read` parameter",
+                "`x` may not be stored into the field `R.s`: it is a `read` parameter",
                 "fix: declare the parameter `x: consume ..` if this function should own it",
                 "fix: `x.copy()` if both sides need a value",
             ],
@@ -928,7 +928,7 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
         (
             "a lambda parameter",
             vec![
-                "`s` may not be passed to a `consume` parameter via `take(..)` — it is a `read` \
+                "`s` may not be passed to a `consume` parameter via `take(..)`: it is a `read` \
                  parameter",
                 "fix: `s.copy()` if both sides need a value",
                 "fix: a named function with `s: consume ..`, called directly, if it should own it",
@@ -944,7 +944,7 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
         (
             "a stored loop variable",
             vec![
-                "`x` may not be stored into `push(..)` — it is a loop variable",
+                "`x` may not be stored into `push(..)`: it is a loop variable",
                 "fix: `for x in consume xs` if the loop should take the elements",
                 "fix: `x.copy()` if both sides need a value",
             ],
@@ -958,7 +958,7 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
             "a loop over an element read",
             // The container still owns an element read, so the loop borrows.
             vec![
-                "`x` may not be stored into `push(..)` — it is a loop variable",
+                "`x` may not be stored into `push(..)`: it is a loop variable",
                 "fix: `x.copy()` if both sides need a value",
             ],
             vec![],
@@ -970,7 +970,7 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
         (
             "a map key read inline",
             vec![
-                "`ks[0]` may not be stored into `m` — it is a `read` parameter",
+                "`ks[0]` may not be stored into `m`: it is a `read` parameter",
                 "fix: `ks[0].copy()` if both sides need a value",
             ],
             vec![],
@@ -981,7 +981,7 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
         ),
         (
             "a map key that is a loop variable",
-            vec!["`k` may not be stored into `m` — it is a loop variable"],
+            vec!["`k` may not be stored into `m`: it is a loop variable"],
             vec![],
             format!(
                 "fn build(ks: Array<String>) -> Map<String, Int64> \
@@ -991,14 +991,14 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
         ),
         (
             "a stream producer",
-            vec!["`xs` may not be stored into `fromArray(..)` — it is a `read` parameter"],
+            vec!["`xs` may not be stored into `fromArray(..)`: it is a `read` parameter"],
             vec![],
             format!("fn mk(xs: Array<Int64>) -> Stream<Int64> {{ return fromArray(xs) }}{END}"),
         ),
         (
             "a projection whose root this frame owns",
             vec![
-                "`d.a` may not be stored into `push(..)` — it is read out of a place that owns it",
+                "`d.a` may not be stored into `push(..)`: it is read out of a place that owns it",
                 "fix: `consume d.a` if `d` should give it up",
             ],
             vec![],
@@ -1009,7 +1009,7 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
         ),
         (
             "a projection of a read parameter",
-            vec!["`d.a` may not be stored into `push(..)` — it is a `read` parameter"],
+            vec!["`d.a` may not be stored into `push(..)`: it is a `read` parameter"],
             // A borrowed root has no take, so the menu must not name one.
             vec!["`consume d.a`"],
             format!(
@@ -1063,12 +1063,12 @@ fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
     let cases: &[(&str, &str, String)] = &[
         (
             "a whole read parameter",
-            "`s` may not be returned — it is a `read` parameter, and a return is owned",
+            "`s` may not be returned: it is a `read` parameter, and a return is owned",
             format!("fn id(s: String) -> String {{ return s }}{END}"),
         ),
         (
             "a loop variable",
-            "`x` may not be returned — it is a loop variable, and a return is owned",
+            "`x` may not be returned: it is a loop variable, and a return is owned",
             format!(
                 "fn first(xs: Array<String>) -> String \
                  {{ for x in xs {{ return x }} return \"\" }}{END}"
@@ -1076,7 +1076,7 @@ fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
         ),
         (
             "a name bound to a field",
-            "`t` may not be returned — it is a second name for the `read` parameter `r`, \
+            "`t` may not be returned: it is a second name for the `read` parameter `r`, \
              and a return is owned",
             format!(
                 "type R = {{ s: String }} \
@@ -1085,13 +1085,13 @@ fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
         ),
         (
             "module state",
-            "`title` may not be returned — it is module state, which nothing may take, \
+            "`title` may not be returned: it is module state, which nothing may take, \
              and a return is owned",
             format!("let mut title = \"x\" fn get() -> String {{ return title }}{END}"),
         ),
         (
             "a field of module state",
-            "`r.s` may not be returned — it is module state, which nothing may take, \
+            "`r.s` may not be returned: it is module state, which nothing may take, \
              and a return is owned",
             format!(
                 "type R = {{ s: String }} let mut r = R {{ s: \"x\" }} \
@@ -1100,7 +1100,7 @@ fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
         ),
         (
             "a record of module state",
-            "`r` may not be returned — it is module state, which nothing may take, \
+            "`r` may not be returned: it is module state, which nothing may take, \
              and a return is owned",
             format!(
                 "type R = {{ s: String }} let mut r = R {{ s: \"x\" }} \
@@ -1109,7 +1109,7 @@ fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
         ),
         (
             "an arm binder",
-            "`s` may not be returned — it is read out of a place that owns it, \
+            "`s` may not be returned: it is read out of a place that owns it, \
              and a return is owned",
             format!(
                 "{TAG} fn text() -> String \
@@ -1121,13 +1121,13 @@ fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
         // at an export's signature.
         (
             "an export returns a read parameter",
-            "`q` may not be returned from an exported function — it is a `read` parameter, \
+            "`q` may not be returned from an exported function: it is a `read` parameter, \
              and the JS caller releases what it is handed",
             format!("export extern fn plain(q: String) -> String {{ return q }}{END}"),
         ),
         (
             "an export returns a projection",
-            "`d.s` may not be returned from an exported function — it is read out of a place \
+            "`d.s` may not be returned from an exported function: it is read out of a place \
              that owns it, and the JS caller releases what it is handed",
             format!(
                 "type D = {{ s: String }} \
@@ -1137,7 +1137,7 @@ fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
         ),
         (
             "an export returns an if arm",
-            "`q` may not be returned from an exported function — it is a `read` parameter, \
+            "`q` may not be returned from an exported function: it is a `read` parameter, \
              and the JS caller releases what it is handed",
             format!(
                 "export extern fn pick(p: String, q: String) -> String \
@@ -1146,7 +1146,7 @@ fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
         ),
         (
             "an export returns a match arm",
-            "`s` may not be returned from an exported function — it is read out of a place \
+            "`s` may not be returned from an exported function: it is read out of a place \
              that owns it, and the JS caller releases what it is handed",
             format!(
                 "{TAG} export extern fn text() -> String \
@@ -1235,7 +1235,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                      \x20 let xs: Array<Attr> = [Key(\"a\" + \"b\")]\n\
                      \x20 match attrKey(xs) { Some(s) => print(s), None => print(\"none\") }\n\
                      \x20 return 0\n}\n",
-            says: "`k` may not be put into `Some(..)` — it is read out of a place that owns it",
+            says: "`k` may not be put into `Some(..)`: it is read out of a place that owns it",
         },
         // The same wrap at the `return` itself, over a loop element.
         Wrapped {
@@ -1254,7 +1254,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                      \x20 let xs: Array<Attr> = [Key(\"a\" + \"b\")]\n\
                      \x20 match firstKey(xs) { Some(s) => print(s), None => print(\"n\") }\n\
                      \x20 return 0\n}\n",
-            says: "`k` may not be put into `Some(..)` — it is read out of a place that owns it",
+            says: "`k` may not be put into `Some(..)`: it is read out of a place that owns it",
         },
         // A `read` parameter's field, wrapped in a constructor at the return:
         // it seeds both sets.
@@ -1268,7 +1268,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                      \x20 let p = Pack { j: \"a\" + \"b\" }\n\
                      \x20 match f1(p) { Some(s) => print(s), None => print(\"n\") }\n\
                      \x20 return 0\n}\n",
-            says: "`p.j` may not be put into `Some(..)` — it is a `read` parameter",
+            says: "`p.j` may not be put into `Some(..)`: it is a `read` parameter",
         },
         // A struct literal at the return.
         Wrapped {
@@ -1282,7 +1282,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                      \x20 let w = f2(p)\n\
                      \x20 print(w.s)\n\
                      \x20 return 0\n}\n",
-            says: "`p.j` may not be stored into the field `Wrap.s` — it is a `read` parameter",
+            says: "`p.j` may not be stored into the field `Wrap.s`: it is a `read` parameter",
         },
         // Through an `if` arm.
         Wrapped {
@@ -1295,7 +1295,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                      \x20 let p = Pack { j: \"a\" + \"b\" }\n\
                      \x20 match f3(p, true) { Some(s) => print(s), None => print(\"n\") }\n\
                      \x20 return 0\n}\n",
-            says: "`p.j` may not be put into `Some(..)` — it is a `read` parameter",
+            says: "`p.j` may not be put into `Some(..)`: it is a `read` parameter",
         },
         // A projection of a locally built record.
         Wrapped {
@@ -1308,7 +1308,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                      fn main() -> Int64 {\n\
                      \x20 match pick() { Some(s) => print(s), None => print(\"n\") }\n\
                      \x20 return 0\n}\n",
-            says: "`d.title` may not be put into `Some(..)` — it is read out of a place that owns it",
+            says: "`d.title` may not be put into `Some(..)`: it is read out of a place that owns it",
         },
         // The same, stored into a local aggregate rather than returned.
         Wrapped {
@@ -1323,7 +1323,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                      \x20 let b = pick()\n\
                      \x20 print(b.v)\n\
                      \x20 return 0\n}\n",
-            says: "`d.title` may not be stored into the field `Box.v` — it is read out of a place that owns it",
+            says: "`d.title` may not be stored into the field `Box.v`: it is read out of a place that owns it",
         },
         // A payload binder handed straight back into its own constructor.
         Wrapped {
@@ -1339,7 +1339,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                      \x20 let b = One([\"a\" + \"b\"])\n\
                      \x20 match take(b) { One(xs) => print(\"\\{xs.length}\"), Nil => print(\"n\") }\n\
                      \x20 return 0\n}\n",
-            says: "`xs` may not be put into `One(..)` — it is a second name for the `read` parameter `b`",
+            says: "`xs` may not be put into `One(..)`: it is a second name for the `read` parameter `b`",
         },
         // An array literal.
         Wrapped {
@@ -1353,7 +1353,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                      \x20 let a = wrap(p)\n\
                      \x20 print(\"\\{a.length}\")\n\
                      \x20 return 0\n}\n",
-            says: "`p.j` may not be stored into the literal — it is a `read` parameter",
+            says: "`p.j` may not be stored into the literal: it is a `read` parameter",
         },
         // A doubly wrapped borrow is refused at the inner constructor.
         Wrapped {
@@ -1371,7 +1371,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                        return 0
 }
 ",
-            says: "`p.j` may not be put into `Some(..)` — it is a `read` parameter",
+            says: "`p.j` may not be put into `Some(..)`: it is a `read` parameter",
         },
         // A generic container's field, whose type is a parameter.
         Wrapped {
@@ -1384,7 +1384,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
                      \x20 let c = Cell { v: \"a\" + \"b\" }\n\
                      \x20 match get(c) { Some(s) => print(s), None => print(\"n\") }\n\
                      \x20 return 0\n}\n",
-            says: "`c.v` may not be put into `Some(..)` — it is a `read` parameter",
+            says: "`c.v` may not be put into `Some(..)`: it is a `read` parameter",
         },
     ]
 }
@@ -1420,7 +1420,7 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
     let cases: &[(&str, &str, bool, String)] = &[
         (
             "a drop after a partial take",
-            "`t` may not be dropped — `t.name` was taken out of it on line 1, and `drop` \
+            "`t` may not be dropped: `t.name` was taken out of it on line 1, and `drop` \
              releases the whole binding",
             true,
             format!(
@@ -1433,7 +1433,7 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
         ),
         (
             "a modify borrow read again in the same call",
-            "`xs` is passed to `f` as `modify` and read again in the same call — a `modify` \
+            "`xs` is passed to `f` as `modify` and read again in the same call: a `modify` \
              borrow is exclusive",
             true,
             format!(
@@ -1443,7 +1443,7 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
         ),
         (
             "a modify receiver read again in the same call",
-            "`t` is passed to `merge` as `modify` and read again in the same call — a `modify` \
+            "`t` is passed to `merge` as `modify` and read again in the same call: a `modify` \
              borrow is exclusive",
             true,
             format!(
@@ -1456,7 +1456,7 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
         ),
         (
             "a stored closure captures a borrow",
-            "`s` may not be captured by a closure that outlives this call — it is a `read` \
+            "`s` may not be captured by a closure that outlives this call: it is a `read` \
              parameter",
             true,
             format!(
@@ -1467,7 +1467,7 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
         ),
         (
             "a closure at a consume fn parameter captures a borrow",
-            "`q` may not be captured by a closure that outlives this call — it is a `read` \
+            "`q` may not be captured by a closure that outlives this call: it is a `read` \
              parameter",
             true,
             format!(
@@ -2509,7 +2509,7 @@ fn an_extern_fn_takes_no_export_to() {
     assert!(!ok, "accepted");
     assert_eq!(
         err,
-        "other.vyrn:1:19: an `extern fn` takes no `export to` — the JS host imports it, not a module\n"
+        "other.vyrn:1:19: an `extern fn` takes no `export to`: the JS host imports it, not a module\n"
     );
 }
 
