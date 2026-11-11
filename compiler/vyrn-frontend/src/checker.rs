@@ -6060,9 +6060,11 @@ impl<'a> Checker<'a> {
             }
             let rty = crate::types::substitute(ret, &subst);
             // `fromJson<T>(s)` calls what `std/jsondec`'s generator writes for
-            // `T`, and the solve is the one place `T` is known.
+            // `T`, and the solve is the one place `T` is known. A type
+            // parameter has no decoder; the bound refuses it per instance.
             if d.key == "fromJson" {
-                if let Some(t) = solved.get("T") {
+                let concrete = solved.get("T").filter(|t| !crate::types::mentions_param(t));
+                if let Some(t) = concrete {
                     self.acc.borrow_mut().derive.push(crate::gen::Site {
                         g: crate::loader::JSON_DECODERS.to_string(),
                         ty: t.clone(),

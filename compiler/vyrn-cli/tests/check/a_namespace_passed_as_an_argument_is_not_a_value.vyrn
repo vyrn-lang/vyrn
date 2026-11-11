@@ -1,0 +1,6 @@
+import * as ns from "std/strings"
+
+fn main() -> Int64 {
+    print(ns)
+    return 0
+}

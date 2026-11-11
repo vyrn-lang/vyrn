@@ -1,0 +1,13 @@
+type Age = Int64 where value >= 0
+
+fn decode<T>(s: String) -> Validation<T> {
+    return fromJson<T>(s)
+}
+
+fn main() -> Int64 {
+    match decode<Age>("3") {
+        Valid(a) => print("ok"),
+        Invalid(e) => print("bad"),
+    }
+    return 0
+}

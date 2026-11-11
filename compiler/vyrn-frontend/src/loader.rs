@@ -5406,8 +5406,9 @@ impl BodyVisitMut for NsResolver<'_> {
                 if matches!(form, CallForm::Protocol(_)) {
                     return true;
                 }
+                // `print(ns)` passes the namespace as a value, which it is not.
                 if let Some(Expr::Var { name: head, .. }) = args.first() {
-                    if self.is_ns(head, locals) {
+                    if *form == CallForm::Method && self.is_ns(head, locals) {
                         let head = head.clone();
                         let member = crate::prelude::method_surface(name);
                         if let Some(sym) = self.resolve_member(&head, member, l) {

@@ -158,6 +158,7 @@ compiler/vyrn-cli/tests/check/a_moved_builtin_names_the_module_it_moved_to_2.vyr
 compiler/vyrn-cli/tests/check/a_moved_builtin_names_the_module_it_moved_to_3.vyrn	0	cbf29ce484222325	20	14	2e9925f231bf6223
 compiler/vyrn-cli/tests/check/a_moved_builtin_names_the_module_it_moved_to_4.vyrn	0	cbf29ce484222325	20	14	320157d252540ff9
 compiler/vyrn-cli/tests/check/a_moved_name_is_declarable_again.vyrn	0	cbf29ce484222325	20	16	ab28a458b4884161
+compiler/vyrn-cli/tests/check/a_namespace_passed_as_an_argument_is_not_a_value.vyrn	0	cbf29ce484222325	20	15	d55aafde564b9dba
 compiler/vyrn-cli/tests/check/a_namespaced_variant_names_the_enum_that_declares_it.vyrn	0	cbf29ce484222325	20	13	8a4a46150f663c43
 compiler/vyrn-cli/tests/check/a_newline_escaped_in_a_hole_counts_its_line.vyrn	1	cb19a5d917a7de62	0	0	cbf29ce484222325
 compiler/vyrn-cli/tests/check/a_param_bounded_by_a_later_protocol_dispatches_through_it.vyrn	0	cbf29ce484222325	20	18	1d63a3e82c9d7a38
@@ -460,6 +461,7 @@ compiler/vyrn-cli/tests/check/fn_types_still_rejected_where_illegal_1.vyrn	0	cbf
 compiler/vyrn-cli/tests/check/fn_types_still_rejected_where_illegal_2.vyrn	0	cbf29ce484222325	20	20	a19fec1805df57bc
 compiler/vyrn-cli/tests/check/fn_types_still_rejected_where_illegal_3.vyrn	0	cbf29ce484222325	20	17	ad276dd5590b2a9c
 compiler/vyrn-cli/tests/check/fn_types_still_rejected_where_illegal_4.vyrn	0	cbf29ce484222325	20	17	574a9476a5577afb
+compiler/vyrn-cli/tests/check/from_json_of_a_type_parameter_says_one_sentence.vyrn	0	cbf29ce484222325	20	16	1ded33aa0c51191b
 compiler/vyrn-cli/tests/check/gen_fn_calling_extern_is_rejected.vyrn	0	cbf29ce484222325	20	17	e14bc4a20d770662
 compiler/vyrn-cli/tests/check/gen_fn_touching_module_state_is_rejected.vyrn	0	cbf29ce484222325	20	16	7b30e6604d586443
 compiler/vyrn-cli/tests/check/gen_fn_transitive_impurity_names_the_chain.vyrn	0	cbf29ce484222325	20	19	abb401ad270da2f8
