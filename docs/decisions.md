@@ -457,6 +457,7 @@ pull request.
 - `vyrn serve --workers` refuses a `handle` by the effect judgment's `module-state` verdict (`World::state_path`), which follows a function value as it follows a call. No second walk answers the question.
 - The page reloads through server-sent events, injected into dev HTML only. `EventSource` reconnects by itself and needs no client library or framing; a WebSocket needs a handshake and frames for a one-way signal, and long polling needs a request loop of its own.
 - A `vyrn` command reads `vyrn.json` and `vyrn.lock` once, into one `Project`. Every load it makes reports through it: the lock is saved, the diagnostics and warnings print one way, and `--offline` and `--deny-warnings` reach every load.
+- A diagnostic names a std file `std/<name>.vyrn`, as a `panic` site does, so its text holds no machine's directory (`Diagnostic::shown_file`). A user file keeps the spelling it was loaded by.
 - Tools are pinned per project in the same lock, and bytes are shared per user. A pinned tool that cannot resolve fails; it never falls back to `PATH`.
 - clang is discovered and recorded, never pinned, because it links against the host's libc.
 - Vyrn does not build tools from source, wrap a package manager, or take a crate for curl, git or tar.

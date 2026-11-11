@@ -2649,7 +2649,7 @@ fn a_refused_join_draws_one_sentence_and_names_no_temporary() {
 }
 
 /// A std module whose own load refuses one of its bodies names that module's
-/// file, not the importer's.
+/// file, not the importer's, as `std/<name>.vyrn` wherever the std copy lies.
 #[test]
 fn a_std_modules_own_refusal_names_its_file() {
     let dir = common::scratch("std-own-refusal");
@@ -2682,8 +2682,5 @@ fn a_std_modules_own_refusal_names_its_file() {
     let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
     let says = format!("strings.vyrn:{line}:0: `bad` declared Int64 but initializer is String\n");
     assert!(!out.status.success(), "accepted");
-    assert!(
-        err.ends_with(&says) && !err.starts_with("main.vyrn"),
-        "{err}"
-    );
+    assert_eq!(err, format!("std/{says}"));
 }

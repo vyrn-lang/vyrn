@@ -121,11 +121,11 @@ impl Diagnostic {
         }
     }
 
-    /// The file a reader sees the diagnostic in: `root` when it names none, and
-    /// a written module's key with its separators spelled
-    /// ([`crate::loader::readable`]), so no printed line holds a control byte.
-    pub fn shown_file(&self, root: &str) -> String {
-        crate::loader::readable(self.file.as_deref().unwrap_or(root))
+    /// The file a reader sees the diagnostic in, `root` when it names none, as
+    /// [`crate::loader::shown_key`] spells it under `std_root`: no printed line
+    /// holds a control byte or the machine's std directory.
+    pub fn shown_file(&self, root: &str, std_root: Option<&str>) -> String {
+        crate::loader::shown_key(self.file.as_deref().unwrap_or(root), std_root)
     }
 
     /// Places the diagnostic in `file`; `None` means the root module.
