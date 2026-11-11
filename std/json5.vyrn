@@ -190,6 +190,7 @@ fn parseString5(p: modify P5, q: Int64) -> Result<String, String> {
             return Err(errAt(p, "unescaped line break in string (JSON5 continues a line with a trailing backslash)"))
         }
         if b == '\\' {
+            let at = p.col
             step(p)
             let e = cur(p)
             if e == 'b' {
@@ -223,7 +224,12 @@ fn parseString5(p: modify P5, q: Int64) -> Result<String, String> {
                 if isHex(h1) == false || isHex(h2) == false {
                     return Err(errAt(p, "invalid \\x escape: expected 2 hex digits"))
                 }
-                pushUtf8(out, hexVal(h1) * 16 + hexVal(h2))
+                let v = hexVal(h1) * 16 + hexVal(h2)
+                if v == 0 {
+                    p.col = at
+                    return Err(errAt(p, "string holds \\x00, which a String cannot hold"))
+                }
+                pushUtf8(out, v)
                 step(p)
                 step(p)
             } else if e == 'u' {
@@ -242,6 +248,11 @@ fn parseString5(p: modify P5, q: Int64) -> Result<String, String> {
                     pushUtf8(out, 65536 + (hi - 55296) * 1024 + (lo - 56320))
                 } else if hi >= 56320 && hi <= 57343 {
                     return Err(errAt(p, "unexpected low surrogate in \\u escape"))
+                } else if hi == 0 {
+                    // A String holds no NUL; the refusal names the backslash, as
+                    // std/jsonread's does.
+                    p.col = at
+                    return Err(errAt(p, "string holds \\u0000, which a String cannot hold"))
                 } else {
                     pushUtf8(out, hi)
                 }
@@ -602,4 +613,9 @@ test "the named refusals, and the strictness holes stay closed" {
     assert(parseErr("'unterminated") != "parsed")
     assert(parseErr("/* open") != "parsed")
     assert(parseErr("'\\0'") != "parsed")
+}
+
+test "a NUL escape is refused at its backslash" {
+    assert(parseErr("[\"a\\u0000\"]") == "line 1, col 4: string holds \\u0000, which a String cannot hold")
+    assert(parseErr("'\\x00'") == "line 1, col 2: string holds \\x00, which a String cannot hold")
 }
