@@ -31,9 +31,10 @@ fn threads() -> usize {
 /// ([`offer`]), and the cut was not measured again with them.
 const SERIAL_BELOW: usize = 600;
 
-/// Returns `work` of each of `items`, in `items`' order, run on the calling
-/// thread and up to [`threads`] less one helpers ([`offer`]), or on the
-/// calling thread alone when the weights sum below [`SERIAL_BELOW`].
+/// Returns `work` of each of `items`, in `items`' order, run on up to
+/// [`threads`] of the [`helpers`], or on the calling thread alone when the
+/// weights sum below [`SERIAL_BELOW`]. A call made by a helper, inside a
+/// worker, runs one worker itself and offers the rest.
 /// Workers take items from one counter, heaviest first by `weight`, so the
 /// longest body does not start last; `VYRN_SHUFFLE=<seed>` permutes that
 /// order, for the test that holds every output independent of it. Each
@@ -100,7 +101,12 @@ pub fn in_parallel_keep<T: Sync, S: Send, R: Send>(
         done
     } else {
         let tag = crate::prof::tag();
-        let ran: Vec<Mutex<Option<Ran<R, S>>>> = (1..n).map(|_| Mutex::new(None)).collect();
+        // A helper has the deep stack a worker needs; any other caller may
+        // not (a test thread overflowed in a debug build), so it offers every
+        // share and waits. With no helper started it has to work itself.
+        let beside = HELPER.get() || helpers() == 0;
+        let ran: Vec<Mutex<Option<Ran<R, S>>>> =
+            (usize::from(beside)..n).map(|_| Mutex::new(None)).collect();
         let offers: Vec<Arc<Offer>> = (ran.iter())
             .map(|slot| {
                 let job = || {
@@ -122,10 +128,17 @@ pub fn in_parallel_keep<T: Sync, S: Send, R: Send>(
                 })
             })
             .collect();
-        let reclaim = Reclaim(&offers);
+        let reclaim = Reclaim {
+            offers: &offers,
+            take_back: beside,
+        };
         offer(&offers);
-        let (mut done, state) = worker();
-        keep(state);
+        let mut done = Vec::new();
+        if beside {
+            let (d, state) = worker();
+            done = d;
+            keep(state);
+        }
         drop(reclaim);
         for slot in ran {
             match slot.into_inner().unwrap_or_else(PoisonError::into_inner) {
@@ -155,9 +168,10 @@ type Ran<R, S> = std::thread::Result<(
 )>;
 
 /// One worker an [`in_parallel`] call offers the helpers. The first helper to
-/// take `run` runs it, then sets `done`. The call takes back each offer no
-/// helper took, so it waits only for a helper running its work, and a call
-/// made inside a worker finishes on its own thread when every helper is busy.
+/// take `run` runs it, then sets `done`. A call made inside a worker takes
+/// back each offer no helper took ([`Reclaim`]), so it waits only for a
+/// helper running its work and finishes on its own thread when every helper
+/// is busy.
 struct Offer {
     run: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     done: Mutex<bool>,
@@ -168,22 +182,33 @@ struct Offer {
 static OFFERS: Mutex<VecDeque<Arc<Offer>>> = Mutex::new(VecDeque::new());
 static OFFERED: Condvar = Condvar::new();
 
-/// Queues `offers`. The first call starts the helpers, [`threads`] less one,
-/// which live as long as the process, because starting them per call costs
-/// about 0.4 ms. A helper that fails to start leaves its share to the
-/// calling threads.
+thread_local! {
+    /// Whether this thread is one of [`helpers`].
+    static HELPER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Starts the helpers on the first call, [`threads`] of them, and returns how
+/// many started. They live as long as the process, because starting them per
+/// call costs about 0.4 ms.
+fn helpers() -> usize {
+    static STARTED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *STARTED.get_or_init(|| {
+        (0..threads())
+            .filter(|_| {
+                // A worker recurses as deep as the CLI's main thread, so it
+                // gets that deep stack, not the platform default (a debug
+                // build overflowed on `limits.rs`'s wide frames).
+                std::thread::Builder::new()
+                    .stack_size(crate::trap::DEEP_STACK_BYTES)
+                    .spawn(help)
+                    .is_ok()
+            })
+            .count()
+    })
+}
+
+/// Queues `offers` for the [`helpers`].
 fn offer(offers: &[Arc<Offer>]) {
-    static STARTED: std::sync::Once = std::sync::Once::new();
-    STARTED.call_once(|| {
-        for _ in 1..threads() {
-            // A worker recurses as deep as the calling thread, so it gets the
-            // CLI's deep stack, not the platform default (a debug build
-            // overflowed on `limits.rs`'s wide frames).
-            let _ = std::thread::Builder::new()
-                .stack_size(crate::trap::DEEP_STACK_BYTES)
-                .spawn(help);
-        }
-    });
     lock(&OFFERS).extend(offers.iter().cloned());
     for _ in offers {
         OFFERED.notify_one();
@@ -193,6 +218,7 @@ fn offer(offers: &[Arc<Offer>]) {
 /// A helper's loop: takes the oldest offer and runs it, unless its call took
 /// it back first.
 fn help() -> ! {
+    HELPER.set(true);
     loop {
         let mut queue = lock(&OFFERS);
         let offer = loop {
@@ -211,14 +237,19 @@ fn help() -> ! {
     }
 }
 
-/// On drop, takes back each offer no helper took and waits for each one a
-/// helper took to end.
-struct Reclaim<'a>(&'a [Arc<Offer>]);
+/// On drop, waits for each offer a helper took to end. With `take_back` it
+/// first takes back each offer no helper took yet, which is right only when
+/// the caller ran a worker itself, so every item is done; without it, it
+/// waits for a helper to take and end every offer.
+struct Reclaim<'a> {
+    offers: &'a [Arc<Offer>],
+    take_back: bool,
+}
 
 impl Drop for Reclaim<'_> {
     fn drop(&mut self) {
-        for o in self.0 {
-            if lock(&o.run).take().is_some() {
+        for o in self.offers {
+            if self.take_back && lock(&o.run).take().is_some() {
                 continue;
             }
             let mut done = lock(&o.done);
