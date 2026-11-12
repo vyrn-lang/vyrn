@@ -109,6 +109,7 @@ Fast: before you claim speed or spend lines on it, write down which layer the ch
 - Set `TMP` and `TEMP` to a shallow directory of your own before any cargo test.
 - One cargo command at a time per worktree.
 - Run every command in the foreground under `timeout 600`, output redirected to a file, then read the file. Never pipe a suite's output: a leaked child holds the pipe open and the run looks hung.
+- A `timeout` that kills cargo mid-compile corrupts the incremental cache: the next link fails with LNK2019. So give a cargo command a timeout longer than the build, and never kill one that is compiling. If the tool moves it to the background, edit nothing and start no second cargo command until it ends. To recover, delete `target/release/incremental/vyrn*-*` and build again.
 - A teammate is not woken when a background command ends. So never `run_in_background`, `&`, `nohup`, a marker file, a poll loop, `sleep`, `tail -f`, or any call whose purpose is to pass time. Each has left a track idle for half an hour.
 - If you are waiting, list the processes whose command line names your worktree. If none is alive, nothing is coming: read your log. A log that stopped growing is not hung until you have checked the process's start time and CPU.
 - Stop a background process by its process tree, then list what is left. Kill only a process whose command line names your worktree; eight tracks share this machine.
