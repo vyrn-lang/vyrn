@@ -169,8 +169,10 @@ pull request.
 - A `let` of a place read from a `read` parameter is a borrow. Writing through the root while it lives is refused, and the fix names `.copy()`.
 - When unsure, the compiler leaks rather than double-frees. A leak is a counted row; a double free is a crash.
 - The system is affine: an undisposed value is released at scope exit. `impl MustUse` is an opt-in obligation, separate from `consume`, and it passes through containers.
+- A must-use obligation passes through every container a type names: arrays, maps, `Option`, `Result`, record fields and enum payloads (decided 2026-11-12 by the lead).
 - `Stream<T>` is linear: consume it with `for`, return it, or `close()` it. It cannot be stored in a field, element, type argument or module state.
 - A must-use obligation follows ownership: a `consume` parameter, a return, `drop`, `close` and a `for` over a stream discharge it; a `read` or `modify` parameter borrows it and owes nothing; a must-use temporary fills only a taking position (decided 2026-11-12 by the lead).
+- A store may not displace a held must-use value; a name bound to a value made from no parts (`None`, `[]`) holds none (decided 2026-11-12 by the lead).
 - A must-use refusal quotes the binding's resolved type (`Stream<Int64>`), not the producer's spelling. A generic body is judged per instance and refused once per binding.
 - A generic parameter does not launder an obligation: a linear value passed through `T` is owed like any other linear binding.
 - A self-referring type declares `impl Owned`. The declaration gives the structural release walk its bottom.

@@ -516,6 +516,39 @@ fn a_field_read_through_a_dead_slots_handle_traps_in_at() {
     );
 }
 
+/// `drop` of a generic container with a declared `release` calls that
+/// release at the binding's type, so the instance is lowered and the free
+/// audit sees each buffer released once.
+#[test]
+fn a_drop_of_a_slots_calls_its_release() {
+    let dir = scratch("drop-slots");
+    let file = dir.join("drop.vyrn");
+    std::fs::write(
+        &file,
+        "import { newSlots, insert, count } from \"std/slots\"\n\
+         fn main() -> Int64 {\n\
+         let mut s = newSlots<String>()\n\
+         let h = insert(s, \"a\".copy())\n\
+         print(count(s))\n\
+         drop s\n\
+         return 0\n\
+         }\n",
+    )
+    .unwrap();
+    let out = vyrn()
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    assert_eq!(
+        (out.status.code(), norm(&out.stdout).as_str()),
+        (Some(0), "1\n"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// A record with two columns, a module-state copy, and the writers the
 /// witnesses below call inside a loop that reads `c.x`.
 const COLUMNS: &str = "type C = { x: Array<Int64>, y: Array<Int64> }\n\

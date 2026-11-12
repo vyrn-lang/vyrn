@@ -223,6 +223,23 @@ fn last_owner(top: &Body) -> std::collections::HashSet<NodeId> {
     out
 }
 
+/// Whether `value` is the parser's write-back form over a part of `root`: a
+/// rebuilding call whose receiver is `root.f` or `root[i]`.
+fn writes_back(value: &Expr, root: &str) -> bool {
+    let Expr::Call { name, args, .. } = value else {
+        return false;
+    };
+    let rooted = |e: &Expr| matches!(e, Expr::Var { name, .. } if name == root);
+    vyrn_frontend::prelude::rebuilds(name)
+        && match args.first() {
+            Some(Expr::Field { expr, .. }) => rooted(expr),
+            Some(Expr::Call { name, args, .. }) => {
+                name == "@at" && args.first().is_some_and(rooted)
+            }
+            _ => false,
+        }
+}
+
 /// The name a place is rooted at, as a value. `None` for module state.
 fn root_name(p: &Place) -> Option<Val> {
     match p {
@@ -264,6 +281,11 @@ impl Reads {
                 self.deep[n] = depth;
                 self.handed[n] |= matches!(u, Use::Hand | Use::Key);
             });
+            // The reader's `drop` hands the value on; a placed release has
+            // line 0 and is the plan's.
+            if let St::Drop(n, _, line, _) = st {
+                self.handed[n.index()] |= *line > 0;
+            }
             // A take out of a sub-place hands that part on, so what is left
             // is this turn's: `out.push(consume p.value)` in a `for p in ..`.
             if let St::Let(_, Rhs::Take(p))
@@ -1330,6 +1352,9 @@ struct Unreached {
     i: Name,
     elem: Type,
     line: usize,
+    /// For a must-use element, the loop variable and the container as the
+    /// reader wrote them, which a refusal of the unreached elements names.
+    words: Option<(String, String)>,
 }
 
 struct Builder<'a> {
@@ -1586,6 +1611,8 @@ impl<'a> Builder<'a> {
             grows: false,
             path: None,
             for_consume: false,
+            turn_owns: false,
+            unreached: None,
             fields: Vec::new(),
             loop_var: None,
             walked: None,
@@ -3596,10 +3623,14 @@ impl<'a> Builder<'a> {
                 let ic = &self.body.names[owner.unwrap_or(it).index()];
                 let loops_alone = !ic.borrow && !ic.bound_by_let;
                 // A projection yields a place in the container, never its own
-                // element.
+                // element. A loop that takes its container owns each
+                // must-use element, which the body disposes of.
                 let owned = self.owns(&ety)
                     && !projected
-                    && (streaming || loops_alone && self.seed.contains(&ekey));
+                    && (streaming
+                        || loops_alone
+                            && (self.seed.contains(&ekey)
+                                || *consuming && self.proto.must_use(&ety)));
                 // Where every element left through the variable, the
                 // container's release frees the buffer alone (field 0 of a
                 // growable array's triple; other containers have no such
@@ -3612,18 +3643,25 @@ impl<'a> Builder<'a> {
                     )
                 {
                     self.body.loop_buffers.push(sid);
+                    let words = self.proto.must_use(&ety).then(|| {
+                        let of =
+                            vyrn_frontend::ast::place_path(iter).map_or("..".into(), |(_, p)| p);
+                        (var.clone(), of)
+                    });
                     unreached = counter.map(|(n, i)| Unreached {
                         it,
                         i,
                         n,
                         elem: ety.clone(),
                         line: *line,
+                        words,
                     });
                 }
                 // Before the variable: each turn binds its own element, so it
                 // may leave a join arm; the container, below the mark, may not.
                 self.frame.loop_marks.push(self.body.names.len());
                 let x = self.name(var, ety, owned, *line);
+                self.body.names[x.index()].turn_owns = owned;
                 self.body.cands.push((ekey, x, Cand::Elem));
                 // The container outlives the loop, so a refusal names the
                 // variable as a loop variable, as the checker does. A projected
@@ -3821,9 +3859,14 @@ impl<'a> Builder<'a> {
         )
     }
 
-    fn old_for(&self, ty: &Type, releases: bool) -> Old {
+    /// What a store of `value` into a part of `root` displaces. The
+    /// write-back form (`p.xs.push(v)` is `p.xs = @push(p.xs, v)`) hands the
+    /// part's own value back, as `xs = xs.push(v)` does for a name.
+    fn old_for(&self, ty: &Type, value: &Expr, root: &str, releases: bool) -> Old {
         if !self.owns(ty) {
             Old::Nothing
+        } else if writes_back(value, root) {
+            Old::Transferred
         } else if releases {
             Old::Released
         } else {
@@ -3897,6 +3940,10 @@ impl<'a> Builder<'a> {
             },
         ];
         let e = self.temp(u.elem.clone(), u.line);
+        if let Some((v, of)) = &u.words {
+            self.body.names[e.index()].path = Some(v.clone());
+            self.body.names[e.index()].unreached = Some(of.clone());
+        }
         l.push(St::Let(
             e,
             Rhs::Read(Place::Elem(Box::new(Place::Name(u.it)), Val::Name(u.i))),
@@ -3970,7 +4017,7 @@ impl<'a> Builder<'a> {
         out.push(St::Store {
             place: Place::Field(Box::new(base), field.to_string()),
             value: v,
-            old: self.old_for(&fty, releases),
+            old: self.old_for(&fty, value, quoted, releases),
             line,
             site: Site::Node(sid),
             releases,
@@ -4184,7 +4231,7 @@ impl<'a> Builder<'a> {
         out.push(St::Store {
             place,
             value: v,
-            old: self.old_for(&ety, releases),
+            old: self.old_for(&ety, value, name, releases),
             line,
             site,
             releases,

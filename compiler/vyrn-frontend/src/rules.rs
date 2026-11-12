@@ -1124,6 +1124,12 @@ rules! {
     ReleasedAround { info, h } "{info} is released around `{h}` on a path that did not take it";
     Overwritten { info }
         "{info} is overwritten while still held: the old value is never released";
+    // A store releases what it displaces, and a release is no disposal of a
+    // must-use value.
+    StoreOverMustUse { s }
+        "`{s}` holds a must-use value, and a store over it would release it undisposed"
+        fix "dispose of the old value first: `drop` it, `close` it, or hand it to a `consume` \
+            parameter";
     ReleasedBeforeStore { info }
         "{info} is released before a store although it holds nothing";
     HeldAtExit { info, exit } "{info} is still held at {exit}: no release is placed for it";
@@ -1165,11 +1171,18 @@ rules! {
         "`{ty}` declares `impl MustUse`, so a value of it must be handed on by name on every \
         path: passed to a `consume` parameter, forwarded by returning it, or released with \
         `drop {s}`";
-    // A container: the reader wrote `Array<Txn>` and the row is `Txn`'s.
+    // A holder: the reader wrote `Array<Txn>` or a record with a `Txn` field,
+    // and the row is `Txn`'s.
     OwedHeld { by, ty, s }
-        "`{by}` declares `impl MustUse` and a `{ty}` holds one, so the container must be \
+        "`{by}` declares `impl MustUse` and a `{ty}` holds one, so the `{ty}` must be \
         handed on by name on every path: passed to a `consume` parameter, forwarded by \
-        returning it, or released with `drop {s}`, which releases each element";
+        returning it, or released with `drop {s}`, which releases what it holds";
+    // A loop that owns its must-use elements, left before every turn ran.
+    LeftUnreached { s, of }
+        "`{s}` does not reach every element of `{of}`: a `break` or a `return` leaves the rest \
+        undisposed"
+        fix "let the loop run to its end, or take the elements one at a time with `pop` in a \
+            `while` loop";
     // A temporary has no name to dispose of, so only a taking position
     // discharges it.
     OwedTemporary { ty }

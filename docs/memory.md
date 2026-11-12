@@ -200,7 +200,13 @@ once on every path, by passing it to a `consume` parameter, returning it, or
 the obligation and the callee may not dispose of it. `Stream<T>` carries the
 same obligation, and `for .. in` and `close(s)` take it as a `consume`
 parameter does. A must-use temporary fills only a position that takes it. A
-path that never disposes of it, or disposes of it twice, is refused.
+store over a must-use value still held is refused: dispose of the old value
+first. A name bound to a value with no parts, such as `None` or `[]`, holds
+nothing to dispose of. `for t in consume xs` over a must-use element owns
+each `t`: the body disposes of it, and a `break` or `return` that leaves
+elements unreached is refused. A record, an enum, an `Option` or a `Result`
+that holds a must-use value is itself must-use. A path that never disposes of
+a must-use value, or disposes of it twice, is refused.
 
 ## A region frees a group at once
 
@@ -301,6 +307,8 @@ one owner is not enough:
 | A `consume` argument passed again in the same call | `` `x` is consumed by `g(..)`, and `x` is passed to the same call `` |
 | A whole use of a value with a hole | `` `p.name` was taken out of `p` here `` |
 | A must-use value never disposed, or disposed twice | `` `s` is a `Stream<Int64>` and is never disposed `` |
+| A `break` out of a loop that owns must-use elements | `` `t` does not reach every element of `xs`: a `break` or a `return` leaves the rest undisposed `` |
+| A store over a held must-use value | `` `t` holds a must-use value, and a store over it would release it undisposed `` |
 | A region value that escapes the region | ``cannot store a heap value into `kept`, which outlives the enclosing `region` `` |
 | A take of module state | `` module state `names` may not be passed to a `consume` parameter `` |
 

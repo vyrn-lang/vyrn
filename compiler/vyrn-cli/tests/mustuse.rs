@@ -464,7 +464,13 @@ fn a_must_use_obligation_follows_ownership() {
             Ok("2\nend a\nend b"),
         ),
     ];
-    let dir = common::scratch("mustuse-owner");
+    judged("mustuse-owner", cases);
+}
+
+/// Checks each program; a refused one names its first sentence, and an
+/// accepted one runs under the free audit and prints `Ok`'s text.
+fn judged<const N: usize>(scratch: &str, cases: [(&str, String, Result<&str, &str>); N]) {
+    let dir = common::scratch(scratch);
     let mut bad = Vec::new();
     for (name, src, want) in cases {
         let file = dir.join(format!("{name}.vyrn"));
@@ -539,4 +545,192 @@ fn a_must_use_value_is_dropped_whatever_it_holds() {
         e.contains("`t` is a `Tok` and is disposed more than once"),
         "{e}"
     );
+}
+
+/// A store releases what it displaces, so a store over a held must-use value
+/// is refused. A name bound to a value made from no parts holds none, and the
+/// write-back of a rebuild under a `modify` root hands the old value back.
+#[test]
+fn a_store_over_a_held_must_use_value_is_refused() {
+    let held = "`t` holds a must-use value, and a store over it would release it undisposed";
+    let elem = "`xs[..]` holds a must-use value, and a store over it would release it undisposed";
+    let cases: [(&str, String, Result<&str, &str>); 7] = [
+        (
+            "name",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut t = begin(\"a\") t = begin(\"b\") drop t \
+                 return 0 }}"
+            ),
+            Err(held),
+        ),
+        (
+            "element",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut xs = pool() xs[0] = begin(\"b\") drop xs \
+                 return 0 }}"
+            ),
+            Err(elem),
+        ),
+        (
+            "nullary",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut xs: Array<Option<Txn>> = [] \
+                 xs.push(Some(begin(\"a\"))) xs[0] = None drop xs return 0 }}"
+            ),
+            Err(elem),
+        ),
+        (
+            "heapless",
+            "type Tok = { id: Int64 } impl MustUse for Tok {} \
+             fn main() -> Int64 { let mut t = Tok { id: 1 } t = Tok { id: 2 } drop t return 0 }"
+                .to_string(),
+            Err(held),
+        ),
+        (
+            "moved",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut t = begin(\"a\") drop t t = begin(\"b\") \
+                 drop t return 0 }}"
+            ),
+            Ok("end a\nend b"),
+        ),
+        (
+            "vacant",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut o: Option<Txn> = None \
+                 o = Some(begin(\"a\")) drop o return 0 }}"
+            ),
+            Ok("end a"),
+        ),
+        (
+            "write-back",
+            format!(
+                "{TXN} type Pool = {{ xs: Array<Txn> }} \
+                 fn add(p: modify Pool) {{ p.xs.push(begin(\"b\")) }} \
+                 fn main() -> Int64 {{ let mut p = Pool {{ xs: pool() }} add(p) \
+                 print(p.xs.length) let xs = consume p.xs drop xs drop p return 0 }}"
+            ),
+            Ok("2\nend a\nend b"),
+        ),
+    ];
+    judged("mustuse-store", cases);
+}
+
+/// A `for` that takes its container owns each must-use element: the body
+/// disposes of it on every path, and a `break` or a `return` that leaves
+/// elements no turn reached is refused in the loop's words.
+#[test]
+fn a_loop_that_takes_its_container_owns_each_must_use_element() {
+    let left = "`t` does not reach every element of `xs`: a `break` or a `return` leaves the \
+                rest undisposed";
+    let cases: [(&str, String, Result<&str, &str>); 6] = [
+        (
+            "read",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let xs = pool() let mut n = 0 \
+                 for t in consume xs {{ n = n + t.ops.length }} return n }}"
+            ),
+            Err("`t` is a `Txn` and is never disposed"),
+        ),
+        (
+            "one-branch",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let xs = pool() \
+                 for t in consume xs {{ if t.label == \"b\" {{ finish(t) }} }} return 0 }}"
+            ),
+            Err("`t` is a `Txn` and is never disposed"),
+        ),
+        (
+            "break",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let xs = pool() \
+                 for t in consume xs {{ finish(t) break }} return 0 }}"
+            ),
+            Err(left),
+        ),
+        (
+            "return",
+            format!(
+                "{TXN} fn first() -> Int64 {{ let xs = pool() \
+                 for t in consume xs {{ finish(t) return 1 }} return 0 }} \
+                 fn main() -> Int64 {{ return first() }}"
+            ),
+            Err(left),
+        ),
+        (
+            "drop",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let xs = pool() \
+                 for t in consume xs {{ drop t }} return 0 }}"
+            ),
+            Ok("end a"),
+        ),
+        (
+            "pop",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut xs = pool() xs.push(begin(\"b\")) \
+                 while xs.length > 0 {{ if let Some(t) = xs.pop() {{ finish(t) }} break }} \
+                 drop xs return 0 }}"
+            ),
+            Ok("end b\nend a"),
+        ),
+    ];
+    judged("mustuse-loop", cases);
+}
+
+/// A record field and an enum payload hold their part's obligation, as an
+/// array's element does, so the holder is disposed of by name.
+#[test]
+fn a_record_or_an_enum_holding_a_must_use_value_is_must_use() {
+    let cases: [(&str, String, Result<&str, &str>); 4] = [
+        (
+            "record",
+            format!(
+                "{TXN} type Pool = {{ n: Int64, xs: Array<Txn> }} \
+                 fn main() -> Int64 {{ let p = Pool {{ n: 1, xs: pool() }} return p.n }}"
+            ),
+            Err("`p` is a `Pool` and is never disposed"),
+        ),
+        (
+            "enum",
+            format!(
+                "{TXN} type Slot = enum {{ Empty, Full(Txn) }} \
+                 fn main() -> Int64 {{ let s = Full(begin(\"a\")) return 0 }}"
+            ),
+            Err("`s` is a `Slot` and is never disposed"),
+        ),
+        (
+            "drop",
+            format!(
+                "{TXN} type Pool = {{ n: Int64, xs: Array<Txn> }} \
+                 fn main() -> Int64 {{ let p = Pool {{ n: 1, xs: pool() }} drop p return 0 }}"
+            ),
+            Ok("end a"),
+        ),
+        (
+            "taken",
+            format!(
+                "{TXN} type Pool = {{ n: Int64, xs: Array<Txn> }} \
+                 fn main() -> Int64 {{ let mut p = Pool {{ n: 1, xs: pool() }} \
+                 let xs = consume p.xs drop xs drop p return 0 }}"
+            ),
+            Ok("end a"),
+        ),
+    ];
+    judged("mustuse-holder", cases);
+}
+
+/// A `drop` of the variable of a loop that takes its container hands the
+/// element on, as a `consume` argument does, so each turn owns its element.
+#[test]
+fn a_drop_in_a_loop_that_takes_its_container_releases_the_element_once() {
+    let cases: [(&str, String, Result<&str, &str>); 1] = [(
+        "drop",
+        "fn main() -> Int64 { let mut xs: Array<String> = [] xs.push(\"a\".copy()) \
+         xs.push(\"bc\".copy()) let mut n = 0 for s in consume xs { if s == \"a\" { drop s } \
+         else { n = n + s.byteLength } } print(n) return 0 }"
+            .to_string(),
+        Ok("2"),
+    )];
+    judged("mustuse-drop-elem", cases);
 }

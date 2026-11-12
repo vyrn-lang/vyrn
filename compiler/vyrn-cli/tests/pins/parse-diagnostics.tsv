@@ -889,6 +889,8 @@ compiler/vyrn-cli/tests/refusals/r85_schema_of_a_type_parameter.vyrn	0	cbf29ce48
 compiler/vyrn-cli/tests/refusals/r86_a_read_parameter_does_not_release_a_must_use_value.vyrn	0	cbf29ce484222325	20	17	20a5d0504d864588
 compiler/vyrn-cli/tests/refusals/r87_a_for_over_a_read_stream_parameter.vyrn	0	cbf29ce484222325	20	18	b43297f432c8d9ac
 compiler/vyrn-cli/tests/refusals/r88_a_must_use_temporary_in_a_read_position.vyrn	0	cbf29ce484222325	20	18	8cd8b5d57399e2bb
+compiler/vyrn-cli/tests/refusals/r89_a_store_over_a_held_must_use_value.vyrn	0	cbf29ce484222325	20	20	ad0ad2f32a8a0202
+compiler/vyrn-cli/tests/refusals/r90_a_break_out_of_a_loop_that_owns_must_use_elements.vyrn	0	cbf29ce484222325	20	18	09c3e359b39504a4
 compiler/vyrn-cli/tests/shapes/a-body-taken-whole-lifts-a-lambda-that-captures-a-later-let.vyrn	0	cbf29ce484222325	20	16	414820b60f79ac03
 compiler/vyrn-cli/tests/shapes/a-borrow-of-a-field-whose-root-is-consumed-after-the-borrow-ends.vyrn	0	cbf29ce484222325	20	14	0a6ed13d107754e1
 compiler/vyrn-cli/tests/shapes/a-borrow-rebound-in-a-let-mut-is-a-copy.vyrn	0	cbf29ce484222325	20	17	cbc0ba2678b9e985

@@ -8,4 +8,4 @@ mustuse_abandoned.vyrn:38:0: `b` is a `Txn` and is disposed more than once
 mustuse_abandoned.vyrn:42:0: `c` is a `Txn` and is never disposed
   note: `Txn` declares `impl MustUse`, so a value of it must be handed on by name on every path: passed to a `consume` parameter, forwarded by returning it, or released with `drop c`
 mustuse_abandoned.vyrn:47:0: `pool` is an `Array<Txn>` and is never disposed
-  note: `Txn` declares `impl MustUse` and a `Array<Txn>` holds one, so the container must be handed on by name on every path: passed to a `consume` parameter, forwarded by returning it, or released with `drop pool`, which releases each element
+  note: `Txn` declares `impl MustUse` and a `Array<Txn>` holds one, so the `Array<Txn>` must be handed on by name on every path: passed to a `consume` parameter, forwarded by returning it, or released with `drop pool`, which releases what it holds

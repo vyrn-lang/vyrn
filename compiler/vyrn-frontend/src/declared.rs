@@ -96,31 +96,47 @@ impl Owned {
     /// type, whose release does not discharge it. A declared row wins;
     /// otherwise the resolved type answers, seeded by `Stream`.
     pub fn linear_kind(&self, ty: &Type) -> Option<Linear> {
-        if let Some(k) = crate::types::type_key(ty).filter(|k| self.linear.contains(k)) {
-            return Some(Linear::Declared(k));
-        }
-        // A self-referring type has no bottom to walk; its obligation goes
-        // unseen rather than the walk not returning.
-        if self_referring(ty, &*self.types).is_some() {
-            return None;
-        }
-        match crate::types::resolve(ty, &*self.types) {
+        self.linear_within(ty, None)
+    }
+
+    /// [`Owned::linear_kind`] under the declared types `up` is walking, so a
+    /// self-referring type ends where it refers back. The walk allocates
+    /// nothing a type that holds no obligation needs.
+    fn linear_within(&self, ty: &Type, up: Option<&Walked<'_>>) -> Option<Linear> {
+        let here;
+        let up = match ty {
+            // A built-in type takes no impl, so only a declared name has a row.
+            Type::Named(n) | Type::App(n, _) => {
+                if self.linear.contains(n) {
+                    return Some(Linear::Declared(n.clone()));
+                }
+                if std::iter::successors(up, |w| w.up).any(|w| w.name == n.as_str()) {
+                    return None;
+                }
+                here = Walked { name: n, up };
+                Some(&here)
+            }
+            _ => up,
+        };
+        // A holder answers what it holds, and its release releases that, so
+        // `drop` discharges each part. A type parameter answers `None`, so a
+        // generic body carries no obligation.
+        let any = |ts: &mut dyn Iterator<Item = &Type>| {
+            for t in ts {
+                if let Some(l) = self.linear_within(t, up) {
+                    return Some(l);
+                }
+            }
+            None
+        };
+        match &*crate::types::resolved(ty, &*self.types) {
             Type::Stream(_) => Some(Linear::Stream),
-            // A container answers what its element does; containers
-            // release their elements, so `drop` discharges each. A record field
-            // or a declared enum payload does not oblige its holder: the author
-            // writes `impl MustUse` on it. A type parameter answers `None`, so
-            // generic containers carry no obligation.
-            Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => self.linear_kind(&e),
-            Type::Map(a, b) => self.linear_kind(&a).or_else(|| self.linear_kind(&b)),
-            // `Option` and `Result` answer through their payloads.
-            ref r if crate::types::option_payload(r).is_some() => {
-                self.linear_kind(crate::types::option_payload(r).unwrap())
+            Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => {
+                any(&mut std::iter::once(&**e))
             }
-            ref r if crate::types::result_payloads(r).is_some() => {
-                let (a, b) = crate::types::result_payloads(r).unwrap();
-                self.linear_kind(a).or_else(|| self.linear_kind(b))
-            }
+            Type::Map(a, b) => any(&mut [&**a, &**b].into_iter()),
+            Type::Record(fs) => any(&mut fs.iter().map(|f| &f.ty)),
+            Type::Enum(vs) => any(&mut vs.iter().flat_map(|v| &v.payload)),
             _ => None,
         }
     }
@@ -540,6 +556,12 @@ impl ArgCaps {
     }
 }
 
+/// One declared type [`Owned::linear_kind`] is inside, and the ones around it.
+struct Walked<'a> {
+    name: &'a str,
+    up: Option<&'a Walked<'a>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,6 +606,27 @@ mod tests {
             Owned::default().linear_kind(&Type::Stream(Box::new(Type::Int))),
             Some(Linear::Stream)
         );
+    }
+
+    /// A record field and an enum payload are holders like an array: each
+    /// passes its part's obligation on, a self-referring one included.
+    #[test]
+    fn a_record_or_an_enum_holding_a_must_use_value_is_must_use() {
+        let src = "protocol MustUse {} \
+                   type Txn = { id: Int64 } \
+                   impl MustUse for Txn {} \
+                   type Pool = { n: Int64, xs: Array<Txn> } \
+                   type Slot = enum { Empty, Full(Txn) } \
+                   type Node = { t: Txn, next: Option<Node> } \
+                   type Plain = { n: Int64, next: Option<Plain> } \
+                   fn main() -> Int64 { return 0 }";
+        let p = parse(lex(src).unwrap()).unwrap();
+        let owned = Owned::new(&p);
+        let txn = Some(Linear::Declared("Txn".into()));
+        for t in ["Pool", "Slot", "Node"] {
+            assert_eq!(owned.linear_kind(&Type::Named(t.into())), txn, "{t}");
+        }
+        assert_eq!(owned.linear_kind(&Type::Named("Plain".into())), None);
     }
 
     /// A depth bound in `owns_heap` would bring back a silent leak of every
