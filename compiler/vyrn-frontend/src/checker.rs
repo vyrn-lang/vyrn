@@ -64,6 +64,19 @@ pub(crate) fn line_of(l: impl std::borrow::Borrow<usize>) -> usize {
     *l.borrow()
 }
 
+/// `d` narrowed to the name a call spells at column `col` of `line`, where `d`
+/// states that line and no column. A callee with no spelling of its own (`@at`,
+/// whose column is its `]`) and a call no source spells (`col` 0) keep the whole
+/// line. A refusal of an argument on the call's line that states no column also
+/// lands on the callee's name.
+fn spelled_at(d: Diagnostic, line: usize, col: usize, name: &str) -> Diagnostic {
+    let spelled = crate::prelude::method_surface(name);
+    match d.col == 0 && d.line == line && d.file.is_none() && col > 0 && !spelled.starts_with('@') {
+        true => d.at(col, col + spelled.chars().count()),
+        false => d,
+    }
+}
+
 /// The receiver of a protocol-call sentence as the source wrote it: a name or a
 /// field path, else `x`, because no other expression keeps its spelling.
 fn receiver_text(e: Option<&Expr>) -> String {
@@ -4056,10 +4069,12 @@ impl<'a> Checker<'a> {
                 args,
                 type_args,
                 line,
-                id: _,
+                id,
             } => {
                 let at = (expr.id(), form);
-                let t = self.call(name, at, args, type_args, *line, scope, expected, fn_ret)?;
+                let t = self
+                    .call(name, at, args, type_args, *line, scope, expected, fn_ret)
+                    .map_err(|d| spelled_at(d, *line, id.col(), name))?;
                 // `schemaOf<T>()` lowers through the literal it stands for, so
                 // the checker types those nodes too (`project::schema`).
                 if let ("schemaOf", [Type::Named(tn) | Type::App(tn, _)], true) =
