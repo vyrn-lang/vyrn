@@ -1621,7 +1621,7 @@ impl<'a> Builder<'a> {
             grows: false,
             path: None,
             for_consume: false,
-            turn_owns: false,
+            owns_part: false,
             unreached: None,
             fields: Vec::new(),
             loop_var: None,
@@ -3671,7 +3671,7 @@ impl<'a> Builder<'a> {
                 // may leave a join arm; the container, below the mark, may not.
                 self.frame.loop_marks.push(self.body.names.len());
                 let x = self.name(var, ety, owned, *line);
-                self.body.names[x.index()].turn_owns = owned;
+                self.body.names[x.index()].owns_part = owned;
                 self.body.cands.push((ekey, x, Cand::Elem));
                 // The container outlives the loop, so a refusal names the
                 // variable as a loop variable, as the checker does. A projected
@@ -4859,7 +4859,8 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<Vec<Name>, Gap> {
         let decls = self.proto.types();
-        let (payloads, variant): (Vec<(String, Type, NodeId)>, String) = match p {
+        // Each binder with its type, its node and the line it is spelled on.
+        let (payloads, variant): (Vec<(String, Type, NodeId, usize)>, String) = match p {
             Pattern::Other => (Vec::new(), String::new()),
             // `??`'s pair names a tag: variant 1 succeeds, 0 fails.
             Pattern::Success(n) | Pattern::Failure(n) => match rt {
@@ -4868,7 +4869,7 @@ impl<'a> Builder<'a> {
                     let ps = vs[at]
                         .payload
                         .first()
-                        .map(|t| vec![(n.name.clone(), t.clone(), n.id())])
+                        .map(|t| vec![(n.name.clone(), t.clone(), n.id(), n.line)])
                         .unwrap_or_default();
                     (ps, vs[at].name.clone())
                 }
@@ -4885,7 +4886,7 @@ impl<'a> Builder<'a> {
                     let ps = names
                         .iter()
                         .zip(var.payload.iter().cloned())
-                        .map(|(n, t)| (n.name.clone(), t, n.id()))
+                        .map(|(n, t)| (n.name.clone(), t, n.id(), n.line))
                         .collect();
                     (ps, var.name.clone())
                 }
@@ -4893,7 +4894,7 @@ impl<'a> Builder<'a> {
             },
         };
         let mut binds = Vec::new();
-        for (i, (name, ty, key)) in payloads.into_iter().enumerate() {
+        for (i, (name, ty, key, at)) in payloads.into_iter().enumerate() {
             let owned = consuming && self.owns(&ty);
             let layout = matches!(
                 &*vyrn_frontend::types::resolved(&ty, &decls),
@@ -4904,7 +4905,9 @@ impl<'a> Builder<'a> {
                     | Type::SmallArray(..)
                     | Type::Map(..)
             );
-            let n = self.name(&name, ty, owned, line);
+            // A binder a desugar made is spelled nowhere: the match's line.
+            let n = self.name(&name, ty, owned, if at == 0 { line } else { at });
+            self.body.names[n.index()].owns_part = owned;
             // The placer keys a binder's exit rows (a `return`, `break` or
             // `continue` inside the arm) by this address. Keyed owned or not:
             // the first build takes nothing, so the second build's rows need

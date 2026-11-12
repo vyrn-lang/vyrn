@@ -640,6 +640,45 @@ fn a_method_that_forgets_elements_is_refused_at_a_must_use_element() {
     }
 }
 
+/// A binder of a `match consume` arm owns its must-use payload: the arm
+/// disposes of it, and a borrowing `match` leaves it with the scrutinee.
+#[test]
+fn a_match_consume_binder_owns_its_must_use_payload() {
+    let head = "type Tok = { id: Int64 } impl MustUse for Tok {} \
+                fn take(t: consume Tok) { drop t } \
+                fn main() -> Int64 { let o: Option<Tok> = Some(Tok { id: 1 }) ";
+    for (arm, refused) in [
+        (
+            "match consume o { Some(t) => { take(t) } None => {} }",
+            false,
+        ),
+        (
+            "match consume o { Some(t) => { drop t } None => {} }",
+            false,
+        ),
+        (
+            "match o { Some(t) => { print(t.id) } None => {} } drop o",
+            false,
+        ),
+        (
+            "match consume o { Some(t) => { print(t.id) } None => {} }",
+            true,
+        ),
+    ] {
+        let r = run(&format!("{head}{arm} return 0 }}"));
+        match refused {
+            true => {
+                let e = r.unwrap_err();
+                assert!(
+                    e.contains("`t` is a `Tok` and is never disposed"),
+                    "{arm}: {e}"
+                );
+            }
+            false => assert_eq!(r, Ok(()), "{arm}"),
+        }
+    }
+}
+
 /// A `for` that takes its container owns each must-use element: the body
 /// disposes of it on every path, and a `break` or a `return` that leaves
 /// elements no turn reached is refused in the loop's words.

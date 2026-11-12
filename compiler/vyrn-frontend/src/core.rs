@@ -92,9 +92,10 @@ pub struct NameInfo {
     /// no statement kinds, so the refusal's wording of that loop and the
     /// kernel's reading of its release as a disposal ride on the name.
     pub for_consume: bool,
-    /// For the variable of a `for` that owns each element: a turn owns its
-    /// element, so a must-use one owes a disposal on every path of the body.
-    pub turn_owns: bool,
+    /// For the variable of a `for` that owns each element, and a binder of a
+    /// `match consume` arm: it owns the part its container hands it, so a
+    /// must-use one owes a disposal on every path of the body or the arm.
+    pub owns_part: bool,
     /// For the temporary that releases an element no turn reached when a
     /// `break` or a `return` leaves `for v in consume xs`: `xs` as the reader
     /// wrote it. Its [`NameInfo::path`] is `v`, so a refusal of a must-use one
@@ -1286,15 +1287,15 @@ impl Body {
 
     /// The must-use row a linear value this body owns owes: the reader
     /// disposes of it exactly once on every path. A `let`, a `consume`
-    /// parameter, a temporary and a turn of a `for` that owns its element
-    /// own their value. A `read` or `modify`
+    /// parameter, a temporary and a name that owns a part
+    /// ([`NameInfo::owns_part`]) own their value. A `read` or `modify`
     /// parameter borrows it, and the caller keeps the obligation. A receiver
     /// owes none, since `fn release(self)` is the disposal.
     pub fn owes(&self, n: Name) -> Option<&crate::own::Linear> {
         let i = &self.names[n.index()];
         let owner = match self.params.contains(&n) {
             true => i.source != "self" && i.borrow_kind.is_none(),
-            false => !i.borrow && (i.bound_by_let || (i.releases && (i.is_temp() || i.turn_owns))),
+            false => !i.borrow && (i.bound_by_let || (i.releases && (i.is_temp() || i.owns_part))),
         };
         i.linear.as_ref().filter(|_| owner)
     }

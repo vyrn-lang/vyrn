@@ -631,6 +631,12 @@ fn census() -> Vec<Row> {
              must-use: move the elements one at a time instead",
             Kernel::Elsewhere,
         ),
+        row(
+            "r92_a_match_consume_binder_owns_a_must_use_payload.vyrn",
+            "a binder of a match consume arm owns its payload",
+            "`t` is a `Tok` and is never disposed",
+            Kernel::Its,
+        ),
     ]
 }
 
