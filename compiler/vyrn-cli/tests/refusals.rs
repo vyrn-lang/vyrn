@@ -617,6 +617,13 @@ fn census() -> Vec<Row> {
             "`t` holds a must-use value, and a store over it would release it undisposed",
             Kernel::Its,
         ),
+        row(
+            "r90_a_break_out_of_a_loop_that_owns_must_use_elements.vyrn",
+            "a loop that takes its container owns each must-use element",
+            "`t` does not reach every element of `xs`: a `break` or a `return` leaves the rest \
+             undisposed",
+            Kernel::Its,
+        ),
     ]
 }
 

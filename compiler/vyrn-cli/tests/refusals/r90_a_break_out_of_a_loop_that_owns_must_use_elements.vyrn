@@ -1,0 +1,18 @@
+// A loop that takes its container owns each element, so a break leaves the
+// elements no turn reached with no one to dispose of them.
+type Txn = {
+    label: String
+}
+
+impl MustUse for Txn {}
+
+fn main() -> Int64 {
+    let mut xs: Array<Txn> = []
+    xs.push(Txn { label: "a".copy() })
+    xs.push(Txn { label: "b".copy() })
+    for t in consume xs {
+        drop t
+        break
+    }
+    return 0
+}

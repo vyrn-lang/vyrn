@@ -1347,6 +1347,9 @@ struct Unreached {
     i: Name,
     elem: Type,
     line: usize,
+    /// For a must-use element, the loop variable and the container as the
+    /// reader wrote them, which a refusal of the unreached elements names.
+    words: Option<(String, String)>,
 }
 
 struct Builder<'a> {
@@ -1603,6 +1606,8 @@ impl<'a> Builder<'a> {
             grows: false,
             path: None,
             for_consume: false,
+            turn_owns: false,
+            unreached: None,
             fields: Vec::new(),
             loop_var: None,
             walked: None,
@@ -3613,10 +3618,14 @@ impl<'a> Builder<'a> {
                 let ic = &self.body.names[owner.unwrap_or(it).index()];
                 let loops_alone = !ic.borrow && !ic.bound_by_let;
                 // A projection yields a place in the container, never its own
-                // element.
+                // element. A loop that takes its container owns each
+                // must-use element, which the body disposes of.
                 let owned = self.owns(&ety)
                     && !projected
-                    && (streaming || loops_alone && self.seed.contains(&ekey));
+                    && (streaming
+                        || loops_alone
+                            && (self.seed.contains(&ekey)
+                                || *consuming && self.proto.must_use(&ety)));
                 // Where every element left through the variable, the
                 // container's release frees the buffer alone (field 0 of a
                 // growable array's triple; other containers have no such
@@ -3629,18 +3638,25 @@ impl<'a> Builder<'a> {
                     )
                 {
                     self.body.loop_buffers.push(sid);
+                    let words = self.proto.must_use(&ety).then(|| {
+                        let of =
+                            vyrn_frontend::ast::place_path(iter).map_or("..".into(), |(_, p)| p);
+                        (var.clone(), of)
+                    });
                     unreached = counter.map(|(n, i)| Unreached {
                         it,
                         i,
                         n,
                         elem: ety.clone(),
                         line: *line,
+                        words,
                     });
                 }
                 // Before the variable: each turn binds its own element, so it
                 // may leave a join arm; the container, below the mark, may not.
                 self.frame.loop_marks.push(self.body.names.len());
                 let x = self.name(var, ety, owned, *line);
+                self.body.names[x.index()].turn_owns = owned;
                 self.body.cands.push((ekey, x, Cand::Elem));
                 // The container outlives the loop, so a refusal names the
                 // variable as a loop variable, as the checker does. A projected
@@ -3919,6 +3935,10 @@ impl<'a> Builder<'a> {
             },
         ];
         let e = self.temp(u.elem.clone(), u.line);
+        if let Some((v, of)) = &u.words {
+            self.body.names[e.index()].path = Some(v.clone());
+            self.body.names[e.index()].unreached = Some(of.clone());
+        }
         l.push(St::Let(
             e,
             Rhs::Read(Place::Elem(Box::new(Place::Name(u.it)), Val::Name(u.i))),

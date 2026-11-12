@@ -1176,6 +1176,12 @@ rules! {
         "`{by}` declares `impl MustUse` and a `{ty}` holds one, so the container must be \
         handed on by name on every path: passed to a `consume` parameter, forwarded by \
         returning it, or released with `drop {s}`, which releases each element";
+    // A loop that owns its must-use elements, left before every turn ran.
+    LeftUnreached { s, of }
+        "`{s}` does not reach every element of `{of}`: a `break` or a `return` leaves the rest \
+        undisposed"
+        fix "let the loop run to its end, or take the elements one at a time with `pop` in a \
+            `while` loop";
     // A temporary has no name to dispose of, so only a taking position
     // discharges it.
     OwedTemporary { ty }

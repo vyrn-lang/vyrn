@@ -829,6 +829,9 @@ impl<'b> Kernel<'b> {
             false => "a",
         };
         let s = self.src(n);
+        if let Some(of) = &i.unreached {
+            return self.refuse(i.line, rule!(LeftUnreached, s, of));
+        }
         let note = match declared {
             _ if i.is_temp() => rule!(OwedTemporary, ty),
             Some(d) if *d == i.ty.to_string() => rule!(OwedDeclared, ty, s),
@@ -1647,8 +1650,12 @@ impl<'b> Kernel<'b> {
             return Ok(());
         }
         // No row repairs a must-use value left held: the reader disposes of it.
-        // A cancelled task disposes of everything it holds.
-        if self.body.owes(n).is_some() && !matches!(end, End::Exit(Exit::Cancel, _)) {
+        // A cancelled task disposes of everything it holds, and a loop that
+        // took its container disposes of it: each element is the turn's, or
+        // the exit's refusal ([`NameInfo::unreached`]).
+        let disposed =
+            matches!(end, End::Exit(Exit::Cancel, _)) || self.body.names[n.index()].for_consume;
+        if self.body.owes(n).is_some() && !disposed {
             self.refusals.push(self.obligation(n, false));
             self.unbind(st, n);
             return Ok(());

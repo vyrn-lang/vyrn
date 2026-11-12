@@ -615,3 +615,65 @@ fn a_store_over_a_held_must_use_value_is_refused() {
     ];
     judged("mustuse-store", cases);
 }
+
+/// A `for` that takes its container owns each must-use element: the body
+/// disposes of it on every path, and a `break` or a `return` that leaves
+/// elements no turn reached is refused in the loop's words.
+#[test]
+fn a_loop_that_takes_its_container_owns_each_must_use_element() {
+    let left = "`t` does not reach every element of `xs`: a `break` or a `return` leaves the \
+                rest undisposed";
+    let cases: [(&str, String, Result<&str, &str>); 6] = [
+        (
+            "read",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let xs = pool() let mut n = 0 \
+                 for t in consume xs {{ n = n + t.ops.length }} return n }}"
+            ),
+            Err("`t` is a `Txn` and is never disposed"),
+        ),
+        (
+            "one-branch",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let xs = pool() \
+                 for t in consume xs {{ if t.label == \"b\" {{ finish(t) }} }} return 0 }}"
+            ),
+            Err("`t` is a `Txn` and is never disposed"),
+        ),
+        (
+            "break",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let xs = pool() \
+                 for t in consume xs {{ finish(t) break }} return 0 }}"
+            ),
+            Err(left),
+        ),
+        (
+            "return",
+            format!(
+                "{TXN} fn first() -> Int64 {{ let xs = pool() \
+                 for t in consume xs {{ finish(t) return 1 }} return 0 }} \
+                 fn main() -> Int64 {{ return first() }}"
+            ),
+            Err(left),
+        ),
+        (
+            "drop",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let xs = pool() \
+                 for t in consume xs {{ drop t }} return 0 }}"
+            ),
+            Ok("end a"),
+        ),
+        (
+            "pop",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut xs = pool() xs.push(begin(\"b\")) \
+                 while xs.length > 0 {{ if let Some(t) = xs.pop() {{ finish(t) }} break }} \
+                 drop xs return 0 }}"
+            ),
+            Ok("end b\nend a"),
+        ),
+    ];
+    judged("mustuse-loop", cases);
+}
