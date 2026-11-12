@@ -628,7 +628,7 @@ test "arms" {
     let r = match B { B => 1 }
     assertEq(r, 1)
 }
-// The `@Heapless` bound is the typed judgment's, at the type argument the
+// The `@Forgettable` bound is the typed judgment's, at the type argument the
 // call solved: in a plain body, and in the instance of a generic that owns
 // heap and in none other.
 fn clearOwned() -> Int64 {

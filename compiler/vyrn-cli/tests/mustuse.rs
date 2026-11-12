@@ -616,6 +616,30 @@ fn a_store_over_a_held_must_use_value_is_refused() {
     judged("mustuse-store", cases);
 }
 
+/// `clear`, `append` and `copyFrom` forget, copy or overwrite elements, so
+/// each is refused at a must-use element that owns no heap.
+#[test]
+fn a_method_that_forgets_elements_is_refused_at_a_must_use_element() {
+    for (m, call) in [
+        ("clear", "xs.clear()"),
+        ("append", "xs.append(ys)"),
+        ("copyFrom", "xs.copyFrom(ys)"),
+    ] {
+        let e = run(&format!(
+            "type Tok = {{ id: Int64 }} impl MustUse for Tok {{}} \
+             fn main() -> Int64 {{ let mut xs: Array<Tok> = [] xs.push(Tok {{ id: 1 }}) \
+             let mut ys: Array<Tok> = [] ys.push(Tok {{ id: 2 }}) {call} drop xs drop ys \
+             return 0 }}"
+        ))
+        .unwrap_err();
+        let says = format!(
+            "`{m}` forgets or overwrites elements without releasing them, and `Tok` is \
+             must-use: move the elements one at a time instead"
+        );
+        assert!(e.contains(&says), "{m}: {e}");
+    }
+}
+
 /// A `for` that takes its container owns each must-use element: the body
 /// disposes of it on every path, and a `break` or a `return` that leaves
 /// elements no turn reached is refused in the loop's words.

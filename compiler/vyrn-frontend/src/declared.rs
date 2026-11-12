@@ -70,7 +70,7 @@ impl Owned {
 
     /// Returns this table with every type parameter owning heap, for judging a
     /// generic body as written: it must hold at the worst instance, and no user
-    /// bound can say `@Heapless`.
+    /// bound can say `@Forgettable`.
     pub fn as_written(&self) -> Self {
         Owned {
             params_own: true,

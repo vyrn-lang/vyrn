@@ -6,7 +6,7 @@
 //! what the declared reading puts on a binding. A parameter spelled `Unit` is
 //! inert (a union or a type name no signature spells), and so is a lending
 //! row's result; [`returns`] skips a lending row. A bound
-//! ([`HEAPLESS`], [`DECODABLE`], `Show`) states a rule about a type argument.
+//! ([`FORGETTABLE`], [`DECODABLE`], `Show`) states a rule about a type argument.
 //! `value`, `@list` and `pullAt` allocate but have no contract, because their
 //! result type is one no signature spells.
 
@@ -96,13 +96,14 @@ fn row(
     }
 }
 
-/// The bound "this type owns no heap", on `@clear`, `@append` and `@copyFrom`,
-/// which forget or overwrite elements without releasing them. Unlexable, so no
-/// program can declare or name it; its refusal has its own wording.
-pub const HEAPLESS: &str = "@Heapless";
+/// The bound "this type owns no heap and is not must-use", on `@clear`,
+/// `@append` and `@copyFrom`, which forget, copy or overwrite elements without
+/// releasing or disposing of them. Unlexable, so no program can declare or name
+/// it; its refusal has its own wording.
+pub const FORGETTABLE: &str = "@Forgettable";
 
 /// The bound "JSON can decode into this type" (`crate::codec::decodable`), on
-/// `fromJson`. Unlexable like [`HEAPLESS`]; its refusal names the offending
+/// `fromJson`. Unlexable like [`FORGETTABLE`]; its refusal names the offending
 /// part of the type.
 pub const DECODABLE: &str = "@Decodable";
 
@@ -613,18 +614,18 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Rebuilds)
             .hover("array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation")
             .resizes(ShapeMap::Same),
-        // The [`HEAPLESS`] rows. `clear` keeps the buffer for the next fill.
+        // The [`FORGETTABLE`] rows. `clear` keeps the buffer for the next fill.
         // `append` copies its source's elements in by bytes, and `copyFrom`
         // overwrites the receiver's, reusing its buffer.
         b("@clear")
             .sig(bounded(
                 row("@clear", &["T"], &[("self", Read, arr(t()))], arr(t()), &[]),
                 "T",
-                HEAPLESS,
+                FORGETTABLE,
             ))
             .method("clear", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.clear() -> Array<T> — length to zero, buffer kept for the next fill; element type must not own heap")
+            .hover("array.clear() -> Array<T> — length to zero, buffer kept for the next fill; element type must not own heap or be must-use")
             .resizes(ShapeMap::Empties),
         b("@append")
             .sig(bounded(
@@ -636,11 +637,11 @@ fn table() -> Vec<Builtin> {
                     &[],
                 ),
                 "T",
-                HEAPLESS,
+                FORGETTABLE,
             ))
             .method("append", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap")
+            .hover("array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap or be must-use")
             .resizes(ShapeMap::Appends(1)),
         b("@copyFrom")
             .sig(bounded(
@@ -652,11 +653,11 @@ fn table() -> Vec<Builtin> {
                     &[],
                 ),
                 "T",
-                HEAPLESS,
+                FORGETTABLE,
             ))
             .method("copyFrom", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap")
+            .hover("array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap or be must-use")
             .resizes(ShapeMap::CopiesFrom(1)),
         b("@toArray")
             .takes(&[1], takes_none)
