@@ -191,6 +191,7 @@ fn last_owner(top: &Body) -> std::collections::HashSet<NodeId> {
             continue;
         }
         let mut w = Reads {
+            names: &f.names,
             last: vec![0; f.names.len()],
             deep: vec![0; f.names.len()],
             bound: vec![usize::MAX; f.names.len()],
@@ -252,7 +253,8 @@ fn root_name(p: &Place) -> Option<Val> {
 /// One frame's last read of each name, the loop depth that read stood at,
 /// the loop depth each name was bound at, and every switch over a bare name
 /// with its depth and the order of its own read. See [`last_owner`].
-struct Reads {
+struct Reads<'a> {
+    names: &'a [NameInfo],
     last: Vec<usize>,
     deep: Vec<usize>,
     bound: Vec<usize>,
@@ -262,7 +264,7 @@ struct Reads {
     order: usize,
 }
 
-impl Reads {
+impl Reads<'_> {
     fn stmts(&mut self, stmts: &[St], depth: usize) {
         for st in stmts {
             // A row is the plan's, not the core's: see [`last_owner`].
@@ -285,6 +287,10 @@ impl Reads {
             // line 0 and is the plan's.
             if let St::Drop(n, _, line, _) = st {
                 self.handed[n.index()] |= *line > 0;
+            }
+            // A loop over `consume g` takes `g` into its container.
+            if let St::Let(t, Rhs::Val(Val::Name(n))) = st {
+                self.handed[n.index()] |= self.names[t.index()].for_consume;
             }
             // A take out of a sub-place hands that part on, so what is left
             // is this turn's: `out.push(consume p.value)` in a `for p in ..`.
