@@ -1171,11 +1171,12 @@ rules! {
         "`{ty}` declares `impl MustUse`, so a value of it must be handed on by name on every \
         path: passed to a `consume` parameter, forwarded by returning it, or released with \
         `drop {s}`";
-    // A container: the reader wrote `Array<Txn>` and the row is `Txn`'s.
+    // A holder: the reader wrote `Array<Txn>` or a record with a `Txn` field,
+    // and the row is `Txn`'s.
     OwedHeld { by, ty, s }
-        "`{by}` declares `impl MustUse` and a `{ty}` holds one, so the container must be \
+        "`{by}` declares `impl MustUse` and a `{ty}` holds one, so the `{ty}` must be \
         handed on by name on every path: passed to a `consume` parameter, forwarded by \
-        returning it, or released with `drop {s}`, which releases each element";
+        returning it, or released with `drop {s}`, which releases what it holds";
     // A loop that owns its must-use elements, left before every turn ran.
     LeftUnreached { s, of }
         "`{s}` does not reach every element of `{of}`: a `break` or a `return` leaves the rest \

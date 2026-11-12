@@ -608,7 +608,7 @@ fn a_store_over_a_held_must_use_value_is_refused() {
                 "{TXN} type Pool = {{ xs: Array<Txn> }} \
                  fn add(p: modify Pool) {{ p.xs.push(begin(\"b\")) }} \
                  fn main() -> Int64 {{ let mut p = Pool {{ xs: pool() }} add(p) \
-                 print(p.xs.length) let xs = consume p.xs drop xs return 0 }}"
+                 print(p.xs.length) let xs = consume p.xs drop xs drop p return 0 }}"
             ),
             Ok("2\nend a\nend b"),
         ),
@@ -676,4 +676,46 @@ fn a_loop_that_takes_its_container_owns_each_must_use_element() {
         ),
     ];
     judged("mustuse-loop", cases);
+}
+
+/// A record field and an enum payload hold their part's obligation, as an
+/// array's element does, so the holder is disposed of by name.
+#[test]
+fn a_record_or_an_enum_holding_a_must_use_value_is_must_use() {
+    let cases: [(&str, String, Result<&str, &str>); 4] = [
+        (
+            "record",
+            format!(
+                "{TXN} type Pool = {{ n: Int64, xs: Array<Txn> }} \
+                 fn main() -> Int64 {{ let p = Pool {{ n: 1, xs: pool() }} return p.n }}"
+            ),
+            Err("`p` is a `Pool` and is never disposed"),
+        ),
+        (
+            "enum",
+            format!(
+                "{TXN} type Slot = enum {{ Empty, Full(Txn) }} \
+                 fn main() -> Int64 {{ let s = Full(begin(\"a\")) return 0 }}"
+            ),
+            Err("`s` is a `Slot` and is never disposed"),
+        ),
+        (
+            "drop",
+            format!(
+                "{TXN} type Pool = {{ n: Int64, xs: Array<Txn> }} \
+                 fn main() -> Int64 {{ let p = Pool {{ n: 1, xs: pool() }} drop p return 0 }}"
+            ),
+            Ok("end a"),
+        ),
+        (
+            "taken",
+            format!(
+                "{TXN} type Pool = {{ n: Int64, xs: Array<Txn> }} \
+                 fn main() -> Int64 {{ let mut p = Pool {{ n: 1, xs: pool() }} \
+                 let xs = consume p.xs drop xs drop p return 0 }}"
+            ),
+            Ok("end a"),
+        ),
+    ];
+    judged("mustuse-holder", cases);
 }

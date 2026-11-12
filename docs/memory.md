@@ -204,8 +204,9 @@ store over a must-use value still held is refused: dispose of the old value
 first. A name bound to a value with no parts, such as `None` or `[]`, holds
 nothing to dispose of. `for t in consume xs` over a must-use element owns
 each `t`: the body disposes of it, and a `break` or `return` that leaves
-elements unreached is refused. A path that never disposes of a must-use
-value, or disposes of it twice, is refused.
+elements unreached is refused. A record, an enum, an `Option` or a `Result`
+that holds a must-use value is itself must-use. A path that never disposes of
+a must-use value, or disposes of it twice, is refused.
 
 ## A region frees a group at once
 
