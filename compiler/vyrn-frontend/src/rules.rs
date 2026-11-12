@@ -1294,7 +1294,7 @@ rules! {
         type is known, or `consume` the heap field and `drop` that";
     DropNotHeap { name, t }
         "`drop` needs a heap value (a String, an Array, a Map, a Ref, or an Option/Result \
-        carrying one, or a type declaring `impl Owned`), but `{name}` is {t}";
+        carrying one, or a type declaring `impl Owned` or `impl MustUse`), but `{name}` is {t}";
 
     // A body the core builder did not build: a defect in the builder, since
     // the checker typed the body.

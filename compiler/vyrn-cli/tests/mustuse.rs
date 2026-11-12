@@ -492,3 +492,51 @@ fn a_must_use_obligation_follows_ownership() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
+
+/// `drop` is a must-use value's disposal whatever the value holds: a record
+/// with a String and no `impl Owned`, or one of scalars, which frees nothing.
+/// Without it the value's last owner could not discharge it.
+#[test]
+fn a_must_use_value_is_dropped_whatever_it_holds() {
+    let dir = common::scratch("mustuse-drop");
+    let cases = [
+        (
+            "text",
+            "type Txn = { label: String } impl MustUse for Txn {} \
+             fn main() -> Int64 { let t = Txn { label: \"a\".copy() } print(t.label) drop t \
+             return 0 }",
+            "a",
+        ),
+        (
+            "scalar",
+            "type Tok = { id: Int64 } impl MustUse for Tok {} \
+             fn finish(t: consume Tok) -> Int64 { let n = t.id drop t return n } \
+             fn main() -> Int64 { let t = Tok { id: 3 } print(finish(t)) return 0 }",
+            "3",
+        ),
+    ];
+    for (name, src, prints) in cases {
+        let file = dir.join(format!("{name}.vyrn"));
+        std::fs::write(&file, src).expect("write the program");
+        let out = vyrn()
+            .env("VYRN_LEAK_CHECK", "1")
+            .arg("run")
+            .arg(&file)
+            .output()
+            .expect("vyrn run");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            (out.status.code(), stdout.trim()),
+            (Some(0), prints),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let e = run("type Tok = { id: Int64 } impl MustUse for Tok {} \
+                 fn main() -> Int64 { let t = Tok { id: 3 } drop t drop t return 0 }")
+    .unwrap_err();
+    assert!(
+        e.contains("`t` is a `Tok` and is disposed more than once"),
+        "{e}"
+    );
+}
