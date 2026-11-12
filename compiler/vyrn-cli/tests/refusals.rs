@@ -637,6 +637,32 @@ fn census() -> Vec<Row> {
             "`t` is a `Tok` and is never disposed",
             Kernel::Its,
         ),
+        row(
+            "r93_a_namespace_member_the_module_does_not_export.vyrn",
+            "a namespace reaches exported declarations only",
+            "namespace `s` (module `std/strings`) has no exported member `noSuchThing`: \
+             namespaces reach exported declarations only, one level deep",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r94_an_import_of_a_name_the_module_does_not_export.vyrn",
+            "an import names an exported declaration",
+            "`takeIdentity` exists in `std/slots` but is not exported: add `export` to its \
+             declaration",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r95_an_import_of_a_name_another_module_defines.vyrn",
+            "an import names a declaration of the module it imports from",
+            "`trim` is not defined in `std/arrays` (it lives in `std/strings`)",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r96_an_import_of_a_name_no_module_defines.vyrn",
+            "an import names a declaration that exists",
+            "`std/strings` does not define `noSuchThing`",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 
