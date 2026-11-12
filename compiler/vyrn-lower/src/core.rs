@@ -223,6 +223,23 @@ fn last_owner(top: &Body) -> std::collections::HashSet<NodeId> {
     out
 }
 
+/// Whether `value` is the parser's write-back form over a part of `root`: a
+/// rebuilding call whose receiver is `root.f` or `root[i]`.
+fn writes_back(value: &Expr, root: &str) -> bool {
+    let Expr::Call { name, args, .. } = value else {
+        return false;
+    };
+    let rooted = |e: &Expr| matches!(e, Expr::Var { name, .. } if name == root);
+    vyrn_frontend::prelude::rebuilds(name)
+        && match args.first() {
+            Some(Expr::Field { expr, .. }) => rooted(expr),
+            Some(Expr::Call { name, args, .. }) => {
+                name == "@at" && args.first().is_some_and(rooted)
+            }
+            _ => false,
+        }
+}
+
 /// The name a place is rooted at, as a value. `None` for module state.
 fn root_name(p: &Place) -> Option<Val> {
     match p {
@@ -3821,9 +3838,14 @@ impl<'a> Builder<'a> {
         )
     }
 
-    fn old_for(&self, ty: &Type, releases: bool) -> Old {
+    /// What a store of `value` into a part of `root` displaces. The
+    /// write-back form (`p.xs.push(v)` is `p.xs = @push(p.xs, v)`) hands the
+    /// part's own value back, as `xs = xs.push(v)` does for a name.
+    fn old_for(&self, ty: &Type, value: &Expr, root: &str, releases: bool) -> Old {
         if !self.owns(ty) {
             Old::Nothing
+        } else if writes_back(value, root) {
+            Old::Transferred
         } else if releases {
             Old::Released
         } else {
@@ -3970,7 +3992,7 @@ impl<'a> Builder<'a> {
         out.push(St::Store {
             place: Place::Field(Box::new(base), field.to_string()),
             value: v,
-            old: self.old_for(&fty, releases),
+            old: self.old_for(&fty, value, quoted, releases),
             line,
             site: Site::Node(sid),
             releases,
@@ -4184,7 +4206,7 @@ impl<'a> Builder<'a> {
         out.push(St::Store {
             place,
             value: v,
-            old: self.old_for(&ety, releases),
+            old: self.old_for(&ety, value, name, releases),
             line,
             site,
             releases,

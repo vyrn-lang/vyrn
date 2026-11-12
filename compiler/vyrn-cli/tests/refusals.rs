@@ -611,6 +611,12 @@ fn census() -> Vec<Row> {
             "`fromArray(..)` is a `Stream<Int64>` and is never disposed",
             Kernel::Its,
         ),
+        row(
+            "r89_a_store_over_a_held_must_use_value.vyrn",
+            "a store over a held must-use value would release it undisposed",
+            "`t` holds a must-use value, and a store over it would release it undisposed",
+            Kernel::Its,
+        ),
     ]
 }
 

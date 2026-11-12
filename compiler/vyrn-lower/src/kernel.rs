@@ -124,7 +124,8 @@ enum Own {
     Held,
     /// Consumed, or not yet bound: nothing to release.
     Gone,
-    /// Bound to a literal: nothing to release until a store replaces it.
+    /// Bound to a literal, or an owing name bound to a value made from no
+    /// parts: nothing to release until a store replaces it.
     Static,
 }
 
@@ -769,6 +770,30 @@ impl<'b> Kernel<'b> {
     fn owned(&self, n: Name) -> bool {
         let i = &self.body.names[n.index()];
         i.releases || !i.borrow
+    }
+
+    /// Whether a store of `value` into `place` releases a must-use value
+    /// still there: a held name, a `modify` parameter's value, or a part that
+    /// is no hole. A name bound to a value made from no parts is `Static` and
+    /// holds none, and a write-back ([`Old::Transferred`]) keeps the old value
+    /// in the new one.
+    fn displaces_must_use(&self, st: &State, place: &Place, value: &Val, old: Old) -> bool {
+        let linear = |n: &Name| self.body.names[n.index()].linear.is_some();
+        let must_use = matches!(value, Val::Name(m) if linear(m))
+            || matches!(place, Place::Name(n) if linear(n));
+        must_use
+            && old != Old::Transferred
+            && match place {
+                Place::Name(n) => {
+                    st.own(*n) == Own::Held || self.body.names[n.index()].is_modify_param()
+                }
+                _ => {
+                    old != Old::Nothing
+                        && root_of(place).is_none_or(|(n, path)| {
+                            !Self::holes_in(st, n, &path).contains(&String::new())
+                        })
+                }
+            }
     }
 
     /// Whether a placed release of `n` would abandon a must-use temporary.
@@ -2361,7 +2386,17 @@ impl<'b> Kernel<'b> {
                 // never `Static`. A `Make` of literals is not static: `[4, 5]`
                 // and a record with a thunk (`examples/lazyfield.vyrn`)
                 // allocate, and treating them as static leaks them.
-                let is_static = self.releases(*n) && matches!(rhs, Rhs::Val(Val::Lit(_)));
+                // A value made from no parts (`None`, `[]`) holds no
+                // must-use part, so an owing name bound to one is `Static`
+                // and a store over it displaces nothing.
+                let empty = match rhs {
+                    Rhs::Make(_, parts) => parts.is_empty(),
+                    Rhs::Call { kind, args, .. } => kind.ctor() && args.is_empty(),
+                    _ => false,
+                };
+                let is_static = self.releases(*n)
+                    && (matches!(rhs, Rhs::Val(Val::Lit(_)))
+                        || empty && self.body.owes(*n).is_some());
                 // A closure that outlives its call may not hold a borrow.
                 // The core marks which closures escape
                 // ([`NameInfo::closure_escapes`]).
@@ -2440,6 +2475,13 @@ impl<'b> Kernel<'b> {
                         st.set_dead(*m, Some((self.here, self.place_text(place))));
                         return Ok(());
                     }
+                }
+                // Said and judged on: the store still takes the value, so
+                // nothing else is refused about it.
+                if self.displaces_must_use(st, place, value, *old) {
+                    let s = self.place_text(place);
+                    self.refusals
+                        .push(self.refuse(self.here, rule!(StoreOverMustUse, s)));
                 }
                 if let Some((n, path)) = root_of(place) {
                     if !path.is_empty() {

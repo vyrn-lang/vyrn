@@ -1,0 +1,14 @@
+// A store releases the value it displaces, and a release is no disposal of a
+// must-use value: the old value is disposed of first.
+type Txn = {
+    label: String
+}
+
+impl MustUse for Txn {}
+
+fn main() -> Int64 {
+    let mut t = Txn { label: "a".copy() }
+    t = Txn { label: "b".copy() }
+    drop t
+    return 0
+}

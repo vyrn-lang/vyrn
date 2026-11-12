@@ -464,7 +464,13 @@ fn a_must_use_obligation_follows_ownership() {
             Ok("2\nend a\nend b"),
         ),
     ];
-    let dir = common::scratch("mustuse-owner");
+    judged("mustuse-owner", cases);
+}
+
+/// Checks each program; a refused one names its first sentence, and an
+/// accepted one runs under the free audit and prints `Ok`'s text.
+fn judged<const N: usize>(scratch: &str, cases: [(&str, String, Result<&str, &str>); N]) {
+    let dir = common::scratch(scratch);
     let mut bad = Vec::new();
     for (name, src, want) in cases {
         let file = dir.join(format!("{name}.vyrn"));
@@ -539,4 +545,73 @@ fn a_must_use_value_is_dropped_whatever_it_holds() {
         e.contains("`t` is a `Tok` and is disposed more than once"),
         "{e}"
     );
+}
+
+/// A store releases what it displaces, so a store over a held must-use value
+/// is refused. A name bound to a value made from no parts holds none, and the
+/// write-back of a rebuild under a `modify` root hands the old value back.
+#[test]
+fn a_store_over_a_held_must_use_value_is_refused() {
+    let held = "`t` holds a must-use value, and a store over it would release it undisposed";
+    let elem = "`xs[..]` holds a must-use value, and a store over it would release it undisposed";
+    let cases: [(&str, String, Result<&str, &str>); 7] = [
+        (
+            "name",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut t = begin(\"a\") t = begin(\"b\") drop t \
+                 return 0 }}"
+            ),
+            Err(held),
+        ),
+        (
+            "element",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut xs = pool() xs[0] = begin(\"b\") drop xs \
+                 return 0 }}"
+            ),
+            Err(elem),
+        ),
+        (
+            "nullary",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut xs: Array<Option<Txn>> = [] \
+                 xs.push(Some(begin(\"a\"))) xs[0] = None drop xs return 0 }}"
+            ),
+            Err(elem),
+        ),
+        (
+            "heapless",
+            "type Tok = { id: Int64 } impl MustUse for Tok {} \
+             fn main() -> Int64 { let mut t = Tok { id: 1 } t = Tok { id: 2 } drop t return 0 }"
+                .to_string(),
+            Err(held),
+        ),
+        (
+            "moved",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut t = begin(\"a\") drop t t = begin(\"b\") \
+                 drop t return 0 }}"
+            ),
+            Ok("end a\nend b"),
+        ),
+        (
+            "vacant",
+            format!(
+                "{TXN} fn main() -> Int64 {{ let mut o: Option<Txn> = None \
+                 o = Some(begin(\"a\")) drop o return 0 }}"
+            ),
+            Ok("end a"),
+        ),
+        (
+            "write-back",
+            format!(
+                "{TXN} type Pool = {{ xs: Array<Txn> }} \
+                 fn add(p: modify Pool) {{ p.xs.push(begin(\"b\")) }} \
+                 fn main() -> Int64 {{ let mut p = Pool {{ xs: pool() }} add(p) \
+                 print(p.xs.length) let xs = consume p.xs drop xs return 0 }}"
+            ),
+            Ok("2\nend a\nend b"),
+        ),
+    ];
+    judged("mustuse-store", cases);
 }

@@ -1124,6 +1124,12 @@ rules! {
     ReleasedAround { info, h } "{info} is released around `{h}` on a path that did not take it";
     Overwritten { info }
         "{info} is overwritten while still held: the old value is never released";
+    // A store releases what it displaces, and a release is no disposal of a
+    // must-use value.
+    StoreOverMustUse { s }
+        "`{s}` holds a must-use value, and a store over it would release it undisposed"
+        fix "dispose of the old value first: `drop` it, `close` it, or hand it to a `consume` \
+            parameter";
     ReleasedBeforeStore { info }
         "{info} is released before a store although it holds nothing";
     HeldAtExit { info, exit } "{info} is still held at {exit}: no release is placed for it";
