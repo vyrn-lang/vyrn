@@ -142,7 +142,7 @@ impl ArtifactMap {
                 .strip_suffix(crate::loader::GEN_SEP)
                 .or_else(|| head.strip_suffix(" at "))
                 .unwrap_or(head);
-            let head = crate::loader::readable(head);
+            let head = crate::loader::shown_key(head, None);
             return format!("{head} at {}", self.display_path(at));
         }
         crate::audience::relative_to(&path, &self.base).unwrap_or(path)

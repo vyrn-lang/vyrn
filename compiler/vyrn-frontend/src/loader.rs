@@ -353,7 +353,7 @@ fn site_file(key: &str, root_key: &str, std_root: Option<&str>) -> String {
             .trim_end_matches(GEN_SEP);
         return format!(
             "{} {}",
-            readable(head),
+            shown_key(head, None),
             site_file(importer, root_key, std_root)
         );
     }
@@ -410,9 +410,18 @@ fn dir_of(resolved: &str) -> &str {
 pub(crate) const GEN_SEP: &str = "\u{1f}";
 
 /// `key` as a reader sees it: every [`GEN_SEP`] spelled ` at `, so no diagnostic prints the
-/// control character (#589).
-pub(crate) fn readable(key: &str) -> String {
-    key.replace(GEN_SEP, " at ")
+/// control character (#589), and each file under `std_root` spelled `std/<name>.vyrn` as a
+/// panic site spells it, so a refusal in std reads the same on every machine.
+pub(crate) fn shown_key(key: &str, std_root: Option<&str>) -> String {
+    let root = std_root.map(|r| format!("{}/", normalize(r)));
+    let shown = |part: &str| match root.as_deref().and_then(|r| part.strip_prefix(r)) {
+        Some(rest) => format!("std/{rest}"),
+        None => part.to_string(),
+    };
+    key.split(GEN_SEP)
+        .map(shown)
+        .collect::<Vec<_>>()
+        .join(" at ")
 }
 
 /// Returns the importer file a generated module's banner key names
@@ -5143,6 +5152,14 @@ fn spellings(
             }
         }
     }
+    // An impl method's linked name follows its type's rename even where no
+    // other module declares the method, and a std module's stored rows name it
+    // as written: its own load may not rename the type.
+    for ((key, written), linked) in renames {
+        if written.contains('$') && written != linked {
+            (out.decls.entry(linked.clone())).or_insert_with(|| (written.clone(), key.clone()));
+        }
+    }
     out
 }
 
@@ -5389,8 +5406,9 @@ impl BodyVisitMut for NsResolver<'_> {
                 if matches!(form, CallForm::Protocol(_)) {
                     return true;
                 }
+                // `print(ns)` passes the namespace as a value, which it is not.
                 if let Some(Expr::Var { name: head, .. }) = args.first() {
-                    if self.is_ns(head, locals) {
+                    if *form == CallForm::Method && self.is_ns(head, locals) {
                         let head = head.clone();
                         let member = crate::prelude::method_surface(name);
                         if let Some(sym) = self.resolve_member(&head, member, l) {
@@ -5714,7 +5732,7 @@ fn link(
         };
         let note = format!(
             "in generated code {}:{line} (see `vyrn emit-gen`)",
-            readable(&m.key)
+            shown_key(&m.key, None)
         );
         let mut d = in_module(Diagnostic { line: at, ..d }, key, root_key).with_note(note);
         d.from_generated = true;

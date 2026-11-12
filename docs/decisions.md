@@ -75,6 +75,7 @@ pull request.
 - An impl of `MustUse`, `Owned` or `Copy` is declared in its type's module, and a built-in type takes none (decided 2026-11-05 by the user). The kernel reads the three in every body that holds the type, so an impl elsewhere would change verdicts that module's own load gave (`loader::foreign_kernel_impls`).
 - A generic call or record literal solves its callee's type parameters renamed apart (`T'n`, fresh per instantiation), so a caller's `T` never meets the callee's. A sentence and the check's record carry the written name.
 - Protocols take associated types, not type parameters. No `protocol P<T>` and no `T::Output`: an operator like `?` has nowhere to name the instance.
+- A free function named like a protocol method is refused, because a call of the name dispatches to an impl first, program-wide. The refusal sits on the function where its module imports the protocol, else on the method: the function's module checks alone without it, and may be std.
 - A type declares its properties by implementing compiler-known protocols (`Owned`, `MustUse`, `Fallible`, `Copy`, `Iterate`, `Hashable`, `Show`). Built-ins have seeded rows and a declared row wins, so no hand-written list can fall out of date.
 - A scalar renders through the language's own lowering; `impl Show` is consulted only for a type the language cannot render. Records get no derived `Show`.
 - Any expression may be a method receiver, evaluated exactly once.
@@ -457,6 +458,7 @@ pull request.
 - `vyrn serve --workers` refuses a `handle` by the effect judgment's `module-state` verdict (`World::state_path`), which follows a function value as it follows a call. No second walk answers the question.
 - The page reloads through server-sent events, injected into dev HTML only. `EventSource` reconnects by itself and needs no client library or framing; a WebSocket needs a handshake and frames for a one-way signal, and long polling needs a request loop of its own.
 - A `vyrn` command reads `vyrn.json` and `vyrn.lock` once, into one `Project`. Every load it makes reports through it: the lock is saved, the diagnostics and warnings print one way, and `--offline` and `--deny-warnings` reach every load.
+- A diagnostic names a std file `std/<name>.vyrn`, as a `panic` site does, so its text holds no machine's directory (`Diagnostic::shown_file`). A user file keeps the spelling it was loaded by.
 - Tools are pinned per project in the same lock, and bytes are shared per user. A pinned tool that cannot resolve fails; it never falls back to `PATH`.
 - clang is discovered and recorded, never pinned, because it links against the host's libc.
 - Vyrn does not build tools from source, wrap a package manager, or take a crate for curl, git or tar.

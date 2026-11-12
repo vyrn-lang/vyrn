@@ -465,7 +465,7 @@ mod tests {
                     fn main() -> Int64 { return routes() + bt.routes() }";
         let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
         assert!(
-            e.contains("`routes` is not in scope — it was imported as `pageRoutes`"),
+            e.contains("`routes` is not in scope: it was imported as `pageRoutes`"),
             "{e}"
         );
         // One cause, one error: the collision diagnostics next door do not pile on.

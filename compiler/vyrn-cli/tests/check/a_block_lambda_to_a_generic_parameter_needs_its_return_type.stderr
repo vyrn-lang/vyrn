@@ -1,0 +1,1 @@
+a_block_lambda_to_a_generic_parameter_needs_its_return_type.vyrn:6:0: cannot infer the return type of a block-bodied lambda passed to a generic `fn` parameter; use an expression body `x -> expr`

@@ -1,0 +1,2 @@
+a_function_named_like_a_protocol_method_is_refused.vyrn:5:4: `slice` collides with protocol Cut's method of the same name: method names dispatch to impls before free functions, so this declaration could never run
+a_function_named_like_a_protocol_method_is_refused.vyrn:10:0: String does not implement protocol `Cut` (needed for `.slice(..)`)

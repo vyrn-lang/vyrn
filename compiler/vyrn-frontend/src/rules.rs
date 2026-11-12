@@ -9,7 +9,7 @@ use crate::ast::{Speech, Spellings, Type};
 use crate::diagnostics::menu;
 use crate::types::{FALLIBLE, SHOW, SHOW_SHOW};
 
-const HINT: &str = "generators run at compile time — they may not use `extern`, \
+const HINT: &str = "generators run at compile time: they may not use `extern`, \
                     module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, \
                     the clock, entropy, or logging sinks";
 
@@ -200,42 +200,47 @@ rules! {
     FunctionDefinedTwice { name } "function `{name}` defined twice";
     FunctionIsType { name } "`{name}` is both a type and a function name";
     FunctionShadowsProtocolMethod { name, owners }
-        "`{name}` collides with protocol {owners}'s method of the same name — \
+        "`{name}` collides with protocol {owners}'s method of the same name: \
         method names dispatch to impls before free functions, so this \
         declaration could never run";
+    MethodShadowsForeignFunction { name, protocol }
+        "protocol {protocol}'s method `{name}` collides with the function `{name}` \
+        of a module that does not import {protocol}: method names dispatch to \
+        impls before free functions, so that function could never run; rename \
+        the method";
     ImplMissesAssociatedType { protocol, ty, name }
-        "`impl {protocol} for {ty}` does not bind the associated type `{name}` \
-        — add `type {name} = ..` (protocol `{protocol}` declares it)";
+        "`impl {protocol} for {ty}` does not bind the associated type `{name}`: \
+        add `type {name} = ..` (protocol `{protocol}` declares it)";
     ImplBindsUndeclaredType { protocol, ty, name }
         "`impl {protocol} for {ty}` binds `type {name}`, which protocol `{protocol}` \
         does not declare";
     ImplMissesProjection { protocol, ty, want }
         "`impl {protocol} for {ty}` does not provide the projection `{want}`, \
-        which protocol `{protocol}` declares — a protocol's members are \
+        which protocol `{protocol}` declares: a protocol's members are \
         all required";
     ProjectionMismatchesProtocol { name, protocol, want, got }
-        "projection `{name}` does not match protocol `{protocol}` — it declares \
+        "projection `{name}` does not match protocol `{protocol}`: it declares \
         `{want}`, this provides `{got}`";
     ImplMissesMethod { protocol, ty, want }
         "`impl {protocol} for {ty}` does not provide `{want}`, which protocol `{protocol}` \
-        declares — a protocol's methods are all required, so anything \
+        declares: a protocol's methods are all required, so anything \
         holding a `T: {protocol}` may call it";
     MethodMismatchesProtocol { head, protocol, want, got }
-        "`{head}` does not match protocol `{protocol}` — it declares `{want}`, this \
+        "`{head}` does not match protocol `{protocol}`: it declares `{want}`, this \
         provides `{got}`";
     ImplMethodUndeclared { head, sig, protocol, fix }
-        "`{head}` provides `{sig}`, which protocol `{protocol}` does not declare — \
+        "`{head}` provides `{sig}`, which protocol `{protocol}` does not declare: \
         dispatch knows only a protocol's own method names, so this one is \
         reachable from nowhere; {fix}";
     ImplUnknownProtocol { protocol, ty }
-        "`impl {protocol} for {ty}`: there is no protocol named `{protocol}` — declare it with \
+        "`impl {protocol} for {ty}`: there is no protocol named `{protocol}`; declare it with \
         `protocol {protocol} {{ .. }}` or import it";
     ImplHeadCollides { head, prev, prev_line, key, protocol }
-        "`{head}` collides with `{prev}` (line {prev_line}) — Vyrn \
+        "`{head}` collides with `{prev}` (line {prev_line}): Vyrn \
         dispatches on the type constructor, so `{key}` may have only one \
         impl of `{protocol}`; write one generic impl (`impl<T> {protocol} for {key}<T>`) to \
         cover every instantiation";
-    ImplUnsupported { protocol, ty, why } "`impl {protocol} for {ty}` is not supported — {why}";
+    ImplUnsupported { protocol, ty, why } "`impl {protocol} for {ty}` is not supported: {why}";
     NoMain {} "no `main` function found";
     MainSignature {} "`main` must have signature `fn main() -> Int64`";
     ExternTakesFn {}
@@ -247,33 +252,33 @@ rules! {
         (closures do not cross the host boundary)";
     GenReturnsFn {} "a `gen fn` may not return a function value";
     ProjectionOneReturn { name }
-        "projection `{name}` must end with exactly one `return <place>` — \
+        "projection `{name}` must end with exactly one `return <place>`: \
         a projection is inlined at the access site, so it has one exit";
     ProjectionUsesTry { name }
-        "projection `{name}` uses `?`, which returns — a projection is \
+        "projection `{name}` uses `?`, which returns: a projection is \
         inlined at the access site, so there is no frame to return \
         from. Check the condition and `panic` instead.";
     ProjectionReturnsValue { name }
-        "projection `{name}` returns a value, not a place — a `read`/`modify` \
+        "projection `{name}` returns a value, not a place: a `read`/`modify` \
         result must be a field or element of `self`; a projection that \
         computes a new value is an ordinary `fn` returning `-> T`";
     OptionalProjectionSugarName { name }
-        "`{name}` is dispatched by sugar that consumes a place unconditionally \
-        — an optional projection needs a name of its own";
+        "`{name}` is dispatched by sugar that consumes a place unconditionally: \
+        an optional projection needs a name of its own";
     OptionalProjectionReadSelf { name }
-        "optional projection `{name}` must take `read self` — the hit is a \
+        "optional projection `{name}` must take `read self`: the hit is a \
         borrow the `if let` arm reads, and nothing writes through a miss";
     OptionalProjectionShape { name }
         "optional projection `{name}` must hold one `if <miss> {{ return None }}` \
-        and end with `return Some(<place>)` — one prologue, one decision, \
+        and end with `return Some(<place>)`: one prologue, one decision, \
         and statements after the decision run only on the hit";
     OptionalProjectionReturnsValue { name }
-        "optional projection `{name}` answers `Some` of a value, not of a place \
-        — the hit must be a field or element of `self`; a computed value \
+        "optional projection `{name}` answers `Some` of a value, not of a place: \
+        the hit must be a field or element of `self`; a computed value \
         is an ordinary `fn` returning `-> Option<T>`";
     ProjectionForeignRoot { name, root }
         "projection `{name}` returns a place rooted at `{root}`, which the \
-        access site does not own — a projection may only return a place \
+        access site does not own: a projection may only return a place \
         inside `self`, a parameter, or a prologue `let` that borrows \
         from one";
     DuplicateBlockName { noun, name, prev }
@@ -281,18 +286,18 @@ rules! {
     MapKeyFloat { key }
         "`{key}` holds a float, and a `Map` key must hash and compare by equality: `NaN != NaN`, and `+0.0 == -0.0` would hash apart";
     MapKeyPayloadEnum { key }
-        "`{key}` has a variant with a payload, and a payload-bearing enum key waits for real demand — a fieldless enum or a record of scalars keys today";
+        "`{key}` has a variant with a payload, and a payload-bearing enum key waits for real demand: a fieldless enum or a record of scalars keys today";
     MapKeyOwnsHeap { key }
-        "`{key}` owns heap somewhere in its fields, and a `Map` key is stored, compared and freed by the map — a key must be heapless all the way down";
+        "`{key}` owns heap somewhere in its fields, and a `Map` key is stored, compared and freed by the map: a key must be heapless all the way down";
     ChainedProjectionUnresolved {}
         "the inner projection's result is not a concrete named type \
-        here, so no engine can resolve the chain — bind the inner \
+        here, so no engine can resolve the chain: bind the inner \
         access with a `let`, then read through the binding";
     OptionalPlaceTested { name }
-        "an optional place is tested for its hit — write \
+        "an optional place is tested for its hit: write \
         `if let Some(x) = ..{name}(..)`; the miss is the `else` arm";
     OptionalPlaceRead { method }
-        "an optional place is read where it is tested — write \
+        "an optional place is read where it is tested: write \
         `if let Some(x) = ..{method}(..)`, or reach for the copying \
         reader when the value must outlive the test";
     ProjectionArity { name, want, got }
@@ -306,16 +311,16 @@ rules! {
         "\"{witness}\" (a possible value of this interpolation) \
         does not satisfy `{name}` (predicate `where {pred}` is false)";
     StreamStored { ty, where_ }
-        "`{ty}` may not be {where_} — a stream's lifetime is a scope, \
+        "`{ty}` may not be {where_}: a stream's lifetime is a scope, \
         so it may be a binding, a parameter, or a return type, and nothing may \
         store it";
     TypeHoldsStream { ty }
-        "`{ty}` holds a `Stream`, but a stream's lifetime is a scope — \
+        "`{ty}` holds a `Stream`, but a stream's lifetime is a scope: \
         it may be a binding, a parameter, or a return type, and nothing may \
         store it";
     GenOnlyType { name } "the `{name}` type is only available during generation";
     SelfNotType {}
-        "`Self` is not a type in Vyrn — a protocol that must name the \
+        "`Self` is not a type in Vyrn: a protocol that must name the \
         implementing type declares an associated type instead: `protocol P {{ type \
         Out  fn m(self) -> Out }}`, and each impl binds it with `type Out = ..`";
     UnknownType { n } "unknown type `{n}`";
@@ -331,7 +336,7 @@ rules! {
         "an integer is not a type; only `SmallArray<T, N>` \
         takes an integer argument";
     MapKeyNeedsHashable { key }
-        "`{key}` can be a `Map` key once it declares the obligation: `impl Hashable for {key}` — equal values must return equal hashes";
+        "`{key}` can be a `Map` key once it declares the obligation: `impl Hashable for {key}`; equal values must return equal hashes";
     MapKeyType { key }
         "a `Map` key is `String`, `Int64`, or a heapless `Hashable` type, found `{key}`";
     FnTypeTakesFn {} "a function type may not take another function value";
@@ -360,7 +365,7 @@ rules! {
         (allowed: Int64, sized ints, Float64, Float32, Bool, String, Unit)";
     GlobalUnit { name } "cannot bind module state `{name}` to a Unit value";
     GlobalStream { name }
-        "module state `{name}` may not be a `Stream` — a stream's \
+        "module state `{name}` may not be a `Stream`: a stream's \
         lifetime is a scope, and module state is never dropped";
     InitMismatch { name, declared, vty }
         "`{name}` declared {declared} but initializer is {vty}";
@@ -376,7 +381,7 @@ rules! {
         that holds no heap.";
     IntLiteralOverflow { n }
         "integer literal {n} exceeds Int64's maximum \
-        (9223372036854775807); only `UInt64` can hold it — \
+        (9223372036854775807); only `UInt64` can hold it: \
         annotate the binding (`let x: UInt64 = ...`)";
     InferNone {}
         "cannot infer the type of `None`; \
@@ -399,7 +404,7 @@ rules! {
         "map values must share a type: expected {val_ty}, \
         found {vt}";
     LambdaNeedsFnType {}
-        "a lambda `|..|` needs a function type from context: \
+        "a lambda `x -> ..` needs a function type from context: \
         pass it to a `fn`-typed parameter, or give the binding a function \
         type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`)";
     RecordFailsPredicate { name, pred } "`{name} {{ .. }}` violates `where {pred}`";
@@ -429,7 +434,7 @@ rules! {
         "a `match` used as a value has single-expression arms; a block arm needs statement position";
     BlockArmOutsideFn {} "a block arm needs a function body around it";
     DefaultOperand { sty }
-        "`??` works on an Option or a Result, not on {sty} — \
+        "`??` works on an Option or a Result, not on {sty}: \
         `match` names the variant to fall back on";
     NotAVariant { vname, sty } "`{vname}` is not a variant of {sty}";
     PatternArity { vname, want, got }
@@ -446,7 +451,7 @@ rules! {
     ParamMatch { t } "`=~` needs a String operand, not `{t}`";
     ParamBitwise { t } "bitwise operators need a concrete integer type, not `{t}`";
     SimdIntDivide {}
-        "`I32x4` has no `/` — no hardware has SIMD integer \
+        "`I32x4` has no `/`: no hardware has SIMD integer \
         divide, so there is no instruction to emit. Read the lanes out \
         and divide them, or use `F32x4`";
     ConcatOperands { l, r } "`+` concatenates two Strings, found {l} and {r}";
@@ -474,7 +479,7 @@ rules! {
         (e.g. `v.lane(0)`), found {other}";
     LaneIndex { max }
         "a lane index must be a compile-time constant in 0..{max} \
-        (that is what makes `lane` total — there is no bounds check to fall back on)";
+        (that is what makes `lane` total: there is no bounds check to fall back on)";
     ReplaceLaneArity { got }
         "`replaceLane` takes a lane index and a value \
         (it is `v.replaceLane(k, x)`), got {got} argument(s)";
@@ -483,7 +488,7 @@ rules! {
         (e.g. `v.replaceLane(0, x)`), found {v}";
     ReplaceLaneIndex { max }
         "a lane index must be a compile-time constant in 0..{max} \
-        (that is what makes `replaceLane` total — there is no bounds check \
+        (that is what makes `replaceLane` total: there is no bounds check \
         to fall back on)";
     MaskArity { what, got }
         "`{what}` takes no arguments (it is `m.{what}()`), \
@@ -506,12 +511,12 @@ rules! {
     CallsLocal { name, ty } "`{name}` is a local of type {ty}, not a function"
         fix "rename the local to call the function `{name}`";
     TestOnly { name }
-        "`{name}` is only available inside a `test` block — in ordinary \
+        "`{name}` is only available inside a `test` block: in ordinary \
         code, use a validated type or return a `Result` to signal failure";
     TakesTwo { name, got } "`{name}` takes 2 arguments, got {got}";
     AssertEqOperands { a, b } "`assertEq` needs two equal, equatable values, found {a} and {b}";
     BlackBoxOutsideBench {}
-        "`blackBox` is only available inside a `bench` or `test` block — \
+        "`blackBox` is only available inside a `bench` or `test` block: \
         it exists to defeat the optimizer while measuring, not for ordinary code";
     TakesOne { name, got } "`{name}` takes 1 argument, got {got}";
     PanicArity { got } "`panic` takes 1 String argument, got {got}";
@@ -540,7 +545,7 @@ rules! {
     IndexType { i } "`at` index must be an Int64, found {i}";
     StreamAddress { name, at } "`{name}` needs a boxed stream's address, found {at}";
     StreamElementContext { name, want }
-        "`{name}` needs the element type from context — \
+        "`{name}` needs the element type from context: \
         write `let x: {want} = {name}(a)`";
     StreamElementMismatch { name, want, exp } "`{name}` answers a `{want}`, not {exp}";
     TakesNone { name } "`{name}` takes no arguments";
@@ -565,7 +570,7 @@ rules! {
     ConversionArity { name, got } "`{name}` conversion takes 1 argument, got {got}";
     ConversionType { name, src } "`{name}(..)` converts a number, found {src}";
     TargetAsTypeArg { name, was, suffix }
-        "`{name}` names its target as a type argument — write `{name}<{was}>({suffix})`";
+        "`{name}` names its target as a type argument: write `{name}<{was}>({suffix})`";
     SchemaOfUnion { t }
         "`schemaOf` describes one declaration, and `{t}` is a union of several: ask it of each member";
     ContractOfArity { got } "`contractOf` takes 1 argument (a contract name), got {got}";
@@ -582,7 +587,7 @@ rules! {
         "generator `{g}` wrote the entry `{got}`, and this call needs `{want}`";
     ValueType { t } "`value` boxes an Int64, Bool, or String, found {t}";
     ValueTypeNoShow { t, key }
-        "`value` boxes an Int64, Bool, or String, found {t} \u{2014} say how it renders \
+        "`value` boxes an Int64, Bool, or String, found {t}: say how it renders \
         with `impl {SHOW} for {key}`";
     ListType { other } "`@list` needs an Array, found {other}";
     SomePayload { aty, want } "`Some` payload is {aty} but Option<{want}> was expected";
@@ -605,14 +610,14 @@ rules! {
     ProtocolLacksMethod { protocol, name } "protocol `{protocol}` declares no method `{name}`";
     BoundAssociatedType { name, proto, a, t }
         "`{name}` mentions `{proto}`'s associated type `{a}`, and \
-        a `<{t}: {proto}>` bound cannot name it — call `.{name}(..)` on a \
+        a `<{t}: {proto}>` bound cannot name it: call `.{name}(..)` on a \
         concrete type, where the impl (and so `{a}`) is known";
     NotImplemented { recv, proto, name }
         "{recv} does not implement protocol `{proto}` \
         (needed for `.{name}(..)`)";
     ProjectionOnBound { name }
         "`{name}` is a projection, and a projection inlines at its \
-        access site — a `<T: ..>` receiver has no body to inline, \
+        access site: a `<T: ..>` receiver has no body to inline, \
         so call `.{name}(..)` on a concrete type";
     UnknownFunction { name } "call to unknown function `{name}`";
     BoundUnsatisfied { shown, tp, b, concrete }
@@ -620,7 +625,7 @@ rules! {
     InferLambdaReturn {}
         "cannot infer the return type of a \
         block-bodied lambda passed to a generic `fn` parameter; \
-        use an expression body `|..| expr`";
+        use an expression body `x -> expr`";
     ArgNotFn { callee, arg, vn }
         "`{callee}` argument {arg} expects a function; `{vn}` is \
         neither a lambda nor a known function";
@@ -636,7 +641,7 @@ rules! {
         value in v1";
     ExternFnValue {}
         "an `extern` function cannot be used as a function \
-        value — the host boundary dispatches by name";
+        value: the host boundary dispatches by name";
     GenFnCall { name }
         "`{name}` is a `gen fn`, so only a `gen fn`, a test, a bench or the `from` of an import \
         may call it; make the caller a `gen fn`";
@@ -759,27 +764,27 @@ rules! {
         own initializer";
     GlobalReadsLater { own_name, name }
         "initializer of `{own_name}` reads `{name}`, a module-state \
-        binding declared later — a global may only read earlier ones";
+        binding declared later: a global may only read earlier ones";
     GlobalCalls { own_name, name }
-        "initializer of `{own_name}` may not call `{name}` — a \
+        "initializer of `{own_name}` may not call `{name}`: a \
         module-state initializer runs before `main`, so it may use only \
         literals, operators, built-ins, and functions imported from another \
         module (whose state initializes first)";
     ShowReturnsString { ret }
         "`{SHOW}`'s `{SHOW_SHOW}` must hand back a String to render through, found {ret}";
     ExternConsume { func, param }
-        "extern fn `{func}` parameter `{param}` may not be `consume` — the caller \
+        "extern fn `{func}` parameter `{param}` may not be `consume`: the caller \
         across this boundary is JS, and it releases the String when the \
         call returns"
         fix "take `{param}: String` and store `{param}.copy()`";
     GoneModule { name, module }
-        "`{name}` is `{module}`'s — add `import {{ {name} }} from \"{module}\"`";
+        "`{name}` is `{module}`'s: add `import {{ {name} }} from \"{module}\"`";
     GoneDesugared { name, module, sugar }
-        "`{name}` is `{module}`'s, and `{sugar}` writes through it — add \
+        "`{name}` is `{module}`'s, and `{sugar}` writes through it: add \
         `import {{ {name} }} from \"{module}\"`";
     NeedsShow { shown, found } "`{shown}` needs a number, Bool, or String, found {found}";
     NeedsShowImpl { shown, found, key }
-        "`{shown}` needs a number, Bool, or String, found {found} \u{2014} say how it \
+        "`{shown}` needs a number, Bool, or String, found {found}: say how it \
         renders with `impl {SHOW} for {key}`";
     LambdaAssignsCapture { name, line }
         "a lambda captures by read; it cannot assign to the captured \
@@ -798,7 +803,7 @@ rules! {
         "a lambda body may not contain another lambda literal in v1 (line {line})";
     ModifyAliased { path, fname, root }
         "`{path}` is passed to `{fname}` as `modify` and read again in the \
-        same call — a `modify` borrow is exclusive"
+        same call: a `modify` borrow is exclusive"
         fix "`{root}.copy()` for the second argument"
         fix "or split the call so the two accesses do not overlap";
     NulInString {}
@@ -820,51 +825,51 @@ rules! {
         `logging` at top level, found {found}";
     AssocTypeRhs { aname }
         "`type {aname}` in a protocol declares an associated type and takes no \
-        right-hand side — the implementing type supplies it, so \
+        right-hand side: the implementing type supplies it, so \
         `type {aname} = ..` belongs in the `impl`";
     AssocTypeAfterMethods { aname, name }
-        "`type {aname}` must be declared before the methods of `{name}` — an \
+        "`type {aname}` must be declared before the methods of `{name}`: an \
         associated type is resolved where it is named, so a signature above \
         it cannot see it";
     ProjectionReceiver { name, want }
         "`fn {name}` returns `{want} T`, so its receiver must be \
-        `{want} self` — the result is a place inside the receiver, \
+        `{want} self`: the result is a place inside the receiver, \
         and the two capabilities name one access";
     ContractMemberExpected { name, found }
         "expected `let` or `fn` in contract `{name}`, found {found} \
         (a contract member is `let name: Type [= default]`, \
         `fn name(..) -> T [= default]`, or the open rule `fn *(..) -> T`)";
     ContractOpenRuleTwice { name, line }
-        "contract `{name}` already has an open rule (line {line}) — \
+        "contract `{name}` already has an open rule (line {line}): \
         a contract has at most one";
     ContractMemberFormChange { name, member, line }
         "contract `{name}` declares `{member}` as both a value and a function \
-        (line {line}) — alternative signatures are alternatives, not a \
+        (line {line}): alternative signatures are alternatives, not a \
         change of member form";
     ContractMemberTwice { name, member, line }
-        "contract `{name}` already declares `{member}` (line {line}) — only \
+        "contract `{name}` already declares `{member}` (line {line}): only \
         `fn` members may have alternative signatures";
     ContractMemberNeedsType { name }
         "contract member `{name}` needs a type: write `let {name}: Type` \
         (a contract states the shape of an export, so the type is never inferred)";
     ContractMemberParams { name }
-        "contract member `{name}` cannot take `(..)` — only the open rule \
+        "contract member `{name}` cannot take `(..)`: only the open rule \
         `fn *(..)` may leave its parameters open, because a named member's \
         arity is part of what the name promises";
     ContractOpenRuleDefault {}
-        "a contract's open rule cannot have a default — it describes the shape of \
+        "a contract's open rule cannot have a default: it describes the shape of \
         exports whose names the contract does not know, so there is no absent \
         member for a default to supply";
     ImplAssocTypeOrder { aname, protocol, ty }
         "`type {aname} = ..` must be declared before the methods of \
-        `impl {protocol} for {ty}` — an associated type is resolved where it \
+        `impl {protocol} for {ty}`: an associated type is resolved where it \
         is named, so a method above it cannot see it";
     ImplAssocTypeClash { aname }
-        "`type {aname}` collides with the `{aname}` this impl's head binds — \
+        "`type {aname}` collides with the `{aname}` this impl's head binds: \
         an associated type and a type variable are different things and \
         cannot share a name";
     ConsumeResult {}
-        "a result is owned by its caller already — `-> consume T` is spelled `-> T`";
+        "a result is owned by its caller already: `-> consume T` is spelled `-> T`";
     UnknownLogLevel { name } "unknown log level `{name}` (trace/debug/info/warn/error)";
     UnknownLoggingField { other }
         "unknown `logging` field `{other}` (expected `level` or `sink`)";
@@ -879,7 +884,7 @@ rules! {
         found {found}";
     InlineWhereBase { name }
         "an inline field `where` refines one record's fields, so the base of \
-        `type {name}` must be exactly `{{ .. }}` — a merge (`&`) or enum \
+        `type {name}` must be exactly `{{ .. }}`: a merge (`&`) or enum \
         variant cannot carry refinements";
     LazyAnonymous {}
         "a `lazy` field needs a named record type \
@@ -893,11 +898,11 @@ rules! {
         "a `lazy` field may not carry an inline `where`: name the \
         validated type and defer that (`field: lazy Body`)";
     FreeFnCapability { name }
-        "`fn {name}` cannot return a capability — a projection's result \
+        "`fn {name}` cannot return a capability: a projection's result \
         is a place inside its receiver, and a free function has none. \
         Declare it on an `impl`.";
     ExportedExternBody {}
-        "an exported extern needs a body — a body-less `extern fn` is an import";
+        "an exported extern needs a body: a body-less `extern fn` is an import";
     ExternBody {} "an `extern fn` has no body";
     IntUnsized {}
         "`Int` has no size; write `Int64` (or `Int8`/`Int16`/`Int32`, \
@@ -915,14 +920,14 @@ rules! {
         "module state `{name}` needs an initializer: write `let {name} = <value>` \
         (top-level `let` has no default value)";
     LetMutPattern { variant }
-        "`let mut {variant}(..)` — a pattern binder is a borrow of the \
+        "`let mut {variant}(..)`: a pattern binder is a borrow of the \
         scrutinee's payload; bind it, then `copy()` what you mutate";
     LetPatternScrutinee { variant }
-        "the scrutinee of `let {variant}(..)` must be a name — a \
+        "the scrutinee of `let {variant}(..)` must be a name: a \
         multi-payload pattern reads it once per binder, so bind the \
         value with an ordinary `let` first";
     LetEmptyVariant { variant }
-        "`let {variant}()` binds nothing — a payload-free variant is a \
+        "`let {variant}()` binds nothing: a payload-free variant is a \
         question, and `if let`/`match` are how it is asked";
     IndexAssignTarget {}
         "the left side of an index assignment `[i] = ..` must be \
@@ -935,7 +940,7 @@ rules! {
         would silently do nothing. Its receiver must be an \
         assignable place: a variable (`xs.push(v)`), a \
         record field (`r.xs.push(v)`), or an array element \
-        (`a[i].push(v)`) — not a temporary or a deeper chain.";
+        (`a[i].push(v)`), not a temporary or a deeper chain.";
     TemplateNoHole { name }
         "a tagged template `{name}\"..\"` needs at least one `\\{{ }}` \
         interpolation; use a plain string otherwise";
@@ -946,11 +951,11 @@ rules! {
         "`{receiver}::{protocol}` names the protocol of a method call and is not a value; \
         write `{receiver}::{protocol}.method(..)`";
     IfLetExpr {}
-        "`if let` is a statement, not an expression — use `match` to bind \
+        "`if let` is a statement, not an expression: use `match` to bind \
         a pattern in an expression position";
     IfExprStatements {}
         "an `if` used as an expression takes a single expression in each \
-        branch, not statements — use the statement form or a function for \
+        branch, not statements: use the statement form or a function for \
         multi-statement branches";
     FloorCannotInclude { artifact, target, module, what }
         "artifact `{artifact}` ({target}) cannot include `{module}`: {what}";
@@ -967,7 +972,7 @@ rules! {
     ImplOfBuiltinType { protocol, ty, key }
         "`impl {protocol} for {ty}` is refused: the language declares `{key}`, so no module may";
     GenImportsDeep { max }
-        "generator imports nest more than {max} deep — a generator \
+        "generator imports nest more than {max} deep: a generator \
         likely imports itself with a growing argument";
     ImportCycle { cycle, key } "import cycle: {cycle} -> {key}";
     CannotLoad { key, why } "cannot load `{key}`: {why}";
@@ -975,7 +980,7 @@ rules! {
     DeclaredByBoth { name, first, second }
         "`{name}` is declared by both `{first}` and `{second}`";
     DeclaredByBothLinked { name, first, second }
-        "`{name}` is declared by both `{first}` and `{second}` — a top-level name is \
+        "`{name}` is declared by both `{first}` and `{second}`: a top-level name is \
         program-wide, so two linked modules cannot share one";
     SourceTooLong { src_len } "src_len {src_len} exceeds the input buffer";
     NotUtf8 {} "the source is not valid UTF-8";
@@ -993,30 +998,30 @@ rules! {
     ByteNotAscii {}
         "byte literal must be a single ASCII byte; write the UTF-8 bytes explicitly";
     SingleQuotedString {}
-        "single-quoted strings are not allowed: '…' is a single byte \
-        (e.g. 'a', '\\n', '\\x41'); use \"…\" for text";
+        "single-quoted strings are not allowed: '..' is a single byte \
+        (e.g. 'a', '\\n', '\\x41'); use \"..\" for text";
     ModuleStateExport {}
-        "module state is not exportable — export accessor functions \
+        "module state is not exportable: export accessor functions \
         (a top-level `let` is module-private in every module)";
     ExportNeedsDecl {}
         "`export` must be followed by `fn`, `type`, `protocol`, `contract`, \
         `extern fn`, `gen fn`, or `mut fn`";
     ExportToExtern {}
-        "an `extern fn` takes no `export to` — the JS host imports it, not a module";
+        "an `extern fn` takes no `export to`: the JS host imports it, not a module";
     LambdaNotHere { form, fix }
         "`{form} ...` is not a lambda here; a lambda takes its parameters before an arrow"
         fix "{fix}";
-    SkeletonDetail { detail } "`vyrn\"…\"` skeleton does not parse: {detail}";
-    SkeletonUnparsable {} "`vyrn\"…\"` skeleton does not parse as Vyrn code";
+    SkeletonDetail { detail } "`vyrn\"..\"` skeleton does not parse: {detail}";
+    SkeletonUnparsable {} "`vyrn\"..\"` skeleton does not parse as Vyrn code";
     ImportNamespaceBuiltin { spec }
-        "`{spec}` cannot be imported as a namespace (`import * as`) — its names \
+        "`{spec}` cannot be imported as a namespace (`import * as`): its names \
         are builtins; import them by name or use them directly";
     ImportNoExport { spec, name } "{spec} has no export `{name}`";
     GenImportConstArgs { name }
         "generator import `{name}(..)` needs compile-time-constant arguments (v1: \
         string / integer / boolean literals)";
     GenImportNotGen { name }
-        "`{name}` is not an imported `gen fn` — a generator import target must be an \
+        "`{name}` is not an imported `gen fn`: a generator import target must be an \
         exported `gen fn` in a module this file imports";
     GenImportArity { name, want, got } "generator `{name}` takes {want} argument(s), got {got}";
     GenImportNotCode { name, ret } "generator `{name}` returns `{ret}`; an imported generator returns `Code`";
@@ -1031,10 +1036,10 @@ rules! {
         "import alias `{local}` clashes with a top-level declaration of \
         the same name in this module";
     ImportedUnderAlias { orig, local }
-        "`{orig}` is not in scope — it was imported as `{local}`; use \
+        "`{orig}` is not in scope: it was imported as `{local}`; use \
         that name (or import `{orig}` too)";
     NamespaceNoMember { ns, target, member }
-        "namespace `{ns}` (module `{target}`) has no exported member `{member}` — \
+        "namespace `{ns}` (module `{target}`) has no exported member `{member}`: \
         namespaces reach exported declarations only, one level deep";
     NotNamespace { ns } "`{ns}` is not an in-scope namespace";
     NamespacedVariant { head, enum_name, variant }
@@ -1042,7 +1047,7 @@ rules! {
         variant (namespaces are one level deep)";
     NamespaceNotValue { name } "namespace `{name}` is not a value";
     NotExported { name, target }
-        "`{name}` exists in `{target}` but is not exported — \
+        "`{name}` exists in `{target}` but is not exported: \
         add `export` to its declaration";
     ExportedOnlyTo { name, target, importers }
         "`{name}` is exported from `{target}` only to {importers}";
@@ -1052,9 +1057,9 @@ rules! {
     TargetLacks { target, name } "`{target}` does not define `{name}`";
     NotImported { what, name, def_module }
         "{what} `{name}` is defined in `{def_module}` but not \
-        imported here — add it to an `import {{ .. }} from` list";
+        imported here: add it to an `import {{ .. }} from` list";
     NotImportedList { what, name, list }
-        "{what} `{name}` is defined in `{list}` but not imported here — add \
+        "{what} `{name}` is defined in `{list}` but not imported here: add \
         it to an `import {{ .. }} from` list";
 
     // The ownership and typed judgments' rules, which `vyrn-lower` states.
@@ -1110,20 +1115,20 @@ rules! {
         reads it; consume `{m}` or copy `{b}`";
     // A written `drop` of a name with a hole.
     DropWithHole { s, h, l }
-        "`{s}` may not be dropped — `{s}{h}` was taken out of it on line {l}, and `drop` \
+        "`{s}` may not be dropped: `{s}{h}` was taken out of it on line {l}, and `drop` \
         releases the whole binding"
         fix "write `{s}{h}` back before the `drop`, so the binding is whole again"
-        fix "delete the `drop` — the parts still here are released when the block exits";
+        fix "delete the `drop`: the parts still here are released when the block exits";
     ReleasedWithHole { info, h }
         "{info} is released whole although a `consume` took `{h}` out of it";
     ReleasedAround { info, h } "{info} is released around `{h}` on a path that did not take it";
     Overwritten { info }
-        "{info} is overwritten while still held — the old value is never released";
+        "{info} is overwritten while still held: the old value is never released";
     ReleasedBeforeStore { info }
         "{info} is released before a store although it holds nothing";
-    HeldAtExit { info, exit } "{info} is still held at {exit} — no release is placed for it";
+    HeldAtExit { info, exit } "{info} is still held at {exit}: no release is placed for it";
     HeldAtArmEnd { info }
-        "{info} is still held where its arm ends — no release is placed for it";
+        "{info} is still held where its arm ends: no release is placed for it";
     JoinMoved { s, by }
         "`{s}` was moved here into {by} on one path and not on the other, and nothing \
         releases it where the paths join";
@@ -1154,93 +1159,93 @@ rules! {
     // reclaims nothing; a declared type has no `close` and is not iterable
     // unless it says so.
     OwedStream { s }
-        "a stream must be consumed with `for … in`, forwarded by returning it, or released \
-        with `close({s})` — on every path";
+        "a stream must be consumed with `for .. in`, forwarded by returning it, or released \
+        with `close({s})`, on every path";
     OwedDeclared { ty, s }
-        "`{ty}` declares `impl MustUse`, so a value of it must be handed on by name — passed \
-        to a call, forwarded by returning it, or released with `drop {s}` — on every path";
+        "`{ty}` declares `impl MustUse`, so a value of it must be handed on by name on every \
+        path: passed to a call, forwarded by returning it, or released with `drop {s}`";
     // A container: the reader wrote `Array<Txn>` and the row is `Txn`'s.
     OwedHeld { by, ty, s }
         "`{by}` declares `impl MustUse` and a `{ty}` holds one, so the container must be \
-        handed on by name — passed to a call, forwarded by returning it, or released with \
-        `drop {s}`, which releases each element — on every path";
+        handed on by name on every path: passed to a call, forwarded by returning it, or \
+        released with `drop {s}`, which releases each element";
 
     // Shape E, the flow-free rules: the kernel's at its use sites.
 
     // A `return` of a closure's captured binding.
     ReturnedCapture { s }
-        "`{s}` may not be returned from a closure — it is a captured binding, and the \
+        "`{s}` may not be returned from a closure: it is a captured binding, and the \
         closure's result is its caller's";
     // A `return` of a borrow from an `export extern fn`: the JS caller releases
     // what it is handed.
     ReturnedToJs { s, what }
-        "`{s}` may not be returned from an exported function — it is {what}, and the JS \
+        "`{s}` may not be returned from an exported function: it is {what}, and the JS \
         caller releases what it is handed";
-    ReturnedBorrow { s, what } "`{s}` may not be returned — it is {what}, and a return is owned";
+    ReturnedBorrow { s, what } "`{s}` may not be returned: it is {what}, and a return is owned";
     // A take of a borrow; `may_not` names the taker.
-    TakenBorrow { may_not, what } "{may_not} — it is {what}";
+    TakenBorrow { may_not, what } "{may_not}: it is {what}";
     // A whole take of a declared release's receiver.
     TakenReceiver { s }
-        "`{s}` may not be moved out of its `release` — a new owner would release it again"
+        "`{s}` may not be moved out of its `release`: a new owner would release it again"
         fix "`match consume {s}` or `consume {s}.field` takes it apart";
     CopyToOwn { s } "`{s}.copy()` if the value should own it";
     CopyForCaller { s } "`{s}.copy()` if the caller needs its own value";
-    CopyForJs { s } "`{s}.copy()` — an `export extern fn` owns its result";
+    CopyForJs { s } "`{s}.copy()`: an `export extern fn` owns its result";
     CopyFromJs { s }
-        "`{s}.copy()` — an `export extern fn` may not take ownership of a String its JS \
+        "`{s}.copy()`: an `export extern fn` may not take ownership of a String its JS \
         caller releases";
-    CopyForCallee { path } "`{path}.copy()` — the callee owns its copy";
+    CopyForCallee { path } "`{path}.copy()`: the callee owns its copy";
     CopyBoth { path } "`{path}.copy()` if both sides need a value";
     ConsumeParam { of } "declare the parameter `{of}: consume ..` if this function should own it";
     ConsumeNamedFn { of }
         "a named function with `{of}: consume ..`, called directly, if it should own it";
     ForInConsume { path, of } "`for {path} in consume {of}` if the loop should take the elements";
     ConsumePrefix { path, root }
-        "`consume {path}` if `{root}` should give it up — the field is dead afterwards";
+        "`consume {path}` if `{root}` should give it up: the field is dead afterwards";
     // Module state read whole, handed to a `consume` parameter.
     ModuleStatePassed { g, by }
-        "module state `{g}` may not be passed to a `consume` parameter via {by} — nothing may \
+        "module state `{g}` may not be passed to a `consume` parameter via {by}: nothing may \
         take ownership of module state (it lives for the whole module and is never dropped)";
     ModuleStateConsumed { g, by }
-        "module state `{g}` may not be consumed by {by} — nothing may take ownership of \
+        "module state `{g}` may not be consumed by {by}: nothing may take ownership of \
         module state (it lives for the whole module and is never dropped)";
     // Module state, or a projection of it, returned.
     ReturnedModuleState { s }
-        "`{s}` may not be returned — it is module state, which nothing may take, and a return \
+        "`{s}` may not be returned: it is module state, which nothing may take, and a return \
         is owned"
-        fix "`{s}.copy()` — the caller releases what it is handed";
-    TakenModuleState { may_not, s } "{may_not} — it is module state, which nothing may take"
-        fix "`{s}.copy()` — the callee releases what it is handed";
+        fix "`{s}.copy()`: the caller releases what it is handed";
+    TakenModuleState { may_not, s } "{may_not}: it is module state, which nothing may take"
+        fix "`{s}.copy()`: the callee releases what it is handed";
     // A named binding read out of a place, which a call rebuilds.
     RebuiltBorrow { s, src, here, by }
-        "`{s}` is read out of `{src}` here — a place that owns it\nline {here}: ... and {by} \
+        "`{s}` is read out of `{src}` here: a place that owns it\nline {here}: ... and {by} \
         takes `{s}`, so `{s}` must be a value of its own"
         fix "`{src}.copy()` if `{s}` should own what {by} rebuilds";
-    DroppedBorrow { s, kind } "`{s}` may not be dropped — it is {kind}"
+    DroppedBorrow { s, kind } "`{s}` may not be dropped: it is {kind}"
         fix "`consume` the place where `{s}` is bound, so `{s}` takes the value rather than \
             naming it"
-        fix "delete the `drop` — the place that owns it releases it";
+        fix "delete the `drop`: the place that owns it releases it";
     EscapingCapture { s, what }
-        "`{s}` may not be captured by a closure that outlives this call — it is {what}";
+        "`{s}` may not be captured by a closure that outlives this call: it is {what}";
     ReleasedUnowned { info } "{info} is released although the body does not own it";
     StoreReleasesNothing { l } "a store into a place that owns heap releases nothing (line {l})";
 
     // Shape E: the builder's, at the construct.
 
-    ElementTaken { path } "`{path}` may not be taken — an element is not a place a take reaches";
+    ElementTaken { path } "`{path}` may not be taken: an element is not a place a take reaches";
     SwapRemove { container }
         "`{container}.swapRemove(..)` returns the element and leaves the container one shorter";
     LoopTakesNothing {}
-        "`consume` here has nothing to take — the loop already owns a container that is not a \
+        "`consume` here has nothing to take: the loop already owns a container that is not a \
         binding"
         fix "drop the `consume`: the elements are already owned";
     ConsumeTakesNothing {}
-        "`consume` here has nothing to take — the value is already owned, so there is no \
+        "`consume` here has nothing to take: the value is already owned, so there is no \
         place to leave a hole in"
         fix "drop the `consume`: the value is already owned";
-    ConsumedBorrow { root, what } "`{root}` may not be consumed — it is {what}";
+    ConsumedBorrow { root, what } "`{root}` may not be consumed: it is {what}";
     HandedOutOfLoopArm { a }
-        "`{a}` may not be handed out of an arm inside a loop — the result is released on \
+        "`{a}` may not be handed out of an arm inside a loop: the result is released on \
         every turn, and `{a}` is bound outside the loop"
         fix "`{a}.copy()` if the arm should hand out a value of its own";
 
@@ -1273,12 +1278,12 @@ rules! {
     StoreNotMut { name } "cannot store into `{name}` (declared without `mut`)";
     OutsideLoop { what } "`{what}` outside a loop";
     DropModuleState { name }
-        "cannot `drop` module state `{name}` — it lives for the whole module and is reclaimed \
+        "cannot `drop` module state `{name}`: it lives for the whole module and is reclaimed \
         at process exit";
     DropUnbound { name } "`drop` of unbound variable `{name}`";
     DropTypeParam { name, t }
         "cannot `drop` `{name}`: its type `{t}` is a type parameter, so this body cannot know \
-        whether the rule below holds for the instance — a plain record would be released \
+        whether the rule below holds for the instance; a plain record would be released \
         here where `drop` on it directly is refused. Release the value where its concrete \
         type is known, or `consume` the heap field and `drop` that";
     DropNotHeap { name, t }
@@ -1329,8 +1334,8 @@ rules! {
         "`{shown}` declares no type parameters, so it takes no type arguments";
     ReceiverType { shown, pty, aty } "the receiver of `{shown}` expects {pty}, found {aty}";
     ForgetsHeap { shown, t }
-        "`{shown}` forgets or overwrites elements without releasing them, and `{t}` owns heap \
-        \u{2014} move the elements one at a time instead";
+        "`{shown}` forgets or overwrites elements without releasing them, and `{t}` owns heap: \
+        move the elements one at a time instead";
     SchemaOfParam { name, t }
         "`{name}` reads the declaration of its type, and `{t}` is a type parameter; write the type \
         itself";
@@ -1350,7 +1355,7 @@ rules! {
         "`{vn}` takes {got} argument(s), but `{callee}` argument {n} expects a {want}-argument \
         function";
     NotFnArg { callee, n, aty }
-        "`{callee}` argument {n} must be a lambda `|..| ..`, a function name, or an expression \
+        "`{callee}` argument {n} must be a lambda `x -> ..`, a function name, or an expression \
         of `fn` type; found {aty}";
     LambdaReturnsSlot { t, exp, r }
         "this lambda returns {t}, but the expected function type `{exp}` returns {r}";

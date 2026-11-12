@@ -175,7 +175,7 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
     ("may not be passed to a `consume` parameter via", "row 12"),
     ("may not be returned from a closure", "row 28"),
     (
-        "may not be returned — it is",
+        "may not be returned: it is",
         "rows 15, 16 and 18, rule 3 at the return",
     ),
     ("may not be returned from an exported function", "row 17"),
@@ -184,7 +184,7 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
         "rows 01, 02, 03, 27 and 34, rule 2 at a store",
     ),
     ("is dropped here but was already consumed by", "row 20"),
-    ("may not be dropped — it is", "row 21"),
+    ("may not be dropped: it is", "row 21"),
     ("was moved here into", "row 07, rule 1's move"),
     ("may not be put into", "row 19, a borrow into a constructor"),
     (
@@ -200,7 +200,7 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
         "rows 10, 11 and 29, the take a loop writes",
     ),
     (
-        "may not be dropped — `",
+        "may not be dropped: `",
         "row 22, a `drop` of a binding a take left a hole in",
     ),
     (

@@ -1701,7 +1701,7 @@ fn main() -> Int64 {
 
 #[test]
 fn a_join_arm_may_not_hand_an_outer_name_out_of_a_loop() {
-    let sentence = "`names` may not be handed out of an arm inside a loop — the result is \
+    let sentence = "`names` may not be handed out of an arm inside a loop: the result is \
                     released on every turn, and `names` is bound outside the loop";
     for (stem, src) in [
         ("if", LOOP_ALIAS_IF),

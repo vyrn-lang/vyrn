@@ -5550,8 +5550,8 @@ fn a_rule_that_left_the_checker_is_still_shown_in_the_editor() {
     assert_eq!(
         said,
         vec![
-            "module state `g` may not be passed to a `consume` parameter via `take(..)` \
-             — nothing may take ownership of module state (it lives for the whole module \
+            "module state `g` may not be passed to a `consume` parameter via `take(..)`: \
+             nothing may take ownership of module state (it lives for the whole module \
              and is never dropped)"
         ],
         "the editor says what `vyrn check` says"

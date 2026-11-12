@@ -1,2 +1,2 @@
 a_declaration_refused_in_an_import_names_its_file_lib.vyrn:2:4: function `f` defined twice
-a_declaration_refused_in_an_import_names_its_file_lib.vyrn:3:1: `impl Nope for Int64`: there is no protocol named `Nope` — declare it with `protocol Nope { .. }` or import it
+a_declaration_refused_in_an_import_names_its_file_lib.vyrn:3:1: `impl Nope for Int64`: there is no protocol named `Nope`; declare it with `protocol Nope { .. }` or import it

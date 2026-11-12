@@ -830,9 +830,9 @@ impl Project {
         // Pins are saved even when the load failed.
         self.save_lock().map_err(|_| SEE_TERMINAL.to_string())?;
         let root_key = dos_to_slash(root);
-        let t = result.map_err(|diags| print_diagnostics(&diags, &root_key, ""))?;
+        let t = result.map_err(|diags| print_diagnostics(&diags, &root_key, &self.opts, ""))?;
         if !warnings.is_empty() {
-            let text = print_diagnostics(&warnings, &root_key, "warning: ");
+            let text = print_diagnostics(&warnings, &root_key, &self.opts, "warning: ");
             if self.flags.deny_warnings {
                 let n = warnings.len();
                 return Err(text + &said(format!("{n} warning(s) — refused by --deny-warnings")));
@@ -1110,7 +1110,7 @@ fn why_cmd(call: &Call) -> Outcome {
         match linked {
             Ok(lit) => lit,
             Err(diags) => {
-                print_diagnostics(&diags, &path, "");
+                print_diagnostics(&diags, &path, &p.opts, "");
                 return Err(ExitCode::FAILURE);
             }
         }
@@ -1834,7 +1834,11 @@ fn why_capability(flags: GlobalFlags, cap: &str, name: &str) -> Outcome {
         Err(diags) => {
             eprintln!("error: cannot link artifact `{}`", artifact.name);
             for d in diags.iter().take(3) {
-                eprintln!("  {}: {}", d.shown_file(&artifact.entry), d.message);
+                eprintln!(
+                    "  {}: {}",
+                    d.shown_file(&artifact.entry, opts.std_root.as_deref()),
+                    d.message
+                );
             }
             return Err(ExitCode::from(2));
         }
@@ -2808,7 +2812,7 @@ fn fix_cmd(call: &Call) -> Outcome {
             let first = d.message.lines().next().unwrap_or_default();
             match (&d.file, d.fixes.as_slice()) {
                 (Some(_), _) => {
-                    let f = d.shown_file(&root_key);
+                    let f = d.shown_file(&root_key, p.opts.std_root.as_deref());
                     elsewhere.push(format!("{f}:{}: {first} (another file)", d.line))
                 }
                 (None, []) => note(&mut refused, format!("{root_key}:{}: {first}", d.line)),
@@ -2941,13 +2945,19 @@ type Loaded = (
 );
 
 /// Prints `file:line:col: message` per diagnostic, the file defaulting to
-/// `root_key`, with its note below, and returns what it printed. `marker` is
-/// `""` for an error and `"warning: "` for a warning.
-fn print_diagnostics(diags: &[Diagnostic], root_key: &str, marker: &str) -> String {
+/// `root_key` and a std file named under `opts.std_root`, with its note below,
+/// and returns what it printed. `marker` is `""` for an error and
+/// `"warning: "` for a warning.
+fn print_diagnostics(
+    diags: &[Diagnostic],
+    root_key: &str,
+    opts: &loader::LoadOptions,
+    marker: &str,
+) -> String {
     use std::fmt::Write;
     let mut text = String::new();
     for d in diags {
-        let file = d.shown_file(root_key);
+        let file = d.shown_file(root_key, opts.std_root.as_deref());
         let _ = writeln!(
             text,
             "{}:{}:{}: {}{}",

@@ -1433,9 +1433,7 @@ impl<'b> Kernel<'b> {
         let takeable = root != path && !element && self.root_owns(st, n);
         let mut fixes = Vec::new();
         if takeable {
-            fixes.push(format!(
-                "`consume {path}` if `{root}` should give it up — the field is dead afterwards"
-            ));
+            fixes.push(rule!(ConsumePrefix, path, root).render());
         }
         fixes.push(format!("`{path}.copy()` if both sides need a value"));
         fixes

@@ -1,0 +1,11 @@
+protocol Cut {
+    fn slice(read self, a: Int64) -> Int64
+}
+
+fn slice(s: String, a: Int64) -> Int64 {
+    return a
+}
+
+fn main() -> Int64 {
+    return slice("abc", 1)
+}

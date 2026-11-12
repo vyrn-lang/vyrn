@@ -154,7 +154,7 @@ impl OriginMaps {
         };
         d.note = Some(format!(
             "in generated code {}:{}:{} (see `vyrn emit-gen`)",
-            crate::loader::readable(&file),
+            crate::loader::shown_key(&file, None),
             d.line,
             d.col.max(1)
         ));
@@ -271,7 +271,7 @@ pub fn report(banner: &str, gen_line: usize, line: &str, ctx: &Context<'_>) -> O
             d.from_generated = true;
             d.note = Some(format!(
                 "in generated code {}:{gen_line} (see `vyrn emit-gen`)",
-                crate::loader::readable(banner),
+                crate::loader::shown_key(banner, None),
             ));
         }
         None => d.file = Some(banner.to_string()),

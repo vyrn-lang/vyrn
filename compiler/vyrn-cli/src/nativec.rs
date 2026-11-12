@@ -15,10 +15,12 @@
 //!
 //! An entry is written to a temporary name and renamed, so a concurrent build
 //! reads a whole file or none. A `.sum` file beside each entry records its
-//! SHA-256 (the header: its length), and a mismatch or a missing entry
-//! rebuilds. The header is not hashed, because that costs more than the build
-//! saves; a flipped bit in it is caught only by clang, which rejects a
-//! malformed header and also checks the system headers' sizes and times.
+//! SHA-256, and a mismatch or a missing entry rebuilds. The precompiled
+//! header's `.sum` records its length and the size and mtime of every header
+//! it includes, as clang's dependency file `pre.h.d` lists them, because clang
+//! refuses a precompiled header once one of them has a new mtime. It is not
+//! hashed, because that costs more than the build saves; a flipped bit in it is
+//! caught only by clang, which rejects a malformed header.
 
 use super::{native_compile_flags, show_path, NativeTarget};
 use std::path::{Path, PathBuf};
@@ -122,14 +124,20 @@ impl Native {
     /// Returns the precompiled header, for `-include-pch`.
     pub fn pch(&self) -> Result<PathBuf, ()> {
         let h = self.dir.join("pre.h");
-        let fill = |c: &mut Command| {
-            c.arg("-c").arg("-x").arg("c-header").arg(&h);
-        };
-        if let Some(hit) = self.hit("pre.h.pch", false) {
+        let deps = self.dir.join("pre.h.d");
+        if let Some(hit) = self.hit("pre.h.pch", &Sum::Headers(&deps)) {
             return Ok(hit);
         }
         place_header(&h)?;
-        self.build("pre.h.pch", false, fill)
+        let fresh = self.dir.join(format!("pre.h.d.{}", tmp_suffix()));
+        let built = self.build("pre.h.pch", &Sum::Headers(&fresh), |c| {
+            c.arg("-c").arg("-x").arg("c-header").arg(&h);
+            c.arg("-MD").arg("-MT").arg("pch").arg("-MF").arg(&fresh);
+        });
+        if std::fs::rename(&fresh, &deps).is_err() {
+            let _ = std::fs::remove_file(&fresh);
+        }
+        built
     }
 
     /// Returns the object of wabt's `<stem>.c`.
@@ -199,12 +207,12 @@ impl Native {
     /// only when the object is built.
     fn compiled(&self, stem: &str, text: &str, extra: &[&str]) -> Result<PathBuf, ()> {
         let name = format!("{stem}.o");
-        if let Some(hit) = self.hit(&name, true) {
+        if let Some(hit) = self.hit(&name, &Sum::Hash) {
             return Ok(hit);
         }
         let src = self.dir.join(format!("{stem}.c"));
         place_file(&src, text.as_bytes())?;
-        self.build(&name, true, |c| {
+        self.build(&name, &Sum::Hash, |c| {
             c.arg("-c").arg(show_path(&src)).args(extra);
         })
     }
@@ -221,30 +229,25 @@ impl Native {
     }
 
     fn object(&self, name: &str, src: &str, extra: &[&str]) -> Result<PathBuf, ()> {
-        if let Some(hit) = self.hit(name, true) {
+        if let Some(hit) = self.hit(name, &Sum::Hash) {
             return Ok(hit);
         }
-        self.build(name, true, |c| {
+        self.build(name, &Sum::Hash, |c| {
             c.arg("-c").arg(src).args(extra);
         })
     }
 
     /// Returns the entry `name` if it matches its `.sum`.
-    fn hit(&self, name: &str, hashed: bool) -> Option<PathBuf> {
+    fn hit(&self, name: &str, how: &Sum) -> Option<PathBuf> {
         let path = self.dir.join(name);
         let sum = std::fs::read_to_string(self.dir.join(format!("{name}.sum"))).ok()?;
-        (digest(&path, hashed)? == sum).then_some(path)
+        (digest(&path, how)? == sum).then_some(path)
     }
 
     /// Compiles into a temporary beside the entry, then renames it into place.
     /// If the rename fails (a peer holds the file open on Windows), the
     /// temporary is the result: valid, and unshared.
-    fn build(
-        &self,
-        name: &str,
-        hashed: bool,
-        fill: impl FnOnce(&mut Command),
-    ) -> Result<PathBuf, ()> {
+    fn build(&self, name: &str, how: &Sum, fill: impl FnOnce(&mut Command)) -> Result<PathBuf, ()> {
         let (dest, tmp) = (
             self.dir.join(name),
             self.dir.join(format!("{name}.{}", tmp_suffix())),
@@ -263,7 +266,7 @@ impl Native {
                 return Err(());
             }
         }
-        let sum = digest(&tmp, hashed).ok_or_else(|| {
+        let sum = digest(&tmp, how).ok_or_else(|| {
             eprintln!("error: clang wrote no {}", tmp.display());
         })?;
         if std::fs::rename(&tmp, &dest).is_err() {
@@ -333,13 +336,55 @@ fn place_header(h: &Path) -> Result<(), ()> {
     placed.map_err(|e| eprintln!("error: cannot write {}: {e}", h.display()))
 }
 
-/// The SHA-256 of the file, or its length where hashing costs more than it saves.
-fn digest(p: &Path, hashed: bool) -> Option<String> {
-    if hashed {
-        Some(sha256_hex(&std::fs::read(p).ok()?))
-    } else {
-        Some(std::fs::metadata(p).ok()?.len().to_string())
+/// What an entry's `.sum` records.
+enum Sum<'a> {
+    /// The entry's SHA-256.
+    Hash,
+    /// The entry's length, then the size and mtime of each header the
+    /// dependency file at the path lists.
+    Headers(&'a Path),
+}
+
+/// The `.sum` of the entry at `p`, or `None` where a file it reads is missing.
+fn digest(p: &Path, how: &Sum) -> Option<String> {
+    use std::fmt::Write;
+    let deps = match how {
+        Sum::Hash => return Some(sha256_hex(&std::fs::read(p).ok()?)),
+        Sum::Headers(deps) => std::fs::read_to_string(deps).ok()?,
+    };
+    let mut sum = std::fs::metadata(p).ok()?.len().to_string();
+    for h in headers(&deps) {
+        let m = std::fs::metadata(&h).ok()?;
+        let at = m
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        let _ = write!(sum, "\n{h} {} {}", m.len(), at.as_nanos());
     }
+    Some(sum)
+}
+
+/// The prerequisites of a make rule `pch: ..` as clang's `-MD` writes it: a
+/// backslash before a space escapes it, and one before a line break joins
+/// the lines.
+fn headers(deps: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut chars = deps.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\\', Some(' ')) => word.push(chars.next().unwrap_or(' ')),
+            ('\\', Some('\r' | '\n')) => {}
+            (c, _) if c.is_whitespace() => {
+                out.extend((!word.is_empty()).then(|| std::mem::take(&mut word)));
+            }
+            (c, _) => word.push(c),
+        }
+    }
+    out.extend((!word.is_empty()).then_some(word));
+    out.retain(|w| w != "pch:");
+    out
 }
 
 #[cfg(test)]
@@ -362,6 +407,13 @@ mod tests {
         drop(f);
         place_header(&h).unwrap();
         assert_eq!(std::fs::metadata(&h).unwrap().modified().unwrap(), old);
+    }
+
+    #[test]
+    fn a_dependency_file_lists_each_header() {
+        let deps = "pch: C:/a\\ b/pre.h \\\r\n  C:\\x\\wasm-rt.h \\\n /s/simd128.h\n";
+        let want = ["C:/a b/pre.h", "C:\\x\\wasm-rt.h", "/s/simd128.h"];
+        assert_eq!(headers(deps), want);
     }
 
     #[test]

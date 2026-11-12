@@ -649,13 +649,29 @@ fn check_accum_inner(
         .map(|m| m.name.clone())
         .collect();
     // A free function named like a protocol method could never run: `call`
-    // dispatches that name to an impl first.
+    // dispatches that name to an impl first. The function is refused where its
+    // module imports the protocol; else the method is, because the function's
+    // module checks alone without the protocol and may be std, which no user
+    // edits.
+    let root = program.spellings.root.as_str();
     for f in &program.functions {
-        if protocol_methods.contains_key(f.name.as_str()) {
-            let owners: Vec<&str> = protocol_methods[f.name.as_str()]
+        let Some(owners) = protocol_methods.get(f.name.as_str()) else {
+            continue;
+        };
+        let home = f.module.as_deref().unwrap_or(root);
+        let module_of = |p: &str| {
+            program
+                .protocols
                 .iter()
-                .map(|(p, _)| p.as_str())
-                .collect();
+                .find(|d| d.name == p)
+                .map(|d| &d.module)
+        };
+        let (seen, unseen): (Vec<_>, Vec<_>) = owners.iter().partition(|(p, _)| {
+            let m = module_of(p).and_then(|m| m.as_deref()).unwrap_or(root);
+            program.spellings.reaches(home, m)
+        });
+        if !seen.is_empty() {
+            let owners: Vec<&str> = seen.iter().map(|(p, _)| p.as_str()).collect();
             out.push(
                 cerr_at!(
                     f.line,
@@ -666,6 +682,15 @@ fn check_accum_inner(
                 )
                 .in_file(f.module.clone()),
             );
+        }
+        for (p, sig) in unseen {
+            let d = cerr!(
+                sig.line,
+                MethodShadowsForeignFunction,
+                name = f.name,
+                protocol = p
+            );
+            out.push(d.in_file(module_of(p).cloned().flatten()));
         }
     }
     // The program's own declaration of a prelude protocol's name replaces it.
@@ -6035,9 +6060,11 @@ impl<'a> Checker<'a> {
             }
             let rty = crate::types::substitute(ret, &subst);
             // `fromJson<T>(s)` calls what `std/jsondec`'s generator writes for
-            // `T`, and the solve is the one place `T` is known.
+            // `T`, and the solve is the one place `T` is known. A type
+            // parameter has no decoder; the bound refuses it per instance.
             if d.key == "fromJson" {
-                if let Some(t) = solved.get("T") {
+                let concrete = solved.get("T").filter(|t| !crate::types::mentions_param(t));
+                if let Some(t) = concrete {
                     self.acc.borrow_mut().derive.push(crate::gen::Site {
                         g: crate::loader::JSON_DECODERS.to_string(),
                         ty: t.clone(),
