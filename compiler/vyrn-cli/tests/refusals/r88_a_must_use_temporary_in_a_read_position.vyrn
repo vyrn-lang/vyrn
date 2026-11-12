@@ -1,0 +1,10 @@
+// A must-use temporary has no name to dispose of, so only a position that
+// takes it discharges it: a `read` argument does not.
+fn peek(s: Stream<Int64>) -> Int64 {
+    return 0
+}
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2]
+    return peek(fromArray(xs))
+}

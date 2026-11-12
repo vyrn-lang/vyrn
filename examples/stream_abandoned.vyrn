@@ -5,7 +5,7 @@ fn feed() -> Stream<Int64> {
     return fromArray(xs)
 }
 
-fn drain(s: Stream<Int64>) -> Int64 {
+fn drain(s: consume Stream<Int64>) -> Int64 {
     let mut total = 0
     for v in s {
         total = total + v

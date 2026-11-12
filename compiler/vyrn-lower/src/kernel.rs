@@ -765,11 +765,16 @@ fn run(
 
 impl<'b> Kernel<'b> {
     /// Whether the body owns what `n` holds. Everything but
-    /// a borrow is owned, including a heapless value and static data. A
-    /// must-use parameter is owned whatever its capability.
+    /// a borrow is owned, including a heapless value and static data.
     fn owned(&self, n: Name) -> bool {
         let i = &self.body.names[n.index()];
-        i.releases || !i.borrow || i.must_use_param
+        i.releases || !i.borrow
+    }
+
+    /// Whether a placed release of `n` would abandon a must-use temporary.
+    fn abandoned(&self, n: Name) -> bool {
+        let i = &self.body.names[n.index()];
+        i.is_temp() && !i.for_consume && self.body.owes(n).is_some()
     }
 
     /// Whether a held `n` owes a release at an exit: it owns heap.
@@ -798,8 +803,9 @@ impl<'b> Kernel<'b> {
             true => "an",
             false => "a",
         };
-        let s = i.source.as_str();
+        let s = self.src(n);
         let note = match declared {
+            _ if i.is_temp() => rule!(OwedTemporary, ty),
             Some(d) if *d == i.ty.to_string() => rule!(OwedDeclared, ty, s),
             Some(_) => rule!(OwedHeld, by, ty, s),
             None => rule!(OwedStream, s),
@@ -1810,7 +1816,7 @@ impl<'b> Kernel<'b> {
             }
             let s = self.src(*c);
             let (what, fixes) = match &self.body.names[c.index()].borrow_kind {
-                Some(b) => (b.what(s), b.fixes(s)),
+                Some(b) => (b.what(s), b.fixes(s, self.body.names[c.index()].copies())),
                 None => (
                     match st.alias(*c) {
                         Some(Alias {
@@ -1836,13 +1842,20 @@ impl<'b> Kernel<'b> {
     fn param_take(&self, n: Name, b: &BorrowKind) -> Refusal {
         let (s, capture) = (self.src(n), matches!(b, BorrowKind::Capture));
         let (ret, export) = (self.by == By::Return, self.body.export);
-        let what = b.what(s);
+        let (what, info) = (b.what(s), &self.body.names[n.index()]);
+        // A linear value is worded as `consume` even under a builtin
+        // (`close(s)`), as [`Kernel::used_after`] words it.
+        let takes = self.takes.get();
+        if info.linear.is_some() && takes == Taker::Stores {
+            self.takes.set(Taker::Declared);
+        }
         let r = match () {
             _ if ret && capture => rule!(ReturnedCapture, s),
             _ if ret && export => rule!(ReturnedToJs, s, what),
             _ if ret => rule!(ReturnedBorrow, s, what),
             _ => rule!(TakenBorrow, may_not = self.may_not(s), what),
         };
+        self.takes.set(takes);
         // The ways out, as `movecheck::Borrow::fixes` and `fixes_here` name
         // them. The value a constructor makes owns what it is given: only the
         // copy. An `export extern fn` signature refuses `consume`, so only a
@@ -1855,11 +1868,12 @@ impl<'b> Kernel<'b> {
             _ if capture => vec![],
             _ if export && ret => vec![rule!(CopyForJs, s).render()],
             _ if export => vec![rule!(CopyFromJs, s).render()],
-            _ => b.fixes(s),
+            _ => b.fixes(s, info.copies()),
         };
         let refusal = self.refuse_with(self.here, r, more);
-        // Every menu above names the copy, except a capture's taken in place.
-        if ret || !capture {
+        // Every menu above names the copy, except a capture's taken in place
+        // and a stream's, which has none.
+        if (ret || !capture) && info.copies() {
             self.copying(n, refusal)
         } else {
             refusal
@@ -1867,13 +1881,10 @@ impl<'b> Kernel<'b> {
     }
 
     /// The kind of borrow `n` is, where a take of it is refused by that kind
-    /// ([`Kernel::param_take`]). `None` for a must-use parameter, which the
-    /// callee may hand on.
+    /// ([`Kernel::param_take`]).
     fn kind_of_borrow(&self, n: Name) -> Option<&BorrowKind> {
         let i = &self.body.names[n.index()];
-        i.borrow_kind
-            .as_ref()
-            .filter(|_| self.borrowed(n) && !i.must_use_param)
+        i.borrow_kind.as_ref().filter(|_| self.borrowed(n))
     }
 
     /// Refuses, as a take, a write into a part of a second name for a
@@ -2545,6 +2556,12 @@ impl<'b> Kernel<'b> {
             St::Drop(n, ..) if self.gives(st, *n) => {
                 self.alias_read(st, *n, "used")?;
                 self.leaves_payload(st, *n)?;
+            }
+            // A placed release of a must-use temporary abandons it: no
+            // position took it, and only a loop takes one by releasing it.
+            St::Drop(n, _, 0, _) if self.abandoned(*n) => {
+                self.refusals.push(self.obligation(*n, false));
+                self.unbind(st, *n);
             }
             St::Drop(n, _, _, row) => {
                 let holes = self.body.drop_holes(*n, row).to_vec();

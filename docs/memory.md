@@ -194,10 +194,13 @@ so is a closure that outlives its call and captures `self`, because a new owner
 would release it by calling this release. The caller frees the boxes of
 `self`'s payloads after the call.
 
-`impl MustUse for T` gives `T` an obligation: on every path a value is handed
-on by name or released with `drop`. `Stream<T>` carries the same obligation,
-discharged by `for .. in`, a return or `close(s)`. A path that never disposes
-of it, or disposes of it twice, is refused.
+`impl MustUse for T` gives `T` an obligation: its owner discharges it exactly
+once on every path, by passing it to a `consume` parameter, returning it, or
+`drop`. A `read` or `modify` parameter borrows the value, so the caller keeps
+the obligation and the callee may not dispose of it. `Stream<T>` carries the
+same obligation, and `for .. in` and `close(s)` take it as a `consume`
+parameter does. A must-use temporary fills only a position that takes it. A
+path that never disposes of it, or disposes of it twice, is refused.
 
 ## A region frees a group at once
 

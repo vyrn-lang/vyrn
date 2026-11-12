@@ -359,7 +359,7 @@ print(b.body)   // runs loadBody here
 `Stream<T>` is a linear sequence: produced once and disposed exactly once, on every path. The compiler checks this.
 
 ```vyrn
-fn total(s: Stream<Int64>) -> Int64 {
+fn total(s: consume Stream<Int64>) -> Int64 {
     let mut sum = 0
     for v in s {
         sum = sum + v
@@ -369,8 +369,8 @@ fn total(s: Stream<Int64>) -> Int64 {
 ```
 
 - `fromArray(xs)` makes a stream from an array. `unfold(seed, step)` from `std/stream` makes a pull-based one whose step reads and writes a `Cursor`; it may never end.
-- A stream is disposed by `for v in s` (a `break` or early `return` also disposes it), by returning it, or by `close(s)`.
-- A stream parameter carries the obligation into the callee.
+- A stream is disposed by `for v in s` (a `break` or early `return` also disposes it), by passing it to a `consume` parameter, by returning it, or by `close(s)`.
+- A `consume` parameter carries the obligation into the callee. A `read` or `modify` parameter borrows the stream: the caller keeps the obligation, and the callee may not dispose of it.
 - A stream that is never disposed is refused: "`s` is a `Stream` and is never disposed".
 
 `std/stream` has the lazy combinators `map`, `filter`, `take` and `merge`. A user type takes the same obligation with `impl MustUse for T {}`, and its disposal is its `impl Owned` release.

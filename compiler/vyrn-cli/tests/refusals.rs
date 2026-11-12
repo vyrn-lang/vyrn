@@ -593,6 +593,24 @@ fn census() -> Vec<Row> {
              type itself",
             Kernel::Elsewhere,
         ),
+        row(
+            "r86_a_read_parameter_does_not_release_a_must_use_value.vyrn",
+            "a `read` parameter borrows a must-use value, and the caller keeps the obligation",
+            "`xs` (line 6) is released although the body does not own it",
+            Kernel::Its,
+        ),
+        row(
+            "r87_a_for_over_a_read_stream_parameter.vyrn",
+            "a `for` takes the stream it pulls, as `close` does",
+            "`s` may not be consumed: it is a `read` parameter",
+            Kernel::Its,
+        ),
+        row(
+            "r88_a_must_use_temporary_in_a_read_position.vyrn",
+            "a must-use temporary fills only a position that takes it",
+            "`fromArray(..)` is a `Stream<Int64>` and is never disposed",
+            Kernel::Its,
+        ),
     ]
 }
 

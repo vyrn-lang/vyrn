@@ -15,7 +15,7 @@ fn relay(n: Int64) -> Stream<Int64> {
     return s
 }
 
-fn total(s: Stream<Int64>) -> Int64 {
+fn total(s: consume Stream<Int64>) -> Int64 {
     let mut sum = 0
     for v in s {
         sum = sum + v

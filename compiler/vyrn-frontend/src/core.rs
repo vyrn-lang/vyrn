@@ -77,11 +77,6 @@ pub struct NameInfo {
     /// at the call site, so its free stands there; the `@`-spelled producers
     /// (`@concat`, `@str`, `@copy`) use the arena and stay region-gated.
     pub receiver_malloc: bool,
-    /// A parameter of a must-use type carries the obligation into the
-    /// callee, so a take of it is the callee's (`boxStream(s)` does not take
-    /// the caller's value). This is the ownership half only;
-    /// [`NameInfo::borrow_kind`] keeps the capability's words.
-    pub must_use_param: bool,
     /// A String accumulator `vyrn_lower::append::append_candidates` admits:
     /// `s = s + e` on it is one `@strAppend` row ([`crate::prelude::Spec::Rebuilds`]). A read
     /// of a module-state accumulator
@@ -92,9 +87,10 @@ pub struct NameInfo {
     /// (`p.name`, `xs[i]`), which a refusal about the temporary quotes. `None`
     /// for a name the program spells, whose `source` is the reader's.
     pub path: Option<String>,
-    /// The temporary a `for x in consume xs` loop binds its container to. The
-    /// core keeps no statement kinds, so the refusal's wording of that loop
-    /// rides on the name.
+    /// The temporary a loop that takes its container binds it to: `for x in
+    /// consume xs`, or a `for` over a stream, which closes it. The core keeps
+    /// no statement kinds, so the refusal's wording of that loop and the
+    /// kernel's reading of its release as a disposal ride on the name.
     pub for_consume: bool,
     /// For a name a record literal binds: where each part goes (`R.s`), one
     /// per field in order.
@@ -155,6 +151,16 @@ impl NameInfo {
     pub fn is_modify_param(&self) -> bool {
         matches!(&self.borrow_kind,
             Some(BorrowKind::Param { cap: "modify", of, .. }) if *of == self.source)
+    }
+
+    /// Whether a `.copy()` of this name's value exists: a stream has none.
+    pub fn copies(&self) -> bool {
+        !matches!(self.linear, Some(crate::own::Linear::Stream))
+    }
+
+    /// Whether the naming pass minted this name for a temporary (`@tN`).
+    pub fn is_temp(&self) -> bool {
+        self.source.starts_with("@t")
     }
 }
 
@@ -231,28 +237,30 @@ impl BorrowKind {
         }
     }
 
-    /// The named ways out. `path` is what was read out of the binding. A
-    /// capture has none: the checker answers that shape at the capture.
-    pub fn fixes(&self, path: &str) -> Vec<String> {
+    /// The named ways out. `path` is what was read out of the binding, and
+    /// `copies` says whether its value has a `.copy()` to offer. A capture
+    /// has none: the checker answers that shape at the capture.
+    pub fn fixes(&self, path: &str, copies: bool) -> Vec<String> {
         use crate::rules::rule;
-        let copy = rule!(CopyBoth, path).render();
-        match self {
+        let copy = || copies.then(|| rule!(CopyBoth, path).render());
+        let fixes = match self {
             // A `fn` type reads every argument, so the function that takes
             // ownership must be a named one, called directly.
             BorrowKind::Param {
                 of, lambda: true, ..
             } => {
-                vec![copy, rule!(ConsumeNamedFn, of).render()]
+                vec![copy(), Some(rule!(ConsumeNamedFn, of).render())]
             }
-            BorrowKind::Param { of, .. } => vec![rule!(ConsumeParam, of).render(), copy],
+            BorrowKind::Param { of, .. } => vec![Some(rule!(ConsumeParam, of).render()), copy()],
             BorrowKind::Capture => Vec::new(),
             // `for .. in consume` helps only when the whole element is handed
             // on; a field of one is a partial move, so a path gets the copy.
             BorrowKind::LoopVar { of } if crate::ast::root_of(path) == path => {
-                vec![rule!(ForInConsume, path, of).render(), copy]
+                vec![Some(rule!(ForInConsume, path, of).render()), copy()]
             }
-            BorrowKind::LoopVar { .. } | BorrowKind::Place => vec![copy],
-        }
+            BorrowKind::LoopVar { .. } | BorrowKind::Place => vec![copy()],
+        };
+        fixes.into_iter().flatten().collect()
     }
 }
 
@@ -1268,13 +1276,18 @@ impl Body {
         self.spellings.speech(&self.file)
     }
 
-    /// The must-use row a linear value bound by a `let` or a parameter owes:
-    /// the reader disposes of it exactly once on every path. A receiver owes
-    /// none, since `fn release(self)` is the disposal.
+    /// The must-use row a linear value this body owns owes: the reader
+    /// disposes of it exactly once on every path. A `let`, a `consume`
+    /// parameter and a temporary own their value. A `read` or `modify`
+    /// parameter borrows it, and the caller keeps the obligation. A receiver
+    /// owes none, since `fn release(self)` is the disposal.
     pub fn owes(&self, n: Name) -> Option<&crate::own::Linear> {
         let i = &self.names[n.index()];
-        let bound = i.bound_by_let || (i.source != "self" && self.params.contains(&n));
-        i.linear.as_ref().filter(|_| bound)
+        let owner = match self.params.contains(&n) {
+            true => i.source != "self" && i.borrow_kind.is_none(),
+            false => !i.borrow && (i.bound_by_let || (i.releases && i.is_temp())),
+        };
+        i.linear.as_ref().filter(|_| owner)
     }
 
     /// This body and every lambda body under it, outermost first.

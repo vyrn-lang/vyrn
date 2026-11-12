@@ -1,0 +1,17 @@
+// A `for` takes the stream it pulls, as `close` does, so it may not walk a
+// `read` parameter's stream.
+fn total(s: Stream<Int64>) -> Int64 {
+    let mut t = 0
+    for v in s {
+        t = t + v
+    }
+    return t
+}
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2]
+    let s = fromArray(xs)
+    let n = total(s)
+    close(s)
+    return n
+}

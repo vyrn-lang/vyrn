@@ -7,11 +7,11 @@ mod common;
 use common::vyrn;
 
 /// A producer, and a consumer that discharges a stream in expression position.
-const FEED: &str = "fn feed() -> Stream<Int64> { let xs: Array<Int64> = [1, 2] return fromArray(xs) } fn drain(s: Stream<Int64>) -> Int64 { let mut t = 0 for v in s { t = t + v } return t } ";
+const FEED: &str = "fn feed() -> Stream<Int64> { let xs: Array<Int64> = [1, 2] return fromArray(xs) } fn drain(s: consume Stream<Int64>) -> Int64 { let mut t = 0 for v in s { t = t + v } return t } ";
 
 /// A combinator spelled locally: nothing in the compiler knows about std/stream, and
 /// nothing has to.
-const TWICE: &str = "fn twice(s: Stream<Int64>) -> Stream<Int64> { let mut out: Array<Int64> = [] for x in s { out.push(x * 2) } return fromArray(out) } ";
+const TWICE: &str = "fn twice(s: consume Stream<Int64>) -> Stream<Int64> { let mut out: Array<Int64> = [] for x in s { out.push(x * 2) } return fromArray(out) } ";
 
 /// `vyrn check` over one program: `Ok`, or its whole standard error.
 fn run(src: &str) -> Result<(), String> {
@@ -235,11 +235,11 @@ fn aliasing_moves_the_obligation_rather_than_dropping_it() {
 }
 
 #[test]
-fn a_stream_parameter_carries_the_obligation_into_the_callee() {
-    // Otherwise `fn sink(s: Stream<Int64>) {}` is a hole: the caller discharges by
-    // moving, and nobody else has to do anything.
+fn a_consume_parameter_carries_the_obligation_into_the_callee() {
+    // Otherwise `fn sink(s: consume Stream<Int64>) {}` is a hole: the caller
+    // discharges by moving, and nobody else has to do anything.
     let e = run(&format!(
-        "{FEED} fn sink(s: Stream<Int64>) -> Int64 {{ return 0 }} \
+        "{FEED} fn sink(s: consume Stream<Int64>) -> Int64 {{ return 0 }} \
          fn main() -> Int64 {{ return sink(feed()) }}"
     ))
     .unwrap_err();
@@ -251,8 +251,8 @@ fn a_stream_parameter_carries_the_obligation_into_the_callee() {
 
 #[test]
 fn a_combinator_neither_swallows_the_obligation_nor_launders_it() {
-    // A `Stream` parameter carries the obligation in and a `Stream` return hands
-    // one back; the two rules compose, with no rule about combinators.
+    // A `consume` parameter carries the obligation in and a `Stream` return
+    // hands one back; the two rules compose, with no rule about combinators.
     let e = run(&format!(
         "{FEED}{TWICE} fn main() -> Int64 {{ let m = twice(feed()) return 0 }}"
     ))
@@ -263,7 +263,7 @@ fn a_combinator_neither_swallows_the_obligation_nor_launders_it() {
     );
 
     let e = run(&format!(
-        "{FEED} fn sink(s: Stream<Int64>) -> Stream<Int64> {{ return feed() }} \
+        "{FEED} fn sink(s: consume Stream<Int64>) -> Stream<Int64> {{ return feed() }} \
          fn main() -> Int64 {{ close(sink(feed())) return 0 }}"
     ))
     .unwrap_err();
@@ -302,7 +302,7 @@ fn a_stream_is_handed_away_once_however_it_is_handed_away() {
         ("serveStream(s)", TEXT, "String", "lines()", ""),
     ] {
         let e = run_as_stream(&format!(
-            "{prelude} fn go(s: Stream<{ty}>) -> Int64 {{ {bind}{call} {bind}{call} \
+            "{prelude} fn go(s: consume Stream<{ty}>) -> Int64 {{ {bind}{call} {bind}{call} \
              return 0 }} fn main() -> Int64 {{ return go({feed}) }}"
         ))
         .unwrap_err();
@@ -321,4 +321,174 @@ fn a_stream_is_handed_away_once_however_it_is_handed_away() {
          let back: Stream<Int64> = unboxStream(a) close(back) return 0 }}"
     ))
     .is_ok());
+}
+
+/// A user must-use type with a release that prints, so a double release or a
+/// missed one shows in the output as well as under the free audit.
+const TXN: &str = "type Txn = { label: String, ops: Array<String> } impl MustUse for Txn {} \
+                   impl Owned for Txn { fn release(consume self) { print(\"end \" + self.label) \
+                   let ops = consume self.ops drop ops let label = consume self.label drop label } } \
+                   fn begin(label: String) -> Txn { let ops: Array<String> = [] \
+                   return Txn { label: label.copy(), ops: ops } } \
+                   fn finish(t: consume Txn) { drop t } \
+                   fn pool() -> Array<Txn> { let mut xs: Array<Txn> = [] xs.push(begin(\"a\")) return xs } ";
+
+/// The obligation follows ownership: a `read` or `modify` parameter borrows a
+/// must-use value and owes nothing, the caller keeps it, and a temporary fills
+/// only a position that takes it. Each refused program names its first
+/// sentence; each accepted one runs under the free audit and prints its
+/// releases once.
+#[test]
+fn a_must_use_obligation_follows_ownership() {
+    let cases: [(&str, String, Result<&str, &str>); 15] = [
+        (
+            "i",
+            format!(
+                "{TXN} fn count(xs: Array<Txn>) -> Int64 {{ let n = xs.length drop xs return n }} \
+             fn main() -> Int64 {{ let xs = pool() print(count(xs)) drop xs return 0 }}"
+            ),
+            Err("`xs` (line 1) is released although the body does not own it"),
+        ),
+        (
+            "d",
+            format!(
+                "{TXN} fn count(xs: Array<Txn>) -> Int64 {{ return xs.length }} \
+             fn main() -> Int64 {{ let xs = pool() print(count(xs)) drop xs return 0 }}"
+            ),
+            Ok("1\nend a"),
+        ),
+        (
+            "e",
+            format!(
+                "{TXN} fn count(xs: Array<Txn>) -> Int64 {{ return xs.length }} \
+             fn main() -> Int64 {{ let xs = pool() print(count(xs)) return 0 }}"
+            ),
+            Err("`xs` is an `Array<Txn>` and is never disposed"),
+        ),
+        (
+            "h",
+            "fn count(xs: Array<String>) -> Int64 { let n = xs.length drop xs return n } \
+             fn main() -> Int64 { let xs: Array<String> = [\"a\".copy()] print(count(xs)) \
+             return 0 }"
+                .to_string(),
+            Err("`xs` (line 1) is released although the body does not own it"),
+        ),
+        (
+            "t2",
+            format!(
+                "{TXN} fn look(t: Txn) -> Int64 {{ finish(t) return 0 }} \
+             fn main() -> Int64 {{ let t = begin(\"a\") print(look(t)) drop t return 0 }}"
+            ),
+            Err(
+                "`t` may not be passed to a `consume` parameter via `finish(..)`: it is a \
+                 `read` parameter",
+            ),
+        ),
+        (
+            "t5",
+            format!(
+                "{TXN} fn add(t: modify Txn) {{ t.ops.push(\"x\".copy()) drop t }} \
+             fn main() -> Int64 {{ let mut t = begin(\"a\") add(t) drop t return 0 }}"
+            ),
+            Err("`t` (line 1) is released although the body does not own it"),
+        ),
+        (
+            "t6",
+            format!(
+                "{TXN} fn look(t: Txn) -> Int64 {{ drop t return 0 }} \
+             fn main() -> Int64 {{ let t = begin(\"a\") print(look(t)) drop t return 0 }}"
+            ),
+            Err("`t` (line 1) is released although the body does not own it"),
+        ),
+        (
+            "t7",
+            format!(
+                "{TXN} protocol Sized {{ fn size(self) -> Int64 }} \
+             impl Sized for Txn {{ fn size(self) -> Int64 {{ return self.ops.length }} }} \
+             fn main() -> Int64 {{ let t = begin(\"a\") print(t.size()) drop t return 0 }}"
+            ),
+            Ok("0\nend a"),
+        ),
+        (
+            "t10",
+            format!("{TXN} fn main() -> Int64 {{ print(begin(\"b\").ops.length) return 0 }}"),
+            Err("`begin(..)` is a `Txn` and is never disposed"),
+        ),
+        (
+            "s2",
+            "fn drain(s: Stream<Int64>) -> Int64 { let mut t = 0 for v in s { t = t + v } \
+             return t } fn main() -> Int64 { let xs: Array<Int64> = [1, 2] \
+             let s = fromArray(xs) let n = drain(s) close(s) return n }"
+                .to_string(),
+            Err("`s` may not be consumed: it is a `read` parameter"),
+        ),
+        (
+            "s5",
+            format!(
+                "{FEED} fn peek(s: Stream<Int64>) -> Int64 {{ return 7 }} \
+             fn main() -> Int64 {{ let s = feed() print(peek(s)) close(s) return 0 }}"
+            ),
+            Ok("7"),
+        ),
+        (
+            "s7",
+            "fn drain(s: Stream<Int64>) -> Int64 { let mut t = 0 for v in s { t = t + v } \
+             return t } fn main() -> Int64 { let xs: Array<Int64> = [1, 2] \
+             return drain(fromArray(xs)) }"
+                .to_string(),
+            Err("`s` may not be consumed: it is a `read` parameter"),
+        ),
+        (
+            "s8",
+            format!(
+                "{FEED} fn main() -> Int64 {{ let s = feed() let n = drain(s) close(s) \
+             return n }}"
+            ),
+            Err("`s` is a `Stream<Int64>` and is disposed more than once"),
+        ),
+        (
+            "s9",
+            format!(
+                "{FEED} fn peek(s: Stream<Int64>) -> Int64 {{ return 0 }} \
+             fn main() -> Int64 {{ return peek(feed()) }}"
+            ),
+            Err("`feed(..)` is a `Stream<Int64>` and is never disposed"),
+        ),
+        (
+            "c9",
+            format!(
+                "{TXN} fn add(xs: modify Array<Txn>) {{ xs.push(begin(\"b\")) }} \
+             fn main() -> Int64 {{ let mut xs = pool() add(xs) print(xs.length) drop xs \
+             return 0 }}"
+            ),
+            Ok("2\nend a\nend b"),
+        ),
+    ];
+    let dir = common::scratch("mustuse-owner");
+    let mut bad = Vec::new();
+    for (name, src, want) in cases {
+        let file = dir.join(format!("{name}.vyrn"));
+        std::fs::write(&file, &src).expect("write the program");
+        let checked = verdict(vyrn().arg("check").arg(&file));
+        match (want, checked) {
+            (Err(says), Err(e)) if e.lines().next().is_some_and(|l| l.ends_with(says)) => {}
+            (Ok(prints), Ok(())) => {
+                let out = vyrn()
+                    .env("VYRN_LEAK_CHECK", "1")
+                    .arg("run")
+                    .arg(&file)
+                    .output()
+                    .expect("vyrn run");
+                let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+                if out.status.code() != Some(0) || stdout.trim_end() != prints {
+                    bad.push(format!(
+                        "{name}: run exited {:?} and printed {stdout:?}",
+                        out.status.code()
+                    ));
+                }
+            }
+            (_, got) => bad.push(format!("{name}: check said {got:?}")),
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
