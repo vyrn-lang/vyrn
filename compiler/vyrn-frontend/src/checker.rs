@@ -1576,7 +1576,8 @@ pub struct CallDecl {
 /// What the checker decided, keyed by node.
 #[derive(Debug, Clone, Default)]
 pub struct Recorded {
-    /// The static type of every expression the checker typed.
+    /// The static type of every expression the checker typed, and of the
+    /// binding each `drop` names, keyed by the statement.
     pub node_types: HashMap<NodeId, Type>,
     /// The static type of every join (a `match` or `if` expression), before
     /// instantiation. A subset of [`Recorded::node_types`], kept apart for the
@@ -3579,7 +3580,15 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
-            Stmt::Drop { .. } => Ok(()),
+            // The dropped binding's type, which the lowering instantiates a
+            // generic declared `release` at.
+            Stmt::Drop { name, id, .. } => {
+                let b = self.lookup(scope, name);
+                if let (Some(b), Some(r)) = (b, &mut self.acc.borrow_mut().record) {
+                    r.node_types.insert(id.0, b.ty);
+                }
+                Ok(())
+            }
             Stmt::Expr(e, _) => self.expr(e, scope, None, Some(ret)).map(|_| ()),
             Stmt::Region { body, .. } => {
                 self.region_floor.borrow_mut().push(scope.len());

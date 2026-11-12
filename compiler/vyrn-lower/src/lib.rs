@@ -446,6 +446,27 @@ impl<'a, 'r> Walk<'a, 'r> {
         self.projection(p);
     }
 
+    /// Follows the declared `release` a `drop` of the statement `at` calls,
+    /// instantiated at the dropped binding's type.
+    fn release_call(&mut self, at: NodeId) {
+        use vyrn_frontend::types::{OWNED, OWNED_RELEASE};
+        let Some(ty) = self
+            .recorded
+            .node_types
+            .get(&at)
+            .map(|t| apply(t, &self.chain))
+        else {
+            return;
+        };
+        let imp = vyrn_frontend::types::type_key(&ty).and_then(|k| self.impls.get(OWNED, &k));
+        let (Some(f), Some(imp)) = (self.impls.method(OWNED, &ty, OWNED_RELEASE), imp) else {
+            return;
+        };
+        let mut solved = HashMap::new();
+        vyrn_frontend::types::solve_param(&imp.ty, &ty, &mut solved);
+        self.calls.push((f, solved));
+    }
+
     /// The `atSet` expansions a removal's receiver lowers through, outermost first.
     fn modify_place(&mut self, recv: &Expr, line: usize) {
         let ty = |e: &Expr| self.recorded(e);
@@ -518,6 +539,10 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                     facts_block(blk, &mut Default::default(), self);
                 }
             }
+            // A `drop` calls the declared `release` of the binding's type, and
+            // a generic one is instantiated there, as at a placed release row
+            // ([`dispatched`]).
+            Stmt::Drop { id, .. } => self.release_call(id.0),
             // A `for` over a user container calls its `size` and reads each
             // element through its `place nth`.
             Stmt::ForIn { iter, line, .. } if !self.impls.is_empty() => {
