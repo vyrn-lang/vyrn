@@ -438,7 +438,7 @@ let total = fold(nums, 0, (acc, x) -> acc + x)
 ## Control flow
 
 - `if cond { .. } else if cond { .. } else { .. }` is a statement. In an expression position each branch is one expression in braces and `else` is required: `let t = if n > 9 { "big" } else { "small" }`. Only the taken branch runs.
-- `while cond { .. }` loops. `for x in xs { .. }` iterates an array, a stream, a map's `keys()` or a type with `impl Iterate`.
+- `while cond { .. }` loops. `for x in xs { .. }` iterates an array, a stream, a map's `keys()`, a String or a type with `impl Iterate`. A String yields its UTF-8 bytes, each an `Int64`, not its characters: `for b in "hi"` visits 104 and 105.
 - `break` and `continue` act on the innermost loop. They are unlabeled, and outside a loop they are refused.
 - There is no `loop` keyword; write `while true`.
 

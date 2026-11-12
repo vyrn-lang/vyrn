@@ -49,9 +49,7 @@ export fn all<T>(xs: Array<T>, pred: fn(T) -> Bool) -> Bool {
     return true
 }
 
-/// Whether `xs` contains the string `x`. The parameter is `Array<String>`, not
-/// generic, because a generic `Array<T>` parameter does not accept a fixed-size
-/// array literal.
+/// Whether `xs` contains the string `x`.
 export fn includes(xs: Array<String>, x: String) -> Bool {
     for e in xs {
         if e == x {
