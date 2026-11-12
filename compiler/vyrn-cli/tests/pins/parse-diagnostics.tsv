@@ -891,6 +891,12 @@ compiler/vyrn-cli/tests/refusals/r87_a_for_over_a_read_stream_parameter.vyrn	0	c
 compiler/vyrn-cli/tests/refusals/r88_a_must_use_temporary_in_a_read_position.vyrn	0	cbf29ce484222325	20	18	8cd8b5d57399e2bb
 compiler/vyrn-cli/tests/refusals/r89_a_store_over_a_held_must_use_value.vyrn	0	cbf29ce484222325	20	20	ad0ad2f32a8a0202
 compiler/vyrn-cli/tests/refusals/r90_a_break_out_of_a_loop_that_owns_must_use_elements.vyrn	0	cbf29ce484222325	20	18	09c3e359b39504a4
+compiler/vyrn-cli/tests/refusals/r91_clear_over_a_must_use_element.vyrn	0	cbf29ce484222325	20	17	4c42a78f62eba07e
+compiler/vyrn-cli/tests/refusals/r92_a_match_consume_binder_owns_a_must_use_payload.vyrn	0	cbf29ce484222325	20	19	54ef6d3bce0aea93
+compiler/vyrn-cli/tests/refusals/r93_a_namespace_member_the_module_does_not_export.vyrn	0	cbf29ce484222325	20	16	8d4c902e9c2f8c28
+compiler/vyrn-cli/tests/refusals/r94_an_import_of_a_name_the_module_does_not_export.vyrn	0	cbf29ce484222325	20	14	4c151817f261fc54
+compiler/vyrn-cli/tests/refusals/r95_an_import_of_a_name_another_module_defines.vyrn	0	cbf29ce484222325	20	19	6188809337077590
+compiler/vyrn-cli/tests/refusals/r96_an_import_of_a_name_no_module_defines.vyrn	0	cbf29ce484222325	20	14	1047e835656589bd
 compiler/vyrn-cli/tests/shapes/a-body-taken-whole-lifts-a-lambda-that-captures-a-later-let.vyrn	0	cbf29ce484222325	20	16	414820b60f79ac03
 compiler/vyrn-cli/tests/shapes/a-borrow-of-a-field-whose-root-is-consumed-after-the-borrow-ends.vyrn	0	cbf29ce484222325	20	14	0a6ed13d107754e1
 compiler/vyrn-cli/tests/shapes/a-borrow-rebound-in-a-let-mut-is-a-copy.vyrn	0	cbf29ce484222325	20	17	cbc0ba2678b9e985
@@ -1445,7 +1451,7 @@ site/guide/text.vyrn	0	cbf29ce484222325	20	19	483234dbaf9afaef
 site/guide/validated.vyrn	0	cbf29ce484222325	20	14	ad08c6c983d1c8dd
 site/markup.vyrn	0	cbf29ce484222325	20	17	dec25373dda5c291
 std/args.vyrn	0	cbf29ce484222325	20	18	f4b938afd0b09fc0
-std/arrays.vyrn	0	cbf29ce484222325	20	17	3a510804a21ee913
+std/arrays.vyrn	0	cbf29ce484222325	20	18	cd992ebb735b9ae8
 std/bench.vyrn	0	cbf29ce484222325	20	15	2825b3d36aaa04dc
 std/cli.vyrn	0	cbf29ce484222325	20	17	26c8e4e681a4debb
 std/code.vyrn	0	cbf29ce484222325	20	17	3b7294d64896b46c

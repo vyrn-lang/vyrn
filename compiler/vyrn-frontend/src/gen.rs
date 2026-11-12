@@ -964,7 +964,8 @@ pub fn derive(
         let written = written.map_err(|f| match f {
             crate::loader::GenFault::Load(ds) => unplaced(refused(ds)),
             crate::loader::GenFault::Reread(why) => {
-                let rule = crate::rules::rule!(GenModuleReread, module = key, why);
+                let module = crate::loader::spoken(root, key, opts);
+                let rule = crate::rules::rule!(GenModuleReread, module, why);
                 Diagnostic::refusal(0, 0, "check", rule)
             }
             crate::loader::GenFault::Run(GenError::Refused(ds)) => unplaced(refused(ds)),

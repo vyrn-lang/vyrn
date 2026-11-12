@@ -167,8 +167,8 @@ checker-rules.vyrn:286:0: map values must share a type: expected Int64, found St
 checker-rules.vyrn:290:0: a lambda `x -> ..` needs a function type from context: pass it to a `fn`-typed parameter, or give the binding a function type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`)
 checker-rules.vyrn:309:0: cannot infer the element type of `[]`; annotate it, e.g. `let a: Array<Int64> = [];`
 checker-rules.vyrn:433:0: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
-checker-rules.vyrn:563:0: call to unknown function `Label`
-checker-rules.vyrn:571:0: call to unknown function `Label`
-checker-rules.vyrn:869:0: `addPair` is a local of type Int64, not a function
+checker-rules.vyrn:563:13: call to unknown function `Label`
+checker-rules.vyrn:571:13: call to unknown function `Label`
+checker-rules.vyrn:869:12: `addPair` is a local of type Int64, not a function
   fix: rename the local to call the function `addPair`
-checker-rules.vyrn:875:0: `clz` needs Int32, UInt32, Int64 or UInt64, found Float64
+checker-rules.vyrn:875:14: `clz` needs Int32, UInt32, Int64 or UInt64, found Float64

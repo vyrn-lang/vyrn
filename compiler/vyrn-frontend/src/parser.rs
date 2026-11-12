@@ -2408,7 +2408,7 @@ impl<'a> Build<'a> {
                 // Method form takes no explicit type arguments: the receiver is the first one
                 // and it is always concrete.
                 Expr::Call {
-                    id: Id::NEW,
+                    id,
                     form: match args.len() > n {
                         true => CallForm::Method,
                         false => CallForm::Plain,

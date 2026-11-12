@@ -191,6 +191,7 @@ fn last_owner(top: &Body) -> std::collections::HashSet<NodeId> {
             continue;
         }
         let mut w = Reads {
+            names: &f.names,
             last: vec![0; f.names.len()],
             deep: vec![0; f.names.len()],
             bound: vec![usize::MAX; f.names.len()],
@@ -252,7 +253,8 @@ fn root_name(p: &Place) -> Option<Val> {
 /// One frame's last read of each name, the loop depth that read stood at,
 /// the loop depth each name was bound at, and every switch over a bare name
 /// with its depth and the order of its own read. See [`last_owner`].
-struct Reads {
+struct Reads<'a> {
+    names: &'a [NameInfo],
     last: Vec<usize>,
     deep: Vec<usize>,
     bound: Vec<usize>,
@@ -262,7 +264,7 @@ struct Reads {
     order: usize,
 }
 
-impl Reads {
+impl Reads<'_> {
     fn stmts(&mut self, stmts: &[St], depth: usize) {
         for st in stmts {
             // A row is the plan's, not the core's: see [`last_owner`].
@@ -285,6 +287,10 @@ impl Reads {
             // line 0 and is the plan's.
             if let St::Drop(n, _, line, _) = st {
                 self.handed[n.index()] |= *line > 0;
+            }
+            // A loop over `consume g` takes `g` into its container.
+            if let St::Let(t, Rhs::Val(Val::Name(n))) = st {
+                self.handed[n.index()] |= self.names[t.index()].for_consume;
             }
             // A take out of a sub-place hands that part on, so what is left
             // is this turn's: `out.push(consume p.value)` in a `for p in ..`.
@@ -867,7 +873,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
 }
 
 /// The calls in `facts` whose solved type argument fails a bound of the
-/// callee's seeded row: `@Heapless` (`clear`, `append`, `copyFrom`),
+/// callee's seeded row: `@Forgettable` (`clear`, `append`, `copyFrom`),
 /// `@Decodable` (`fromJson`) and `Show` (`print`, `toString`). A type
 /// parameter of the body satisfies `Show` where `outer`, the body's bounds,
 /// gives it. A type argument that fails as written (`Array<T>`) is named as
@@ -879,13 +885,22 @@ fn unbound(
     outer: &HashMap<String, Vec<String>>,
     sp: &Speech,
 ) -> Vec<(usize, String)> {
-    use vyrn_frontend::prelude::{signature, DECODABLE, HEAPLESS};
+    use vyrn_frontend::prelude::{signature, DECODABLE, FORGETTABLE};
     use vyrn_frontend::types::{self, SHOW};
     let decls = own.proto.types();
+    // What a forgotten element of `t` would leave undone, if anything.
+    let owes = |t: &Type| {
+        let base = types::resolved(t, decls);
+        if vyrn_frontend::declared::owns_heap(&base, decls) {
+            Some("owns heap")
+        } else {
+            own.proto.must_use(t).then_some("is must-use")
+        }
+    };
     let fails = |t: &Type, bound: &str| {
         let base = types::resolved(t, decls);
         match bound {
-            HEAPLESS => vyrn_frontend::declared::owns_heap(&base, decls),
+            FORGETTABLE => owes(t).is_some(),
             DECODABLE => vyrn_frontend::codec::decodable(&base, decls).is_err(),
             SHOW => match &*base {
                 Type::Param(p) => !outer.get(p).is_some_and(|bs| bs.iter().any(|b| b == SHOW)),
@@ -895,9 +910,10 @@ fn unbound(
         }
     };
     let sentence = |shown: &str, t: &Type, bound: &str| match bound {
-        HEAPLESS => {
+        FORGETTABLE => {
+            let owes = owes(t).unwrap_or_default();
             let ([t], []) = sp.say([t], []);
-            rule!(ForgetsHeap, shown, t).render()
+            rule!(ForgetsElements, shown, t, owes).render()
         }
         DECODABLE => {
             // The codec names the offender by its declaration where it has one.
@@ -1611,7 +1627,7 @@ impl<'a> Builder<'a> {
             grows: false,
             path: None,
             for_consume: false,
-            turn_owns: false,
+            owns_part: false,
             unreached: None,
             fields: Vec::new(),
             loop_var: None,
@@ -3661,7 +3677,7 @@ impl<'a> Builder<'a> {
                 // may leave a join arm; the container, below the mark, may not.
                 self.frame.loop_marks.push(self.body.names.len());
                 let x = self.name(var, ety, owned, *line);
-                self.body.names[x.index()].turn_owns = owned;
+                self.body.names[x.index()].owns_part = owned;
                 self.body.cands.push((ekey, x, Cand::Elem));
                 // The container outlives the loop, so a refusal names the
                 // variable as a loop variable, as the checker does. A projected
@@ -4849,7 +4865,8 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<Vec<Name>, Gap> {
         let decls = self.proto.types();
-        let (payloads, variant): (Vec<(String, Type, NodeId)>, String) = match p {
+        // Each binder with its type, its node and the line it is spelled on.
+        let (payloads, variant): (Vec<(String, Type, NodeId, usize)>, String) = match p {
             Pattern::Other => (Vec::new(), String::new()),
             // `??`'s pair names a tag: variant 1 succeeds, 0 fails.
             Pattern::Success(n) | Pattern::Failure(n) => match rt {
@@ -4858,7 +4875,7 @@ impl<'a> Builder<'a> {
                     let ps = vs[at]
                         .payload
                         .first()
-                        .map(|t| vec![(n.name.clone(), t.clone(), n.id())])
+                        .map(|t| vec![(n.name.clone(), t.clone(), n.id(), n.line)])
                         .unwrap_or_default();
                     (ps, vs[at].name.clone())
                 }
@@ -4875,7 +4892,7 @@ impl<'a> Builder<'a> {
                     let ps = names
                         .iter()
                         .zip(var.payload.iter().cloned())
-                        .map(|(n, t)| (n.name.clone(), t, n.id()))
+                        .map(|(n, t)| (n.name.clone(), t, n.id(), n.line))
                         .collect();
                     (ps, var.name.clone())
                 }
@@ -4883,7 +4900,7 @@ impl<'a> Builder<'a> {
             },
         };
         let mut binds = Vec::new();
-        for (i, (name, ty, key)) in payloads.into_iter().enumerate() {
+        for (i, (name, ty, key, at)) in payloads.into_iter().enumerate() {
             let owned = consuming && self.owns(&ty);
             let layout = matches!(
                 &*vyrn_frontend::types::resolved(&ty, &decls),
@@ -4894,7 +4911,9 @@ impl<'a> Builder<'a> {
                     | Type::SmallArray(..)
                     | Type::Map(..)
             );
-            let n = self.name(&name, ty, owned, line);
+            // A binder a desugar made is spelled nowhere: the match's line.
+            let n = self.name(&name, ty, owned, if at == 0 { line } else { at });
+            self.body.names[n.index()].owns_part = owned;
             // The placer keys a binder's exit rows (a `return`, `break` or
             // `continue` inside the arm) by this address. Keyed owned or not:
             // the first build takes nothing, so the second build's rows need

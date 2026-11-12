@@ -2254,6 +2254,36 @@ fn main() -> Int64 {
     );
 }
 
+// A loop over `consume g` hands `g` on, so the outer turn of a consume loop
+// owns its element and the inner loop takes it, a `break` included.
+#[test]
+fn a_consume_loop_takes_the_variable_of_an_outer_consume_loop() {
+    let src = r#"fn main() -> Int64 {
+    let mut groups: Array<Array<String>> = []
+    groups.push(["a".copy(), "b".copy()])
+    groups.push(["cc".copy(), "d".copy()])
+    let mut n = 0
+    for g in consume groups {
+        for x in consume g {
+            if x.byteLength > 1 {
+                n = n + 10
+                drop x
+                break
+            }
+            n = n + 1
+            drop x
+        }
+    }
+    print(n)
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("nestedconsume", src),
+        (Some(0), "12\n".to_string())
+    );
+}
+
 // A removal hands back what it took out, and a statement that discards it is
 // no site that reads it, so a popped record's box is released.
 #[test]

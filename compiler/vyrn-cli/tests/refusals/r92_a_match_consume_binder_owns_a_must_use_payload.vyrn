@@ -1,0 +1,18 @@
+// A binder of a `match consume` arm owns the payload, as the variable of
+// `for t in consume xs` owns its element: the arm disposes of it.
+type Tok = {
+    id: Int64
+}
+
+impl MustUse for Tok {}
+
+fn main() -> Int64 {
+    let o: Option<Tok> = Some(Tok { id: 1 })
+    match consume o {
+        Some(t) => {
+            print(t.id)
+        }
+        None => {}
+    }
+    return 0
+}

@@ -109,6 +109,7 @@ Fast: before you claim speed or spend lines on it, write down which layer the ch
 - Set `TMP` and `TEMP` to a shallow directory of your own before any cargo test.
 - One cargo command at a time per worktree.
 - Run every command in the foreground under `timeout 600`, output redirected to a file, then read the file. Never pipe a suite's output: a leaked child holds the pipe open and the run looks hung.
+- A `timeout` that kills cargo mid-compile corrupts the incremental cache: the next link fails with LNK2019. So give a cargo command a timeout longer than the build, and never kill one that is compiling. If the tool moves it to the background, edit nothing and start no second cargo command until it ends. To recover, delete `target/release/incremental/vyrn*-*` and build again.
 - A teammate is not woken when a background command ends. So never `run_in_background`, `&`, `nohup`, a marker file, a poll loop, `sleep`, `tail -f`, or any call whose purpose is to pass time. Each has left a track idle for half an hour.
 - If you are waiting, list the processes whose command line names your worktree. If none is alive, nothing is coming: read your log. A log that stopped growing is not hung until you have checked the process's start time and CPU.
 - Stop a background process by its process tree, then list what is left. Kill only a process whose command line names your worktree; eight tracks share this machine.
@@ -150,6 +151,7 @@ The `allocs` lines need `vyrn` built with the allocation counter (`--features al
 Add what the change touches:
 - `std/`: `target/release/vyrn doc --std -o ../docs/api --verify`, and commit what it regenerates. Then, from the root, the step "The site's own tests" in `.github/workflows/site.yml`: `compiler/target/release/vyrn test` on `site/export.vyrn` and each `site/app/*.vyrn`, after `python3 scripts/site-history.py > site/data/history.json`. A std module doc is its reference page's description, and the site tests pin it.
 - `web/` or `editor/vscode/`: `node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"`.
+- `site/`, `vyrn-play`, or the line or column of a diagnostic: `node --test "site/test/*.test.mjs"`, after the steps "The playground module" and "Render every page" of `.github/workflows/site.yml` have written `out/`. The playground tests pin where a refusal sits (#274).
 - A manifest row that moves: `cargo test --release -p vyrn-cli --test residue -- --ignored`, about six minutes. A moved row can move a release, and a moved release is an ownership change.
 - A claim about compiler speed: `sh ../scripts/check-speed.sh <main's tree> ..`, both release builds without incremental. It prints microseconds per line for each tree and exits 1 above the threshold; CI runs it on every push to main.
 - The slice's licence: the lowering pin, the bench table, whichever it names.

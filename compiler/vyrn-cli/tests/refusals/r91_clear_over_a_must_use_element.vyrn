@@ -1,0 +1,15 @@
+// `clear` forgets its elements, and forgetting a must-use value is no
+// disposal of it: the elements are moved out one at a time.
+type Tok = {
+    id: Int64
+}
+
+impl MustUse for Tok {}
+
+fn main() -> Int64 {
+    let mut xs: Array<Tok> = []
+    xs.push(Tok { id: 1 })
+    xs.clear()
+    drop xs
+    return 0
+}

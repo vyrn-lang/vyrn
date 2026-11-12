@@ -616,6 +616,69 @@ fn a_store_over_a_held_must_use_value_is_refused() {
     judged("mustuse-store", cases);
 }
 
+/// `clear`, `append` and `copyFrom` forget, copy or overwrite elements, so
+/// each is refused at a must-use element that owns no heap.
+#[test]
+fn a_method_that_forgets_elements_is_refused_at_a_must_use_element() {
+    for (m, call) in [
+        ("clear", "xs.clear()"),
+        ("append", "xs.append(ys)"),
+        ("copyFrom", "xs.copyFrom(ys)"),
+    ] {
+        let e = run(&format!(
+            "type Tok = {{ id: Int64 }} impl MustUse for Tok {{}} \
+             fn main() -> Int64 {{ let mut xs: Array<Tok> = [] xs.push(Tok {{ id: 1 }}) \
+             let mut ys: Array<Tok> = [] ys.push(Tok {{ id: 2 }}) {call} drop xs drop ys \
+             return 0 }}"
+        ))
+        .unwrap_err();
+        let says = format!(
+            "`{m}` forgets or overwrites elements without releasing them, and `Tok` is \
+             must-use: move the elements one at a time instead"
+        );
+        assert!(e.contains(&says), "{m}: {e}");
+    }
+}
+
+/// A binder of a `match consume` arm owns its must-use payload: the arm
+/// disposes of it, and a borrowing `match` leaves it with the scrutinee.
+#[test]
+fn a_match_consume_binder_owns_its_must_use_payload() {
+    let head = "type Tok = { id: Int64 } impl MustUse for Tok {} \
+                fn take(t: consume Tok) { drop t } \
+                fn main() -> Int64 { let o: Option<Tok> = Some(Tok { id: 1 }) ";
+    for (arm, refused) in [
+        (
+            "match consume o { Some(t) => { take(t) } None => {} }",
+            false,
+        ),
+        (
+            "match consume o { Some(t) => { drop t } None => {} }",
+            false,
+        ),
+        (
+            "match o { Some(t) => { print(t.id) } None => {} } drop o",
+            false,
+        ),
+        (
+            "match consume o { Some(t) => { print(t.id) } None => {} }",
+            true,
+        ),
+    ] {
+        let r = run(&format!("{head}{arm} return 0 }}"));
+        match refused {
+            true => {
+                let e = r.unwrap_err();
+                assert!(
+                    e.contains("`t` is a `Tok` and is never disposed"),
+                    "{arm}: {e}"
+                );
+            }
+            false => assert_eq!(r, Ok(()), "{arm}"),
+        }
+    }
+}
+
 /// A `for` that takes its container owns each must-use element: the body
 /// disposes of it on every path, and a `break` or a `return` that leaves
 /// elements no turn reached is refused in the loop's words.

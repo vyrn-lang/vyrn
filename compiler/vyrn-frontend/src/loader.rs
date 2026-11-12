@@ -858,7 +858,7 @@ fn exported_only_to(
 
 /// The module `key` as a sentence in `importer` names it: the specifier
 /// `importer` would import it by, so the text holds no machine's path.
-fn spoken(importer: &str, key: &str, opts: &LoadOptions) -> String {
+pub(crate) fn spoken(importer: &str, key: &str, opts: &LoadOptions) -> String {
     let dir = dir_of(generated_importer(importer).unwrap_or(importer));
     import_specifier(dir, key, opts.std_root.as_deref())
 }
@@ -998,7 +998,7 @@ fn foreign_kernel_impls(
             let rule = match owner.get(&key) {
                 Some((home, _)) if *home == m.key || clashed.contains(key.as_str()) => continue,
                 Some((home, _)) => {
-                    let home = import_specifier(dir_of(&m.key), home, opts.std_root.as_deref());
+                    let home = spoken(&m.key, home, opts);
                     rule!(ImplAwayFromType, protocol, ty, home, key = DeclName(&key))
                 }
                 None if !matches!(ty, Type::Named(_) | Type::App(..)) => {
@@ -3438,7 +3438,10 @@ fn run_resolved(
     )
     .map_err(|f| match f {
         GenFault::Load(ds) => ds,
-        GenFault::Reread(why) => err(rule!(GenModuleReread, module = gen_mod_key, why)),
+        GenFault::Reread(why) => {
+            let module = spoken(importer, &gen_mod_key, opts);
+            err(rule!(GenModuleReread, module, why))
+        }
         // The generator's module is the root of its own load, so a refusal
         // there carries no file; in this load it names the module.
         GenFault::Run(crate::gen::GenError::Refused(ds)) => ds
@@ -4629,6 +4632,7 @@ fn resolve_aliases(
     modules: &mut [Module],
     errors: &mut Vec<Diagnostic>,
     root_key: &str,
+    opts: &LoadOptions,
 ) -> Spellings {
     // Top-level decl names per module.
     let mut module_decls: HashMap<String, HashSet<String>> = HashMap::new();
@@ -5104,6 +5108,7 @@ fn resolve_aliases(
             module_variants: &module_variants,
             module_key: m.key.clone(),
             root_key: root_key.to_string(),
+            opts,
             errors,
         };
         nr.resolve_program(&mut m.program);
@@ -5241,6 +5246,7 @@ struct NsResolver<'a> {
     module_variants: &'a HashMap<String, HashMap<String, HashSet<String>>>,
     module_key: String,
     root_key: String,
+    opts: &'a LoadOptions,
     errors: &'a mut Vec<Diagnostic>,
 }
 
@@ -5267,6 +5273,7 @@ impl NsResolver<'_> {
             .get(&target)
             .is_some_and(|s| s.contains(member));
         if !exported {
+            let target = spoken(&self.module_key, &target, self.opts);
             self.err(line, rule!(NamespaceNoMember, ns, target, member));
             return None;
         }
@@ -5567,7 +5574,7 @@ fn link(
     let proof_key = std_key(PROOF);
     // Fold import aliases into the flat namespace first.
     let alias_span = crate::prof::phase("link: resolve_aliases");
-    let spellings = resolve_aliases(&mut modules, &mut errors, root_key);
+    let spellings = resolve_aliases(&mut modules, &mut errors, root_key, opts);
     drop(alias_span);
     let index_span = crate::prof::phase("link: index");
 
@@ -5774,7 +5781,7 @@ fn link(
                                 &m.key,
                                 root_key,
                                 imp.line,
-                                rule!(NotExported, name, target),
+                                rule!(NotExported, name, target = spoken(&m.key, target, opts)),
                             ));
                         } else if let Some(to) = shut_out(name, target, m, (imp.line, imp.col)) {
                             let rule = exported_only_to(name, to, target, &m.key, opts);
@@ -5789,7 +5796,12 @@ fn link(
                             &m.key,
                             root_key,
                             imp.line,
-                            rule!(NotDefinedIn, name, target, def_module),
+                            rule!(
+                                NotDefinedIn,
+                                name,
+                                target = spoken(&m.key, target, opts),
+                                def_module = spoken(&m.key, def_module, opts)
+                            ),
                         ));
                     }
                     // A clashed name: `clash_diagnostics` reported the pair. It
@@ -5803,7 +5815,7 @@ fn link(
                             &m.key,
                             root_key,
                             imp.line,
-                            rule!(TargetLacks, target, name),
+                            rule!(TargetLacks, target = spoken(&m.key, target, opts), name),
                         ));
                     }
                 }

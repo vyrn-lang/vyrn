@@ -1,0 +1,8 @@
+// A sentence spells a module as the importer imports it, never by the
+// machine's path to it.
+import * as s from "std/strings"
+
+fn main() -> Int64 {
+    print(s.noSuchThing("a"))
+    return 0
+}

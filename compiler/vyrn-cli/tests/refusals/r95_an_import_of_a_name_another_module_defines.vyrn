@@ -1,0 +1,9 @@
+// A sentence spells both modules as the importer imports them, never by the
+// machine's path to them.
+import { trimEnd } from "std/strings"
+import { trim } from "std/arrays"
+
+fn main() -> Int64 {
+    print(trimEnd("a "))
+    return 0
+}

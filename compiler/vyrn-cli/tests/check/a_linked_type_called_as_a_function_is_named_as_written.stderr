@@ -1,1 +1,1 @@
-a_linked_type_called_as_a_function_is_named_as_written.vyrn:3:0: call to unknown function `Json`
+a_linked_type_called_as_a_function_is_named_as_written.vyrn:3:13: call to unknown function `Json`

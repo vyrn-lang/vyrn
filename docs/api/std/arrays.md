@@ -48,9 +48,7 @@ Whether `pred` holds for every element; true when empty.
 fn includes(xs: Array<String>, x: String) -> Bool
 ```
 
-Whether `xs` contains the string `x`. The parameter is `Array<String>`, not
-generic, because a generic `Array<T>` parameter does not accept a fixed-size
-array literal.
+Whether `xs` contains the string `x`.
 
 ## sortWith
 

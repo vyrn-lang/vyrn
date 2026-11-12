@@ -246,7 +246,7 @@ fn a_gen_fn_that_calls_a_generator_does_not_fail_the_build() {
     let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
     let said = norm(&out.stderr);
     assert!(
-        !out.status.success() && said.contains(":5:0: `quoted` is a `gen fn`"),
+        !out.status.success() && said.contains(":5:21: `quoted` is a `gen fn`"),
         "{said}"
     );
 }
