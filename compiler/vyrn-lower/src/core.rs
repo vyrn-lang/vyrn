@@ -281,6 +281,11 @@ impl Reads {
                 self.deep[n] = depth;
                 self.handed[n] |= matches!(u, Use::Hand | Use::Key);
             });
+            // The reader's `drop` hands the value on; a placed release has
+            // line 0 and is the plan's.
+            if let St::Drop(n, _, line, _) = st {
+                self.handed[n.index()] |= *line > 0;
+            }
             // A take out of a sub-place hands that part on, so what is left
             // is this turn's: `out.push(consume p.value)` in a `for p in ..`.
             if let St::Let(_, Rhs::Take(p))

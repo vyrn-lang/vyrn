@@ -719,3 +719,18 @@ fn a_record_or_an_enum_holding_a_must_use_value_is_must_use() {
     ];
     judged("mustuse-holder", cases);
 }
+
+/// A `drop` of the variable of a loop that takes its container hands the
+/// element on, as a `consume` argument does, so each turn owns its element.
+#[test]
+fn a_drop_in_a_loop_that_takes_its_container_releases_the_element_once() {
+    let cases: [(&str, String, Result<&str, &str>); 1] = [(
+        "drop",
+        "fn main() -> Int64 { let mut xs: Array<String> = [] xs.push(\"a\".copy()) \
+         xs.push(\"bc\".copy()) let mut n = 0 for s in consume xs { if s == \"a\" { drop s } \
+         else { n = n + s.byteLength } } print(n) return 0 }"
+            .to_string(),
+        Ok("2"),
+    )];
+    judged("mustuse-drop-elem", cases);
+}
