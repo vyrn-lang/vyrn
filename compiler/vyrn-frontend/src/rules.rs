@@ -1159,16 +1159,22 @@ rules! {
     // reclaims nothing; a declared type has no `close` and is not iterable
     // unless it says so.
     OwedStream { s }
-        "a stream must be consumed with `for .. in`, forwarded by returning it, or released \
-        with `close({s})`, on every path";
+        "a stream must be consumed with `for .. in`, passed to a `consume` parameter, \
+        forwarded by returning it, or released with `close({s})`, on every path";
     OwedDeclared { ty, s }
         "`{ty}` declares `impl MustUse`, so a value of it must be handed on by name on every \
-        path: passed to a call, forwarded by returning it, or released with `drop {s}`";
+        path: passed to a `consume` parameter, forwarded by returning it, or released with \
+        `drop {s}`";
     // A container: the reader wrote `Array<Txn>` and the row is `Txn`'s.
     OwedHeld { by, ty, s }
         "`{by}` declares `impl MustUse` and a `{ty}` holds one, so the container must be \
-        handed on by name on every path: passed to a call, forwarded by returning it, or \
-        released with `drop {s}`, which releases each element";
+        handed on by name on every path: passed to a `consume` parameter, forwarded by \
+        returning it, or released with `drop {s}`, which releases each element";
+    // A temporary has no name to dispose of, so only a taking position
+    // discharges it.
+    OwedTemporary { ty }
+        "a `{ty}` a call returns must fill a position that takes it: a `let`, a `consume` \
+        parameter or a `return`";
 
     // Shape E, the flow-free rules: the kernel's at its use sites.
 
@@ -1288,7 +1294,7 @@ rules! {
         type is known, or `consume` the heap field and `drop` that";
     DropNotHeap { name, t }
         "`drop` needs a heap value (a String, an Array, a Map, a Ref, or an Option/Result \
-        carrying one, or a type declaring `impl Owned`), but `{name}` is {t}";
+        carrying one, or a type declaring `impl Owned` or `impl MustUse`), but `{name}` is {t}";
 
     // A body the core builder did not build: a defect in the builder, since
     // the checker typed the body.

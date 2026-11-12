@@ -1171,11 +1171,12 @@ fn seeded<'a>(
                     b.body.names[n.index()].borrow = false;
                 }
                 // A `read` or `modify` parameter is never taken; the
-                // kernel needs the capability to word the refusal. A must-use
-                // parameter is excepted from the take only: its capability
-                // still words a refusal about a second name for it.
-                b.body.names[n.index()].must_use_param =
-                    b.proto.must_use(&b.body.names[n.index()].ty.clone());
+                // kernel needs the capability to word the refusal. A linear
+                // one is a borrow whatever its heap: the caller keeps the
+                // obligation, so a take of a heapless stream is refused too.
+                if !owned && b.body.names[n.index()].linear.is_some() {
+                    b.body.names[n.index()].borrow = true;
+                }
                 b.body.names[n.index()].borrow_kind = param_borrow(p.capability, &p.name, false);
                 b.body.names[n.index()].mutable = p.capability == Capability::Modify;
                 b.frame.scope.push((p.name.clone(), n));
@@ -1583,7 +1584,6 @@ impl<'a> Builder<'a> {
             payload: None,
             receiver_malloc: false,
             grows: false,
-            must_use_param: false,
             path: None,
             for_consume: false,
             fields: Vec::new(),
@@ -3104,13 +3104,11 @@ impl<'a> Builder<'a> {
         self.body.names[n.index()].not_owned = reason;
         self.record_fields(n, value);
         // `let t = s` on a `read` parameter makes `t` a second name
-        // for it, with its words and its must-use take exception.
+        // for it, with its words.
         if let Rhs::Val(Val::Name(m)) = &rhs {
             if self.body.names[n.index()].borrow {
                 self.body.names[n.index()].borrow_kind =
                     self.body.names[m.index()].borrow_kind.clone();
-                self.body.names[n.index()].must_use_param =
-                    self.body.names[m.index()].must_use_param;
             }
         }
         self.bind(n, rhs, out);
@@ -3465,7 +3463,9 @@ impl<'a> Builder<'a> {
                             t
                         } else if pulled {
                             // A stream is pulled to its end and closed by the
-                            // loop through its own name (below).
+                            // loop through its own name (below), so the loop
+                            // takes it as `close` does.
+                            self.consume_names_a_borrow(iter, *line)?;
                             n
                         } else {
                             // The loop reads the container through a borrow,
@@ -3519,6 +3519,10 @@ impl<'a> Builder<'a> {
                 );
                 if streaming {
                     self.frame.stream_loops.push(it);
+                    // The loop takes a stream it is handed unnamed.
+                    if self.body.names[it.index()].is_temp() {
+                        self.body.names[it.index()].for_consume = true;
+                    }
                 }
                 // `for x in xs` walks a named index: the length read once
                 // before the loop, and a counter from zero that steps right
@@ -3661,7 +3665,8 @@ impl<'a> Builder<'a> {
                     // stream is always disposed of here, so a later use is a
                     // second disposal ([`Body::owes`]).
                     let owed = self.body.owes(it).is_some();
-                    if self.stream_owed(it) && (owed || self.taken_by_loop(it, sid)) {
+                    let held = self.body.names[it.index()].releases;
+                    if held && (owed || self.taken_by_loop(it, sid)) {
                         out.push(St::Drop(it, Site::None, 0, None));
                     }
                 } else if *consuming && self.taken_by_loop(it, sid) {
@@ -3854,14 +3859,6 @@ impl<'a> Builder<'a> {
         frees
     }
 
-    /// Whether the stream `it` a `for` walks is this frame's to close: one it
-    /// holds, or a parameter, which carries the obligation into the callee
-    /// ([`NameInfo::must_use_param`]).
-    fn stream_owed(&self, it: Name) -> bool {
-        let info = &self.body.names[it.index()];
-        info.releases || info.must_use_param
-    }
-
     /// The rows a `return` or a `?` runs for every enclosing `for`, innermost
     /// first: the elements no turn reached, then the stream it walks, closed.
     fn leave_loops(&mut self, out: &mut Vec<St>) {
@@ -3869,7 +3866,7 @@ impl<'a> Builder<'a> {
             self.release_unreached(u, out);
         }
         for it in self.frame.stream_loops.iter().rev() {
-            if self.stream_owed(*it) {
+            if self.body.names[it.index()].releases {
                 out.push(St::Drop(*it, Site::None, 0, None));
             }
         }
@@ -4860,8 +4857,6 @@ impl<'a> Builder<'a> {
                 if let Some(m) = from {
                     if let Some(k) = self.body.names[m.index()].borrow_kind.clone() {
                         self.body.names[n.index()].borrow_kind = Some(k);
-                        self.body.names[n.index()].must_use_param =
-                            self.body.names[m.index()].must_use_param;
                     }
                     // A scrutinee that is a place read has no kind to pass
                     // on, so the binder is `Place` (`return match d.tag {
@@ -5373,6 +5368,15 @@ impl<'a> Builder<'a> {
                     }
                     self.temp(ty, e.line())
                 };
+                // A must-use temporary owes its disposal, and the refusal
+                // quotes what made it.
+                if self.body.names[t.index()].linear.is_some() {
+                    let made = match e {
+                        Expr::Call { name, .. } => format!("{}(..)", self.body.spelled(name)),
+                        _ => vyrn_frontend::checker::pred_summary(e),
+                    };
+                    self.body.names[t.index()].path = Some(made);
+                }
                 self.record_fields(t, e);
                 self.bind(t, rhs, out);
                 self.hold(t);
@@ -5671,9 +5675,13 @@ impl<'a> Builder<'a> {
         let info = &self.body.names[n.index()];
         match &info.borrow_kind {
             // The sentence names the root; the fixes name the path.
-            Some(k) if info.borrow && !info.must_use_param => {
+            Some(k) if info.borrow => {
                 let what = k.what(&root);
-                refuse(rule!(ConsumedBorrow, root, what), k.fixes(&path), line)
+                refuse(
+                    rule!(ConsumedBorrow, root, what),
+                    k.fixes(&path, info.copies()),
+                    line,
+                )
             }
             _ => Ok(()),
         }
@@ -7077,15 +7085,6 @@ impl<'a> Builder<'a> {
             // The result is the argument: the temporary is taken and released
             // once, as the result.
             caps[0] = Capability::Consume;
-        }
-        // A stream is linear: a position it fills takes it, whatever
-        // the position's word says.
-        for (c, a) in caps.iter_mut().zip(args) {
-            if self.ty_of(a).is_ok_and(|t| {
-                matches!(&*vyrn_frontend::types::resolved(&t, decls), Type::Stream(_))
-            }) {
-                *c = Capability::Consume;
-            }
         }
         // `@list([..])` moves the literal's elements into the array it builds,
         // so it takes the literal; a read would release them twice.

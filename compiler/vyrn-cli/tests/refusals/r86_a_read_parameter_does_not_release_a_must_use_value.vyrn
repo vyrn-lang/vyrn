@@ -1,0 +1,17 @@
+// A `read` parameter borrows a must-use value: the caller keeps the
+// obligation, so the callee may not release it.
+type Txn = { label: String }
+impl MustUse for Txn {}
+
+fn count(xs: Array<Txn>) -> Int64 {
+    let n = xs.length
+    drop xs
+    return n
+}
+
+fn main() -> Int64 {
+    let xs: Array<Txn> = []
+    print(count(xs))
+    drop xs
+    return 0
+}

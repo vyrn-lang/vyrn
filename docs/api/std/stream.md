@@ -52,7 +52,7 @@ other producer state goes in a second cursor the step closes over.
 ## map
 
 ```vyrn
-fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U>
+fn map<T, U>(s: consume Stream<T>, f: fn(T) -> U) -> Stream<U>
 ```
 
 Applies `f` to every element the consumer asks for. `s` is consumed; the
@@ -65,7 +65,7 @@ layer (`map` over `unfold` under `take`: +24%) and saves no lines.
 ## filter
 
 ```vyrn
-fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T>
+fn filter<T>(s: consume Stream<T>, pred: fn(T) -> Bool) -> Stream<T>
 ```
 
 Keeps only the elements for which `pred` holds.
@@ -76,7 +76,7 @@ over an endless source where nothing passes, it asks forever.
 ## take
 
 ```vyrn
-fn take<T>(s: Stream<T>, n: Int64) -> Stream<T>
+fn take<T>(s: consume Stream<T>, n: Int64) -> Stream<T>
 ```
 
 The first `n` elements (fewer if the stream is shorter; none if `n <= 0`).
@@ -85,7 +85,7 @@ Asks its source exactly n times: the count is checked before each pull.
 ## merge
 
 ```vyrn
-fn merge<T>(a: Stream<T>, b: Stream<T>) -> Stream<T>
+fn merge<T>(a: consume Stream<T>, b: consume Stream<T>) -> Stream<T>
 ```
 
 Interleaves two streams one element at a time, draining whichever outlasts

@@ -858,9 +858,10 @@ fn pin_diagnostics(
                 d.end_col = end_col;
                 break;
             }
-            // A path is not a token. The kernel words its refusals about places,
-            // so the pin is the place's root, which is a token on the line.
-            let root = &target[..target.find(['.', '[']).unwrap_or(target.len())];
+            // A path is not a token. The kernel words its refusals about places
+            // and calls (`f(..)`), so the pin is the root, which is a token on
+            // the line.
+            let root = &target[..target.find(['.', '[', '(']).unwrap_or(target.len())];
             if root != target && !root.is_empty() {
                 if let Some(t) = tok_info.iter().find(|t| t.line == d.line && t.text == root) {
                     d.col = t.col;

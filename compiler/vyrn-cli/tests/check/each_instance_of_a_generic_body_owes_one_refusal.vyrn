@@ -1,5 +1,5 @@
 // Two instances abandon the same parameter; the reader is told once.
-fn f<T>(s: Stream<T>) -> Int64 {
+fn f<T>(s: consume Stream<T>) -> Int64 {
     return 0
 }
 

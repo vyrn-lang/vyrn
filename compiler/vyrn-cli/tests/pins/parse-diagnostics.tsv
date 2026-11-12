@@ -238,7 +238,7 @@ compiler/vyrn-cli/tests/check/a_scalar_renders_by_the_language_whatever_is_decla
 compiler/vyrn-cli/tests/check/a_schema_cannot_name_its_root_and_a_def_alike.vyrn	0	cbf29ce484222325	20	14	443b4e55a5ff13f3
 compiler/vyrn-cli/tests/check/a_second_open_rule_is_rejected.vyrn	1	6905807b876c1bdc	20	20	13ad5fe8659ab17b
 compiler/vyrn-cli/tests/check/a_served_generator_program_must_dispose_its_streams.vyrn	0	cbf29ce484222325	20	19	8eb93e4ae6730dc4
-compiler/vyrn-cli/tests/check/a_served_stream_returns_to_its_caller.vyrn	0	cbf29ce484222325	20	19	0cfbbd24fc1bfffd
+compiler/vyrn-cli/tests/check/a_served_stream_returns_to_its_caller.vyrn	0	cbf29ce484222325	20	17	b7abec65bf53a04c
 compiler/vyrn-cli/tests/check/a_show_against_the_prelude_returns_a_string.vyrn	0	cbf29ce484222325	20	20	30372d2f4f88f561
 compiler/vyrn-cli/tests/check/a_show_that_is_not_a_string_is_refused.vyrn	0	cbf29ce484222325	20	19	cc5ed16a5c520176
 compiler/vyrn-cli/tests/check/a_sorted_array_can_be_searched.vyrn	0	cbf29ce484222325	20	20	14b6e9682642bbb9
@@ -442,7 +442,7 @@ compiler/vyrn-cli/tests/check/drop_module_state.vyrn	0	cbf29ce484222325	20	18	15
 compiler/vyrn-cli/tests/check/duplicate_bench_names_are_rejected.vyrn	0	cbf29ce484222325	20	16	1cbf7c6aa749e1fe
 compiler/vyrn-cli/tests/check/duplicate_contract_members_are_rejected.vyrn	1	0ff53437591e45fb	20	20	db5613b711697698
 compiler/vyrn-cli/tests/check/duplicate_test_names_are_rejected.vyrn	0	cbf29ce484222325	20	14	0c39968bff996563
-compiler/vyrn-cli/tests/check/each_instance_of_a_generic_body_owes_one_refusal.vyrn	0	cbf29ce484222325	20	19	620447781e44bef5
+compiler/vyrn-cli/tests/check/each_instance_of_a_generic_body_owes_one_refusal.vyrn	0	cbf29ce484222325	20	15	efe77b43048bf7fb
 compiler/vyrn-cli/tests/check/enum_with_noncodable_payload_names_the_variant.vyrn	0	cbf29ce484222325	20	19	7551421625a15156
 compiler/vyrn-cli/tests/check/export_let_is_rejected_with_a_named_diagnostic.vyrn	1	0b86990be9a93606	20	20	746e373b43169c25
 compiler/vyrn-cli/tests/check/extern_cannot_take_fn_param.vyrn	0	cbf29ce484222325	20	18	b27fed70933339d4
@@ -886,6 +886,9 @@ compiler/vyrn-cli/tests/refusals/r82_two_impls_declare_one_method.vyrn	0	cbf29ce
 compiler/vyrn-cli/tests/refusals/r83_two_bounds_declare_one_method.vyrn	0	cbf29ce484222325	20	19	a5c9192dfab4da66
 compiler/vyrn-cli/tests/refusals/r84_main_calls_a_gen_fn.vyrn	0	cbf29ce484222325	20	17	e16f10649e32b795
 compiler/vyrn-cli/tests/refusals/r85_schema_of_a_type_parameter.vyrn	0	cbf29ce484222325	20	19	d5655904ea1a23a9
+compiler/vyrn-cli/tests/refusals/r86_a_read_parameter_does_not_release_a_must_use_value.vyrn	0	cbf29ce484222325	20	17	20a5d0504d864588
+compiler/vyrn-cli/tests/refusals/r87_a_for_over_a_read_stream_parameter.vyrn	0	cbf29ce484222325	20	18	b43297f432c8d9ac
+compiler/vyrn-cli/tests/refusals/r88_a_must_use_temporary_in_a_read_position.vyrn	0	cbf29ce484222325	20	18	8cd8b5d57399e2bb
 compiler/vyrn-cli/tests/shapes/a-body-taken-whole-lifts-a-lambda-that-captures-a-later-let.vyrn	0	cbf29ce484222325	20	16	414820b60f79ac03
 compiler/vyrn-cli/tests/shapes/a-borrow-of-a-field-whose-root-is-consumed-after-the-borrow-ends.vyrn	0	cbf29ce484222325	20	14	0a6ed13d107754e1
 compiler/vyrn-cli/tests/shapes/a-borrow-rebound-in-a-let-mut-is-a-copy.vyrn	0	cbf29ce484222325	20	17	cbc0ba2678b9e985
@@ -912,7 +915,7 @@ compiler/vyrn-cli/tests/shapes/a-float-literal-left-of-a-float32-operand.vyrn	0	
 compiler/vyrn-cli/tests/shapes/a-fn-value-bound-by-let-and-captured-by-a-lambda.vyrn	0	cbf29ce484222325	20	14	356e9fbac3e7d792
 compiler/vyrn-cli/tests/shapes/a-for-and-a-match-over-a-call-result.vyrn	0	cbf29ce484222325	20	16	b22e0cfa27869d4e
 compiler/vyrn-cli/tests/shapes/a-for-left-early-over-the-elements-it-never-reached.vyrn	0	cbf29ce484222325	20	16	5f407a4fa91ed095
-compiler/vyrn-cli/tests/shapes/a-for-over-a-stream-its-parameter-and-an-early-return.vyrn	0	cbf29ce484222325	20	19	33cda410e256b7d9
+compiler/vyrn-cli/tests/shapes/a-for-over-a-stream-its-parameter-and-an-early-return.vyrn	0	cbf29ce484222325	20	17	a929bf1693165f8f
 compiler/vyrn-cli/tests/shapes/a-for-over-a-string-literal-beside-a-continue.vyrn	0	cbf29ce484222325	20	17	dacca158e835d1c5
 compiler/vyrn-cli/tests/shapes/a-for-over-a-string-whose-byte-leaves-a-byte-s-range.vyrn	0	cbf29ce484222325	20	19	ec18d0f6b41ab70a
 compiler/vyrn-cli/tests/shapes/a-for-over-a-user-container-read-from-a-field.vyrn	0	cbf29ce484222325	20	17	0c39c4cb7fdf74f6
@@ -1002,7 +1005,7 @@ compiler/vyrn-cli/tests/shapes/a-stored-function-value-passed-to-a-higher-order-
 compiler/vyrn-cli/tests/shapes/a-stored-lambda-that-returns-an-option-of-a-named-record.vyrn	0	cbf29ce484222325	20	19	794e39f7c04cff4d
 compiler/vyrn-cli/tests/shapes/a-stream-a-producer-builds-in-a-slot-of-its-own.vyrn	0	cbf29ce484222325	20	18	e37e1d2e4c731eeb
 compiler/vyrn-cli/tests/shapes/a-stream-boxed-answers-its-address.vyrn	0	cbf29ce484222325	20	16	c6f0b7178e82e733
-compiler/vyrn-cli/tests/shapes/a-stream-handed-to-a-function-that-returns-it.vyrn	0	cbf29ce484222325	20	19	e36cd8790c598b31
+compiler/vyrn-cli/tests/shapes/a-stream-handed-to-a-function-that-returns-it.vyrn	0	cbf29ce484222325	20	18	c54c0b65fbcce07d
 compiler/vyrn-cli/tests/shapes/a-string-accumulator-seeded-stored-into-and-borrowed.vyrn	0	cbf29ce484222325	20	17	986a0edb46f4ed6c
 compiler/vyrn-cli/tests/shapes/a-string-boxed-by-value-while-its-owner-lives.vyrn	0	cbf29ce484222325	20	14	12dd8d737573e888
 compiler/vyrn-cli/tests/shapes/a-string-interpolated-by-a-tagged-template-while-its-owner-lives.vyrn	0	cbf29ce484222325	20	14	acee95a24ecf24c9
@@ -1338,8 +1341,8 @@ examples/statemod/store.vyrn	0	cbf29ce484222325	20	16	dd65b02f903dc6ee
 examples/statemod/trace.vyrn	0	cbf29ce484222325	20	14	eba924b034a7f418
 examples/statemod.vyrn	0	cbf29ce484222325	20	19	4324934b339e52c8
 examples/storage.vyrn	0	cbf29ce484222325	20	18	bbd573059a6867bb
-examples/stream.vyrn	0	cbf29ce484222325	20	18	e2202b5c608bcf0c
-examples/stream_abandoned.vyrn	0	cbf29ce484222325	20	18	13852ce4ff70bbcf
+examples/stream.vyrn	0	cbf29ce484222325	20	19	66bf582a8b22edd1
+examples/stream_abandoned.vyrn	0	cbf29ce484222325	20	19	87df8a567ba1be67
 examples/stream_combinator_abandoned.vyrn	0	cbf29ce484222325	20	17	8062f3455287ad86
 examples/streamlazy.vyrn	0	cbf29ce484222325	20	19	199afe43407bdcab
 examples/streammove.vyrn	0	cbf29ce484222325	20	16	7d6c775e8bbe1b49
@@ -1479,7 +1482,7 @@ std/runtime.vyrn	0	cbf29ce484222325	20	18	0cc927f4a1d0d36e
 std/scan.vyrn	0	cbf29ce484222325	20	16	fa2868ab13f061b1
 std/slots.vyrn	0	cbf29ce484222325	20	18	ada7e63f76e123a9
 std/storage.vyrn	0	cbf29ce484222325	20	14	838ee66367094974
-std/stream.vyrn	0	cbf29ce484222325	20	17	18e56aff739731b0
+std/stream.vyrn	0	cbf29ce484222325	20	18	7b33eaedd834b02c
 std/strings.vyrn	0	cbf29ce484222325	20	17	b629a5aa6d142897
 std/strpred.vyrn	0	cbf29ce484222325	20	17	cc6bc59f6decd9aa
 std/sum.vyrn	0	cbf29ce484222325	20	15	8c91500e0625df59

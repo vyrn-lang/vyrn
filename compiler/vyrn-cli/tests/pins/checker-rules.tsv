@@ -28,7 +28,7 @@ checker-rules.vyrn:145:0: `for` needs an Array, a String, or a type that declare
 checker-rules.vyrn:151:0: cannot `drop` module state `g`: it lives for the whole module and is reclaimed at process exit
 checker-rules.vyrn:155:0: `drop` of unbound variable `zz`
 checker-rules.vyrn:159:0: cannot `drop` `x`: its type `T` is a type parameter, so this body cannot know whether the rule below holds for the instance; a plain record would be released here where `drop` on it directly is refused. Release the value where its concrete type is known, or `consume` the heap field and `drop` that
-checker-rules.vyrn:164:0: `drop` needs a heap value (a String, an Array, a Map, a Ref, or an Option/Result carrying one, or a type declaring `impl Owned`), but `n` is Int64
+checker-rules.vyrn:164:0: `drop` needs a heap value (a String, an Array, a Map, a Ref, or an Option/Result carrying one, or a type declaring `impl Owned` or `impl MustUse`), but `n` is Int64
 checker-rules.vyrn:168:0: integer literal 300 does not fit UInt8 (its range is 0..=255)
 checker-rules.vyrn:176:0: byte literal 255 does not fit Int8 (its range is -128..=127)
 checker-rules.vyrn:184:0: variant `A` needs 1 argument(s)

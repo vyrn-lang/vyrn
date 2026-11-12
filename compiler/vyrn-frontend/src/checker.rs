@@ -6916,7 +6916,7 @@ impl<'a> Checker<'a> {
 }
 
 /// A one-line rendering of a predicate for diagnostics.
-pub(crate) fn pred_summary(expr: &Expr) -> String {
+pub fn pred_summary(expr: &Expr) -> String {
     match expr {
         Expr::Int(n, _) => n.to_string(),
         Expr::Byte(b, _) => b.to_string(),

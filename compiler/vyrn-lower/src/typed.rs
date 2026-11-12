@@ -467,7 +467,8 @@ pub fn refused(body: &Body, as_written: bool) -> Vec<(usize, String)> {
 /// sentence `vyrn check` gives and its line. A name no binding answers is module
 /// state, which lives for the whole module, or no name at all. A bound name
 /// needs a type that owns heap: a String, an array, a map, a built-in sum
-/// that carries heap, or a type declaring `impl Owned`. A type parameter is
+/// that carries heap, a type declaring `impl Owned`, or a type declaring
+/// `impl MustUse`, whose drop is its disposal. A type parameter is
 /// refused, because no instance check runs on the body. The types are read
 /// as written, so the caller passes no instance of a generic function.
 pub fn drops(
@@ -501,9 +502,12 @@ pub fn drops(
                 Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
             ) || (types::is_sum_alias(&t)
                 && vyrn_frontend::declared::owns_heap(&t, decls));
-            // `Err` is a name the checker could not type, and its refusal
-            // is the unknown name's (`refused`).
-            if owned || heap || t == Type::Err {
+            // A must-use value's last owner has no other way to discharge
+            // it, whatever its representation. `Err` is a name the checker
+            // could not type, and its refusal is the unknown name's
+            // (`refused`).
+            let must_use = matches!(info.linear, Some(vyrn_frontend::own::Linear::Declared(_)));
+            if owned || heap || must_use || t == Type::Err {
                 continue;
             }
             let (name, param) = (&info.source, matches!(t, Type::Param(_)));
