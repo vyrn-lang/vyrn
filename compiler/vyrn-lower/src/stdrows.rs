@@ -77,6 +77,12 @@ impl Given {
         let given: Vec<&Function> = (program.functions.iter())
             .filter(|f| matches!(f.body, Body::Given(_)))
             .collect();
+        // A module whose closed entry the load lacked has its own load write
+        // both entries, once.
+        let mut fresh: HashMap<&str, Arc<Entry>> = HashMap::new();
+        for owner in &program.unclosed {
+            fresh.insert(owner, entry(owner, program, opts, resolver, engine)?);
+        }
         if given.is_empty() {
             return Ok(out);
         }
@@ -90,7 +96,10 @@ impl Given {
             let m = f.module.as_deref().expect("a given function is imported");
             let owner = loader::generated_importer(m).unwrap_or(m);
             if !entries.contains_key(owner) {
-                let e = entry(owner, program, opts, resolver, engine)?;
+                let e = match fresh.remove(owner) {
+                    Some(e) => e,
+                    None => entry(owner, program, opts, resolver, engine)?,
+                };
                 let names: HashMap<String, String> = (e.homes())
                     .filter_map(|(own, w, m)| {
                         let to = *linked.get(&(w, m)).unwrap_or(&w);
@@ -240,21 +249,28 @@ fn entry(
         true => format!("{owner}\0{hash}"),
         false => entry_key(owner, hash),
     };
-    if let Some(e) = ENTRIES.with(|c| c.borrow().get(&key).cloned()) {
+    // A load that lacked the module's closed entry writes both again.
+    let unclosed = program.unclosed.contains(owner);
+    if let Some(e) = ENTRIES
+        .with(|c| c.borrow().get(&key).cloned())
+        .filter(|_| !unclosed)
+    {
         return Ok(e);
     }
     let cached = (!off)
         .then(|| resolver.gen_cache_get(&key))
         .flatten()
         .and_then(|text| Entry::read(&key, text))
-        .filter(|e| e.fresh(program, resolver));
+        .filter(|e| !unclosed && e.fresh(program, resolver));
     let e = match cached {
         Some(e) => e,
         None => {
-            let body = Entry::written(owner, opts, resolver, engine)?.encode();
+            let w = Entry::written(owner, opts, resolver, engine)?;
+            let body = w.encode();
             if !off {
                 let tag = loader::gen_cache_tag(&key, body.as_bytes());
                 resolver.gen_cache_put(&key, &format!("{TAG} {tag}\n{body}"));
+                loader::put_closed(resolver, owner, hash, &w.inputs, &w.generated, &w.closed);
             }
             Entry::parse(body).ok_or_else(|| vec![missing("its own rows", owner)])?
         }
@@ -357,6 +373,9 @@ struct Written {
     rows: BTreeMap<String, BTreeMap<String, Stored>>,
     /// The function values the module's bodies store and pass, each once.
     sources: Vec<StoredSource>,
+    /// Each given function whose calls open nothing, by module key and
+    /// written name ([`crate::effects::StateUse::opens`]).
+    closed: Vec<(String, String)>,
 }
 
 /// One module's stored rows: the entry's text, which a load indexes once and
@@ -440,15 +459,19 @@ impl Entry {
         }
         let fenced = vyrn_frontend::checker::fenced(&program, &world.ownership.record);
         let mut rows = BTreeMap::new();
+        let mut closed = Vec::new();
         let gives = loader::Gives::of(root, opts);
-        for f in program
-            .functions
-            .iter()
-            .filter(|f| loader::is_given(f, gives))
-        {
-            let Some(k) = home(f, root) else {
+        for (i, f) in (0..).zip(&program.functions) {
+            let Some(k) = home(f, root).filter(|_| loader::is_given(f, gives)) else {
                 continue;
             };
+            let at = program.source_id(vyrn_frontend::ast::SourceBody::Fn(i));
+            if world.state_use(at).is_some_and(|u| !u.opens) {
+                closed.push((
+                    k.to_string(),
+                    program.spellings.written(&f.name).to_string(),
+                ));
+            }
             let hash = program.module_hashes.get(k).map_or("", String::as_str);
             let key = (k.to_string(), hash.to_string(), f.name.clone());
             let (Some(judgment), Some(fenced)) = (judged.remove(&key), fenced.get(&f.name)) else {
@@ -507,6 +530,7 @@ impl Entry {
             homes,
             rows,
             sources,
+            closed,
         })
     }
 

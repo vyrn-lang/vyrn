@@ -350,6 +350,10 @@ pub struct Program {
     /// entry records, which its check's entries go on from. Empty for a
     /// program no load linked.
     pub seen: crate::loader::Seen,
+    /// The std modules a stateful row of which the load could not give for
+    /// want of a fresh closed entry (`loader::read_closed`): their own loads
+    /// write one (`vyrn_lower::stdrows`). Empty for a program no load linked.
+    pub unclosed: std::collections::BTreeSet<String>,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only

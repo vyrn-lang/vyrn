@@ -1,7 +1,8 @@
-//! `vyrn check` reads std's stored rows (`vyrn_lower::stdrows`) and
-//! interfaces (`loader::interface_parse`). These pin that a stale or damaged
-//! entry is refused and written again, and that `VYRN_NO_GEN_CACHE` reads and
-//! writes none, with the same verdicts.
+//! `vyrn check` reads std's stored rows (`vyrn_lower::stdrows`), closed
+//! entries (`loader::read_closed`) and interfaces (`loader::interface_parse`).
+//! These pin that a stale or damaged entry is refused and written again, that
+//! `VYRN_NO_GEN_CACHE` reads and writes none, with the same verdicts, and
+//! which std bodies naming module state a warm check gives.
 
 mod common;
 
@@ -89,6 +90,22 @@ impl Tree {
             .env("VYRN_GEN_CACHE_DIR", &self.cache)
             .output()
             .expect("vyrn build");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n"),
+        )
+    }
+
+    /// `vyrn emit-lowered` of the root, a host that builds every body: its
+    /// exit code and standard error.
+    fn report(&self) -> (Option<i32>, String) {
+        let out = vyrn()
+            .arg("emit-lowered")
+            .arg(&self.root)
+            .env("VYRN_STD", &self.std)
+            .env("VYRN_GEN_CACHE_DIR", &self.cache)
+            .output()
+            .expect("vyrn emit-lowered");
         (
             out.status.code(),
             String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n"),
@@ -245,23 +262,144 @@ fn a_cold_fill_writes_each_entry_alike_in_any_order() {
     }
 }
 
-/// A std module whose bodies hold a borrow of module state across a call
-/// through a function value, and one that only reads immutable state.
-const STATE_MODULE: &str = "let mut names: Array<String> = [\"a\", \"b\"]\n\n\
-                            let fixed: Array<String> = [\"x\", \"y\"]\n\n\
-                            export fn bump() {\n    names.push(\"c\")\n}\n\n\
-                            export fn walk(cb: fn() -> Unit) -> Int64 {\n    let s = names[0]\n    cb()\n    return s.byteLength\n}\n\n\
-                            export fn viaModify(xs: modify Array<String>, cb: fn() -> Unit) -> Int64 {\n    let s = xs[0]\n    cb()\n    return s.byteLength\n}\n\n\
-                            export fn viaOwn(cb: fn() -> Unit) -> Int64 {\n    return viaModify(names, cb)\n}\n\n\
-                            export fn viaFixed(cb: fn() -> Unit) -> Int64 {\n    let s = fixed[0]\n    cb()\n    return s.byteLength\n}\n";
+/// A std module with one body per kind of call a borrow of its module state
+/// can be live across, and one that only reads immutable state.
+const STATE_MODULE: &str = r#"let mut names: Array<String> = ["a", "b"]
+
+let mut hooks: Array<fn() -> Unit> = []
+
+let fixed: Array<String> = ["x", "y"]
+
+export type Box = { n: Int64 }
+
+export protocol Visit {
+    fn visit(self) -> Int64
+}
+
+impl Visit for Box {
+    fn visit(self) -> Int64 {
+        return self.n
+    }
+}
+
+export fn bump() {
+    names.push("c")
+}
+
+export fn run(cb: fn() -> Unit) {
+    cb()
+}
+
+export fn runAt(f: fn(Int64) -> Unit) {
+    f(1)
+}
+
+fn nop() {
+}
+
+fn nopAt(x: Int64) {
+}
+
+fn helper(cb: fn() -> Unit) {
+    cb()
+}
+
+fn idle<T>(x: T) -> Int64 {
+    return 1
+}
+
+fn applyG<T>(x: T, f: fn(T) -> Unit) {
+    f(x)
+}
+
+export fn walk(cb: fn() -> Unit) -> Int64 {
+    let s = names[0]
+    cb()
+    return s.byteLength
+}
+
+export fn viaModify(xs: modify Array<String>, cb: fn() -> Unit) -> Int64 {
+    let s = xs[0]
+    cb()
+    return s.byteLength
+}
+
+export fn viaOwn(cb: fn() -> Unit) -> Int64 {
+    return viaModify(names, cb)
+}
+
+export fn viaHelper(cb: fn() -> Unit) -> Int64 {
+    let s = names[0]
+    helper(cb)
+    return s.byteLength
+}
+
+export fn viaLocal(cb: fn() -> Unit) -> Int64 {
+    run(cb)
+    let g: fn() -> Unit = nop
+    let s = names[0]
+    g()
+    return s.byteLength
+}
+
+export fn viaHooks(cb: consume fn() -> Unit) -> Int64 {
+    hooks.push(cb)
+    let s = names[0]
+    let mut i = 0
+    while i < hooks.length {
+        let h = hooks[i]
+        h()
+        i = i + 1
+    }
+    return s.byteLength
+}
+
+export fn viaGenericFn(cb: fn() -> Unit) -> Int64 {
+    let s = names[0]
+    applyG(3, nopAt)
+    return s.byteLength
+}
+
+export fn viaProto(cb: fn() -> Unit) -> Int64 {
+    let b = Box { n: 2 }
+    let s = names[0]
+    let k = b.visit()
+    return s.byteLength + k
+}
+
+export fn viaGeneric(cb: fn() -> Unit) -> Int64 {
+    let s = names[0]
+    let k = idle(3)
+    return s.byteLength + k
+}
+
+export fn walkEnded(cb: fn() -> Unit) -> Int64 {
+    let n = names[0].byteLength
+    cb()
+    return n
+}
+
+export fn scalarAcross(cb: fn() -> Unit) -> Int64 {
+    let n = names.length
+    cb()
+    return n
+}
+
+export fn viaFixed(cb: fn() -> Unit) -> Int64 {
+    let s = fixed[0]
+    cb()
+    return s.byteLength
+}
+"#;
 
 /// A root that calls `std/sgstate`'s `entry` with a callback whose body is
-/// `callback`.
+/// `callback`. `runAt(hurt)` makes `hurt` a source of `fn(Int64) -> Unit`.
 fn state_root(entry: &str, callback: &str) -> String {
     format!(
-        "import {{ {entry}, bump }} from \"std/sgstate\"\n\n\
+        "import {{ {entry}, bump, runAt }} from \"std/sgstate\"\n\n\
          fn quiet() {{\n    {callback}\n}}\n\n\
-         fn main() -> Int64 {{\n    return {entry}(quiet)\n}}\n"
+         fn hurt(x: Int64) {{\n    {callback}\n}}\n\n\
+         fn main() -> Int64 {{\n    runAt(hurt)\n    return {entry}(quiet)\n}}\n"
     )
 }
 
@@ -272,48 +410,197 @@ fn state_tree(tag: &str, root_text: &str) -> Tree {
     t
 }
 
-/// `vyrn check` warm, `vyrn check` under `VYRN_NO_GEN_CACHE` and `vyrn build`
-/// of `t`'s root, each as its exit code and first line of standard error.
-fn verdicts(t: &Tree) -> [(Option<i32>, String); 3] {
-    let first =
-        |(code, err): (Option<i32>, String)| (code, err.lines().next().unwrap_or("").into());
-    t.check(false);
-    [t.check(false), t.check(true), t.build()].map(first)
+/// `t`'s root under `vyrn check` cold, warm and under `VYRN_NO_GEN_CACHE`,
+/// `vyrn build`, and `vyrn emit-lowered`, a host that builds every body: each
+/// as its exit code and standard error. The warm check gives what the cold one
+/// wrote a closed entry for.
+fn verdicts(t: &Tree) -> [(Option<i32>, String); 5] {
+    let _ = std::fs::remove_dir_all(&t.cache);
+    let cold = t.check(false);
+    [cold, t.check(false), t.check(true), t.build(), t.report()]
 }
 
-/// A body that borrows its module's state across a call through a function
-/// value is built in each program, so the callback the program passes decides
-/// its verdict, under check as under build (a given body kept the verdict of
-/// its module's own load, where no callback writes the state).
+/// The functions of `std/sgstate` its closed entry gives ([`loader::read_closed`]).
+fn closed(t: &Tree) -> Vec<String> {
+    let entry = (t.entries("closed-").into_iter()).find(|(_, text)| text.contains("sgstate.vyrn "));
+    let (_, text) = entry.expect("a closed entry for std/sgstate");
+    (text.lines())
+        .filter_map(|l| l.rsplit_once(' '))
+        .filter(|(m, _)| m.ends_with("sgstate.vyrn"))
+        .map(|(_, n)| n.to_string())
+        .collect()
+}
+
+/// Asserts that every host prints one verdict for `t`'s root, `code`.
+fn agree(t: &Tree, entry: &str, code: i32) -> String {
+    let [first, rest @ ..] = verdicts(t);
+    assert_eq!(first.0, Some(code), "{entry}: {}", first.1);
+    for v in rest {
+        assert_eq!(v, first, "{entry}: a host printed another verdict");
+    }
+    first.1
+}
+
+/// A body that borrows its module's state across a call that may run a body
+/// the program supplies is built in each program, so the program decides its
+/// verdict under every host. A given body would keep its own load's verdict,
+/// where no callback writes the state.
 #[test]
-fn a_std_body_naming_its_module_state_is_judged_with_the_programs_callbacks() {
-    for entry in ["walk", "viaOwn"] {
-        let quiet = state_tree("stdrows-state-quiet", &state_root(entry, "print(\"q\")"));
-        for (code, err) in verdicts(&quiet) {
-            assert_eq!(code, Some(0), "{entry}: {err}");
-        }
-        let bumps = state_tree("stdrows-state-bumps", &state_root(entry, "bump()"));
-        for (code, err) in verdicts(&bumps) {
-            assert_eq!(code, Some(1), "{entry} was accepted");
-            let refused = err.contains("`names` is written here while");
-            assert!(refused, "{entry}: {err}");
-        }
+fn a_std_body_whose_calls_open_is_judged_with_the_programs_callbacks() {
+    for entry in [
+        "walk",
+        "viaOwn",
+        "viaHelper",
+        "viaLocal",
+        "viaHooks",
+        "viaGenericFn",
+    ] {
+        let quiet = state_tree("stdrows-open-quiet", &state_root(entry, "print(\"q\")"));
+        agree(&quiet, entry, 0);
+        let bumps = state_tree("stdrows-open-bumps", &state_root(entry, "bump()"));
+        let err = agree(&bumps, entry, 1);
+        assert!(
+            err.contains("`names` is written here while"),
+            "{entry}: {err}"
+        );
+        assert!(
+            !closed(&bumps).contains(&entry.to_string()),
+            "{entry} is given"
+        );
+    }
+}
+
+/// A body whose calls all have one answer in every program keeps its verdict
+/// in every program, so a warm check gives it.
+#[test]
+fn a_std_body_whose_calls_close_is_given() {
+    for entry in ["viaProto", "viaGeneric"] {
+        let t = state_tree("stdrows-closed", &state_root(entry, "bump()"));
+        agree(&t, entry, 0);
+        assert!(
+            closed(&t).contains(&entry.to_string()),
+            "{entry} is not given"
+        );
+    }
+}
+
+/// The test reads calls, not borrows: a body with an open call is built in
+/// each program even where no borrow is live across the call.
+#[test]
+fn a_std_body_with_an_open_call_is_built_though_no_borrow_spans_it() {
+    for entry in ["walkEnded", "scalarAcross"] {
+        let t = state_tree("stdrows-ended", &state_root(entry, "bump()"));
+        agree(&t, entry, 0);
+        assert!(!closed(&t).contains(&entry.to_string()), "{entry} is given");
     }
 }
 
 /// Immutable module state cannot be written, so no answer ends a borrow of
-/// it: the body stays given, and every callback is accepted.
+/// it: the body is given whatever it calls.
 #[test]
 fn a_std_body_reading_immutable_state_stays_given() {
     let t = state_tree("stdrows-state-fixed", &state_root("viaFixed", "bump()"));
-    for (code, err) in verdicts(&t) {
-        assert_eq!(code, Some(0), "{err}");
-    }
+    agree(&t, "viaFixed", 0);
     let spells: Vec<String> = (t.entries("interface-").into_iter())
         .filter(|(_, text)| text.contains("viaFixed"))
         .map(|(_, text)| text)
         .collect();
     assert_eq!(spells.len(), 1, "one interface entry names viaFixed");
     assert!(spells[0].contains("\nviaFixed "), "viaFixed is not given");
-    assert!(!spells[0].contains("\nwalk "), "walk is given");
+}
+
+/// A program refused for a protocol method named like a function a std body
+/// calls prints the collision alone, cold, warm, without the cache and under
+/// build: no body is typed after it, given or not.
+#[test]
+fn a_name_collision_prints_one_text_under_every_host() {
+    let root = "import { cursorGet, Cursor } from \"std/stream\"\n\n\
+                protocol Hd {\n    fn handleOf(read self) -> Int64\n}\n\n\
+                impl Hd for Cursor {\n    fn handleOf(read self) -> Int64 {\n        return 0\n    }\n}\n\n\
+                fn main() -> Int64 {\n    let c = Cursor { slot: 0, gen: 0 }\n    return cursorGet(c)\n}\n";
+    let t = tree_of("stdrows-collision", root);
+    let err = agree(&t, "cursorGet", 1);
+    assert_eq!(err.lines().count(), 1, "{err}");
+}
+
+/// `std/sgstate`'s closed entry: its name and text.
+fn closed_entry(t: &Tree) -> (String, String) {
+    let entry = (t.entries("closed-").into_iter()).find(|(_, text)| text.contains("sgstate.vyrn "));
+    entry.expect("a closed entry for std/sgstate")
+}
+
+/// `text`, a closed entry's, with `walk` added to the functions it gives, and
+/// its tag line made under `key`; `None` keeps the entry's own tag.
+fn forged(text: &str, key: Option<&str>) -> String {
+    let (head, body) = text.split_once('\n').expect("a tag line");
+    let module = (body.lines())
+        .filter_map(|l| l.rsplit_once(' '))
+        .find(|(m, _)| m.ends_with("sgstate.vyrn"))
+        .map(|(m, _)| m)
+        .expect("a function of std/sgstate");
+    let mut lines: Vec<String> = body.lines().map(str::to_string).collect();
+    let count = (lines.iter().rposition(|l| l.parse::<usize>().is_ok())).expect("a count");
+    let n: usize = lines[count].parse().expect("a count");
+    lines[count] = (n + 1).to_string();
+    lines.push(format!("{module} walk"));
+    let body = lines.join("\n") + "\n";
+    let head = match key {
+        Some(k) => format!(
+            "closed1 {}",
+            vyrn_frontend::loader::gen_cache_tag(k, body.as_bytes())
+        ),
+        None => head.to_string(),
+    };
+    format!("{head}\n{body}")
+}
+
+/// A closed entry that does not read whole, under its own key, as the
+/// module's own load wrote it, gives nothing: the program's callback still
+/// decides `walk`'s verdict.
+#[test]
+fn a_damaged_closed_entry_gives_nothing() {
+    let t = state_tree("stdrows-closed-damaged", &state_root("walk", "bump()"));
+    let refused = agree(&t, "walk", 1);
+    let (name, text) = closed_entry(&t);
+    let path = t.cache.join(&name);
+    let damages = [
+        ("truncated", text[..text.len() / 2].to_string()),
+        ("a wrong tag", forged(&text, None)),
+        (
+            "another key's tag",
+            forged(&text, Some("closed-of-another-compiler")),
+        ),
+    ];
+    for (why, damaged) in damages {
+        std::fs::write(&path, damaged).expect("damage");
+        assert_eq!(t.check(false), (Some(1), refused.clone()), "{why}");
+        let again = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(again, text, "{why}: the entry was not written again");
+    }
+}
+
+/// An entry written for an older text of the module, or of a file its own
+/// load read, gives nothing: the text hash keys it and its inputs stamp it.
+#[test]
+fn a_closed_entry_for_older_std_text_gives_nothing() {
+    let t = state_tree("stdrows-closed-stale", &state_root("walk", "bump()"));
+    let refused = agree(&t, "walk", 1);
+    let (name, text) = closed_entry(&t);
+    let module = t.std.join("sgstate.vyrn");
+    std::fs::write(&module, format!("{STATE_MODULE}\n// an edit\n")).expect("edit");
+    // The edited text has another key; the old entry, made to give `walk`
+    // under its own key, records the old text.
+    std::fs::write(t.cache.join(&name), forged(&text, Some(&name))).expect("forge");
+    assert_eq!(t.check(false), (Some(1), refused.clone()), "older own text");
+    std::fs::write(&module, STATE_MODULE).expect("restore");
+    // The entry records each file the own load read; one other than the
+    // module, edited, makes the entry stale.
+    let input = (text.lines().skip(2))
+        .filter_map(|l| l.split('\t').next())
+        .find(|p| p.ends_with(".vyrn") && !p.ends_with("sgstate.vyrn"))
+        .expect("an input besides std/sgstate");
+    let s = std::fs::read_to_string(input).expect("read input");
+    std::fs::write(input, format!("{s}\n// an edit\n")).expect("edit input");
+    std::fs::write(t.cache.join(&name), forged(&text, Some(&name))).expect("forge");
+    assert_eq!(t.check(false), (Some(1), refused), "older input text");
 }
