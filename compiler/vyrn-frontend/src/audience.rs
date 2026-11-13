@@ -16,7 +16,6 @@
 //! scores role scopes the same way, so the two path axes compose.
 
 use crate::schema::Json;
-use crate::session::Session;
 
 /// Who runs a module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,16 +113,17 @@ impl AudienceMap {
         self
     }
 
-    /// Returns `path` as file identity: what the filesystem calls it, or `path`
-    /// when nothing on disk answers. A `session` answers from its memo of
-    /// [`crate::manifest::real_path`], the `realpath` every manifest's map holds.
-    fn identity(&self, path: &str, session: Option<&Session>) -> String {
-        let real = match (self.realpath, session) {
-            (None, _) => None,
-            (Some(_), Some(s)) => s.real_path(path),
-            (Some(f), None) => f(path),
-        };
-        real.unwrap_or_else(|| path.to_string())
+    /// Returns `path` as file identity: what `real` says the filesystem calls
+    /// it, or `path` when nothing on disk answers or the map compares paths
+    /// as written. A load answers from its table of real paths
+    /// (`loader::real_path`), any other caller from [`AudienceMap::real`].
+    fn identity(&self, path: &str, real: &mut dyn FnMut(&str) -> Option<String>) -> String {
+        (self.realpath.and_then(|_| real(path))).unwrap_or_else(|| path.to_string())
+    }
+
+    /// What this map's `realpath` calls `path`, asked afresh.
+    pub fn real(&self, path: &str) -> Option<String> {
+        self.realpath.and_then(|f| f(path))
     }
 }
 
@@ -229,8 +229,12 @@ pub fn from_manifest(doc: &Json, base: &str) -> Option<AudienceMap> {
 /// A generated module's banner key resolves to the file a person wrote, so a
 /// page's generated modules inherit the page's audience. A `session` keeps the
 /// file identities it asks the disk for.
-pub fn audience_of(key: &str, map: &AudienceMap, session: Option<&Session>) -> Verdict {
-    let verdict = declared_audience_of(key, map, session);
+pub fn audience_of(
+    key: &str,
+    map: &AudienceMap,
+    real: &mut dyn FnMut(&str) -> Option<String>,
+) -> Verdict {
+    let verdict = declared_audience_of(key, map, real);
     if verdict.audience != Audience::Universal {
         return verdict;
     }
@@ -239,7 +243,7 @@ pub fn audience_of(key: &str, map: &AudienceMap, session: Option<&Session>) -> V
     // opposite sides of the wire; the SSR half must reach the server, and the
     // client half is checked against the client root.
     if let Some(importer) = crate::loader::generated_importer(key) {
-        let caller = audience_of(importer, map, session);
+        let caller = audience_of(importer, map, real);
         if caller.audience != Audience::Universal {
             return caller;
         }
@@ -249,8 +253,12 @@ pub fn audience_of(key: &str, map: &AudienceMap, session: Option<&Session>) -> V
 
 /// Returns the audience `path` declares: the manifest key naming it as an
 /// entry point, else the nearest audience segment.
-fn declared_audience_of(path: &str, map: &AudienceMap, session: Option<&Session>) -> Verdict {
-    let path = map.identity(&source_file(path), session);
+fn declared_audience_of(
+    path: &str,
+    map: &AudienceMap,
+    real: &mut dyn FnMut(&str) -> Option<String>,
+) -> Verdict {
+    let path = map.identity(&source_file(path), real);
     // An entry point's audience is declared by its key, so it beats the path.
     if let Some((_, a, key)) = map
         .entries
@@ -714,7 +722,7 @@ pub fn remedy(imported: Audience, importer: &str, module: &str, map: &AudienceMa
 /// Returns `path` as a project reader types it: relative to the project
 /// directory when inside it. An absolute temp path in a diagnostic is noise.
 pub fn display_path(path: &str, map: &AudienceMap) -> String {
-    let path = map.identity(&source_file(path), None);
+    let path = map.identity(&source_file(path), &mut |p| map.real(p));
     relative_to(&path, &map.base).unwrap_or(path)
 }
 
@@ -780,11 +788,13 @@ mod tests {
     fn audience_outer_and_feature_outer_agree() {
         let m = map();
         assert_eq!(
-            audience_of("/p/server/api/pastes.vyrn", &m, None).audience,
+            audience_of("/p/server/api/pastes.vyrn", &m, &mut |p| m.real(p)).audience,
             Audience::Server
         );
         assert_eq!(
-            audience_of("/p/src/pastes/server/api/pastes.vyrn", &m, None).audience,
+            audience_of("/p/src/pastes/server/api/pastes.vyrn", &m, &mut |p| m
+                .real(p))
+            .audience,
             Audience::Server
         );
     }
@@ -793,11 +803,11 @@ mod tests {
     fn nearest_segment_wins() {
         let m = map();
         // A universal directory under a server one is universal.
-        let v = audience_of("/p/server/app/widget.vyrn", &m, None);
+        let v = audience_of("/p/server/app/widget.vyrn", &m, &mut |p| m.real(p));
         assert_eq!(v.audience, Audience::Universal);
         assert_eq!(v.reason, Reason::Segment("app".into()));
         // And the other way round.
-        let v = audience_of("/p/app/server/secret.vyrn", &m, None);
+        let v = audience_of("/p/app/server/secret.vyrn", &m, &mut |p| m.real(p));
         assert_eq!(v.audience, Audience::Server);
         assert_eq!(v.reason, Reason::Segment("server".into()));
     }
@@ -805,7 +815,7 @@ mod tests {
     #[test]
     fn a_file_named_server_is_not_a_server_module_unless_the_manifest_says_so() {
         let m = map();
-        let v = audience_of("/p/server.vyrn", &m, None);
+        let v = audience_of("/p/server.vyrn", &m, &mut |p| m.real(p));
         assert_eq!(v.audience, Audience::Universal);
         assert_eq!(v.reason, Reason::Default);
 
@@ -816,11 +826,11 @@ mod tests {
             "/p",
         )
         .unwrap();
-        let v = audience_of("/p/server.vyrn", &m, None);
+        let v = audience_of("/p/server.vyrn", &m, &mut |p| m.real(p));
         assert_eq!(v.audience, Audience::Server);
         assert_eq!(v.reason, Reason::Entry("server".into()));
         assert_eq!(
-            audience_of("/p/client.vyrn", &m, None).audience,
+            audience_of("/p/client.vyrn", &m, &mut |p| m.real(p)).audience,
             Audience::Client
         );
     }
@@ -829,7 +839,7 @@ mod tests {
     fn outside_the_project_has_no_audience() {
         let m = map();
         assert_eq!(
-            audience_of("/elsewhere/server/x.vyrn", &m, None).audience,
+            audience_of("/elsewhere/server/x.vyrn", &m, &mut |p| m.real(p)).audience,
             Audience::Universal
         );
     }
@@ -852,7 +862,7 @@ mod tests {
             "/p/vendor/store.vyrn",
         ] {
             assert_eq!(
-                audience_of(spelling, &m, None).audience,
+                audience_of(spelling, &m, &mut |p| m.real(p)).audience,
                 Audience::Server,
                 "{spelling}"
             );
@@ -878,9 +888,15 @@ mod tests {
         // And the generated module's audience reads exactly that.
         let m = map();
         let banner = "generated by vyxPage(\"../server/pages/Leak.vyx\") at /p/client/boot.vyrn";
-        assert_eq!(audience_of(banner, &m, None).audience, Audience::Server);
+        assert_eq!(
+            audience_of(banner, &m, &mut |p| m.real(p)).audience,
+            Audience::Server
+        );
         let glue = "generated by components(\"../app/widgets\") at /p/client/boot.vyrn";
-        assert_eq!(audience_of(glue, &m, None).audience, Audience::Client);
+        assert_eq!(
+            audience_of(glue, &m, &mut |p| m.real(p)).audience,
+            Audience::Client
+        );
     }
 
     #[test]
@@ -906,7 +922,7 @@ mod tests {
             "",
         )
         .unwrap();
-        let v = audience_of("/p/screens/main.vyrn", &m, None);
+        let v = audience_of("/p/screens/main.vyrn", &m, &mut |p| m.real(p));
         assert_eq!(v.audience, Audience::Universal);
         assert_eq!(v.reason, Reason::Default);
     }

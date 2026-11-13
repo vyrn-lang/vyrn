@@ -664,11 +664,13 @@ fn audience_objection(
     imported: &str,
     line: usize,
     opts: &LoadOptions,
+    real_paths: &mut HashMap<String, Option<String>>,
 ) -> Option<Diagnostic> {
     use crate::audience;
     let map = opts.audience.as_ref()?;
-    let from = audience::audience_of(importer, map, opts.session.as_deref());
-    let to = audience::audience_of(imported, map, opts.session.as_deref());
+    let mut real = |p: &str| real_path(p, opts, real_paths);
+    let from = audience::audience_of(importer, map, &mut real);
+    let to = audience::audience_of(imported, map, &mut real);
     if !audience::widens(from.audience, to.audience) {
         return None;
     }
@@ -701,16 +703,31 @@ fn same_file(
     opts: &LoadOptions,
     real_paths: &mut HashMap<String, Option<String>>,
 ) -> bool {
-    let mut real = |p: &str| {
-        real_paths
-            .entry(p.to_string())
-            .or_insert_with(|| match &opts.session {
-                Some(s) => s.real_path(p),
-                None => crate::manifest::real_path(p),
-            })
-            .clone()
+    a == b
+        || matches!(
+            (real_path(a, opts, real_paths), real_path(b, opts, real_paths)),
+            (Some(x), Some(y)) if x == y
+        )
+}
+
+/// What the filesystem calls `p`, from the host's session or the disk, asked
+/// once per load: `real_paths` is the load's table. The audience asks for
+/// both ends of every import edge, which cost a warm check of
+/// `examples/bin/server.vyrn` 8.9 ms of canonicalizing before the table.
+fn real_path(
+    p: &str,
+    opts: &LoadOptions,
+    real_paths: &mut HashMap<String, Option<String>>,
+) -> Option<String> {
+    if let Some(real) = real_paths.get(p) {
+        return real.clone();
+    }
+    let real = match &opts.session {
+        Some(s) => s.real_path(p),
+        None => crate::manifest::real_path(p),
     };
-    a == b || matches!((real(a), real(b)), (Some(x), Some(y)) if x == y)
+    real_paths.insert(p.to_string(), real.clone());
+    real
 }
 
 /// The module an `export to` judgment reads an importer as. Only [`author_of`]
@@ -1972,7 +1989,7 @@ fn load_modules(
                 })?;
                 // An import may not widen audience. Checked before the
                 // target is visited, so the first illegal edge is the one reported.
-                if let Some(d) = audience_objection(key, &target, imp.line, opts)
+                if let Some(d) = audience_objection(key, &target, imp.line, opts, &mut w.real_paths)
                     .or_else(|| runtime_fence(key, &target, imp.line, opts, &mut w.real_paths))
                 {
                     return Err(vec![in_module(d, key, root_key)]);
@@ -2039,7 +2056,7 @@ fn load_modules(
                 // it too. The generated module's audience is its input file's, or
                 // the mounting root's when the input declares none, so a `.vyx`
                 // under `server/` mounted from the client root widens here.
-                if let Some(d) = audience_objection(key, &gen_key, *line, opts) {
+                if let Some(d) = audience_objection(key, &gen_key, *line, opts, &mut w.real_paths) {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
                 if let Some(g) = generated {

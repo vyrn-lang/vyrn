@@ -431,7 +431,16 @@ impl Module {
     /// never behaviour.
     fn sweep_pool(&mut self) {
         let spans = &self.spans;
+        // Spans ascend and never overlap. Most windows of the pool read as a
+        // word outside every span, and skip the search.
+        let (start, end) = match (spans.first(), spans.last()) {
+            (Some(&(first, _)), Some(&(at, len))) => (first, at + len),
+            _ => (0, 0),
+        };
         let find = |x: u32| -> Option<usize> {
+            if !(start..end).contains(&x) {
+                return None;
+            }
             let i = spans.partition_point(|&(at, _)| at <= x).checked_sub(1)?;
             let (at, len) = spans[i];
             (x - at < len).then_some(i)

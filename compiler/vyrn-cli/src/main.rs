@@ -1726,7 +1726,7 @@ fn why_audience(flags: GlobalFlags, file: &str) -> Outcome {
     match (&fenced, &map) {
         (Some(who), _) => println!("  audience: {who}"),
         (None, Some(map)) => {
-            let v = vyrn_frontend::audience::audience_of(&path, map, None);
+            let v = vyrn_frontend::audience::audience_of(&path, map, &mut |p| map.real(p));
             println!("  audience: {} — {}", v.audience.phrase(), v.because());
         }
         (None, None) => {
