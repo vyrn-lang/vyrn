@@ -77,6 +77,24 @@ impl Tree {
         )
     }
 
+    /// `vyrn build` of the root to wasm: its exit code and standard error.
+    fn build(&self) -> (Option<i32>, String) {
+        let out = vyrn()
+            .arg("build")
+            .arg(&self.root)
+            .arg("-o")
+            .arg(self.root.with_extension("wasm"))
+            .args(["--target", "wasm"])
+            .env("VYRN_STD", &self.std)
+            .env("VYRN_GEN_CACHE_DIR", &self.cache)
+            .output()
+            .expect("vyrn build");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n"),
+        )
+    }
+
     /// Each stored entry's name and text whose name starts with `kind`.
     fn entries(&self, kind: &str) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = std::fs::read_dir(&self.cache)
@@ -225,4 +243,77 @@ fn a_cold_fill_writes_each_entry_alike_in_any_order() {
     for (n, x, y) in shared {
         assert_eq!(unstamped(x), unstamped(y), "entry {n} differs");
     }
+}
+
+/// A std module whose bodies hold a borrow of module state across a call
+/// through a function value, and one that only reads immutable state.
+const STATE_MODULE: &str = "let mut names: Array<String> = [\"a\", \"b\"]\n\n\
+                            let fixed: Array<String> = [\"x\", \"y\"]\n\n\
+                            export fn bump() {\n    names.push(\"c\")\n}\n\n\
+                            export fn walk(cb: fn() -> Unit) -> Int64 {\n    let s = names[0]\n    cb()\n    return s.byteLength\n}\n\n\
+                            export fn viaModify(xs: modify Array<String>, cb: fn() -> Unit) -> Int64 {\n    let s = xs[0]\n    cb()\n    return s.byteLength\n}\n\n\
+                            export fn viaOwn(cb: fn() -> Unit) -> Int64 {\n    return viaModify(names, cb)\n}\n\n\
+                            export fn viaFixed(cb: fn() -> Unit) -> Int64 {\n    let s = fixed[0]\n    cb()\n    return s.byteLength\n}\n";
+
+/// A root that calls `std/sgstate`'s `entry` with a callback whose body is
+/// `callback`.
+fn state_root(entry: &str, callback: &str) -> String {
+    format!(
+        "import {{ {entry}, bump }} from \"std/sgstate\"\n\n\
+         fn quiet() {{\n    {callback}\n}}\n\n\
+         fn main() -> Int64 {{\n    return {entry}(quiet)\n}}\n"
+    )
+}
+
+/// A tree whose std holds `std/sgstate`, rooted at `root_text`.
+fn state_tree(tag: &str, root_text: &str) -> Tree {
+    let t = tree_of(tag, root_text);
+    std::fs::write(t.std.join("sgstate.vyrn"), STATE_MODULE).expect("write sgstate");
+    t
+}
+
+/// `vyrn check` warm, `vyrn check` under `VYRN_NO_GEN_CACHE` and `vyrn build`
+/// of `t`'s root, each as its exit code and first line of standard error.
+fn verdicts(t: &Tree) -> [(Option<i32>, String); 3] {
+    let first =
+        |(code, err): (Option<i32>, String)| (code, err.lines().next().unwrap_or("").into());
+    t.check(false);
+    [t.check(false), t.check(true), t.build()].map(first)
+}
+
+/// A body that borrows its module's state across a call through a function
+/// value is built in each program, so the callback the program passes decides
+/// its verdict, under check as under build (a given body kept the verdict of
+/// its module's own load, where no callback writes the state).
+#[test]
+fn a_std_body_naming_its_module_state_is_judged_with_the_programs_callbacks() {
+    for entry in ["walk", "viaOwn"] {
+        let quiet = state_tree("stdrows-state-quiet", &state_root(entry, "print(\"q\")"));
+        for (code, err) in verdicts(&quiet) {
+            assert_eq!(code, Some(0), "{entry}: {err}");
+        }
+        let bumps = state_tree("stdrows-state-bumps", &state_root(entry, "bump()"));
+        for (code, err) in verdicts(&bumps) {
+            assert_eq!(code, Some(1), "{entry} was accepted");
+            let refused = err.contains("`names` is written here while");
+            assert!(refused, "{entry}: {err}");
+        }
+    }
+}
+
+/// Immutable module state cannot be written, so no answer ends a borrow of
+/// it: the body stays given, and every callback is accepted.
+#[test]
+fn a_std_body_reading_immutable_state_stays_given() {
+    let t = state_tree("stdrows-state-fixed", &state_root("viaFixed", "bump()"));
+    for (code, err) in verdicts(&t) {
+        assert_eq!(code, Some(0), "{err}");
+    }
+    let spells: Vec<String> = (t.entries("interface-").into_iter())
+        .filter(|(_, text)| text.contains("viaFixed"))
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(spells.len(), 1, "one interface entry names viaFixed");
+    assert!(spells[0].contains("\nviaFixed "), "viaFixed is not given");
+    assert!(!spells[0].contains("\nwalk "), "walk is given");
 }
