@@ -8156,42 +8156,47 @@ fn declared(program: &Program, own: &Ownership, body: &Body) -> crate::elide::Su
     }))
 }
 
-/// Every frame's answers of `top`, added to the table, each frame numbered
-/// first ([`Fns::number`]).
+/// Every frame's answers of `tops`, added to the table in frame order, each
+/// frame numbered first ([`Fns::number`]). A frame id folded once keeps its
+/// stated body for the emitters; one folded twice, here or by an earlier
+/// call, keeps none. The stated bodies are made on every thread.
 fn fold_frames(
     program: &Program,
-    top: &mut Body,
+    tops: &mut [Body],
     own: &Ownership,
     out: &mut Facts,
     fns: &mut Fns,
     bodies: &mut HashMap<FnId, Option<Stated>>,
 ) {
-    let ids = fns.number(top);
-    for (body, id) in top.frames().into_iter().zip(ids) {
-        fold_frame(program, body, id, own, out, bodies);
+    let ids: Vec<Vec<FnId>> = tops.iter_mut().map(|top| fns.number(top)).collect();
+    let frames: Vec<(&Body, FnId)> = (tops.iter().zip(ids))
+        .flat_map(|(top, ids)| top.frames().into_iter().zip(ids))
+        .collect();
+    let mut folds: HashMap<FnId, usize> = HashMap::new();
+    for (_, id) in &frames {
+        *folds.entry(*id).or_default() += 1;
+    }
+    let once = |id: &FnId| folds.get(id) == Some(&1) && !bodies.contains_key(id);
+    let made = vyrn_frontend::par::in_parallel(
+        &frames,
+        |(body, id)| once(id).then(|| rows(&body.stmts).count()).unwrap_or(0),
+        || (),
+        |(), (body, id)| once(id).then(|| stated(program, own, body)),
+    );
+    for ((body, id), made) in frames.into_iter().zip(made) {
+        // Filled at the same site as the fold, so a body the fold does not
+        // see is one no emitter may walk either.
+        let kept = made.map(|body| Stated {
+            body,
+            decided: Default::default(),
+        });
+        bodies.insert(id, kept);
+        fold_frame(body, own, out);
     }
 }
 
-fn fold_frame(
-    program: &Program,
-    body: &Body,
-    id: FnId,
-    own: &Ownership,
-    out: &mut Facts,
-    bodies: &mut HashMap<FnId, Option<Stated>>,
-) {
+fn fold_frame(body: &Body, own: &Ownership, out: &mut Facts) {
     let proto = &own.proto;
-    // Filled at the same site as the fold, so a body the fold does not see is
-    // one no emitter may walk either.
-    bodies
-        .entry(id)
-        .and_modify(|had| *had = None)
-        .or_insert_with(|| {
-            Some(Stated {
-                body: stated(program, own, body),
-                decided: Default::default(),
-            })
-        });
     fold_facts(body, proto, out);
     out.loop_buffer_only
         .extend(body.loop_buffers.iter().copied());
@@ -8932,7 +8937,8 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         let mut unused = Facts::default();
         for (inst, top) in lowered.instances.iter().zip(&mut built) {
             if let (None, Some(top)) = (&inst.func.module, top) {
-                fold_frames(program, top, own, &mut unused, &mut w.fns, &mut w.bodies);
+                let tops = std::slice::from_mut(top);
+                fold_frames(program, tops, own, &mut unused, &mut w.fns, &mut w.bodies);
             }
         }
         w.calls.replace(calls);
@@ -8987,16 +8993,14 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         for b in built.iter_mut().chain(outside.iter_mut()) {
             tops.extend(fresh.next().flatten().or(b.take()));
         }
-        for mut top in tops {
-            fold_frames(
-                program,
-                &mut top,
-                own,
-                &mut facts,
-                &mut w.fns,
-                &mut w.bodies,
-            );
-        }
+        fold_frames(
+            program,
+            &mut tops,
+            own,
+            &mut facts,
+            &mut w.fns,
+            &mut w.bodies,
+        );
     }
     // A worklist to a fixpoint. Each body is built, placed, and built again,
     // because the first build read the plan before the rows its own placement
@@ -9041,14 +9045,8 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             let Ok(mut top) = build_in(program, inst, own, &own.proto, &w.fns, &mut names) else {
                 continue;
             };
-            fold_frames(
-                program,
-                &mut top,
-                own,
-                &mut facts,
-                &mut w.fns,
-                &mut w.bodies,
-            );
+            let tops = std::slice::from_mut(&mut top);
+            fold_frames(program, tops, own, &mut facts, &mut w.fns, &mut w.bodies);
         }
         dispatches = crate::dispatches_new(&placed, &by_name, &had);
     }
