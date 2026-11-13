@@ -2232,6 +2232,71 @@ fn a_refused_generator_program_is_refused_when_its_run_succeeds() {
     assert!(cold.starts_with("lib.vyrn:3:0: cannot assign"), "{cold}");
 }
 
+/// `proved` judges the project's program, a generator's module included, and
+/// not the generator's own program, whose `main` reads `args()`. So a check
+/// made warm after `proved` joins the manifest refuses what a cold one does.
+#[test]
+fn a_proved_generator_module_is_refused_alike_warm_and_cold() {
+    let dir = common::scratch("gen-proved");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "fn pick(xs: Array<Int64>, i: Int64) -> Int64 {\n\
+         \x20   return xs[i]\n\
+         }\n\
+         \n\
+         export gen fn g() -> Code {\n\
+         \x20   let n = pick([1], 0)\n\
+         \x20   return vyrn\"export fn f() -> Int64 { return 1 }\"\n\
+         }\n",
+    )
+    .expect("write lib.vyrn");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "import { g } from \"./lib\"\n\
+         import { f } from g()\n\
+         \n\
+         fn main() -> Int64 { return f() }\n",
+    )
+    .expect("write host.vyrn");
+    let check = |cached: bool| {
+        let mut c = vyrn();
+        c.current_dir(&dir)
+            .env("VYRN_GEN_CACHE_DIR", dir.join("cache"));
+        match cached {
+            true => c.env_remove("VYRN_NO_GEN_CACHE"),
+            false => c.env("VYRN_NO_GEN_CACHE", "1"),
+        };
+        let out = c.args(["check", "host.vyrn"]).output().expect("run vyrn");
+        let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+        (out.status.code(), err)
+    };
+    std::fs::write(dir.join("vyrn.json"), r#"{ "main": "host.vyrn" }"#).expect("write vyrn.json");
+    assert_eq!(check(true).0, Some(0), "{}", check(true).1);
+    std::fs::write(
+        dir.join("vyrn.json"),
+        r#"{ "main": "host.vyrn", "proved": ["**"] }"#,
+    )
+    .expect("write vyrn.json");
+    let cold = check(false);
+    assert_eq!(
+        check(true),
+        cold,
+        "the answer depends on the generator cache"
+    );
+    assert_eq!(cold.0, Some(1));
+    assert!(
+        cold.1.starts_with("lib.vyrn:2:0: the index check stays"),
+        "{}",
+        cold.1
+    );
+    assert_eq!(
+        cold.1.lines().filter(|l| l.contains("index check")).count(),
+        1,
+        "{}",
+        cold.1
+    );
+}
+
 /// Runs `vyrn` with `args` in `dir` twice over one generator cache, cold then
 /// warm, and returns the refusal's stderr, which must not depend on the cache.
 fn refused_cold_and_warm(dir: &Path, args: &[&str]) -> String {
