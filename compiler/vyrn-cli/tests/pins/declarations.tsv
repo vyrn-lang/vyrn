@@ -5,7 +5,7 @@ functions	3	43	19	2	0	10	20	97
 protocols	1	8	10	0	0	7	0	26
 contracts	1	10	4	0	0	0	1	16
 impls	2	14	28	2	0	5	0	51
-globals	1	18	10	1	0	2	0	32
+globals	1	19	10	1	0	2	0	33
 tests	1	8	2	1	0	1	5	18
 benches	1	8	2	1	0	1	6	19
-all	13	158	79	8	0	44	33	335
+all	13	159	79	8	0	44	33	336

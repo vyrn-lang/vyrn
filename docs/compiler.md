@@ -128,7 +128,9 @@ the playground serves an embedded `std/`. The loader:
   cache's directory. Under `vyrn
   check` (`loader::std_given`) each non-generic function's body is
   `ast::Body::Given`, unparsed and untyped, and its module's stored row stands
-  for it (below). Under a host that emits a module (`movecheck::Host::Emit`)
+  for it (below), unless the body names its module's mutable state: the
+  program's callbacks decide where a call ends a borrow of that state, so
+  such a body is parsed where reached and judged in each program. Under a host that emits a module (`movecheck::Host::Emit`)
   each non-generic function that only gen fn bodies reach is given the same
   way, because no run enters it, unless `VYRN_NO_GEN_CACHE` leaves no rows
   entry to keep; a runtime module's functions stay written. The load lexes and

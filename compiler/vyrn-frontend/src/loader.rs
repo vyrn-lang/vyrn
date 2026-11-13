@@ -2597,8 +2597,9 @@ fn gives_unrun(opts: &LoadOptions) -> bool {
 }
 
 /// Whether `f`, a top-level function of an imported std module whose
-/// functions `module` says may be given, is given: one body for every
+/// functions `module` says may be given, may be given: one body for every
 /// program. A generic is judged per instance, and an `extern` has no body.
+/// [`Interface::of`] gives it unless its body names its module's mutable state.
 pub fn is_given(f: &Function, module: Gives) -> bool {
     module.0 && f.type_params.is_empty() && !f.is_extern
 }
@@ -2733,7 +2734,7 @@ fn skims(key: &str, root_key: &str, opts: &LoadOptions) -> bool {
 }
 
 /// The format word that opens a std module's interface entry.
-const INTERFACE_TAG: &str = "interface4";
+const INTERFACE_TAG: &str = "interface5";
 
 /// The parse of imported std module `key` as its interface ([`skims`]): its
 /// declarations but each top-level function with a body, which waits as a
@@ -2801,15 +2802,16 @@ fn interface_parse(
         at += line.len() + 1;
         Some(from..from + names.len())
     };
+    // A function with no line spells its module's state ([`Interface::of`]).
     for r in &mut rows {
         let names = &interface.rows[r.names.clone()];
         if gives.0 && !names.contains(' ') {
-            r.given = Some(next(names).ok_or_else(mismatch)?);
+            r.given = next(names);
         }
     }
     let mut given = Vec::new();
     for (fi, f) in (program.functions.iter().enumerate()).filter(|(_, f)| is_given(f, gives)) {
-        given.push((fi, next(&f.name).ok_or_else(mismatch)?));
+        given.extend(next(&f.name).map(|names| (fi, names)));
     }
     if at != spells.len() {
         return Err(mismatch());
@@ -2869,6 +2871,10 @@ impl Interface {
         };
         let mut spells = String::new();
         let gives = Gives::of(owner, opts);
+        let state: HashSet<&str> = (full.program.globals.iter())
+            .filter(|g| g.mutable)
+            .map(|g| g.name.as_str())
+            .collect();
         // The rows' given functions, then the flattened methods'.
         let given = (full.program.functions.iter()).filter(|f| is_given(f, gives));
         let (cut, flat): (Vec<&Function>, Vec<&Function>) = given.partition(|f| b.row(f).is_some());
@@ -2883,6 +2889,13 @@ impl Interface {
             let mut names: Vec<&str> = Vec::new();
             if let Some(body) = parsed.as_ref().or(f.body.written()) {
                 crate::ast::spelled(body, &mut names);
+            }
+            // Not given: the program's callbacks decide where a call ends a
+            // borrow of the state, and a given body keeps its own load's
+            // verdict. Only a body that names the state can hold a borrow of
+            // it, because nothing may return one.
+            if names.iter().any(|n| state.contains(n)) {
+                continue;
             }
             names.sort_unstable();
             names.dedup();
