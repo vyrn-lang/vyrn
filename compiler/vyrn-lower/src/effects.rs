@@ -689,6 +689,88 @@ fn placed_reach(
     .0
 }
 
+/// The effect judgment over every instance of `program` that builds, judged
+/// as the placer judges it: each instance with its set, and each call the
+/// judgment could not attribute or answered with an empty set. A survey of a
+/// corpus reads it (`vyrn-cli/tests/effects.rs`).
+pub struct Survey<'p> {
+    pub sets: Vec<(&'p crate::Instance<'p>, Effects)>,
+    /// `(body, callee, line)` for every [`Callee::Unknown`] call.
+    pub unknown: Vec<(String, String, usize)>,
+    /// The same, for every [`Callee::Empty`] call.
+    pub empty: Vec<(String, String, usize)>,
+    /// How many calls through a function value were answered with bodies.
+    pub through: usize,
+    /// Per [`crate::core::Gap`] kind, how many instances did not build.
+    pub gaps: std::collections::BTreeMap<&'static str, usize>,
+}
+
+/// Surveys `lowered`, the lowering of `program` under `world`'s ownership
+/// ([`Survey`]).
+pub fn survey<'p>(
+    program: &'p vyrn_frontend::ast::Program,
+    world: &crate::World,
+    lowered: &'p crate::Lowered<'p>,
+) -> Survey<'p> {
+    let own = &world.ownership;
+    let mut gaps = std::collections::BTreeMap::new();
+    let mut built = Vec::new();
+    for inst in &lowered.instances {
+        match crate::core::build(program, world, inst) {
+            Ok(b) => built.push((inst, b)),
+            Err(g) => *gaps.entry(g.what).or_default() += 1,
+        }
+    }
+    let tops: Vec<(&str, &Body)> = built
+        .iter()
+        .map(|(i, b)| (i.func.name.as_str(), b))
+        .collect();
+    let outside: Vec<Body> = (lowered.bodies.iter())
+        .filter_map(|ob| crate::core::build_outside(program, world, ob).ok())
+        .collect();
+    let outside: Vec<&Body> = outside.iter().collect();
+    let mut fns = crate::Fns::lowered(lowered);
+    let places = crate::core::build_places(program, lowered, own, &mut fns);
+    let said = |refs: &[&Body], calls: &[(usize, String, usize)]| -> Vec<(String, String, usize)> {
+        (calls.iter())
+            .map(|(i, c, l)| {
+                let body = refs
+                    .get(*i)
+                    .map_or("a body no call enters", |b| b.name.as_str());
+                (body.to_string(), c.clone(), *l)
+            })
+            .collect()
+    };
+    let (sets, unknown, empty, through) = judge_built(
+        program,
+        lowered,
+        own,
+        &mut fns,
+        &places,
+        &tops,
+        &[],
+        &outside,
+        |judged, _, refs, top, _| {
+            let sets = (built.iter().zip(top)).map(|((i, _), at)| (*i, judged.effects[*at]));
+            let through = judged.through.len();
+            (
+                sets.collect(),
+                said(refs, &judged.unknown),
+                said(refs, &judged.empty),
+                through,
+            )
+        },
+    )
+    .0;
+    Survey {
+        sets,
+        unknown,
+        empty,
+        through,
+        gaps,
+    }
+}
+
 /// The judgment over bodies the caller built: `tops` holds each body with
 /// the name a call spells it by, `served` each body the judgment memo
 /// served, by its frames as last judged, and `outside` each body no call
@@ -837,7 +919,10 @@ pub(crate) fn judge_built<R>(
         if let Some(idx) = place_tops.get(name) {
             return Callee::Dispatched(idx.clone());
         }
-        if pure.contains(name) {
+        // A program function with no judged body runs no body here: a generic
+        // only a `test` body reaches, or a fork primitive (`task$both`) the
+        // core splits into its branches.
+        if pure.contains(name) || program.functions.iter().any(|f| f.name == name) {
             return Callee::Pure;
         }
         Callee::Unknown
