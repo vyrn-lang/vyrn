@@ -964,7 +964,10 @@ mod tests {
             "an entry point that is not written yet still hangs off that base"
         );
         let key = format!("{canon}/server/store.vyrn");
-        assert_eq!(audience_of(&key, &m, None).audience, Audience::Server);
+        assert_eq!(
+            audience_of(&key, &m, &mut |p| m.real(p)).audience,
+            Audience::Server
+        );
     }
 
     /// An artifact entry hangs off the audience base, and a contradictory
