@@ -761,6 +761,8 @@ run as their own gate:
 - `typed.rs`: every store into a validated place has a legal producer.
 - `fnverdicts.rs`: each function's trap-free and kernel verdicts, against
   `tests/pins/fn-verdicts.tsv`.
+- `given.rs`: every load that gives std bodies their stored rows prints what
+  the load that builds every body prints.
 - `canon.rs`: how many relations and conditions of the corpus share an
   identity at each layer of `canon`, against `tests/pins/canon.tsv`.
 

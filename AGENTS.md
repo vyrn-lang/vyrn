@@ -75,6 +75,7 @@ A deletion is licensed by evidence, not by reading. Write the licence into the c
 - A rule leaves a pass when the other pass states it: `vyrn check` over the whole corpus before and after, every byte of stderr and every exit code equal. No refusal lost, none gained. Witness each refusal the corpus never reaches with one program, under both binaries.
 - Lowering or emission: `VYRN_WASM_MANIFEST=check` is green, or you run `write` and explain every moved row from `wasm2wat`.
 - Ownership: the kernel corpus (accepted, refused, unlowered unchanged), the residue ratchet on both engines and the shape sweep. The baseline only shrinks; grow it by hand, with a reason, or not at all.
+- What a load gives, the stored rows, or a rule a given body's verdict rests on: the `given` suite is green, or names each new difference in its `KNOWN` with the reason.
 - The loader, the symbols, the parser: the diagnostics pin, the lowering pin, the formatter's re-lex invariant, the LSP suite.
 - Speed: the benchmark table, interleaved runs, best of N, noise band stated.
 
@@ -131,7 +132,7 @@ cargo nextest run --release --workspace --no-fail-fast --status-level fail
 cargo test --release --manifest-path vyrn-play/Cargo.toml
 VYRN_WASM_MANIFEST=check cargo nextest run --release -p vyrn-cli --no-fail-fast \
   --status-level fail --success-output final --run-ignored only \
-  -E 'binary(kernel) | binary(effects) | binary(typed) | binary(coretables) | binary(coredrive) | binary(wasmhash) | binary(parallel) | binary(recheck) | binary(testsweep) | binary(shapesweep) | binary(verdicts) | binary(fnverdicts) | binary(canon) | binary(syntaxgate) | binary(fixtures) | binary(fuel)'
+  -E 'binary(kernel) | binary(effects) | binary(typed) | binary(coretables) | binary(coredrive) | binary(wasmhash) | binary(parallel) | binary(recheck) | binary(testsweep) | binary(shapesweep) | binary(verdicts) | binary(fnverdicts) | binary(given) | binary(canon) | binary(syntaxgate) | binary(fixtures) | binary(fuel)'
 cargo nextest run --release -p vyrn-cli --features allocs --no-fail-fast \
   --status-level fail --run-ignored only -E 'binary(compiler_scaling)'
 sh ../scripts/check-allocs.sh <main's allocs vyrn> target/release/vyrn
@@ -143,6 +144,7 @@ The workspace line runs every crate's tests, not only the CLI's: CI does, and a 
 `shapesweep` generates every ownership shape of a store, a read and a removal and runs each accepted one under the free audit on both engines. Measured on 2026-10-08 with other tracks building: 135 s and 144 s on 12 threads, 231 s at the worst load. Its failures are held to `tests/pins/shapesweep-known.tsv`. A failure the list does not name fails the gate. `VYRN_PIN=write` deletes the rows that no longer fail and refuses to add one.
 `verdicts` builds every example to wasm once more, as an oracle build, and fails where a check verdict `vyrn emit-lowered` prints differs from the module's `vyrn:sites` row. Measured on 2026-10-11: 33 s.
 `fnverdicts` judges each function of every root under `examples/`, `std/` and `site/` and holds its trap-free and kernel verdicts to `tests/pins/fn-verdicts.tsv`. Measured on 2026-10-23: 18 s.
+`given` loads every corpus root under `Host::Check`, which gives std bodies their stored rows, under `Host::Emit`, which gives the bodies no run reaches, and under `Host::Report`, which builds every body. It fails where a given load prints other diagnostics or another verdict than the built one, except for a root its `KNOWN` names. Measured on 2026-11-13: 16 s for 1509 roots.
 `canon` canonicalizes every predicate, key lambda, loop-free `-> Bool` function and `if` or `while` condition of the same roots and holds the pair counts per level to `tests/pins/canon.tsv`. Measured on 2026-10-23: 12 s.
 `syntaxgate` holds `tests/pins/parse-diagnostics.tsv`: what the parser says over every corpus root and its mutants, as a count and a hash per root; and every lex and parse row refused by some root. Adding or editing a root moves its row, so rewrite it with `VYRN_PIN=write`. A moved row on an unchanged root is a moved diagnostic: run `vyrn check` on the root and name the cause. The token table and the lexer's scanner, `lexer/grammar.rs`, the recognizer, `recognizer/rules.rs`, and the editor's grammar and configuration under `editor/vscode/` are written from the grammar: after a change to it, `VYRN_PIN=write cargo test --release -p vyrn-syntax` rewrites them. Measured on 2026-10-30: about 2 s.
 `check-corpus.sh` refuses to run while a tree holds an untracked `.vyrn` file under a corpus root, and prints it. Delete or commit the file first; a stray root makes the two trees differ.
