@@ -576,6 +576,7 @@ fn build(
         session: Default::default(),
         lazy: None,
         seen: Default::default(),
+        unclosed: Default::default(),
     };
     let mut bodies = Vec::new();
     let events = std::mem::take(&mut run.events);

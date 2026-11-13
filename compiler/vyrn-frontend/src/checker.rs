@@ -667,6 +667,7 @@ fn check_accum_inner(
     // module checks alone without the protocol and may be std, which no user
     // edits.
     let root = program.spellings.root.as_str();
+    let before_collisions = out.len();
     for f in &program.functions {
         let Some(owners) = protocol_methods.get(f.name.as_str()) else {
             continue;
@@ -706,6 +707,13 @@ fn check_accum_inner(
             out.push(d.in_file(module_of(p).cloned().flatten()));
         }
     }
+    // A collision changes what a body dispatches to, std bodies included, so
+    // no body is typed after one: no verdict it gave would be the program's.
+    let bodies_from = if out.len() > before_collisions {
+        program.functions.len()
+    } else {
+        bodies_from
+    };
     // The program's own declaration of a prelude protocol's name replaces it.
     let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> = (crate::prelude::protocols())
         .iter()

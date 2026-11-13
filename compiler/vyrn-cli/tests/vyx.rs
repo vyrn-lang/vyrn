@@ -1102,7 +1102,8 @@ fn an_unchanged_rebuild_regenerates_no_provider() {
     // Each generation entry's name and mtime, so a rewrite shows. Files only: the
     // `wasm/` directory is the compiled engine's store, not a generation, an
     // `exe-` record names the binary, written once its stamp settles, and an
-    // `interface-` or `rows-` entry is a std module's interface or rows.
+    // `interface-`, `rows-` or `closed-` entry is a std module's interface,
+    // rows or closed functions.
     let stamp = |cache: &Path| -> Vec<(String, std::time::SystemTime)> {
         let mut v: Vec<_> = std::fs::read_dir(cache)
             .unwrap()
@@ -1113,6 +1114,7 @@ fn an_unchanged_rebuild_regenerates_no_provider() {
                         && !name.starts_with("exe-")
                         && !name.starts_with("interface-")
                         && !name.starts_with("rows-")
+                        && !name.starts_with("closed-")
                 })
             })
             .map(|e| {

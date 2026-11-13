@@ -128,9 +128,13 @@ the playground serves an embedded `std/`. The loader:
   cache's directory. Under `vyrn
   check` (`loader::std_given`) each non-generic function's body is
   `ast::Body::Given`, unparsed and untyped, and its module's stored row stands
-  for it (below), unless the body names its module's mutable state: the
-  program's callbacks decide where a call ends a borrow of that state, so
-  such a body is parsed where reached and judged in each program. Under a host that emits a module (`movecheck::Host::Emit`)
+  for it (below). A body that names its module's mutable state is given only
+  where its module's closed entry lists it (`loader::read_closed`): the own
+  load's effect judgment found that none of its calls opens, so no callback a
+  program supplies can decide where a call ends a borrow of that state. Else
+  it is parsed where reached and judged in each program, and the load marks
+  its module (`Program::unclosed`) so the lowering's own load writes the
+  entry. Under a host that emits a module (`movecheck::Host::Emit`)
   each non-generic function that only gen fn bodies reach is given the same
   way, because no run enters it, unless `VYRN_NO_GEN_CACHE` leaves no rows
   entry to keep; a runtime module's functions stay written. The load lexes and
@@ -761,8 +765,9 @@ run as their own gate:
 - `typed.rs`: every store into a validated place has a legal producer.
 - `fnverdicts.rs`: each function's trap-free and kernel verdicts, against
   `tests/pins/fn-verdicts.tsv`.
-- `given.rs`: every load that gives std bodies their stored rows prints what
-  the load that builds every body prints.
+- `given.rs`: every load that gives std bodies their stored rows, checked
+  twice so the second gives what the first wrote a closed entry for, prints
+  what the load that builds every body prints.
 - `canon.rs`: how many relations and conditions of the corpus share an
   identity at each layer of `canon`, against `tests/pins/canon.tsv`.
 

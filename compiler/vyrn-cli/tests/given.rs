@@ -4,9 +4,11 @@
 //! `Host::Emit` a std body no run reaches is given (`loader::parse_reached`).
 //! A `Host::Report` load gives nothing and builds every body it links. Each
 //! corpus root `scripts/check-corpus.sh` walks is loaded under the three
-//! hosts, and each giving load must print the built load's diagnostics,
-//! warnings and verdict: a given body's stored verdict is the verdict its
-//! build gives in that program.
+//! hosts, and under `Host::Check` twice, because a std body naming its module
+//! state is given only once its module's closed entry is written
+//! (`loader::read_closed`). Each giving load must print the built load's
+//! diagnostics, warnings and verdict: a given body's stored verdict is the
+//! verdict its build gives in that program.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -72,10 +74,7 @@ fn verdict(path: &Path, host: Host) -> String {
 /// The roots whose `Host::Check` and built loads may print different
 /// diagnostics, each with its reason. Both loads still reach one verdict, and a root that agrees again
 /// fails until it leaves this list.
-const KNOWN: &[(&str, &str)] = &[(
-    "compiler/vyrn-cli/tests/check/a_protocol_method_named_like_a_std_function_is_refused_at_the_method.vyrn",
-    "a given std line's follow-on refusals are not printed (docs/decisions.md, given bodies)",
-)];
+const KNOWN: &[(&str, &str)] = &[];
 
 /// The last line of a [`verdict`]: `ok` or `refused`.
 fn last(v: &str) -> &str {
@@ -111,18 +110,20 @@ fn every_given_verdict_is_the_built_one() {
                     let rel = slash(path.strip_prefix(repo_root()).expect("under the repo"));
                     let unrun = verdict(path, Host::Emit);
                     let unrun = common::first_diff(&rel, "unrun given", &unrun, "built", &built);
-                    let given = verdict(path, Host::Check);
                     let known = KNOWN.iter().any(|(k, _)| *k == rel);
-                    let d = common::first_diff(&rel, "given", &given, "built", &built);
-                    let d = match (known, d) {
-                        (true, Some(_)) if last(&given) == last(&built) => None,
-                        (true, None) => Some(format!("  {rel}: agrees; remove it from KNOWN\n")),
-                        (_, d) => d,
-                    };
-                    moved
-                        .lock()
-                        .expect("no worker panicked")
-                        .extend(d.into_iter().chain(unrun));
+                    let mut diffs: Vec<String> = unrun.into_iter().collect();
+                    for label in ["given", "given again"] {
+                        let given = verdict(path, Host::Check);
+                        let d = common::first_diff(&rel, label, &given, "built", &built);
+                        diffs.extend(match (known, d) {
+                            (true, Some(_)) if last(&given) == last(&built) => None,
+                            (true, None) => {
+                                Some(format!("  {rel}: agrees; remove it from KNOWN\n"))
+                            }
+                            (_, d) => d,
+                        });
+                    }
+                    moved.lock().expect("no worker panicked").extend(diffs);
                 }
             })
             .expect("a worker starts");

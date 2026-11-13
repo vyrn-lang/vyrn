@@ -441,11 +441,11 @@ fn run_corpus() {
                 return Callee::Bodies(idx.clone());
             }
             if let Some(idx) = impl_methods.get(name) {
-                return Callee::Bodies(idx.clone());
+                return Callee::Dispatched(idx.clone());
             }
             // A projection dispatched by name is in neither table above.
             if let Some(idx) = place_tops.get(name) {
-                return Callee::Bodies(idx.clone());
+                return Callee::Dispatched(idx.clone());
             }
             // A program function without a judged body (a generic reached only
             // from a `test` body, a generic declared release) is judged pure
@@ -640,7 +640,7 @@ fn run_corpus() {
                         }
                         let ce = match r {
                             Callee::Atom(a) => a.to_string(),
-                            Callee::Bodies(idx) => idx
+                            Callee::Bodies(idx) | Callee::Dispatched(idx) => idx
                                 .iter()
                                 .map(|j| judged.effects[*j])
                                 .fold(Effects::PURE, Effects::join)

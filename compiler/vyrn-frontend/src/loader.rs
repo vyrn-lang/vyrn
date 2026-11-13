@@ -1058,6 +1058,9 @@ struct Module {
     /// The parse whose cut bodies ([`Parsed::bodies`]) `program`'s empty and
     /// given ones stand for.
     cut: Option<Rc<Parsed>>,
+    /// Whether a stateful row of it could not be given for want of a fresh
+    /// closed entry ([`Program::unclosed`]).
+    unclosed: bool,
 }
 
 /// The state one load walks: the modules entered, their loading state, the
@@ -1869,6 +1872,7 @@ fn load_modules(
                     session: Default::default(),
                     lazy: None,
                     seen: Default::default(),
+                    unclosed: Default::default(),
                 },
                 import_targets: Vec::new(),
                 generated: None,
@@ -1877,6 +1881,7 @@ fn load_modules(
                 hash: None,
                 refs: Rc::default(),
                 cut: None,
+                unclosed: false,
             };
             module.refs = Rc::new(program_ref_names(&module.program));
             w.modules.push(module);
@@ -2094,6 +2099,7 @@ fn load_modules(
             hash: Some(hash),
             refs: parsed.refs.clone(),
             cut: cut.then(|| parsed.clone()),
+            unclosed: false,
         });
         Ok(())
     }
@@ -2167,7 +2173,7 @@ fn load_modules(
         }
     }
 
-    if let Err(diags) = parse_reached(&mut w.modules, opts) {
+    if let Err(diags) = parse_reached(&mut w.modules, opts, resolver, &mut w.inputs) {
         return Err(failed(diags, w.origins));
     }
     let away = away_from_home(&w.modules, &root_key, opts, &mut w.real_paths);
@@ -2297,6 +2303,9 @@ struct Row {
     /// The names its body spells, as a range of [`Bodies::names`], where it
     /// is given ([`is_given`]).
     given: Option<std::ops::Range<usize>>,
+    /// Whether its body spells its module's mutable state, so it is given
+    /// only where its module's closed entry names it ([`read_closed`]).
+    stateful: bool,
 }
 
 /// One cut body.
@@ -2531,6 +2540,7 @@ impl Row {
             from,
             cut,
             given: None,
+            stateful: false,
         };
         ok.then_some(row)
     }
@@ -2734,7 +2744,7 @@ fn skims(key: &str, root_key: &str, opts: &LoadOptions) -> bool {
 }
 
 /// The format word that opens a std module's interface entry.
-const INTERFACE_TAG: &str = "interface5";
+const INTERFACE_TAG: &str = "interface6";
 
 /// The parse of imported std module `key` as its interface ([`skims`]): its
 /// declarations but each top-level function with a body, which waits as a
@@ -2802,11 +2812,13 @@ fn interface_parse(
         at += line.len() + 1;
         Some(from..from + names.len())
     };
-    // A function with no line spells its module's state ([`Interface::of`]).
+    // A flattened method with no line spells its module's state
+    // ([`Interface::of`]).
     for r in &mut rows {
         let names = &interface.rows[r.names.clone()];
         if gives.0 && !names.contains(' ') {
             r.given = next(names);
+            r.stateful = interface.stateful.contains(names);
         }
     }
     let mut given = Vec::new();
@@ -2843,6 +2855,8 @@ struct Interface {
     /// The method-form names the module answers to ([`Bodies::answers`]),
     /// which its text, cut of its functions, may not declare.
     answers: HashSet<String>,
+    /// The rows whose bodies spell their module's mutable state.
+    stateful: HashSet<String>,
     /// The names each given body spells ([`Body::Given`]), a line per given
     /// function: the rows', then the flattened impl methods', each in source
     /// order.
@@ -2878,6 +2892,7 @@ impl Interface {
         // The rows' given functions, then the flattened methods'.
         let given = (full.program.functions.iter()).filter(|f| is_given(f, gives));
         let (cut, flat): (Vec<&Function>, Vec<&Function>) = given.partition(|f| b.row(f).is_some());
+        let mut stateful = HashSet::new();
         for f in cut.into_iter().chain(flat) {
             let row = b
                 .row(f)
@@ -2890,12 +2905,17 @@ impl Interface {
             if let Some(body) = parsed.as_ref().or(f.body.written()) {
                 crate::ast::spelled(body, &mut names);
             }
-            // Not given: the program's callbacks decide where a call ends a
-            // borrow of the state, and a given body keeps its own load's
-            // verdict. Only a body that names the state can hold a borrow of
-            // it, because nothing may return one.
+            // The program's callbacks may decide where a call ends a borrow
+            // of the state, and a given body keeps its own load's verdict.
+            // Only a body that names the state can hold a borrow of it,
+            // because nothing may return one. Such a row is given only where
+            // its module's own load found its calls closed ([`read_closed`]);
+            // such a flattened method never is.
             if names.iter().any(|n| state.contains(n)) {
-                continue;
+                if b.row(f).is_none() {
+                    continue;
+                }
+                stateful.insert(f.name.clone());
             }
             names.sort_unstable();
             names.dedup();
@@ -2919,18 +2939,19 @@ impl Interface {
             refs: (*full.refs).clone(),
             mentions: full.mentions.clone(),
             answers: b.answers.clone(),
+            stateful,
             spells: spells.into(),
             rows: b.table.to_string(),
             text: out,
         })
     }
 
-    /// The entry as text: the tag line, the counted refs, mentions and
-    /// answers, the given bodies' names and the rows, each after its length in
-    /// bytes, then the cut text.
+    /// The entry as text: the tag line, the counted refs, mentions, answers
+    /// and stateful rows, the given bodies' names and the rows, each after its
+    /// length in bytes, then the cut text.
     fn render(&self, key: &str) -> String {
         let mut body = String::new();
-        for names in [&self.refs, &self.mentions, &self.answers] {
+        for names in [&self.refs, &self.mentions, &self.answers, &self.stateful] {
             let mut names: Vec<&String> = names.iter().collect();
             names.sort();
             body.push_str(&format!("{}\n", names.len()));
@@ -2968,7 +2989,7 @@ impl Interface {
                 })
                 .collect()
         };
-        let (refs, mentions, answers) = (names()?, names()?, names()?);
+        let (refs, mentions, answers, stateful) = (names()?, names()?, names()?, names()?);
         let mut table = || -> Option<&str> {
             let (n, tail) = rest.split_once('\n')?;
             let n: usize = n.parse().ok()?;
@@ -2981,11 +3002,100 @@ impl Interface {
             refs,
             mentions,
             answers,
+            stateful,
             spells: spells.into(),
             rows: rows.to_string(),
             text: rest.to_string(),
         })
     }
+}
+
+/// The format word that opens a std module's closed entry.
+const CLOSED_TAG: &str = "closed1";
+
+/// The cache key of std module `owner`'s closed entry at text hash `hash`.
+fn closed_key(owner: &str, hash: &str) -> String {
+    let id = crate::gen::compiler_identity();
+    let seed = format!("{CLOSED_TAG}\0{id}\0{owner}\0{hash}");
+    format!("closed-{}", crate::hash::sha256_hex(seed.as_bytes()))
+}
+
+/// Writes std module `owner`'s closed entry: each function of its own load,
+/// by module key and written name, whose every call has one answer in every
+/// program (`vyrn_lower::effects::StateUse::opens`). It records what the
+/// module's rows entry records, the files the own load read with
+/// `inputs` and the text hash of each module its generator imports wrote,
+/// so the two go stale together. [`read_closed`] reads it.
+pub fn put_closed(
+    resolver: &dyn ModuleResolver,
+    owner: &str,
+    hash: &str,
+    inputs: &Inputs,
+    generated: &[(String, String)],
+    closed: &[(String, String)],
+) {
+    let key = closed_key(owner, hash);
+    let mut body = String::new();
+    inputs.render(&mut body);
+    for pairs in [generated, closed] {
+        body.push_str(&format!("{}\n", pairs.len()));
+        for (a, b) in pairs {
+            body.push_str(&format!("{a} {b}\n"));
+        }
+    }
+    let tag = gen_cache_tag(&key, body.as_bytes());
+    resolver.gen_cache_put(&key, &format!("{CLOSED_TAG} {tag}\n{body}"));
+}
+
+/// The rows of module `m`, whose cut functions `b` holds, that its owner's
+/// closed entry ([`put_closed`]) gives, if the entry is fresh: each file it
+/// records still holds what the own load read, and `modules` holds each
+/// generated module it records at the same hash. `read` keeps each file's
+/// answer for the load's later entries. `None` for a missing, damaged,
+/// foreign or stale entry, and under `VYRN_NO_GEN_CACHE`: then no stateful row
+/// of `m` is given.
+fn read_closed<'b>(
+    resolver: &dyn ModuleResolver,
+    m: &Module,
+    b: &'b Bodies,
+    modules: &[Module],
+    read: &mut HashMap<String, Option<String>>,
+) -> Option<HashSet<&'b str>> {
+    if gen_cache_off() {
+        return None;
+    }
+    let _p = crate::prof::phase("closed: read");
+    let owner = generated_importer(&m.key).unwrap_or(&m.key);
+    let hash = (modules.iter().find(|o| o.key == owner))?.hash.as_deref()?;
+    let key = closed_key(owner, hash);
+    let text = resolver.gen_cache_get(&key)?;
+    let (head, body) = text.split_once('\n')?;
+    let tag = head.strip_prefix(CLOSED_TAG)?.strip_prefix(' ')?;
+    if gen_cache_tag(&key, body.as_bytes()) != tag {
+        return None;
+    }
+    let mut lines = body.split_terminator('\n');
+    let inputs = Inputs::read(&mut || lines.next())?;
+    let mut pairs = || -> Option<Vec<(String, String)>> {
+        let n: usize = lines.next()?.parse().ok()?;
+        (0..n)
+            .map(|_| {
+                // A path may hold a space; a name and a hash never do.
+                let (a, b) = lines.next()?.rsplit_once(' ')?;
+                Some((a.to_string(), b.to_string()))
+            })
+            .collect()
+    };
+    let (generated, closed) = (pairs()?, pairs()?);
+    let linked = |(k, h): &(String, String)| {
+        (modules.iter()).any(|m| m.key == *k && m.hash.as_deref() == Some(h.as_str()))
+    };
+    let fresh = !inputs.hashes.is_empty()
+        && generated.iter().all(linked)
+        && all_fresh(&inputs.hashes, &inputs.stamps, resolver, read);
+    let rows = (b.rows.iter().map(|r| b.name(r)))
+        .filter(|n| closed.iter().any(|(k, c)| *k == m.key && c == n));
+    (fresh && lines.next().is_none()).then(|| rows.collect())
 }
 
 /// The `gen fn` `name` that program `p` exports.
@@ -6049,7 +6159,12 @@ fn link(
     // `main` in linker order: dependencies first.
     let mut extra_globals = Vec::new();
     let mut module_hashes = BTreeMap::new();
+    let mut unclosed = BTreeSet::new();
     for m in modules {
+        unclosed.extend(
+            m.unclosed
+                .then(|| generated_importer(&m.key).unwrap_or(&m.key).to_string()),
+        );
         if m.key == root_key {
             merged = Some(m.program);
         } else {
@@ -6095,6 +6210,7 @@ fn link(
     program.globals = ordered;
     program.imports.clear(); // consumed
     program.module_hashes = module_hashes;
+    program.unclosed = unclosed;
     program.spellings = std::sync::Arc::new(spellings);
     let ours = |m: &Option<String>| order_key.as_deref() == Some(m.as_deref().unwrap_or(root_key));
     program.orders = crate::order::Names::of(&program, &ours);
@@ -6195,7 +6311,12 @@ fn reach(
 /// stored row ([`Body::Given`]) where it may ([`is_given`]), unparsed. A
 /// runtime module's functions stay written, because the emitter calls them
 /// by name.
-fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<Diagnostic>> {
+fn parse_reached(
+    modules: &mut [Module],
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    read: &mut HashMap<String, Option<String>>,
+) -> Result<(), Vec<Diagnostic>> {
     let generators: HashSet<String> = generator_calls(modules).map(str::to_string).collect();
     // Each module's cut functions, held apart from `modules`, which the end
     // writes.
@@ -6231,6 +6352,10 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
         }
         !tested.iter().any(|n| gens.contains(n))
     };
+    // Per module, the stateful rows its owner's closed entry gives
+    // ([`read_closed`]), read where a load that may give one first reaches
+    // one: `Some(None)` where the module has no fresh entry.
+    let mut closed: Vec<Option<Option<HashSet<&str>>>> = Vec::new();
     let mut names: Vec<&str> = opts.host_calls.to_vec();
     // What the gen fn bodies outside a cut spell, under `gives`.
     let mut unrun: Vec<&str> = Vec::new();
@@ -6304,10 +6429,19 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
                 deferred.push((mi, ri));
                 continue;
             }
+            if r.stateful && (std_given(opts) || giving && !derive) {
+                closed.resize_with(modules.len(), || None);
+                if closed[mi].is_none() {
+                    closed[mi] = Some(read_closed(resolver, m, b, modules, read));
+                }
+            }
+            let listed = (closed.get(mi).and_then(|c| c.as_ref()?.as_ref()))
+                .is_some_and(|c| c.contains(b.name(r)));
+            let spelled = b.names_of(r).filter(|_| !r.stateful || listed);
             // The emitter calls a runtime module's functions by name.
-            let gift = (b.names_of(r).filter(|_| giving && !derive))
+            let gift = (spelled.clone().filter(|_| giving && !derive))
                 .filter(|_| runtime_module(&m.key, opts).is_none());
-            let kept = b.names_of(r).filter(|_| std_given(opts));
+            let kept = spelled.filter(|_| std_given(opts));
             if let Some(g) = gift.or(kept) {
                 let list = if giving { &mut given } else { &mut stored };
                 list.push((mi, ri, g));
@@ -6386,6 +6520,9 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             }
         }
         place(&mut m.program.functions, fns);
+    }
+    for (m, c) in modules.iter_mut().zip(closed) {
+        m.unclosed = matches!(c, Some(None)) && !gen_cache_off();
     }
     Ok(())
 }

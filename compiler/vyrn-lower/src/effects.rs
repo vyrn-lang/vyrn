@@ -65,6 +65,9 @@ pub enum Callee {
     /// User bodies, by index into the slice handed to [`judge`]: several for
     /// several instances, impls or function-value sources.
     Bodies(Vec<usize>),
+    /// The bodies a name dispatches to by protocol method or projection, a
+    /// set any module that declares an impl may grow.
+    Dispatched(Vec<usize>),
     /// A builtin with no effect.
     Pure,
     /// A call through a function value whose closed set is empty, so the call
@@ -97,9 +100,9 @@ pub struct Judged<'a> {
     callees: Vec<Callee>,
     /// Per callee, whether a call to it may store into any global.
     stores: Vec<bool>,
-    /// Per body, the globals it or a callee stores into, joined in the same
-    /// fixpoint.
-    writes: Vec<std::collections::BTreeSet<String>>,
+    /// Per body, its solved [`Fact`]: the globals it or a callee stores into
+    /// and whether it opens, joined in the fixpoint `effects` comes from.
+    solved: Vec<Fact>,
     /// Every global, which a wait may store into.
     globals: &'a [&'a str],
 }
@@ -124,8 +127,8 @@ impl Judged<'_> {
                 continue;
             }
             let gs: std::collections::BTreeSet<&str> = match &self.callees[*k] {
-                Callee::Bodies(idx) => (idx.iter())
-                    .flat_map(|j| &self.writes[*j])
+                Callee::Bodies(idx) | Callee::Dispatched(idx) => (idx.iter())
+                    .flat_map(|j| &self.solved[*j].1)
                     .map(String::as_str)
                     .collect(),
                 _ => self.globals.iter().copied().collect(),
@@ -141,7 +144,9 @@ impl Judged<'_> {
     fn waits(&self, k: usize) -> bool {
         match &self.callees[k] {
             Callee::Atom(a) => a.has(Effect::Waits),
-            Callee::Bodies(idx) => idx.iter().any(|j| self.effects[*j].has(Effect::Waits)),
+            Callee::Bodies(idx) | Callee::Dispatched(idx) => {
+                idx.iter().any(|j| self.effects[*j].has(Effect::Waits))
+            }
             Callee::Pure | Callee::Empty | Callee::Unknown => false,
         }
     }
@@ -205,14 +210,15 @@ impl Judged<'_> {
     fn into_state_uses(self, refs: &[&Body]) -> HashMap<FnId, StateUse> {
         let steps = self.state_steps();
         let mut out: HashMap<FnId, StateUse> = HashMap::with_capacity(refs.len());
-        for ((((b, e), mut writes), step), f) in (refs.iter().zip(&self.effects))
-            .zip(self.writes)
+        for ((((b, e), Fact(_, mut writes, opens)), step), f) in (refs.iter().zip(&self.effects))
+            .zip(self.solved)
             .zip(steps)
             .zip(self.frames)
         {
             let Some(id) = b.id else { continue };
             let u = out.entry(id).or_default();
             u.effects = u.effects.join(*e);
+            u.opens |= opens;
             u.writes.append(&mut writes);
             u.via = u.via.or(step.and_then(|j| refs.get(j)?.id));
             u.awaits_at = u.awaits_at.or(f
@@ -268,6 +274,11 @@ pub struct StateUse {
     pub via: Option<FnId>,
     /// The line of its first call marked `await`, if it marks one.
     pub awaits_at: Option<usize>,
+    /// Whether a call into it may run a body another program supplies: it or
+    /// a callee calls through a function value, by a protocol method or
+    /// projection name, or a name nobody attributes. Then the program decides
+    /// what the call stores, and so which borrows a call ends.
+    pub opens: bool,
 }
 
 /// The globals a call to `callee` in the frame `frame` may store into, by
@@ -308,15 +319,18 @@ pub fn walk_frames(bodies: &[&Body]) -> Vec<Walked> {
     out
 }
 
-/// A frame's effect set and the globals it may store to.
-struct Fact(Effects, std::collections::BTreeSet<String>);
+/// A frame's effect set, the globals it may store to, and whether it opens
+/// ([`StateUse::opens`]).
+#[derive(Debug)]
+struct Fact(Effects, std::collections::BTreeSet<String>, bool);
 
 impl crate::fixpoint::Lattice for Fact {
     fn join(&mut self, o: &Fact) -> bool {
-        let before = (self.0, self.1.len());
+        let before = (self.0, self.1.len(), self.2);
         self.0 = self.0.join(o.0);
         self.1.extend(o.1.iter().cloned());
-        (self.0, self.1.len()) != before
+        self.2 |= o.2;
+        (self.0, self.1.len(), self.2) != before
     }
 }
 
@@ -346,6 +360,7 @@ pub fn judge<'a>(
         let mut e = f.own;
         let mut to: Vec<usize> = Vec::new();
         let mut ids = Vec::with_capacity(f.calls.len());
+        let mut opens = false;
         for c in &f.calls {
             // A call through a value reaches what the value's type may hold;
             // any other callee is resolved by name.
@@ -366,9 +381,11 @@ pub fn judge<'a>(
                 }
             };
             let callee = &callees[k];
+            opens |=
+                c.through.is_some() || matches!(callee, Callee::Dispatched(_) | Callee::Unknown);
             match callee {
                 Callee::Atom(a) => e = e.join(*a),
-                Callee::Bodies(idx) => {
+                Callee::Bodies(idx) | Callee::Dispatched(idx) => {
                     taken.resize(taken.len().max(k + 1), 0);
                     if std::mem::replace(&mut taken[k], i + 1) != i + 1 {
                         to.extend(idx.iter().copied());
@@ -380,7 +397,7 @@ pub fn judge<'a>(
             }
             // An owned result of a call that is no user body is an
             // allocation; a user callee's own set answers for it.
-            if c.born && !matches!(callee, Callee::Bodies(_)) {
+            if c.born && !matches!(callee, Callee::Bodies(_) | Callee::Dispatched(_)) {
                 e = e.with(Effect::Alloc);
             }
             ids.push(k);
@@ -393,19 +410,18 @@ pub fn judge<'a>(
         if e.has(Effect::Waits) {
             writes.extend(globals.iter().map(|g| g.to_string()));
         }
-        own.push(Fact(e, writes));
+        own.push(Fact(e, writes, opens));
         edges.push(to);
         resolved.push(ids);
     }
     // Effect sets and the program's globals are finite, so the joins end.
-    let (effects, writes): (Vec<_>, Vec<std::collections::BTreeSet<String>>) =
-        crate::fixpoint::solve(own, &edges)
-            .into_iter()
-            .map(|Fact(e, w)| (e, w))
-            .unzip();
+    let solved = crate::fixpoint::solve(own, &edges);
+    let effects = solved.iter().map(|f| f.0).collect();
     let stores = (callees.iter())
         .map(|c| match c {
-            Callee::Bodies(idx) => idx.iter().any(|j| !writes[*j].is_empty()),
+            Callee::Bodies(idx) | Callee::Dispatched(idx) => {
+                idx.iter().any(|j| !solved[*j].1.is_empty())
+            }
             Callee::Atom(a) => a.has(Effect::Waits) && !globals.is_empty(),
             Callee::Pure | Callee::Empty | Callee::Unknown => false,
         })
@@ -420,7 +436,7 @@ pub fn judge<'a>(
         edges,
         callees,
         stores,
-        writes,
+        solved,
         globals,
     }
 }
@@ -815,11 +831,11 @@ pub(crate) fn judge_built<R>(
             return Callee::Bodies(idx.clone());
         }
         if let Some(idx) = impl_methods.get(name) {
-            return Callee::Bodies(idx.clone());
+            return Callee::Dispatched(idx.clone());
         }
         // A projection dispatched by name.
         if let Some(idx) = place_tops.get(name) {
-            return Callee::Bodies(idx.clone());
+            return Callee::Dispatched(idx.clone());
         }
         if pure.contains(name) {
             return Callee::Pure;
