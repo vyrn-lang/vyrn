@@ -834,6 +834,8 @@ impl<'b> Kernel<'b> {
         }
         let note = match declared {
             _ if i.is_temp() => rule!(OwedTemporary, ty),
+            None if s == "_" => rule!(OwedUnnamed, ty, release = "close(t)"),
+            Some(_) if s == "_" => rule!(OwedUnnamed, ty, release = "drop t"),
             Some(d) if *d == i.ty.to_string() => rule!(OwedDeclared, ty, s),
             Some(_) => rule!(OwedHeld, by, ty, s),
             None => rule!(OwedStream, s),

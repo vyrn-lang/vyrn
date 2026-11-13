@@ -1171,6 +1171,10 @@ rules! {
         "`{ty}` declares `impl MustUse`, so a value of it must be handed on by name on every \
         path: passed to a `consume` parameter, forwarded by returning it, or released with \
         `drop {s}`";
+    // A `_` binder owns the value and names nothing to dispose of it by.
+    OwedUnnamed { ty, release }
+        "a `_` binder gives the `{ty}` no name to hand on: bind a name, such as `t`, and pass \
+        `t` to a `consume` parameter, return it, or release it with `{release}`";
     // A holder: the reader wrote `Array<Txn>` or a record with a `Txn` field,
     // and the row is `Txn`'s.
     OwedHeld { by, ty, s }

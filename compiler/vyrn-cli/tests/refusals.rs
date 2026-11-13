@@ -2232,6 +2232,32 @@ fn a_refused_generator_program_is_refused_when_its_run_succeeds() {
     assert!(cold.starts_with("lib.vyrn:3:0: cannot assign"), "{cold}");
 }
 
+/// A `_` binder over a must-use value is refused with a fix the user can
+/// write, at a `for .. in consume` and at a `match consume` arm alike.
+#[test]
+fn a_wildcard_over_a_must_use_value_names_a_fix_that_binds_a_name() {
+    let dir = common::scratch("wild-must-use");
+    let head = "type Tok = { n: Int64 }\n\nimpl MustUse for Tok {}\n\nfn main() -> Int64 {\n";
+    let loops = "    let xs: Array<Tok> = [Tok { n: 1 }]\n    for _ in consume xs {\n    }\n";
+    let arms = "    let o: Option<Tok> = Some(Tok { n: 1 })\n    match consume o {\n\
+                \x20       Some(_) => print(\"s\"),\n        None => print(\"n\"),\n    }\n";
+    for (file, body, line) in [("f.vyrn", loops, 7), ("m.vyrn", arms, 8)] {
+        std::fs::write(dir.join(file), format!("{head}{body}    return 0\n}}\n")).expect("write");
+        let out = vyrn()
+            .current_dir(&dir)
+            .args(["check", file])
+            .output()
+            .expect("run vyrn");
+        let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+        let says = format!(
+            "{file}:{line}:0: `_` is a `Tok` and is never disposed\n  note: a `_` binder gives \
+             the `Tok` no name to hand on: bind a name, such as `t`, and pass `t` to a \
+             `consume` parameter, return it, or release it with `drop t`\n"
+        );
+        assert_eq!((out.status.code(), err), (Some(1), says));
+    }
+}
+
 /// `proved` judges the project's program, a generator's module included, and
 /// not the generator's own program, whose `main` reads `args()`. So a check
 /// made warm after `proved` joins the manifest refuses what a cold one does.
