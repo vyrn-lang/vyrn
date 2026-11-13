@@ -72,10 +72,7 @@ fn verdict(path: &Path, host: Host) -> String {
 /// The roots whose `Host::Check` and built loads may print different
 /// diagnostics, each with its reason. Both loads still reach one verdict, and a root that agrees again
 /// fails until it leaves this list.
-const KNOWN: &[(&str, &str)] = &[(
-    "compiler/vyrn-cli/tests/check/a_protocol_method_named_like_a_std_function_is_refused_at_the_method.vyrn",
-    "a given std line's follow-on refusals are not printed (docs/decisions.md, given bodies)",
-)];
+const KNOWN: &[(&str, &str)] = &[];
 
 /// The last line of a [`verdict`]: `ok` or `refused`.
 fn last(v: &str) -> &str {
