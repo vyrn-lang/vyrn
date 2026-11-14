@@ -3260,7 +3260,7 @@ fn recorded_gens(
     let consts = consts?;
     let call = gen_call(key, &consts, opts);
     let id = crate::gen::compiler_identity();
-    let entry_key = generator_cache_key(&id, target, name, &call.arg_repr, &call.allowed);
+    let entry_key = generator_cache_key(&id, target, name, &call, opts);
     cached(&entry_key, target, opts, resolver, read)?
         .gens
         .clone()
@@ -3697,7 +3697,7 @@ pub(crate) fn generation(
 ) -> Result<Generated, GenFault> {
     let sources_hash = (cache && !gen_cache_off()).then(|| {
         let id = crate::gen::compiler_identity();
-        generator_cache_key(&id, gen_mod_key, name, &call.arg_repr, &call.allowed)
+        generator_cache_key(&id, gen_mod_key, name, &call, inner)
     });
     let hit = (sources_hash.as_deref()).and_then(|k| cached(k, gen_mod_key, inner, resolver, read));
     if let Some(entry) = hit {
@@ -3948,6 +3948,10 @@ pub(crate) fn generator_opts(opts: &LoadOptions, caller: &str) -> Result<LoadOpt
     let mut inner = opts.clone();
     inner.nest.depth += 1;
     inner.nest.gen = None;
+    // `proved` asks the project's program to prove its checks, the generator's
+    // module included; the generator's program also runs the main `vyrn-genwasm`
+    // writes, whose `args()` reads no source can prove. The cache key omits it.
+    inner.proved = Default::default();
     // A generator program's node ids repeat the importer's, so its sites
     // expand in a table of their own.
     if opts.expansions.is_shared() {
@@ -4104,9 +4108,11 @@ fn restamp_contracts(program: &mut Program, gen_mod_key: &str, std_root: Option<
 }
 
 /// The cache lookup key: `sha256(compiler identity ++ generator module ++ name
-/// ++ args ++ resolved input roots)`. The identity is
+/// ++ args ++ resolved input roots ++ dependency aliases)`. The identity is
 /// [`crate::gen::compiler_identity`], because recorded inputs cannot tell two
-/// compilers' outputs apart.
+/// compilers' outputs apart. The aliases decide what the generator's own
+/// imports resolve to, and its recorded sources still hash alike after a
+/// re-pin.
 ///
 /// The key omits the generator's sources: finding them means parsing the whole
 /// generator graph on every hit. The entry records them among its inputs, so a
@@ -4116,19 +4122,33 @@ fn generator_cache_key(
     identity: &str,
     gen_mod_key: &str,
     name: &str,
-    arg_repr: &str,
-    resolved_inputs: &[String],
+    call: &GenCall<'_>,
+    opts: &LoadOptions,
 ) -> String {
     let mut blob: Vec<u8> = Vec::new();
-    for part in [identity, gen_mod_key, name, arg_repr] {
-        blob.extend_from_slice(part.as_bytes());
-        blob.push(0);
-    }
-    let mut inputs: Vec<&String> = resolved_inputs.iter().collect();
+    let mut aliases: Vec<_> = opts.aliases.iter().collect();
+    aliases.sort();
+    let mut inputs: Vec<&String> = call.allowed.iter().collect();
     inputs.sort();
     inputs.dedup();
-    for p in inputs {
-        blob.extend_from_slice(p.as_bytes());
+    let count = inputs.len().to_string();
+    let parts = [
+        identity,
+        gen_mod_key,
+        name,
+        &call.arg_repr,
+        &opts.alias_base,
+        &count,
+    ]
+    .into_iter()
+    .chain(inputs.into_iter().map(String::as_str))
+    .chain(
+        aliases
+            .into_iter()
+            .flat_map(|(a, t)| [a.as_str(), t.as_str()]),
+    );
+    for part in parts {
+        blob.extend_from_slice(part.as_bytes());
         blob.push(0);
     }
     crate::hash::sha256_hex(&blob)
@@ -7653,7 +7673,21 @@ mod tests {
 
     #[test]
     fn two_compilers_do_not_share_a_generator_output() {
-        let key = |id: &str| generator_cache_key(id, "m.vyrn", "g", "x", &[]);
+        let call = gen_call("m.vyrn", &[], &LoadOptions::default());
+        let key = |id: &str| generator_cache_key(id, "m.vyrn", "g", &call, &LoadOptions::default());
         assert_ne!(key("0.1.0:1:2"), key("0.1.0:1:3"));
+    }
+
+    /// A re-pinned dependency alias misses: the generator's recorded sources
+    /// still hash alike, but its imports resolve to another module.
+    #[test]
+    fn a_repinned_alias_misses_the_generator_output() {
+        let pinned = |target: &str| LoadOptions {
+            aliases: [("pad".to_string(), target.to_string())].into(),
+            ..Default::default()
+        };
+        let call = gen_call("m.vyrn", &[], &LoadOptions::default());
+        let key = |o: &LoadOptions| generator_cache_key("id", "g.vyrn", "mk", &call, o);
+        assert_ne!(key(&pinned("./a.vyrn")), key(&pinned("./b.vyrn")));
     }
 }

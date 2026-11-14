@@ -2347,6 +2347,18 @@ fn a_capturing_lambda_handed_on_as_a_value_is_freed() {
     shape_runs_clean("a-capturing-lambda-handed-to-a-call-as-a-value", "415\n");
 }
 
+// A named function at a `consume fn` parameter holds nothing to release, here
+// or where the parameter is handed on (witness C:/t/gf/w5: check passed and
+// build found no lowering for the body).
+#[test]
+fn a_named_function_at_a_consume_fn_parameter_lowers() {
+    let src = "fn three() -> Int64 { return 3 }\n\
+               fn take(f: consume fn() -> Int64) -> Int64 { return f() }\n\
+               fn via(g: consume fn() -> Int64) -> Int64 { return take(g) + 1 }\n\
+               fn vyrnTestMain() -> Int64 { return take(three) * 10 + via(three) }\n";
+    runs_clean("a-named-function-at-a-consume-fn-parameter", src, "34\n");
+}
+
 // A `consume` parameter of a generic instance and of a higher-order instance,
 // a stored value at a `consume fn` parameter among them (record `m7-lamval`).
 #[test]
@@ -2438,7 +2450,12 @@ fn a_for_over_a_user_container_in_a_field_runs() {
 /// it prints `want`, exits 0 and prints nothing on stderr.
 fn shape_runs_clean(stem: &str, want: &str) {
     let shape = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/shapes/{stem}.vyrn"));
-    let src = std::fs::read_to_string(shape).unwrap()
+    runs_clean(stem, &std::fs::read_to_string(shape).unwrap(), want);
+}
+
+/// Runs `src`, a module with `vyrnTestMain`, as [`shape_runs_clean`] does.
+fn runs_clean(stem: &str, src: &str, want: &str) {
+    let src = src.to_string()
         + "
 fn main() -> Int64 { print(vyrnTestMain().toString()) return 0 }
 ";

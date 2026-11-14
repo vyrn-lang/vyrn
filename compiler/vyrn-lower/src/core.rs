@@ -7654,6 +7654,11 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
         caps.push((*n, names));
     }
     bind_targets(&mut out.stmts, bound, &caps);
+    // A `consume` parameter bound to a named function holds nothing, so its
+    // release leaves with it. A lambda's stays, and the emitter declines it.
+    unbind_drops(&mut out.stmts, &|n| {
+        (bound.iter()).any(|(b, t)| *b == n && matches!(t, Target::Fn(_)))
+    });
     let mut reads = vec![0; out.names.len()];
     count_reads(&out.stmts, &mut reads);
     let gone = |n: &Name| !values.contains(n);
@@ -7734,6 +7739,14 @@ fn make_before_read(
         }
     }
     false
+}
+
+/// Deletes from `ss`, at every depth, each release of a name `gone` answers.
+fn unbind_drops(ss: &mut Vec<St>, gone: &dyn Fn(Name) -> bool) {
+    ss.retain(|s| !matches!(s, St::Drop(n, ..) | St::Row { name: n, .. } if gone(*n)));
+    for s in ss.iter_mut() {
+        s.lists_mut().for_each(|l| unbind_drops(l, gone));
+    }
 }
 
 fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name>)]) {

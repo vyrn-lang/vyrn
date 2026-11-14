@@ -12,11 +12,11 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use vyrn_frontend::ast::{Program, Type};
+use vyrn_frontend::ast::Program;
 use vyrn_frontend::audience::{self, Audience};
 use vyrn_frontend::floor::{self, Capability};
 use vyrn_frontend::loader::DiskResolver;
-use vyrn_lower::effects::{self, Callee, Effect, Effects};
+use vyrn_lower::effects::{self, Effect, Effects};
 
 fn repo_root() -> PathBuf {
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -213,12 +213,10 @@ fn run_corpus() {
 
     let mut rows: Vec<Row> = Vec::new();
     let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
-    // Calls through a function value the sources answered for, and the
-    // function types with a source the corpus has no body for (open sets).
+    // Calls through a function value the sources answered for.
     let mut through_calls = 0usize;
-    let mut open: Vec<String> = Vec::new();
-    // Function types the program declares and holds no value of: the call through
-    // such a name cannot run.
+    // Calls through a function value no value of which exists in the program:
+    // such a call cannot run.
     let mut empty_sets: Vec<String> = Vec::new();
     let mut empty_calls = 0usize;
     // The floor rows the judgment states. Each must answer as the pass does,
@@ -228,7 +226,6 @@ fn run_corpus() {
     let mut judged_carried = 0usize;
     let mut judged_differ: Vec<String> = Vec::new();
     let mut gaps: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let show_gaps = std::env::var("VYRN_EFFECTS_GAPS").ok();
     let mut unloadable = 0usize;
     let mut refused = 0usize;
     let mut programs = 0usize;
@@ -273,264 +270,23 @@ fn run_corpus() {
             ),
             None => path.file_name().unwrap().to_string_lossy().to_string(),
         };
-        let lowered = vyrn_lower::lower(&program);
         let world = vyrn_lower::analyze(&program);
-        let mut bodies = Vec::new();
-        let mut insts = Vec::new();
-        for inst in &lowered.instances {
-            match vyrn_lower::core::build(&program, &world, inst) {
-                Ok(b) => {
-                    bodies.push(b);
-                    insts.push(inst);
-                }
-                Err(g) => {
-                    if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
-                        eprintln!(
-                            "  gap: {} {}:{}:{} {} {}",
-                            slash(path),
-                            inst.module(),
-                            inst.spelling(),
-                            g.line,
-                            g.what,
-                            g.detail
-                        );
-                    }
-                    *gaps.entry(g.what).or_default() += 1;
-                }
-            }
+        let lowered = vyrn_lower::lower(&program);
+        let survey = vyrn_lower::effects::survey(&program, &world, &lowered);
+        through_calls += survey.through;
+        empty_calls += survey.empty.len();
+        for (what, n) in &survey.gaps {
+            *gaps.entry(what).or_default() += n;
         }
-        // The module-state initializer and every `test` and `bench` body: no
-        // instance and no pass verdict, but the lambdas they hold need a frame,
-        // which is what a stored source names.
-        let mut outside: Vec<vyrn_frontend::core::Body> = Vec::new();
-        if !program.globals.is_empty() {
-            match vyrn_lower::core::build_module_state(&program, &world, &lowered.globals) {
-                Ok(b) => outside.push(b),
-                Err(g) => *gaps.entry(g.what).or_default() += 1,
-            }
-        }
-        for ob in &lowered.bodies {
-            match vyrn_lower::core::build_outside(&program, &world, ob) {
-                Ok(b) => outside.push(b),
-                Err(g) => {
-                    if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
-                        eprintln!(
-                            "  gap: {} {}:{} {} {}",
-                            slash(path),
-                            ob.name,
-                            g.line,
-                            g.what,
-                            g.detail
-                        );
-                    }
-                    *gaps.entry(g.what).or_default() += 1;
-                }
-            }
-        }
-        // An `impl` projection's body. No instance covers it, yet the
-        // core lowers an access site as a call by the projection's name, so the
-        // judgment needs the body to bound what `x.field(k)` runs. Built under the
-        // empty substitution a declaration has.
-        let mut place_bodies: Vec<(&str, vyrn_frontend::core::Body)> = Vec::new();
-        for pr in &lowered.places {
-            let inst = vyrn_lower::Instance {
-                func: pr.func,
-                func_id: pr.id,
-                type_args: Vec::new(),
-                subst: Default::default(),
-                facts: pr.facts.clone(),
-                releases: Vec::new(),
-                calls: Vec::new(),
-            };
-            match vyrn_lower::core::build(&program, &world, &inst) {
-                Ok(b) => place_bodies.push((pr.func.name.as_str(), b)),
-                Err(g) => {
-                    if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
-                        eprintln!(
-                            "  gap: {} place {}:{} {} {}",
-                            slash(path),
-                            pr.func.name,
-                            g.line,
-                            g.what,
-                            g.detail
-                        );
-                    }
-                    *gaps.entry(g.what).or_default() += 1;
-                }
-            }
-        }
-        // Every frame, outermost first. `top[i]` is the slot of instance `i`'s own
-        // body; a lambda frame is keyed by its enclosing function, line and column,
-        // as the checker names a lambda source.
-        let mut refs: Vec<&vyrn_frontend::core::Body> = Vec::new();
-        let mut top: Vec<usize> = Vec::new();
-        let mut lambda_frames: BTreeMap<(&str, (usize, usize)), Vec<usize>> = BTreeMap::new();
-        for (i, b) in bodies.iter().enumerate() {
-            for f in b.frames() {
-                if std::ptr::eq(f, b) {
-                    top.push(refs.len());
-                } else if let Some(at) = vyrn_lower::core::lambda_at(&f.name) {
-                    lambda_frames
-                        .entry((insts[i].func.name.as_str(), at))
-                        .or_default()
-                        .push(refs.len());
-                }
-                refs.push(f);
-            }
-        }
-        // Bodies that are no instance get no `top` slot. Their lambdas are keyed by
-        // the checker's name: empty for the module-state initializer, `test@<i>` or
-        // `bench@<i>` otherwise.
-        for b in &outside {
-            for f in b.frames() {
-                if let Some(at) = vyrn_lower::core::lambda_at(&f.name) {
-                    lambda_frames
-                        .entry((b.name.as_str(), at))
-                        .or_default()
-                        .push(refs.len());
-                }
-                refs.push(f);
-            }
-        }
-        // The resolver reaches a projection's body by its surface name, the name
-        // the core calls it by.
-        let mut place_tops: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-        for (name, b) in &place_bodies {
-            place_tops.entry(name).or_default().push(refs.len());
-            for f in b.frames() {
-                refs.push(f);
-            }
-        }
-        // A callee's name: every instance of the function by that name, and
-        // every impl method with that surface name.
-        let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-        for (i, inst) in insts.iter().enumerate() {
-            by_name
-                .entry(inst.func.name.as_str())
-                .or_default()
-                .push(top[i]);
-        }
-        let mut impl_methods: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-        for im in &program.impls {
-            for m in im.methods.iter().chain(im.places.iter()) {
-                if let Some(key) = vyrn_frontend::types::type_key(&im.ty) {
-                    let mangled =
-                        vyrn_frontend::types::impl_method_name(&im.protocol, &key, &m.name);
-                    if let Some(idx) = by_name.get(mangled.as_str()) {
-                        impl_methods
-                            .entry(m.name.as_str())
-                            .or_default()
-                            .extend(idx.iter().copied());
-                    }
-                }
-            }
-        }
-        let decls = vyrn_frontend::types::decl_map(&program);
-        let pure = effects::PureNames::new(&decls);
-        let externs: BTreeMap<&str, Effect> = (program.functions.iter())
-            .filter_map(|f| Some((f.name.as_str(), effects::extern_effect(f)?)))
-            .collect();
-        let mut resolve = |name: &str| -> Callee {
-            if let Some(e) = effects::atom(name) {
-                return Callee::Atom(Effects::of(e));
-            }
-            if let Some(&e) = externs.get(name) {
-                return Callee::Atom(Effects::of(e));
-            }
-            if let Some(idx) = by_name.get(name) {
-                return Callee::Bodies(idx.clone());
-            }
-            if let Some(idx) = impl_methods.get(name) {
-                return Callee::Dispatched(idx.clone());
-            }
-            // A projection dispatched by name is in neither table above.
-            if let Some(idx) = place_tops.get(name) {
-                return Callee::Dispatched(idx.clone());
-            }
-            // A program function without a judged body (a generic reached only
-            // from a `test` body, a generic declared release) is judged pure
-            // here: a hole the survey does not count.
-            if pure.contains(name) || program.functions.iter().any(|f| f.name == name) {
-                return Callee::Pure;
-            }
-            Callee::Unknown
-        };
-        // The closed set of functions a value of a function type may hold: the
-        // defunctionalization sources and the functions handed to a
-        // `fn`-typed parameter. A named source is its instances; a
-        // lambda source is its frame.
-        let stored = vyrn_frontend::checker::record(&program).stored;
-        let mut through = |ty: &Type| -> Callee {
-            // The sources are collected with aliases resolved; a local is
-            // typed as the program spelled it.
-            let ty = &vyrn_frontend::types::resolve(ty, &decls);
-            if !matches!(ty, Type::Fn(..)) {
-                return Callee::Unknown;
-            }
-            let mut idx: Vec<usize> = Vec::new();
-            let mut missing: Vec<String> = Vec::new();
-            for src in stored.every_source() {
-                if !vyrn_frontend::checker::fn_sigs_match(&src.sig, ty) {
-                    continue;
-                }
-                if let Some(n) = &src.named {
-                    match by_name.get(n.as_str()) {
-                        Some(i) => idx.extend(i.iter().copied()),
-                        None => missing.push(n.clone()),
-                    }
-                }
-                if let Some(l) = &src.lambda {
-                    match lambda_frames.get(&(l.defined_in.as_str(), (l.line, l.col))) {
-                        Some(i) => idx.extend(i.iter().copied()),
-                        None => {
-                            missing.push(format!("a lambda in {} at line {}", l.defined_in, l.line))
-                        }
-                    }
-                }
-            }
-            // An open set names a source the corpus has no body for, so the join is
-            // short. An empty set is a different answer: `Callee::Empty`.
-            if !missing.is_empty() {
-                open.push(format!(
-                    "{file}: a `{ty}` value may hold {}",
-                    missing.join(", ")
-                ));
-            } else if idx.is_empty() {
-                empty_sets.push(format!("{file}: no `{ty}` value exists in this program"));
-            }
-            idx.sort_unstable();
-            idx.dedup();
-            if !idx.is_empty() {
-                Callee::Bodies(idx)
-            } else if missing.is_empty() {
-                Callee::Empty
-            } else {
-                Callee::Unknown
-            }
-        };
-        let walked = effects::walk_frames(&refs);
-        let frames: Vec<&effects::Walked> = walked.iter().collect();
-        let globals: Vec<&str> = program.globals.iter().map(|g| g.name.as_str()).collect();
-        let judged = effects::judge(&frames, &globals, &mut resolve, &mut through);
-        through_calls += judged.through.len();
-        empty_calls += judged.empty.len();
-        // Two reasons only: no collected source matches the callee's function type,
-        // or the callee is no name of the body (a projection dispatched by name).
-        for (i, name, line) in &judged.unknown {
-            let ty = refs[*i]
-                .names
+        empty_sets.extend(
+            survey
+                .empty
                 .iter()
-                .find(|n| &n.source == name)
-                .map(|n| n.ty.to_string());
-            let why = match ty {
-                Some(t) => format!("no collected source of `{t}`"),
-                None => "not a name of the body: a projection dispatched by name".to_string(),
-            };
+                .map(|(body, c, line)| format!("{file}:{line} {c} (in {body})")),
+        );
+        for (body, name, line) in &survey.unknown {
             *unknown
-                .entry(format!(
-                    "{file}:{line} {name} (in {}) — {why}",
-                    refs[*i].name
-                ))
+                .entry(format!("{file}:{line} {name} (in {body})"))
                 .or_default() += 1;
         }
 
@@ -547,8 +303,8 @@ fn run_corpus() {
             }
         }
 
-        for (i, inst) in insts.iter().enumerate() {
-            let e = judged.effects[top[i]];
+        for (inst, e) in &survey.sets {
+            let (inst, e) = (*inst, *e);
             let want = caps_of(e);
             let have = floor_carries(&externs, inst.func);
             let floor = if inst.func.is_gen && !want.is_empty() {
@@ -607,51 +363,16 @@ fn run_corpus() {
                     (kind, format!("{} — {}", v.audience.phrase(), v.because()))
                 }
             };
-            if let Some((_, want_fn)) = dump_target {
-                if inst.func.name == want_fn {
-                    eprintln!(
-                        "{file}: {} in {} — {e}",
-                        inst.spelling(),
-                        if inst.module().is_empty() {
-                            "<root>"
-                        } else {
-                            inst.module()
-                        }
-                    );
-                    eprintln!(
-                        "  floor: {floor:?} (body carries {:?}); audience: {audience_kind:?} {who}",
-                        have
-                    );
-                    let mut callees: BTreeSet<String> = BTreeSet::new();
-                    for f in bodies[i].frames() {
-                        collect_callees(&f.stmts, &mut callees);
-                    }
-                    for c in callees {
-                        let mut r = resolve(&c);
-                        if matches!(r, Callee::Unknown) {
-                            if let Some(n) = bodies[i]
-                                .frames()
-                                .iter()
-                                .flat_map(|f| f.names.iter())
-                                .find(|n| n.source == c)
-                            {
-                                r = through(&n.ty);
-                            }
-                        }
-                        let ce = match r {
-                            Callee::Atom(a) => a.to_string(),
-                            Callee::Bodies(idx) | Callee::Dispatched(idx) => idx
-                                .iter()
-                                .map(|j| judged.effects[*j])
-                                .fold(Effects::PURE, Effects::join)
-                                .to_string(),
-                            Callee::Pure => "pure".into(),
-                            Callee::Empty => "an empty set".into(),
-                            Callee::Unknown => "unknown".into(),
-                        };
-                        eprintln!("  calls {c}: {ce}");
-                    }
-                }
+            if dump_target.is_some_and(|(_, want_fn)| inst.func.name == want_fn) {
+                let at = if inst.module().is_empty() {
+                    "<root>"
+                } else {
+                    inst.module()
+                };
+                eprintln!("{file}: {} in {at} — {e}", inst.spelling());
+                eprintln!(
+                    "  floor: {floor:?} (body carries {have:?}); audience: {audience_kind:?} {who}"
+                );
             }
             rows.push(Row {
                 file: file.clone(),
@@ -689,12 +410,6 @@ fn run_corpus() {
         rows.len(),
         unknown.values().sum::<usize>()
     );
-    open.sort();
-    open.dedup();
-    eprintln!("  open sets: {}", open.len());
-    for o in &open {
-        eprintln!("    {o}");
-    }
     empty_sets.sort();
     empty_sets.dedup();
     eprintln!("  empty sets: {}", empty_sets.len());
@@ -750,19 +465,12 @@ fn run_corpus() {
         "calls the judgment could not attribute; the first: {}",
         unknown.keys().next().map(String::as_str).unwrap_or("none")
     );
-    const OPEN_SETS: usize = 0;
-    assert_eq!(
-        open.len(),
-        OPEN_SETS,
-        "function types whose closed set names a body the corpus does not have; the first: {}",
-        open.first().map(String::as_str).unwrap_or("none")
-    );
     // An empty set is an answer, not a hole.
     const EMPTY_SETS: usize = 3;
     assert_eq!(
         empty_sets.len(),
         EMPTY_SETS,
-        "function types no value of which exists in their program:\n{}",
+        "calls through a function value no value of which exists in their program:\n{}",
         empty_sets.join("\n")
     );
     if std::env::var("VYRN_EFFECTS_MODULES").is_ok() {
@@ -799,20 +507,6 @@ fn run_corpus() {
     );
     assert!(!rows.is_empty(), "the judgment judged nothing");
     let _ = &rows[0].module;
-}
-
-fn collect_callees(stmts: &[vyrn_frontend::core::St], out: &mut BTreeSet<String>) {
-    use vyrn_frontend::core::{Rhs, St};
-    for (s, _) in vyrn_frontend::core::rows(stmts) {
-        if let St::Let(_, Rhs::Call { callee, .. })
-        | St::Do {
-            rhs: Rhs::Call { callee, .. },
-            ..
-        } = s
-        {
-            out.insert(callee.clone());
-        }
-    }
 }
 
 /// The effect lattice, one row per atom: its effect, and whether a generator
