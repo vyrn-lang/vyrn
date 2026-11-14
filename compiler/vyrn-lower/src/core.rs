@@ -7699,9 +7699,8 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
 
 /// Puts `made`, the row that binds `n`, before the one row that reads `n`, at
 /// that row's depth, and with `release` a release of `n` where its borrow
-/// ends ([`borrow_end`]). `names` is the body's names. `false` where no row
-/// reads it, and where `release` and the borrow outlives a row that may
-/// leave the list.
+/// ends ([`borrow_end`]) and before each exit until then. `names` is the
+/// body's names. `false` where no row reads it.
 ///
 /// `n` is a `read` parameter ([`Builder::targets_of`] binds a lambda only
 /// there), so the checker lets no row move or store it: each read is a
@@ -7733,10 +7732,11 @@ fn make_before_read(
         count_reads(std::slice::from_ref(&ss[i]), &mut reads);
         if reads[n.index()] > 0 {
             if release {
-                let Some(end) = borrow_end(&ss[i..], n) else {
-                    return false;
-                };
-                ss.insert(i + end + 1, St::Drop(n, Site::None, 0, None));
+                let end = borrow_end(&ss[i..], n);
+                let mut held: Vec<St> = ss.drain(i..=i + end).collect();
+                release_on_exits(&mut held, n, false);
+                held.push(St::Drop(n, Site::None, 0, None));
+                ss.splice(i..i, held);
             }
             ss.insert(i, made);
             return true;
@@ -7745,10 +7745,8 @@ fn make_before_read(
     false
 }
 
-/// The index of the last row of `ss` that names `n` or a `let` alias of it,
-/// or `None` where a row after the first may leave `ss`, past a release
-/// placed after that index.
-fn borrow_end(ss: &[St], n: Name) -> Option<usize> {
+/// The index of the last row of `ss` that names `n` or a `let` alias of it.
+fn borrow_end(ss: &[St], n: Name) -> usize {
     let mut aliases = vec![n];
     let mut end = 0;
     let mut ns = Vec::new();
@@ -7769,19 +7767,30 @@ fn borrow_end(ss: &[St], n: Name) -> Option<usize> {
             }
         }
     }
-    (!ss[1..=end].iter().any(|s| leaves(s, false))).then_some(end)
+    end
 }
 
-/// Whether `s` may leave the list it stands in: a `return`, or a `break` or
-/// `continue` under no loop of `s` (`in_loop` says it stands in one).
-fn leaves(s: &St, in_loop: bool) -> bool {
-    match s {
-        St::Return { .. } => true,
-        St::Break { .. } | St::Continue { .. } => !in_loop,
-        _ => {
-            let in_loop = in_loop || matches!(s, St::Loop { .. });
-            s.lists().flatten().any(|r| leaves(r, in_loop))
+/// Puts a release of `n` before each row under `ss` that leaves `ss`: a
+/// `return`, or a `break` or `continue` under no loop of `ss` (`in_loop` says
+/// `ss` is a loop's own list or stands in one).
+fn release_on_exits(ss: &mut Vec<St>, n: Name, in_loop: bool) {
+    let mut i = 0;
+    while i < ss.len() {
+        let leaves = match &ss[i] {
+            St::Return { .. } => true,
+            St::Break { .. } | St::Continue { .. } => !in_loop,
+            _ => false,
+        };
+        if leaves {
+            ss.insert(i, St::Drop(n, Site::None, 0, None));
+            i += 1;
+        } else {
+            let inner = in_loop || matches!(ss[i], St::Loop { .. });
+            ss[i]
+                .lists_mut()
+                .for_each(|l| release_on_exits(l, n, inner));
         }
+        i += 1;
     }
 }
 

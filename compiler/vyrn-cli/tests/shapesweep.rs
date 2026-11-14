@@ -1928,11 +1928,13 @@ struct FnUse {
 // `timeout` takes a lambda that calls the value, not the value: a `match` on
 // a `Race` with a `Unit` payload fails to build with no fn value in it.
 #[rustfmt::skip]
-const FN_USES: [FnUse; 15] = [
+const FN_USES: [FnUse; 16] = [
     FnUse { id: "call0", sig: Sig::Plain, decl: "", body: "", later: "", calls: 0, waits: Some(false) },
     FnUse { id: "call1", sig: Sig::Plain, decl: "", body: "{a}p()", later: "", calls: 1, waits: None },
     FnUse { id: "call2", sig: Sig::Plain, decl: "", body: "{a}p()\n{a}p()", later: "", calls: 2, waits: None },
     FnUse { id: "local", sig: Sig::Plain, decl: "", body: "let g = p\n{a}g()", later: "", calls: 1, waits: None },
+    FnUse { id: "exit", sig: Sig::Plain, decl: "",
+        body: "let g = p\nfor k in [1, 2] {\n    if k == 2 {\n        return\n    }\n    {a}g()\n}", later: "", calls: 1, waits: None },
     FnUse { id: "array", sig: Sig::Plain, decl: "",
         body: "let xs: Array<fn() -> Unit> = [p]\nfor h in xs {\n    {a}h()\n}", later: "", calls: 1, waits: None },
     FnUse { id: "record", sig: Sig::Plain, decl: "",
