@@ -2641,6 +2641,58 @@ fn main() -> Int64 {
     assert_eq!(audited_run("statetake", src), (Some(0), "1\n".to_string()));
 }
 
+/// A Unit element has no bytes: a `map` to a Unit lambda builds, and its
+/// array holds a length and nothing else.
+#[test]
+fn an_array_of_unit_builds_and_runs() {
+    let src = r#"import { map } from "std/arrays"
+
+fn named() {
+    print("nm")
+}
+
+fn take(p: fn() -> Unit) {
+    let r = map([1], x -> p())
+    print(r.length.toString())
+}
+
+fn main() -> Int64 {
+    take(named)
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("unitarray", src),
+        (Some(0), "nm\n1\n".to_string())
+    );
+}
+
+/// A Unit payload's word is 0 and is never boxed, so `Some` of a Unit call
+/// builds and its match frees nothing.
+#[test]
+fn a_unit_payload_builds_and_runs() {
+    let src = r#"fn named() {
+    print("nm")
+}
+
+fn mk() -> Option<Unit> {
+    return Some(named())
+}
+
+fn main() -> Int64 {
+    match mk() {
+        Some(v) => print("some"),
+        None => print("none"),
+    }
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("unitpayload", src),
+        (Some(0), "nm\nsome\n".to_string())
+    );
+}
+
 /// #468: a store into a place a `consume` left a hole in releases what the
 /// place still holds, around the hole: the field itself (nothing), a record
 /// around the field, and the whole binding. The new value is whole, so the
