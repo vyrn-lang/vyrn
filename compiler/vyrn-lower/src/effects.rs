@@ -171,12 +171,38 @@ impl Judged<'_> {
         out
     }
 
+    /// The parameter frame `f` calls with no `await` where every call of `f`
+    /// that waits is such a call through a function value; `None` where `f`
+    /// waits by any other call, or by none.
+    fn waits_inside(&self, f: usize) -> Option<&str> {
+        let (calls, ks) = (&self.frames[f].calls, &self.resolved[f]);
+        let mut param = None;
+        for (c, _) in calls.iter().zip(ks).filter(|(_, k)| self.waits(**k)) {
+            if c.mark != Mark::None || c.through.is_none() {
+                return None;
+            }
+            param.get_or_insert(c.callee.as_str());
+        }
+        param
+    }
+
     /// Each call of frame `i`, run where `at` says, that breaks a waiting
     /// rule, with its line: a mark on a call that does not wait, and a waiting
     /// call without one or where nothing may wait. A fork waits when one of
     /// its branches does, and a branch has no mark of its own to break.
-    pub fn wait_rules(&self, i: usize, at: Waiting) -> impl Iterator<Item = (usize, Rule)> + '_ {
+    ///
+    /// A frame outside the root's modules (`foreign`, per frame) that waits
+    /// only by calls through a parameter with no `await` is refused at each
+    /// call into it, mark or none, because no `await` there can help; its own
+    /// calls are not refused.
+    pub fn wait_rules<'s>(
+        &'s self,
+        i: usize,
+        at: Waiting,
+        foreign: &'s [bool],
+    ) -> impl Iterator<Item = (usize, Rule)> + 's {
         let (calls, ks) = (&self.frames[i].calls, &self.resolved[i]);
+        let inside = move |f: usize| self.waits_inside(f).filter(|_| foreign[f]);
         (0..calls.len()).filter_map(move |j| {
             let c = &calls[j];
             let callee = DeclName(&c.callee);
@@ -184,6 +210,18 @@ impl Judged<'_> {
                 Mark::Fork(n) => (j + 1..j + 1 + n).any(|b| self.waits(ks[b])),
                 _ => self.waits(ks[j]),
             };
+            if c.through.is_some() && c.mark == Mark::None && inside(i).is_some() {
+                return None;
+            }
+            let into = match (&self.callees[ks[j]], c.mark) {
+                (Callee::Bodies(idx), Mark::None | Mark::Await) => {
+                    idx.iter().find_map(|f| inside(*f))
+                }
+                _ => None,
+            };
+            if let (Some(param), Waiting::Body) = (into, at) {
+                return Some((c.line, rule!(AwaitInside, callee, param = DeclName(param))));
+            }
             let r = match (waits, at, c.mark) {
                 (true, Waiting::Initializer, _) => rule!(InitializerWaits, callee),
                 (true, Waiting::Body, Mark::None) => rule!(AwaitMissing, callee),

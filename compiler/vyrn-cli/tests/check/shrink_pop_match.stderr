@@ -1,0 +1,1 @@
+shrink_pop_match.vyrn:3:0: `pop` is not available on Array<Int64, 2>, a fixed-size array (it cannot shrink); use a growable `Array<T>`

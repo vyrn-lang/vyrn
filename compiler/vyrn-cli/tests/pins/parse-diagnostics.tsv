@@ -271,6 +271,7 @@ compiler/vyrn-cli/tests/check/a_vector_does_not_mix_with_a_scalar_2.vyrn	0	cbf29
 compiler/vyrn-cli/tests/check/a_waiting_branch_of_a_both_without_await_is_refused.vyrn	0	cbf29ce484222325	20	18	77afa206da95e2f9
 compiler/vyrn-cli/tests/check/a_waiting_call_without_await_is_refused.vyrn	0	cbf29ce484222325	20	15	77726ea7f56265f9
 compiler/vyrn-cli/tests/check/a_waiting_function_value_called_without_await_is_refused.vyrn	0	cbf29ce484222325	20	15	6ac1fcb663c330bd
+compiler/vyrn-cli/tests/check/a_waiting_value_a_std_function_calls_is_refused_at_the_call.vyrn	0	cbf29ce484222325	20	18	70bd66653c0048d0
 compiler/vyrn-cli/tests/check/a_where_over_a_union_is_refused.vyrn	0	cbf29ce484222325	20	17	e14b380a6540c835
 compiler/vyrn-cli/tests/check/a_where_predicate_cannot_wait.vyrn	0	cbf29ce484222325	20	18	c40d1dd120f9f01c
 compiler/vyrn-cli/tests/check/accepts_array_operations.vyrn	0	cbf29ce484222325	20	17	48c4e509bc11f9fd
@@ -735,6 +736,7 @@ compiler/vyrn-cli/tests/check/schema_of_a_union_is_refused.vyrn	0	cbf29ce4842223
 compiler/vyrn-cli/tests/check/setfield_into_predicated_field_takes_a_constructed_value.vyrn	0	cbf29ce484222325	20	17	e177a31d2f665c6e
 compiler/vyrn-cli/tests/check/shrink_a_string.vyrn	0	cbf29ce484222325	20	18	20fe6da80a783e77
 compiler/vyrn-cli/tests/check/shrink_pop.vyrn	0	cbf29ce484222325	20	18	728afc02a1639e1a
+compiler/vyrn-cli/tests/check/shrink_pop_match.vyrn	0	cbf29ce484222325	20	14	53f4454de3f1f1f7
 compiler/vyrn-cli/tests/check/shrink_swapremove.vyrn	0	cbf29ce484222325	20	13	c3678574ff5d1426
 compiler/vyrn-cli/tests/check/sized_int_minimums_are_writable_negated.vyrn	0	cbf29ce484222325	20	17	92d780f292dcecbc
 compiler/vyrn-cli/tests/check/smallarray_at_a_contract_boundary_is_a_named_error.vyrn	0	cbf29ce484222325	20	17	258c74f4bba060ca
@@ -1062,6 +1064,7 @@ compiler/vyrn-cli/tests/waits/lambda.vyrn	0	cbf29ce484222325	20	14	7e8a0ba1b59dd
 compiler/vyrn-cli/tests/waits/longsleep.vyrn	0	cbf29ce484222325	20	16	598eac905e55a826
 compiler/vyrn-cli/tests/waits/race.vyrn	0	cbf29ce484222325	20	17	5eaf328666292474
 compiler/vyrn-cli/tests/waits/result.vyrn	0	cbf29ce484222325	20	15	45a0b3aa47bcea81
+compiler/vyrn-cli/tests/waits/unawaited.vyrn	0	cbf29ce484222325	20	17	036b4dd0f4daf488
 examples/a1_afterjoin.vyrn	0	cbf29ce484222325	20	13	30f04885312703ea
 examples/a2_capture.vyrn	0	cbf29ce484222325	20	17	d14579e36e1493c2
 examples/a2_capture_escape.vyrn	0	cbf29ce484222325	20	18	aa841adb72cc068e

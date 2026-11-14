@@ -729,6 +729,9 @@ rules! {
         "`{callee}` waits, and its call has no `await`"
         fix "write `await` before the call";
     AwaitNoWait { callee } "`await` marks a call that waits, and `{callee}` does not wait";
+    AwaitInside { callee, param }
+        "`{callee}` waits only because it calls `{param}` with no `await`"
+        fix "pass a function that does not wait";
     ForkBranch { form }
         "each branch of `{form}` is a call of a function, which `{form}` starts and waits for";
     InitializerWaits { callee }
@@ -1415,9 +1418,9 @@ rules! {
     IndexAssignUnknown { name } "index-assignment to unknown variable `{name}`";
     ConditionNotBool { word, t } "`{word}` condition must be Bool, found {t}";
     UnknownVariable { name } "unknown variable `{name}`";
-    ShrinkFixedArray { op }
-        "`{op}` is not available on a fixed-size array (it cannot shrink); use a growable \
-        `Array<T>`";
+    ShrinkFixedArray { op, t }
+        "`{op}` is not available on {t}, a fixed-size array (it cannot shrink); use a \
+        growable `Array<T>`";
     ShrinkNeedsArray { op, t } "`{op}` needs an `Array<T>`, found {t}";
     DuplicateArm { v } "duplicate `{v}` arm";
     MissingVariant { v } "`match` is missing variant `{v}`";

@@ -1,0 +1,8 @@
+fn main() -> Int64 {
+    let mut a = [1, 2]
+    match a.pop() {
+        Some(v) => print("p"),
+        None => print("e"),
+    }
+    return 0
+}
