@@ -729,6 +729,9 @@ rules! {
         "`{callee}` waits, and its call has no `await`"
         fix "write `await` before the call";
     AwaitNoWait { callee } "`await` marks a call that waits, and `{callee}` does not wait";
+    AwaitInside { callee, param }
+        "`{callee}` waits only because it calls `{param}` with no `await`"
+        fix "pass a function that does not wait";
     ForkBranch { form }
         "each branch of `{form}` is a call of a function, which `{form}` starts and waits for";
     InitializerWaits { callee }

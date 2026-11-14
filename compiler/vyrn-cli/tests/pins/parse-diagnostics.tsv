@@ -271,6 +271,7 @@ compiler/vyrn-cli/tests/check/a_vector_does_not_mix_with_a_scalar_2.vyrn	0	cbf29
 compiler/vyrn-cli/tests/check/a_waiting_branch_of_a_both_without_await_is_refused.vyrn	0	cbf29ce484222325	20	18	77afa206da95e2f9
 compiler/vyrn-cli/tests/check/a_waiting_call_without_await_is_refused.vyrn	0	cbf29ce484222325	20	15	77726ea7f56265f9
 compiler/vyrn-cli/tests/check/a_waiting_function_value_called_without_await_is_refused.vyrn	0	cbf29ce484222325	20	15	6ac1fcb663c330bd
+compiler/vyrn-cli/tests/check/a_waiting_value_a_std_function_calls_is_refused_at_the_call.vyrn	0	cbf29ce484222325	20	18	70bd66653c0048d0
 compiler/vyrn-cli/tests/check/a_where_over_a_union_is_refused.vyrn	0	cbf29ce484222325	20	17	e14b380a6540c835
 compiler/vyrn-cli/tests/check/a_where_predicate_cannot_wait.vyrn	0	cbf29ce484222325	20	18	c40d1dd120f9f01c
 compiler/vyrn-cli/tests/check/accepts_array_operations.vyrn	0	cbf29ce484222325	20	17	48c4e509bc11f9fd

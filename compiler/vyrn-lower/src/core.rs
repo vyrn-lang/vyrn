@@ -8726,10 +8726,23 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                     (id, Arc::clone(shared))
                 })
                 .collect();
+            // Per frame, whether its module is outside the root's: one a module
+            // imports by a `std/` path.
+            let std: HashSet<&str> = (program.spellings.paths.iter())
+                .filter(|(_, p)| p.starts_with("std/"))
+                .map(|((_, to), _)| to.as_str())
+                .collect();
+            let lazy = |m: &Option<String>| m.as_deref().is_some_and(|k| std.contains(k));
+            let served_jobs = (states.iter().filter(|s| s.answered().is_some())).map(|s| &s.job);
+            let mut foreign: Vec<bool> = refs.iter().map(|b| lazy(&b.file)).collect();
+            foreign.resize(judged.frames.len(), false);
+            for ((job, at), (_, frames)) in served_jobs.clone().zip(served_at).zip(&late) {
+                foreign[*at..*at + frames.len()].fill(lazy(job.module()));
+            }
             // The waiting rules over every frame, built, served or alone. The
             // memo keeps none of their refusals, because they read the judgment.
             let mut rules = |i: usize, at: Waiting, file: &Option<String>, body: &str| {
-                for (line, rule) in judged.wait_rules(i, at) {
+                for (line, rule) in judged.wait_rules(i, at, &foreign) {
                     let mut d = Diagnostic::refusal(line, 0, "check", rule).in_file(file.clone());
                     // A callee of `std/task` is linked as `task$sleep`.
                     d.speak(&program.spellings);
@@ -8750,7 +8763,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             for (i, b) in refs.iter().enumerate() {
                 rules(i, Waiting::Body, &b.file, &b.name);
             }
-            let served_jobs = (states.iter().filter(|s| s.answered().is_some())).map(|s| &s.job);
             for ((job, at), (_, frames)) in served_jobs.zip(served_at).zip(&late) {
                 for i in *at..*at + frames.len() {
                     rules(i, Waiting::Body, job.module(), job.owner());
