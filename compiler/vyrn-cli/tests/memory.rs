@@ -2409,6 +2409,23 @@ fn a_capturing_lambda_read_through_an_alias_or_a_capture_is_freed() {
     );
 }
 
+// A lambda that captures a fn value and hands it to a function, itself handed
+// to a std function, calls through the value it captured (fnsweep
+// fv.c.filter.nm: no lowering).
+#[test]
+fn a_lambda_handing_on_a_captured_fn_value_is_freed() {
+    let src = "import { filter } from \"std/arrays\"\n\
+               fn yes(f: fn() -> Unit) -> Bool { f()\n return true }\n\
+               fn take(p: consume fn() -> Unit) -> Int64 {\n\
+                 return filter([1, 2], x -> yes(p)).length\n\
+               }\n\
+               fn vyrnTestMain() -> Int64 {\n\
+                 let s = \"s\".copy()\n\
+                 return take(() -> print(s))\n\
+               }\n";
+    runs_clean("a-lambda-handing-on-a-captured-fn-value", src, "s\ns\n2\n");
+}
+
 // A `consume` parameter of a generic instance and of a higher-order instance,
 // a stored value at a `consume fn` parameter among them (record `m7-lamval`).
 #[test]

@@ -7429,10 +7429,13 @@ impl<'a> Builder<'a> {
                     Target::Lambda(key, caps, p.ty.clone())
                 }
                 Expr::Var { name: v, .. } => match self.lookup(v) {
+                    // A lambda frame's capture is a parameter no call binds.
                     Some(n)
                         if p.capability != Capability::Consume
                             && self.body.params.contains(&n)
-                            && matches!(self.body.names[n.index()].ty, Type::Fn(..)) =>
+                            && matches!(self.body.names[n.index()].ty, Type::Fn(..))
+                            && self.body.names[n.index()].borrow_kind
+                                != Some(BorrowKind::Capture) =>
                     {
                         Target::Param(n)
                     }
