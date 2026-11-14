@@ -497,6 +497,19 @@ impl Fork {
     }
 }
 
+/// A `fn` parameter position that reads its argument. A pass-through
+/// forwards the caller's value as a borrow, so one at a `consume` position
+/// would release that value in the callee and again in the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtRead(());
+
+impl AtRead {
+    /// `None` at a `consume` position.
+    pub fn of(cap: Capability) -> Option<AtRead> {
+        (cap != Capability::Consume).then_some(AtRead(()))
+    }
+}
+
 /// What a `fn`-typed parameter of a specialization calls: one
 /// instance per target, and a call through the parameter is a direct call
 /// (`vyrn_lower::core::specialize`).
@@ -506,7 +519,8 @@ pub enum Target {
     Fn(String),
     /// The target this body's own `fn`-typed parameter is bound to: a
     /// pass-through, which `vyrn_lower::core::specialize` replaces by the instance's target.
-    Param(Name),
+    /// Only a `read` position passes one through ([`AtRead`]).
+    Param(Name, AtRead),
     /// A lambda lifted under this key (`vyrn_lower::core::lambda_spelling`), called with its
     /// captures first. Each capture is the instance parameter that carries
     /// it, by name and type, in forwarding order. The type is the callee's

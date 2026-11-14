@@ -36,9 +36,9 @@ use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::check::{Ensures, Promise, Raises, Verdict};
 use vyrn_frontend::core::{
-    count_reads, names_in, rows, Arg, Arm, Await, Body, BorrowKind, Branch, Callee, Cand, Copied,
-    Ctor, Facts, Fork, Form, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs,
-    Site, St, Target, Test, Use, Val, Walk,
+    count_reads, names_in, rows, Arg, Arm, AtRead, Await, Body, BorrowKind, Branch, Callee, Cand,
+    Copied, Ctor, Facts, Fork, Form, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload,
+    Place, Rhs, Site, St, Target, Test, Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::{DeclName, Rule};
@@ -7431,13 +7431,12 @@ impl<'a> Builder<'a> {
                 Expr::Var { name: v, .. } => match self.lookup(v) {
                     // A lambda frame's capture is a parameter no call binds.
                     Some(n)
-                        if p.capability != Capability::Consume
-                            && self.body.params.contains(&n)
+                        if self.body.params.contains(&n)
                             && matches!(self.body.names[n.index()].ty, Type::Fn(..))
                             && self.body.names[n.index()].borrow_kind
                                 != Some(BorrowKind::Capture) =>
                     {
-                        Target::Param(n)
+                        AtRead::of(p.capability).map_or(value, |r| Target::Param(n, r))
                     }
                     Some(_) => value,
                     None if self.concrete_fn(v) => Target::Fn(v.clone()),
@@ -7629,7 +7628,7 @@ pub fn lambda_at(name: &str) -> Option<(usize, usize)> {
 /// value is made where it is read: its target's closure variant. `None`
 /// where one is read twice, or a pass-through names no target.
 pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
-    if bound.iter().any(|(_, t)| matches!(t, Target::Param(_))) {
+    if bound.iter().any(|(_, t)| matches!(t, Target::Param(..))) {
         return None;
     }
     let mut out = body.clone();
@@ -7870,7 +7869,7 @@ fn bind_call(
         }
     }
     for t in targets.iter_mut() {
-        let Target::Param(p) = t else { continue };
+        let Target::Param(p, _) = t else { continue };
         let p = *p;
         let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
             continue;

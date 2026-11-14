@@ -1369,7 +1369,7 @@ impl<'b> Walk<'_, '_, 'b> {
                     let s = match t {
                         Target::Fn(f) => f.clone(),
                         Target::Lambda(k, ..) => k.clone(),
-                        Target::Param(n) => format!("param {}", n.0),
+                        Target::Param(n, _) => format!("param {}", n.0),
                         Target::Value(v) => format!("value {v}"),
                     };
                     xs.push(self.t.intern(Node::Static(s)));

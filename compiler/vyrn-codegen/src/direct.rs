@@ -14754,7 +14754,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 sig: self.cx.lambda_sig(key)?,
                 ncaps: caps.len(),
             }),
-            Target::Param(_) | Target::Value(_) => None,
+            Target::Param(..) | Target::Value(_) => None,
         }
     }
 
