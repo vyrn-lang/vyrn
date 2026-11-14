@@ -7695,10 +7695,14 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
 }
 
 /// Puts `made`, the row that binds `n`, before the one row that reads `n`, at
-/// that row's depth, and with `release` a release of `n` after it. `names` is
-/// the body's names. `false` where no row reads it, and where `release` and
-/// the read is neither a lambda's capture nor a copy, each of which copies
-/// what it reads.
+/// that row's depth, and with `release` a release of `n` where its borrow
+/// ends ([`borrow_end`]). `names` is the body's names. `false` where no row
+/// reads it, and where `release` and the borrow outlives a row that may
+/// leave the list.
+///
+/// `n` is a `read` parameter ([`Builder::targets_of`] binds a lambda only
+/// there), so the checker lets no row move or store it: each read is a
+/// borrow, which a `let` may alias.
 fn make_before_read(
     ss: &mut Vec<St>,
     names: &[NameInfo],
@@ -7726,21 +7730,56 @@ fn make_before_read(
         count_reads(std::slice::from_ref(&ss[i]), &mut reads);
         if reads[n.index()] > 0 {
             if release {
-                let copies = match &ss[i] {
-                    St::Let(_, Rhs::Prim(Op::Closure(_), ..)) => true,
-                    St::Let(_, rhs) => rhs.copies(names) == Some(Copied::Value),
-                    _ => false,
-                };
-                if !copies {
+                let Some(end) = borrow_end(&ss[i..], n) else {
                     return false;
-                }
-                ss.insert(i + 1, St::Drop(n, Site::None, 0, None));
+                };
+                ss.insert(i + end + 1, St::Drop(n, Site::None, 0, None));
             }
             ss.insert(i, made);
             return true;
         }
     }
     false
+}
+
+/// The index of the last row of `ss` that names `n` or a `let` alias of it,
+/// or `None` where a row after the first may leave `ss`, past a release
+/// placed after that index.
+fn borrow_end(ss: &[St], n: Name) -> Option<usize> {
+    let mut aliases = vec![n];
+    let mut end = 0;
+    let mut ns = Vec::new();
+    for (i, s) in ss.iter().enumerate() {
+        ns.clear();
+        names_in(s, &mut ns);
+        if ns.iter().any(|m| aliases.contains(m)) {
+            end = i;
+        }
+        let of = match s {
+            St::Let(m, Rhs::Val(a)) => Some((m, a.clone())),
+            St::Let(m, Rhs::Read(p)) => root_name(p).map(|a| (m, a)),
+            _ => None,
+        };
+        if let Some((m, Val::Name(a))) = of {
+            if aliases.contains(&a) {
+                aliases.push(*m);
+            }
+        }
+    }
+    (!ss[1..=end].iter().any(|s| leaves(s, false))).then_some(end)
+}
+
+/// Whether `s` may leave the list it stands in: a `return`, or a `break` or
+/// `continue` under no loop of `s` (`in_loop` says it stands in one).
+fn leaves(s: &St, in_loop: bool) -> bool {
+    match s {
+        St::Return { .. } => true,
+        St::Break { .. } | St::Continue { .. } => !in_loop,
+        _ => {
+            let in_loop = in_loop || matches!(s, St::Loop { .. });
+            s.lists().flatten().any(|r| leaves(r, in_loop))
+        }
+    }
 }
 
 /// Deletes from `ss`, at every depth, each release of a name `gone` answers.

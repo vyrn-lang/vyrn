@@ -13170,11 +13170,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
         // parameter holds the caller's address for the whole body, so a second name for it
         // is that address while neither is written: a scrutinee's temporary (a declared
         // release's `match consume self`) or a reader's `let data = d`. A bound `fn`
-        // parameter that [`vyrn_lower::core::specialize`] makes is still that parameter.
+        // parameter that [`vyrn_lower::core::specialize`] makes is still that parameter, and
+        // one it makes with captures releases them after the borrow's last row.
         let joins = self.core_joins(*x);
         let made = |r: &Rhs| matches!(r, Rhs::Make(Ctor::Closure(_), _));
-        let param = from.borrow
-            && (body.params.contains(x) || self.lets_of(*x).iter().any(|(_, r)| made(r)))
+        let param = ((from.borrow && body.params.contains(x))
+            || self.lets_of(*x).iter().any(|(_, r)| made(r)))
             && (info.source.starts_with('@') || info.borrow)
             && unwritten(n);
         ((joins || param || (!info.borrow && self.owns_heap(&info.ty) && !from.borrow))

@@ -2388,6 +2388,27 @@ fn a_capturing_lambda_handed_between_consume_fn_parameters_is_freed() {
     );
 }
 
+// A capturing lambda at a `read` fn parameter, read once by a `let` alias and
+// once by a lambda that captures it, is made and released once each
+// (fnsweep fv.r.local.lam, fv.r.hof.lam: no lowering).
+#[test]
+fn a_capturing_lambda_read_through_an_alias_or_a_capture_is_freed() {
+    let src = "fn each(f: fn(Int64) -> Unit) { f(1) }\n\
+               fn alias(p: fn() -> Unit) { let g = p\n g() }\n\
+               fn wrap(p: fn() -> Unit) { each(x -> p()) }\n\
+               fn vyrnTestMain() -> Int64 {\n\
+                 let s = \"s\".copy()\n\
+                 alias(() -> print(s))\n\
+                 wrap(() -> print(s))\n\
+                 return 0\n\
+               }\n";
+    runs_clean(
+        "a-capturing-lambda-read-through-an-alias-or-a-capture",
+        src,
+        "s\ns\n0\n",
+    );
+}
+
 // A `consume` parameter of a generic instance and of a higher-order instance,
 // a stored value at a `consume fn` parameter among them (record `m7-lamval`).
 #[test]
