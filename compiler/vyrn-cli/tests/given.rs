@@ -8,13 +8,18 @@
 //! state is given only once its module's closed entry is written
 //! (`loader::read_closed`). Each giving load must print the built load's
 //! diagnostics, warnings and verdict: a given body's stored verdict is the
-//! verdict its build gives in that program.
+//! verdict its build gives in that program. The editor's judgment memo
+//! (`movecheck::Judgments`) is held to the same: each root is analysed twice
+//! in one session that arms it, under `Host::Check` and under `Host::Emit`,
+//! and the second analysis, served the first's verdicts and fact summaries,
+//! must print what the first printed, as after an editor restart.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use vyrn_frontend::movecheck::{declare, Host};
+use vyrn_frontend::session::Session;
 
 mod common;
 
@@ -38,21 +43,53 @@ fn roots_in(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// What `vyrn check` decides of `path` under `host`: each diagnostic and
-/// warning of the load, then the instantiation check's error, then `ok` or
-/// `refused`.
-fn verdict(path: &Path, host: Host) -> String {
-    declare(host);
-    let src = std::fs::read_to_string(path).expect("the root reads");
+/// The options `vyrn check` loads `path` with, in `session` where one is given.
+fn options(
+    path: &Path,
+    session: Option<&std::sync::Arc<Session>>,
+) -> vyrn_frontend::loader::LoadOptions {
     let mut opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(slash(&repo_root().join("std"))),
         expansions: vyrn_frontend::project::Expansions::shared(),
+        session: session.cloned(),
         ..Default::default()
     };
     let dir = path.parent().expect("a file has a directory");
     if let Ok(Some(m)) = vyrn_frontend::manifest::find(dir) {
         m.load_options(&mut opts);
     }
+    opts
+}
+
+/// The diagnostics the editor shows for `path` under `host`, analysed in
+/// `session`.
+fn editor(path: &Path, host: Host, session: &std::sync::Arc<Session>) -> String {
+    declare(host);
+    let src = std::fs::read_to_string(path).expect("the root reads");
+    let opts = options(path, Some(session));
+    let engine = vyrn_genwasm::engine();
+    let resolver = vyrn_frontend::loader::DiskResolver;
+    let root = slash(path);
+    let linker = Some((root.as_str(), &opts, &resolver as _));
+    let a = vyrn_frontend::analyze_judged(&src, linker, Some(&*engine), &vyrn_lower::JUDGE);
+    a.diagnostics
+        .iter()
+        .map(|d| {
+            format!(
+                "{d:?}
+"
+            )
+        })
+        .collect()
+}
+
+/// What `vyrn check` decides of `path` under `host`: each diagnostic and
+/// warning of the load, then the instantiation check's error, then `ok` or
+/// `refused`.
+fn verdict(path: &Path, host: Host) -> String {
+    declare(host);
+    let src = std::fs::read_to_string(path).expect("the root reads");
+    let opts = options(path, None);
     let engine = vyrn_genwasm::engine();
     let resolver = vyrn_frontend::loader::DiskResolver;
     let (loaded, warnings) =
@@ -112,6 +149,19 @@ fn every_given_verdict_is_the_built_one() {
                     let unrun = common::first_diff(&rel, "unrun given", &unrun, "built", &built);
                     let known = KNOWN.iter().any(|(k, _)| *k == rel);
                     let mut diffs: Vec<String> = unrun.into_iter().collect();
+                    for (host, label) in [(Host::Check, "memo"), (Host::Emit, "unrun memo")] {
+                        let session = Session::new(true);
+                        let first = editor(path, host, &session);
+                        let served = editor(path, host, &session);
+                        let label = format!("{label} served");
+                        diffs.extend(common::first_diff(
+                            &rel,
+                            &label,
+                            &served,
+                            "restarted",
+                            &first,
+                        ));
+                    }
                     for label in ["given", "given again"] {
                         let given = verdict(path, Host::Check);
                         let d = common::first_diff(&rel, label, &given, "built", &built);
