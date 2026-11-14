@@ -12,7 +12,7 @@ set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 py=$(command -v python3 || command -v python)
 exec "$py" - "$1" "$2" "${3:-${CHECK_ALLOCS_THRESHOLD:-0.1}}" "$root" <<'PY'
-import glob, os, shutil, subprocess, sys, tempfile
+import glob, os, shutil, subprocess, sys, tempfile, time
 
 base, head, limit = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2]), float(sys.argv[3])
 tree = sys.argv[4]
@@ -69,6 +69,10 @@ def phases(binary, cache, verb, root):
 
 caches = {b: tempfile.mkdtemp() for b in (base, head)}
 works = {b: copy_for(b) for b in (base, head)}
+# A file younger than the loader's settling slack (manifest::MTIME_SLACK) has no
+# settled stamp, so a load reads and hashes it where a later load trusts its
+# stamp. Wait the slack out once, past the last copy, or the counts depend on timing.
+time.sleep(3)
 failed = False
 skipped = []
 for verb, root in roots:
