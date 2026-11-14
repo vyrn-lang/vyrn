@@ -132,12 +132,12 @@ checker-rules.vyrn:703:17: `float64Bits` argument 1 expects Float64, found Int64
 checker-rules.vyrn:705:14: `declaredOne` expects 1 argument(s), got 2
 checker-rules.vyrn:710:0: function `fallsThrough` must return Int64 on all paths
 checker-rules.vyrn:716:0: this lambda must return Int64 on all paths
-checker-rules.vyrn:729:0: `pop` is not available on a fixed-size array (it cannot shrink); use a growable `Array<T>`
+checker-rules.vyrn:729:0: `pop` is not available on Array<Int64, 2>, a fixed-size array (it cannot shrink); use a growable `Array<T>`
 checker-rules.vyrn:734:0: `swapRemove` needs an `Array<T>`, found String
 checker-rules.vyrn:739:0: `pop` needs an `Array<T>`, found T
 checker-rules.vyrn:745:0: `pop` needs an `Array<T>`, found Map<String, Int64>
-checker-rules.vyrn:753:0: `pop` is not available on a fixed-size array (it cannot shrink); use a growable `Array<T>`
-checker-rules.vyrn:757:0: `pop` is not available on a fixed-size array (it cannot shrink); use a growable `Array<T>`
+checker-rules.vyrn:753:0: `pop` is not available on Array<Int64, 2>, a fixed-size array (it cannot shrink); use a growable `Array<T>`
+checker-rules.vyrn:757:0: `pop` is not available on Array<Int64, 2>, a fixed-size array (it cannot shrink); use a growable `Array<T>`
 checker-rules.vyrn:775:24: this lambda takes 2 parameter(s), but `applyTo` argument 2 expects 1
 checker-rules.vyrn:779:24: this lambda returns String, but `applyTo` expects it to return Int64
 checker-rules.vyrn:784:24: `g` is a 2-argument function value, but `applyTo` argument 2 expects 1

@@ -735,6 +735,7 @@ compiler/vyrn-cli/tests/check/schema_of_a_union_is_refused.vyrn	0	cbf29ce4842223
 compiler/vyrn-cli/tests/check/setfield_into_predicated_field_takes_a_constructed_value.vyrn	0	cbf29ce484222325	20	17	e177a31d2f665c6e
 compiler/vyrn-cli/tests/check/shrink_a_string.vyrn	0	cbf29ce484222325	20	18	20fe6da80a783e77
 compiler/vyrn-cli/tests/check/shrink_pop.vyrn	0	cbf29ce484222325	20	18	728afc02a1639e1a
+compiler/vyrn-cli/tests/check/shrink_pop_match.vyrn	0	cbf29ce484222325	20	14	53f4454de3f1f1f7
 compiler/vyrn-cli/tests/check/shrink_swapremove.vyrn	0	cbf29ce484222325	20	13	c3678574ff5d1426
 compiler/vyrn-cli/tests/check/sized_int_minimums_are_writable_negated.vyrn	0	cbf29ce484222325	20	17	92d780f292dcecbc
 compiler/vyrn-cli/tests/check/smallarray_at_a_contract_boundary_is_a_named_error.vyrn	0	cbf29ce484222325	20	17	258c74f4bba060ca

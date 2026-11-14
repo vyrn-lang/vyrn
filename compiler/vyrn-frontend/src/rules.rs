@@ -1415,9 +1415,9 @@ rules! {
     IndexAssignUnknown { name } "index-assignment to unknown variable `{name}`";
     ConditionNotBool { word, t } "`{word}` condition must be Bool, found {t}";
     UnknownVariable { name } "unknown variable `{name}`";
-    ShrinkFixedArray { op }
-        "`{op}` is not available on a fixed-size array (it cannot shrink); use a growable \
-        `Array<T>`";
+    ShrinkFixedArray { op, t }
+        "`{op}` is not available on {t}, a fixed-size array (it cannot shrink); use a \
+        growable `Array<T>`";
     ShrinkNeedsArray { op, t } "`{op}` needs an `Array<T>`, found {t}";
     DuplicateArm { v } "duplicate `{v}` arm";
     MissingVariant { v } "`match` is missing variant `{v}`";
