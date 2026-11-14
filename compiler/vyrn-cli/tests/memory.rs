@@ -2693,6 +2693,33 @@ fn main() -> Int64 {
     );
 }
 
+/// A Unit parameter is one unread word at every call: declared, a generic
+/// instance, a fork branch, a stored `fn`, a lambda and a waiting function.
+#[test]
+fn a_unit_parameter_is_one_unread_word() {
+    let shapes = [
+        ("declared", "fn f(u: Unit, n: Int64) -> Int64 {\n    return n\n}\nfn main() -> Int64 {\n    print(f(named(), 3))\n    return 0\n}\n"),
+        ("generic", "fn g<T>(x: T, n: Int64) -> Int64 {\n    return n\n}\nfn main() -> Int64 {\n    print(g(named(), 3))\n    return 0\n}\n"),
+        ("fork", "import { both, sleep, Both } from \"std/task\"\nfn main() -> Int64 {\n    await sleep(1)\n    let r = both(named(), named())\n    print(3)\n    return 0\n}\n"),
+        ("stored", "fn f(u: Unit) -> Int64 {\n    return 3\n}\nfn call(g: fn(Unit) -> Int64) -> Int64 {\n    return g(named())\n}\nfn main() -> Int64 {\n    print(call(f))\n    return 0\n}\n"),
+        ("lambda", "fn call(g: fn(Unit) -> Int64) -> Int64 {\n    return g(named())\n}\nfn main() -> Int64 {\n    let k = 2\n    print(call(u -> k + 1))\n    return 0\n}\n"),
+        ("waits", "import { sleep } from \"std/task\"\nfn w(u: Unit, n: Int64) -> Int64 {\n    await sleep(1)\n    return n\n}\nfn main() -> Int64 {\n    print(await w(named(), 3))\n    return 0\n}\n"),
+    ];
+    for (stem, body) in shapes {
+        let src = format!("fn named() {{\n    print(\"nm\")\n}}\n{body}");
+        let want = if stem == "fork" {
+            "nm\nnm\n3\n"
+        } else {
+            "nm\n3\n"
+        };
+        assert_eq!(
+            audited_run(&format!("unitparam{stem}"), &src),
+            (Some(0), want.to_string()),
+            "{stem}"
+        );
+    }
+}
+
 /// #468: a store into a place a `consume` left a hole in releases what the
 /// place still holds, around the hole: the field itself (nothing), a record
 /// around the field, and the whole binding. The new value is whole, so the

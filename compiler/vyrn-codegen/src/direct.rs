@@ -2345,7 +2345,8 @@ impl<'a> Cx<'a> {
             }
             match self.repr(p, line)?.val() {
                 Some(v) => params.push(v),
-                None => return unsupported("a Unit parameter", line),
+                // One unread word keeps every later parameter at its declared index.
+                None => params.push(ValType::I32),
             }
         }
         let mut results = match &sig.ret {
@@ -3444,7 +3445,7 @@ fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Resu
                 Place::Slot(off)
             }
             Repr::Scalar(_) => Place::Local(local),
-            Repr::Unit => return unsupported("a Unit parameter of a stored `fn`", 0),
+            Repr::Unit => Place::Local(local),
         };
         args.push((place, pty.clone()));
     }
@@ -12741,7 +12742,13 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         };
                         spilled.push(s.spill(b, l, &ty, line)?);
                     }
-                    (Arg::Val(v), _) => s.core_val(m, b, v, p, line)?,
+                    (Arg::Val(v), _) => {
+                        s.core_val(m, b, v, p, line)?;
+                        // A Unit parameter's unread word ([`Cx::wasm_sig`]).
+                        if s.core_unit(p) {
+                            b.ins(&Instruction::I32Const(0));
+                        }
+                    }
                     (Arg::Place(pl), _) => {
                         let (_, off) = s.core_addr(m, b, pl, line)?;
                         s.core_step(b, off);
