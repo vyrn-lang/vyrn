@@ -942,7 +942,7 @@ fn away_from_home(
         let mut visit = |e: &Expr| {
             if let Expr::Call { name, line, .. } = e {
                 if let Some(&h) = homed.iter().find(|(n, _)| *n == name.as_str()) {
-                    calls.push((h, *line));
+                    calls.push((h, *line, e.col()));
                 }
             }
             true
@@ -972,16 +972,12 @@ fn away_from_home(
         {
             crate::ast::each_expr_in(e, &mut visit);
         }
-        for ((name, home), line) in calls {
+        for ((name, home), line, col) in calls {
             let at_home = resolve_spec(home, &m.key, opts)
                 .is_ok_and(|k| same_file(&m.key, &k, opts, real_paths));
             if !at_home {
-                out.push(load_error(
-                    &m.key,
-                    root_key,
-                    line,
-                    rule!(AwayFromHome, name, home),
-                ));
+                let d = load_error(&m.key, root_key, line, rule!(AwayFromHome, name, home));
+                out.push(Diagnostic { col, ..d });
             }
         }
     }
@@ -5411,9 +5407,10 @@ struct NsResolver<'a> {
 }
 
 impl NsResolver<'_> {
-    fn err(&mut self, line: usize, rule: Rule) {
-        self.errors
-            .push(load_error(&self.module_key, &self.root_key, line, rule));
+    /// Refuses at `line`, on column `col` (0 for the whole line).
+    fn err(&mut self, line: usize, col: usize, rule: Rule) {
+        let d = load_error(&self.module_key, &self.root_key, line, rule);
+        self.errors.push(Diagnostic { col, ..d });
     }
 
     /// The program-wide symbol a namespace member resolves to, after any
@@ -5426,7 +5423,13 @@ impl NsResolver<'_> {
             .is_some_and(|vs| vs.contains(variant))
     }
 
-    fn resolve_member(&mut self, ns: &str, member: &str, line: usize) -> Option<String> {
+    fn resolve_member(
+        &mut self,
+        ns: &str,
+        member: &str,
+        line: usize,
+        col: usize,
+    ) -> Option<String> {
         let target = self.ns.get(ns).cloned()?;
         let exported = self
             .module_exports
@@ -5434,7 +5437,7 @@ impl NsResolver<'_> {
             .is_some_and(|s| s.contains(member));
         if !exported {
             let target = spoken(&self.module_key, &target, self.opts);
-            self.err(line, rule!(NamespaceNoMember, ns, target, member));
+            self.err(line, col, rule!(NamespaceNoMember, ns, target, member));
             return None;
         }
         Some(resolved_name(self.foreign_renames, &target, member))
@@ -5509,7 +5512,7 @@ impl NsResolver<'_> {
                 // type.
                 if let Some((ns, member)) = b.split_once('.') {
                     let line = f.line;
-                    if let Some(sym) = self.resolve_member(ns, member, line) {
+                    if let Some(sym) = self.resolve_member(ns, member, line, 0) {
                         *b = sym;
                     }
                 }
@@ -5524,7 +5527,7 @@ impl NsResolver<'_> {
             let head = n.clone();
             if let Some((ns, member)) = head.split_once('.') {
                 if self.ns.contains_key(ns) {
-                    if let Some(sym) = self.resolve_member(ns, member, 0) {
+                    if let Some(sym) = self.resolve_member(ns, member, 0, 0) {
                         *n = sym;
                     }
                 }
@@ -5549,6 +5552,7 @@ impl BodyVisitMut for NsResolver<'_> {
     }
 
     fn expr(&mut self, e: &mut Expr, locals: &HashSet<String>) -> bool {
+        let col = e.col();
         match e {
             // `ns.fn(args)` and `ns.Enum.Variant(payload)` both arrive as method
             // sugar with the namespace as the first argument, which goes.
@@ -5578,7 +5582,7 @@ impl BodyVisitMut for NsResolver<'_> {
                     if *form == CallForm::Method && self.is_ns(head, locals) {
                         let head = head.clone();
                         let member = crate::prelude::method_surface(name);
-                        if let Some(sym) = self.resolve_member(&head, member, l) {
+                        if let Some(sym) = self.resolve_member(&head, member, l, col) {
                             *name = sym;
                         }
                         args.remove(0);
@@ -5613,12 +5617,12 @@ impl BodyVisitMut for NsResolver<'_> {
                 // qualifier into the name.
                 if let Some((ns, member)) = name.clone().split_once('.') {
                     if self.is_ns(ns, locals) {
-                        if let Some(sym) = self.resolve_member(ns, member, *line) {
+                        if let Some(sym) = self.resolve_member(ns, member, *line, col) {
                             *name = sym;
                         }
                     } else {
                         let (ns, line) = (ns.to_string(), *line);
-                        self.err(line, rule!(NotNamespace, ns));
+                        self.err(line, col, rule!(NotNamespace, ns));
                     }
                 }
             }
@@ -5633,7 +5637,7 @@ impl BodyVisitMut for NsResolver<'_> {
                 if let Expr::Var { name: head, .. } = expr.as_ref() {
                     if self.is_ns(head, locals) {
                         let head = head.clone();
-                        if let Some(sym) = self.resolve_member(&head, field, l) {
+                        if let Some(sym) = self.resolve_member(&head, field, l, col) {
                             *e = Expr::var(sym, l);
                         }
                         return false;
@@ -5651,10 +5655,14 @@ impl BodyVisitMut for NsResolver<'_> {
                             let (head, enum_name, variant) =
                                 (head.clone(), enum_name.clone(), field.clone());
                             if self.declares_variant(&head, &enum_name, &variant) {
-                                let _ = self.resolve_member(&head, &enum_name, l);
+                                let _ = self.resolve_member(&head, &enum_name, l, col);
                                 *e = Expr::var(variant, l);
                             } else {
-                                self.err(l, rule!(NamespacedVariant, head, enum_name, variant));
+                                self.err(
+                                    l,
+                                    col,
+                                    rule!(NamespacedVariant, head, enum_name, variant),
+                                );
                             }
                             return false;
                         }
@@ -5664,7 +5672,7 @@ impl BodyVisitMut for NsResolver<'_> {
             Expr::Var { name, line, id: _ } => {
                 if self.is_ns(name, locals) {
                     let (name, line) = (name.clone(), *line);
-                    self.err(line, rule!(NamespaceNotValue, name));
+                    self.err(line, col, rule!(NamespaceNotValue, name));
                 }
             }
             _ => {}
@@ -5682,7 +5690,7 @@ impl BodyVisitMut for NsResolver<'_> {
                 let variant = rest.rsplit('.').next().unwrap_or(rest).to_string();
                 let enum_name = rest.split('.').next().unwrap_or(rest).to_string();
                 if self.ns.contains_key(&ns) {
-                    let _ = self.resolve_member(&ns, &enum_name, line);
+                    let _ = self.resolve_member(&ns, &enum_name, line, 0);
                     *v = variant;
                 }
             }
