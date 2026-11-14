@@ -1063,6 +1063,7 @@ compiler/vyrn-cli/tests/waits/lambda.vyrn	0	cbf29ce484222325	20	14	7e8a0ba1b59dd
 compiler/vyrn-cli/tests/waits/longsleep.vyrn	0	cbf29ce484222325	20	16	598eac905e55a826
 compiler/vyrn-cli/tests/waits/race.vyrn	0	cbf29ce484222325	20	17	5eaf328666292474
 compiler/vyrn-cli/tests/waits/result.vyrn	0	cbf29ce484222325	20	15	45a0b3aa47bcea81
+compiler/vyrn-cli/tests/waits/unawaited.vyrn	0	cbf29ce484222325	20	17	036b4dd0f4daf488
 examples/a1_afterjoin.vyrn	0	cbf29ce484222325	20	13	30f04885312703ea
 examples/a2_capture.vyrn	0	cbf29ce484222325	20	17	d14579e36e1493c2
 examples/a2_capture_escape.vyrn	0	cbf29ce484222325	20	18	aa841adb72cc068e
