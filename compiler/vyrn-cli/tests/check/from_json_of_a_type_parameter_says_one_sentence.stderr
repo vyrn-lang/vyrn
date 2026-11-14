@@ -1,1 +1,1 @@
-from_json_of_a_type_parameter_says_one_sentence.vyrn:4:0: `fromJson` cannot decode into `T` (not a codable type)
+from_json_of_a_type_parameter_says_one_sentence.vyrn:4:12: `fromJson` cannot decode into `T` (not a codable type)

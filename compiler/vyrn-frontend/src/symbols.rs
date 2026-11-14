@@ -837,8 +837,13 @@ fn pin_diagnostics(
     tok_info: &[TokenInfo],
 ) {
     for d in diags.iter_mut() {
-        // Lex and parse diagnostics carry their own column.
+        // Lex and parse diagnostics carry their own span. A judgment that knows
+        // only where its name starts spans the token there.
         if d.col != 0 {
+            if d.end_col == 0 && !matches!(d.stage, "lex" | "parse") {
+                let at = tok_info.iter().find(|t| t.line == d.line && t.col == d.col);
+                d.end_col = at.map_or(0, |t| t.end_col);
+            }
             continue;
         }
         for target in backtick_tokens(&d.message) {

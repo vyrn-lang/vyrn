@@ -2641,6 +2641,85 @@ fn main() -> Int64 {
     assert_eq!(audited_run("statetake", src), (Some(0), "1\n".to_string()));
 }
 
+/// A Unit element has no bytes: a `map` to a Unit lambda builds, and its
+/// array holds a length and nothing else.
+#[test]
+fn an_array_of_unit_builds_and_runs() {
+    let src = r#"import { map } from "std/arrays"
+
+fn named() {
+    print("nm")
+}
+
+fn take(p: fn() -> Unit) {
+    let r = map([1], x -> p())
+    print(r.length.toString())
+}
+
+fn main() -> Int64 {
+    take(named)
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("unitarray", src),
+        (Some(0), "nm\n1\n".to_string())
+    );
+}
+
+/// A Unit payload's word is 0 and is never boxed, so `Some` of a Unit call
+/// builds and its match frees nothing.
+#[test]
+fn a_unit_payload_builds_and_runs() {
+    let src = r#"fn named() {
+    print("nm")
+}
+
+fn mk() -> Option<Unit> {
+    return Some(named())
+}
+
+fn main() -> Int64 {
+    match mk() {
+        Some(v) => print("some"),
+        None => print("none"),
+    }
+    return 0
+}
+"#;
+    assert_eq!(
+        audited_run("unitpayload", src),
+        (Some(0), "nm\nsome\n".to_string())
+    );
+}
+
+/// A Unit parameter is one unread word at every call: declared, a generic
+/// instance, a fork branch, a stored `fn`, a lambda and a waiting function.
+#[test]
+fn a_unit_parameter_is_one_unread_word() {
+    let shapes = [
+        ("declared", "fn f(u: Unit, n: Int64) -> Int64 {\n    return n\n}\nfn main() -> Int64 {\n    print(f(named(), 3))\n    return 0\n}\n"),
+        ("generic", "fn g<T>(x: T, n: Int64) -> Int64 {\n    return n\n}\nfn main() -> Int64 {\n    print(g(named(), 3))\n    return 0\n}\n"),
+        ("fork", "import { both, sleep, Both } from \"std/task\"\nfn main() -> Int64 {\n    await sleep(1)\n    let r = both(named(), named())\n    print(3)\n    return 0\n}\n"),
+        ("stored", "fn f(u: Unit) -> Int64 {\n    return 3\n}\nfn call(g: fn(Unit) -> Int64) -> Int64 {\n    return g(named())\n}\nfn main() -> Int64 {\n    print(call(f))\n    return 0\n}\n"),
+        ("lambda", "fn call(g: fn(Unit) -> Int64) -> Int64 {\n    return g(named())\n}\nfn main() -> Int64 {\n    let k = 2\n    print(call(u -> k + 1))\n    return 0\n}\n"),
+        ("waits", "import { sleep } from \"std/task\"\nfn w(u: Unit, n: Int64) -> Int64 {\n    await sleep(1)\n    return n\n}\nfn main() -> Int64 {\n    print(await w(named(), 3))\n    return 0\n}\n"),
+    ];
+    for (stem, body) in shapes {
+        let src = format!("fn named() {{\n    print(\"nm\")\n}}\n{body}");
+        let want = if stem == "fork" {
+            "nm\nnm\n3\n"
+        } else {
+            "nm\n3\n"
+        };
+        assert_eq!(
+            audited_run(&format!("unitparam{stem}"), &src),
+            (Some(0), want.to_string()),
+            "{stem}"
+        );
+    }
+}
+
 /// #468: a store into a place a `consume` left a hole in releases what the
 /// place still holds, around the hole: the field itself (nothing), a record
 /// around the field, and the whole binding. The new value is whole, so the

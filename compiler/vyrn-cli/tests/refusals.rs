@@ -2839,7 +2839,7 @@ fn a_std_modules_own_refusal_names_its_file() {
         .output()
         .expect("vyrn check");
     let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
-    let says = format!("strings.vyrn:{line}:0: `bad` declared Int64 but initializer is String\n");
+    let says = format!("strings.vyrn:{line}:9: `bad` declared Int64 but initializer is String\n");
     assert!(!out.status.success(), "accepted");
     assert_eq!(err, format!("std/{says}"));
 }

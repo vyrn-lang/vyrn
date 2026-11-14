@@ -2345,7 +2345,8 @@ impl<'a> Cx<'a> {
             }
             match self.repr(p, line)?.val() {
                 Some(v) => params.push(v),
-                None => return unsupported("a Unit parameter", line),
+                // One unread word keeps every later parameter at its declared index.
+                None => params.push(ValType::I32),
             }
         }
         let mut results = match &sig.ret {
@@ -3444,7 +3445,7 @@ fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Resu
                 Place::Slot(off)
             }
             Repr::Scalar(_) => Place::Local(local),
-            Repr::Unit => return unsupported("a Unit parameter of a stored `fn`", 0),
+            Repr::Unit => Place::Local(local),
         };
         args.push((place, pty.clone()));
     }
@@ -6637,6 +6638,9 @@ impl<'p> Fn_<'_, 'p> {
                 push(b)?;
                 float_into_word(b, v);
             }
+            Word::Void => {
+                b.ins(&Instruction::I64Const(0));
+            }
             _ => {
                 place
                     .addr(b, 0)
@@ -7291,7 +7295,9 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&self.cx.load(&w.elem, 0));
             }
             Repr::Agg(_) => {}
-            Repr::Unit => return unsupported("an array of Unit", line),
+            Repr::Unit => {
+                b.ins(&Instruction::Drop);
+            }
         }
         Ok(())
     }
@@ -7318,7 +7324,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&self.cx.store(elem, k));
                 }
                 Repr::Agg(_) => self.agg_part(m, b, elems, i, dest.at(at), stride, elem, line)?,
-                Repr::Unit => return unsupported("an array of Unit", line),
+                Repr::Unit => {}
             }
         }
         Ok(())
@@ -7350,7 +7356,8 @@ impl<'p> Fn_<'_, 'p> {
                     let at = dest.at(l.fields[i]);
                     self.agg_part(m, b, parts, order[i], at, fl.size, &f.ty, line)?;
                 }
-                Repr::Unit => return unsupported("a Unit field", line),
+                // No bytes: the part's row already ran its effects.
+                Repr::Unit => {}
             }
         }
         dest.addr(b, 0);
@@ -7623,7 +7630,9 @@ impl<'p> Fn_<'_, 'p> {
             Repr::Agg(_) => {
                 b.copy(stride as u32);
             }
-            Repr::Unit => return unsupported("an array of Unit", line),
+            Repr::Unit => {
+                b.ins(&Instruction::Drop);
+            }
         }
         // After the store, nothing reads the old buffer through the caller's header.
         b.ins(&Instruction::LocalGet(stale));
@@ -7718,21 +7727,24 @@ impl<'p> Fn_<'_, 'p> {
         }
         let elem = w.elem.clone();
         // Take the removed element before the last one overwrites it; they can be one address.
-        let r = self.cx.repr(&elem, line)?;
-        let taken = self.place_for(b, &r, line)?;
-        match (taken, &r) {
-            (Place::Local(l), _) => {
+        // A Unit element has no bytes to take, and the call row hands back nothing.
+        let taken = match self.cx.repr(&elem, line)? {
+            Repr::Unit => None,
+            Repr::Scalar(v) => {
+                let l = b.local(v);
                 self.elem_addr(b, &w, idx);
                 self.load_elem(b, &w, line)?;
                 b.ins(&Instruction::LocalSet(l));
+                Some(Place::Local(l))
             }
-            (Place::Slot(off), Repr::Agg(el)) => {
+            Repr::Agg(el) => {
+                let off = b.alloc(el.size, el.align);
                 b.slot(off);
                 self.elem_addr(b, &w, idx);
                 b.copy(el.size);
+                Some(Place::Slot(off))
             }
-            _ => return unsupported("an array of Unit", line),
-        }
+        };
         let last = b.local(ValType::I64);
         b.ins(&Instruction::LocalGet(slot));
         b.ins(&Instruction::LocalGet(w.len));
@@ -7744,13 +7756,13 @@ impl<'p> Fn_<'_, 'p> {
         self.elem_addr(b, &w, last);
         b.copy(w.stride);
         match taken {
-            Place::Local(l) => {
+            Some(Place::Local(l)) => {
                 b.ins(&Instruction::LocalGet(l));
             }
-            // `place_for` hands out a local or a frame slot, never module state.
-            p => {
+            Some(p) => {
                 p.addr(b, 0);
             }
+            None => {}
         }
         Ok(elem)
     }
@@ -7759,6 +7771,9 @@ impl<'p> Fn_<'_, 'p> {
     fn encode_word2(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {
         match self.word2(t)? {
             Word::Direct => {}
+            Word::Void => {
+                b.ins(&Instruction::I64Const(0));
+            }
             Word::Ext(_) => {
                 b.ins(&Instruction::I64ExtendI32U);
             }
@@ -7781,6 +7796,8 @@ type Sum = Vec<EnumVariant>;
 enum Word {
     /// It is the word.
     Direct,
+    /// A `Unit` payload: no bytes, so the word is 0 and nothing reads it.
+    Void,
     /// A narrower integer scalar, zero-extended into the word.
     Ext(ValType),
     /// A float's bits, reinterpreted (and zero-extended for `f32`). `Ext` would emit
@@ -8238,7 +8255,8 @@ impl<'p> Fn_<'_, 'p> {
             // Test `words(t) == 2`, not the shape: a one-slot sum is also two `I64`s,
             // and a nested sum rides in one boxed slot.
             Repr::Agg(_) if self.cx.words(t) == 2 => Word::Inline2,
-            _ => Word::Boxed,
+            Repr::Agg(_) => Word::Boxed,
+            Repr::Unit => Word::Void,
         })
     }
 
@@ -8545,6 +8563,7 @@ impl<'p> Fn_<'_, 'p> {
         let off = sl.fields[self.cx.payload_slot(ptys, i)];
         let kind = self.word2(t)?;
         Ok(match kind {
+            Word::Void => return unsupported("a binding of a Unit value", line),
             Word::Direct => {
                 let l = b.local(ValType::I64);
                 b.ins(&Instruction::LocalGet(addr));
@@ -12723,7 +12742,13 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         };
                         spilled.push(s.spill(b, l, &ty, line)?);
                     }
-                    (Arg::Val(v), _) => s.core_val(m, b, v, p, line)?,
+                    (Arg::Val(v), _) => {
+                        s.core_val(m, b, v, p, line)?;
+                        // A Unit parameter's unread word ([`Cx::wasm_sig`]).
+                        if s.core_unit(p) {
+                            b.ins(&Instruction::I32Const(0));
+                        }
+                    }
                     (Arg::Place(pl), _) => {
                         let (_, off) = s.core_addr(m, b, pl, line)?;
                         s.core_step(b, off);
@@ -12830,10 +12855,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
         }
         let (ty, off) = self.core_addr(m, b, p, line)?;
-        let Repr::Scalar(_) = self.cx.repr(&ty, line)? else {
-            return unsupported("a read of a place this walk does not load", line);
+        match self.cx.repr(&ty, line)? {
+            Repr::Scalar(_) => b.ins(&self.cx.load(&ty, off.unwrap_or(0))),
+            // No bytes to load: the address goes unread.
+            Repr::Unit => b.ins(&Instruction::Drop),
+            Repr::Agg(_) => return unsupported("a read of a place this walk does not load", line),
         };
-        b.ins(&self.cx.load(&ty, off.unwrap_or(0)));
         Ok(ty)
     }
 
@@ -13841,7 +13868,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// Whether this walk stores a part of a made layout through [`Fn_::part`]: a value in
     /// one wasm local. [`Fn_::agg_part`] stores a layout part.
     fn core_part_ty(&self, t: &Type) -> bool {
-        self.core_framed(t)
+        self.core_framed(t) || self.core_unit(t)
     }
 
     /// Whether a name of `t` gets a place of its own: a value in one wasm local, as a
@@ -14141,7 +14168,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             return false;
         };
         vs.iter().zip(&tys).all(|(v, t)| {
-            self.core_framed(t)
+            self.core_part_ty(t)
                 || (self.core_payload_layout(v, t)
                     && (matches!(ctor, Ctor::Map)
                         || matches!(v, Val::Name(n)
@@ -15800,9 +15827,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
             // A place whose value fits one wasm local, a String pointer as much as an `Int64`
             // ([`Fn_::core_read`]). A take loads the same value and leaves a hole, which the
-            // place's release rows carry.
+            // place's release rows carry. A Unit place loads nothing.
             Rhs::Read(p) | Rhs::Take(p) => {
-                self.core_place_ty(p).is_some_and(|t| self.core_framed(&t))
+                (self.core_place_ty(p)).is_some_and(|t| self.core_framed(&t) || self.core_unit(&t))
             }
             _ => false,
         }
