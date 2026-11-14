@@ -663,6 +663,13 @@ fn census() -> Vec<Row> {
             "`std/strings` does not define `noSuchThing`",
             Kernel::Elsewhere,
         ),
+        row(
+            "r97_a_read_fn_parameter_to_a_consume_fn_parameter.vyrn",
+            "rule 2: a `read` fn parameter to a `consume` fn parameter",
+            "`cb` may not be passed to a `consume` parameter via `take(..)`: it is a `read` \
+             parameter",
+            Kernel::Its,
+        ),
     ]
 }
 

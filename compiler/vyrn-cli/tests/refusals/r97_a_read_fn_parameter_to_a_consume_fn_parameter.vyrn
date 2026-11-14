@@ -1,0 +1,18 @@
+// A `read` fn parameter has nothing to give a `consume` one, whatever value
+// the caller passes: here a named function, which holds no capture.
+fn named() {
+    print("nm")
+}
+
+fn take(f: consume fn() -> Unit) {
+    f()
+}
+
+fn via(cb: fn() -> Unit) -> Int64 {
+    take(cb)
+    return 0
+}
+
+fn main() -> Int64 {
+    return via(named)
+}
