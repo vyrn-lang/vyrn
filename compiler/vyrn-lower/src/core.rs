@@ -7396,9 +7396,10 @@ impl<'a> Builder<'a> {
     /// Per argument of a call to `name`, the [`Target`] a `fn`-typed
     /// parameter is bound to: a declared function, a bound parameter of this
     /// body, a lambda literal with its captures, or a stored value
-    /// forwarded as its one capture. A lambda at a `consume` position is a
-    /// stored value. Empty where the callee takes no function. A parameter is
-    /// `fn`-typed as written; one of an alias type takes a stored value.
+    /// forwarded as its one capture. A lambda or a parameter at a `consume`
+    /// position is a stored value, so the row names its move. Empty where the
+    /// callee takes no function. A parameter is `fn`-typed as written; one of
+    /// an alias type takes a stored value.
     fn targets_of(&self, name: &str, args: &[Expr]) -> Vec<Option<Target>> {
         let Some((_, f)) = self.declared(name) else {
             return Vec::new();
@@ -7429,7 +7430,8 @@ impl<'a> Builder<'a> {
                 }
                 Expr::Var { name: v, .. } => match self.lookup(v) {
                     Some(n)
-                        if self.body.params.contains(&n)
+                        if p.capability != Capability::Consume
+                            && self.body.params.contains(&n)
                             && matches!(self.body.names[n.index()].ty, Type::Fn(..)) =>
                     {
                         Target::Param(n)

@@ -897,6 +897,7 @@ compiler/vyrn-cli/tests/refusals/r93_a_namespace_member_the_module_does_not_expo
 compiler/vyrn-cli/tests/refusals/r94_an_import_of_a_name_the_module_does_not_export.vyrn	0	cbf29ce484222325	20	14	4c151817f261fc54
 compiler/vyrn-cli/tests/refusals/r95_an_import_of_a_name_another_module_defines.vyrn	0	cbf29ce484222325	20	19	6188809337077590
 compiler/vyrn-cli/tests/refusals/r96_an_import_of_a_name_no_module_defines.vyrn	0	cbf29ce484222325	20	14	1047e835656589bd
+compiler/vyrn-cli/tests/refusals/r97_a_read_fn_parameter_to_a_consume_fn_parameter.vyrn	0	cbf29ce484222325	20	18	57774f4c424e94c9
 compiler/vyrn-cli/tests/shapes/a-body-taken-whole-lifts-a-lambda-that-captures-a-later-let.vyrn	0	cbf29ce484222325	20	16	414820b60f79ac03
 compiler/vyrn-cli/tests/shapes/a-borrow-of-a-field-whose-root-is-consumed-after-the-borrow-ends.vyrn	0	cbf29ce484222325	20	14	0a6ed13d107754e1
 compiler/vyrn-cli/tests/shapes/a-borrow-rebound-in-a-let-mut-is-a-copy.vyrn	0	cbf29ce484222325	20	17	cbc0ba2678b9e985

@@ -74,6 +74,12 @@ constructor, returned, captured by a closure that outlives the call, or passed
 to a `consume` parameter. Because a borrow never escapes its call, it needs no
 lifetime annotation.
 
+A `fn` parameter follows the same rule, whatever value the caller passes. A
+`consume fn` parameter handed to another `consume fn` parameter moves: the
+callee owns the capture block and releases it once. A `read` one handed to a
+`consume` one is refused, even where the caller passes a named function that
+holds nothing; `cb.copy()` gives the callee a value of its own.
+
 A `modify` or `consume` argument is exclusive: no other argument of the same
 call may name it or a place overlapping it, because the callee could write or
 free the one and then read the other. Places compare by path. `f(p.a, p.b)`

@@ -2359,6 +2359,35 @@ fn a_named_function_at_a_consume_fn_parameter_lowers() {
     runs_clean("a-named-function-at-a-consume-fn-parameter", src, "34\n");
 }
 
+// A capturing lambda handed from one `consume fn` parameter to another moves
+// with its capture block: called, stored in module state, handed on again and
+// returned, it is released once (witness C:/t/f5/patches k5, l2: a trap).
+#[test]
+fn a_capturing_lambda_handed_between_consume_fn_parameters_is_freed() {
+    let src = "let mut hooks: Array<fn() -> Unit> = []\n\
+               fn take(f: consume fn() -> Unit) { f() }\n\
+               fn keep(f: consume fn() -> Unit) { hooks.push(f) }\n\
+               fn back(f: consume fn() -> Unit) -> fn() -> Unit { return f }\n\
+               fn via(cb: consume fn() -> Unit) { take(cb) }\n\
+               fn mid(cb: consume fn() -> Unit) { via(cb) }\n\
+               fn store(cb: consume fn() -> Unit) { keep(cb) }\n\
+               fn again(cb: consume fn() -> Unit) { let g = back(cb)\n g() }\n\
+               fn vyrnTestMain() -> Int64 {\n\
+                 let s = \"s\".copy()\n\
+                 via(() -> print(s))\n\
+                 mid(() -> print(s))\n\
+                 store(() -> print(s))\n\
+                 for h in hooks { h() }\n\
+                 again(() -> print(s))\n\
+                 return 0\n\
+               }\n";
+    runs_clean(
+        "a-capturing-lambda-handed-between-consume-fn-parameters",
+        src,
+        "s\ns\ns\ns\n0\n",
+    );
+}
+
 // A `consume` parameter of a generic instance and of a higher-order instance,
 // a stored value at a `consume fn` parameter among them (record `m7-lamval`).
 #[test]
