@@ -672,8 +672,10 @@ jobs:
         # Every ownership shape of a store, a read and a removal, filtered by
         # `vyrn check` and run under `VYRN_LEAK_CHECK=1` on `vyrn run` and on
         # the route's own executable, each against the digest the generator
-        # computed. Failures are held to `tests/pins/shapesweep-known.tsv`: a
-        # new one fails here, and a row that no longer fails is reported.
+        # computed, and every fn-value shape of a value handed along up to
+        # three hops. Failures are held to `tests/pins/shapesweep-known.tsv`
+        # and `fnsweep-known.tsv`: a new one fails here, and a row that no
+        # longer fails is reported.
         #
         # It is here and not in the ignored-suites job for the residue
         # ratchet's reason: the route leg needs clang, wabt and simde. The leg

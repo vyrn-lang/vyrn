@@ -36,9 +36,9 @@ use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::check::{Ensures, Promise, Raises, Verdict};
 use vyrn_frontend::core::{
-    count_reads, names_in, rows, Arg, Arm, Await, Body, BorrowKind, Branch, Callee, Cand, Copied,
-    Ctor, Facts, Fork, Form, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs,
-    Site, St, Target, Test, Use, Val, Walk,
+    count_reads, names_in, rows, Arg, Arm, AtRead, Await, Body, BorrowKind, Branch, Callee, Cand,
+    Copied, Ctor, Facts, Fork, Form, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload,
+    Place, Rhs, Site, St, Target, Test, Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::{DeclName, Rule};
@@ -7429,12 +7429,14 @@ impl<'a> Builder<'a> {
                     Target::Lambda(key, caps, p.ty.clone())
                 }
                 Expr::Var { name: v, .. } => match self.lookup(v) {
+                    // A lambda frame's capture is a parameter no call binds.
                     Some(n)
-                        if p.capability != Capability::Consume
-                            && self.body.params.contains(&n)
-                            && matches!(self.body.names[n.index()].ty, Type::Fn(..)) =>
+                        if self.body.params.contains(&n)
+                            && matches!(self.body.names[n.index()].ty, Type::Fn(..))
+                            && self.body.names[n.index()].borrow_kind
+                                != Some(BorrowKind::Capture) =>
                     {
-                        Target::Param(n)
+                        AtRead::of(p.capability).map_or(value, |r| Target::Param(n, r))
                     }
                     Some(_) => value,
                     None if self.concrete_fn(v) => Target::Fn(v.clone()),
@@ -7626,7 +7628,7 @@ pub fn lambda_at(name: &str) -> Option<(usize, usize)> {
 /// value is made where it is read: its target's closure variant. `None`
 /// where one is read twice, or a pass-through names no target.
 pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
-    if bound.iter().any(|(_, t)| matches!(t, Target::Param(_))) {
+    if bound.iter().any(|(_, t)| matches!(t, Target::Param(..))) {
         return None;
     }
     let mut out = body.clone();
@@ -7695,10 +7697,13 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
 }
 
 /// Puts `made`, the row that binds `n`, before the one row that reads `n`, at
-/// that row's depth, and with `release` a release of `n` after it. `names` is
-/// the body's names. `false` where no row reads it, and where `release` and
-/// the read is neither a lambda's capture nor a copy, each of which copies
-/// what it reads.
+/// that row's depth, and with `release` a release of `n` where its borrow
+/// ends ([`borrow_end`]) and before each exit until then. `names` is the
+/// body's names. `false` where no row reads it.
+///
+/// `n` is a `read` parameter ([`Builder::targets_of`] binds a lambda only
+/// there), so the checker lets no row move or store it: each read is a
+/// borrow, which a `let` may alias.
 fn make_before_read(
     ss: &mut Vec<St>,
     names: &[NameInfo],
@@ -7726,21 +7731,66 @@ fn make_before_read(
         count_reads(std::slice::from_ref(&ss[i]), &mut reads);
         if reads[n.index()] > 0 {
             if release {
-                let copies = match &ss[i] {
-                    St::Let(_, Rhs::Prim(Op::Closure(_), ..)) => true,
-                    St::Let(_, rhs) => rhs.copies(names) == Some(Copied::Value),
-                    _ => false,
-                };
-                if !copies {
-                    return false;
-                }
-                ss.insert(i + 1, St::Drop(n, Site::None, 0, None));
+                let end = borrow_end(&ss[i..], n);
+                let mut held: Vec<St> = ss.drain(i..=i + end).collect();
+                release_on_exits(&mut held, n, false);
+                held.push(St::Drop(n, Site::None, 0, None));
+                ss.splice(i..i, held);
             }
             ss.insert(i, made);
             return true;
         }
     }
     false
+}
+
+/// The index of the last row of `ss` that names `n` or a `let` alias of it.
+fn borrow_end(ss: &[St], n: Name) -> usize {
+    let mut aliases = vec![n];
+    let mut end = 0;
+    let mut ns = Vec::new();
+    for (i, s) in ss.iter().enumerate() {
+        ns.clear();
+        names_in(s, &mut ns);
+        if ns.iter().any(|m| aliases.contains(m)) {
+            end = i;
+        }
+        let of = match s {
+            St::Let(m, Rhs::Val(a)) => Some((m, a.clone())),
+            St::Let(m, Rhs::Read(p)) => root_name(p).map(|a| (m, a)),
+            _ => None,
+        };
+        if let Some((m, Val::Name(a))) = of {
+            if aliases.contains(&a) {
+                aliases.push(*m);
+            }
+        }
+    }
+    end
+}
+
+/// Puts a release of `n` before each row under `ss` that leaves `ss`: a
+/// `return`, or a `break` or `continue` under no loop of `ss` (`in_loop` says
+/// `ss` is a loop's own list or stands in one).
+fn release_on_exits(ss: &mut Vec<St>, n: Name, in_loop: bool) {
+    let mut i = 0;
+    while i < ss.len() {
+        let leaves = match &ss[i] {
+            St::Return { .. } => true,
+            St::Break { .. } | St::Continue { .. } => !in_loop,
+            _ => false,
+        };
+        if leaves {
+            ss.insert(i, St::Drop(n, Site::None, 0, None));
+            i += 1;
+        } else {
+            let inner = in_loop || matches!(ss[i], St::Loop { .. });
+            ss[i]
+                .lists_mut()
+                .for_each(|l| release_on_exits(l, n, inner));
+        }
+        i += 1;
+    }
 }
 
 /// Deletes from `ss`, at every depth, each release of a name `gone` answers.
@@ -7819,7 +7869,7 @@ fn bind_call(
         }
     }
     for t in targets.iter_mut() {
-        let Target::Param(p) = t else { continue };
+        let Target::Param(p, _) = t else { continue };
         let p = *p;
         let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
             continue;

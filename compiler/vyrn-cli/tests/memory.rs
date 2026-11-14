@@ -2388,6 +2388,48 @@ fn a_capturing_lambda_handed_between_consume_fn_parameters_is_freed() {
     );
 }
 
+// A capturing lambda at a `read` fn parameter, read by a `let` alias, by one
+// that an early `return` leaves, and by a lambda that captures it, is made
+// and released once each (fnsweep fv.r.local.lam, fv.r.exit.lam,
+// fv.r.hof.lam: no lowering).
+#[test]
+fn a_capturing_lambda_read_through_an_alias_or_a_capture_is_freed() {
+    let src = "fn each(f: fn(Int64) -> Unit) { f(1) }\n\
+               fn alias(p: fn() -> Unit) { let g = p\n g() }\n\
+               fn early(p: fn() -> Unit, n: Int64) { let g = p\n if n > 1 { return }\n g() }\n\
+               fn wrap(p: fn() -> Unit) { each(x -> p()) }\n\
+               fn vyrnTestMain() -> Int64 {\n\
+                 let s = \"s\".copy()\n\
+                 alias(() -> print(s))\n\
+                 early(() -> print(s), 1)\n\
+                 early(() -> print(s), 2)\n\
+                 wrap(() -> print(s))\n\
+                 return 0\n\
+               }\n";
+    runs_clean(
+        "a-capturing-lambda-read-through-an-alias-or-a-capture",
+        src,
+        "s\ns\ns\n0\n",
+    );
+}
+
+// A lambda that captures a fn value and hands it to a function, itself handed
+// to a std function, calls through the value it captured (fnsweep
+// fv.c.filter.nm: no lowering).
+#[test]
+fn a_lambda_handing_on_a_captured_fn_value_is_freed() {
+    let src = "import { filter } from \"std/arrays\"\n\
+               fn yes(f: fn() -> Unit) -> Bool { f()\n return true }\n\
+               fn take(p: consume fn() -> Unit) -> Int64 {\n\
+                 return filter([1, 2], x -> yes(p)).length\n\
+               }\n\
+               fn vyrnTestMain() -> Int64 {\n\
+                 let s = \"s\".copy()\n\
+                 return take(() -> print(s))\n\
+               }\n";
+    runs_clean("a-lambda-handing-on-a-captured-fn-value", src, "s\ns\n2\n");
+}
+
 // A `consume` parameter of a generic instance and of a higher-order instance,
 // a stored value at a `consume fn` parameter among them (record `m7-lamval`).
 #[test]

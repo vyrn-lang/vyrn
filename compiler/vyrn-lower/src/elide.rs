@@ -2634,7 +2634,7 @@ fn entered<'a>(
 fn spelling(t: &Target) -> Option<&str> {
     match t {
         Target::Fn(n) | Target::Value(n) | Target::Lambda(n, ..) => Some(n),
-        Target::Param(_) => None,
+        Target::Param(..) => None,
     }
 }
 
