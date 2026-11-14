@@ -38,6 +38,10 @@
 //! `$VYRN_SHAPESWEEP_OUT` (default: the temp directory's `vyrn-shapesweep`).
 //! `VYRN_SHAPESWEEP_ONLY=<text>` restricts the run to ids containing the text
 //! and skips the list.
+//!
+//! The second test runs the fn-value family ([`fn_space`]) through the same
+//! rig, one program per shape at the check, and holds its failures to
+//! `tests/pins/fnsweep-known.tsv` by the same rule.
 
 mod common;
 use common::*;
@@ -1351,6 +1355,27 @@ struct Rig {
 }
 
 impl Rig {
+    /// A rig that writes its programs in `dir`, with the route's leg where
+    /// clang, wabt and simde are found.
+    fn new(dir: &Path) -> Rig {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let wasm2c = vyrn_codegen::toolchain::wasm2c_from(&root).ok().flatten();
+        let simde = vyrn_codegen::toolchain::simde_from(&root);
+        let route = match (wasm2c, simde, vyrn_codegen::toolchain::find_clang()) {
+            (Some(w), Some((s, _)), Some(_)) => Some((w.exe, s)),
+            _ => None,
+        };
+        if route.is_none() {
+            eprintln!("SKIP the route's leg: clang, wabt or simde is missing");
+        }
+        Rig {
+            dir: dir.to_path_buf(),
+            route,
+            engine_us: AtomicUsize::new(0),
+            route_us: AtomicUsize::new(0),
+        }
+    }
+
     fn check(&self, src: &str, tag: &str) -> (bool, String) {
         let file = self.dir.join(format!("{tag}.vyrn"));
         std::fs::write(&file, src).unwrap();
@@ -1432,6 +1457,57 @@ impl Rig {
         kinds.dedup();
         (kinds, detail)
     }
+
+    /// Runs each batch of shapes on both legs: per batch, each member's
+    /// failure kinds and detail. `text` writes the program of a list of shape
+    /// indices and its expected output.
+    fn run_batches(
+        &self,
+        batches: &[Vec<usize>],
+        text: &(dyn Fn(&[usize]) -> (String, String) + Sync),
+    ) -> Vec<Vec<(usize, Vec<String>, String)>> {
+        for_each_parallel(batches, |_, batch| {
+            let (src, want) = text(batch);
+            let tag = format!("b{}", batch[0]);
+            let (ek, _) = self.engine(&src, &tag, &want);
+            let (rk, _) = self.route(&src, &tag, &want);
+            if ek.is_empty() && rk.is_empty() {
+                return batch
+                    .iter()
+                    .map(|&i| (i, Vec::new(), String::new()))
+                    .collect();
+            }
+            // Split. The engine runs each shape alone; the route builds the
+            // engine-clean shapes together once more, and each of the rest alone,
+            // so a failure names one shape without a build per shape.
+            let mut out: Vec<(usize, Vec<String>, String)> = Vec::new();
+            for &i in batch {
+                let (src, want) = text(&[i]);
+                let (kinds, detail) = self.engine(&src, &format!("s{i}"), &want);
+                out.push((i, kinds, detail));
+            }
+            let clean: Vec<usize> = (out.iter())
+                .filter(|o| o.1.is_empty())
+                .map(|o| o.0)
+                .collect();
+            let together = clean.is_empty() || {
+                let (src, want) = text(&clean);
+                (self.route(&src, &format!("t{}", clean[0]), &want).0).is_empty()
+            };
+            for (i, kinds, detail) in &mut out {
+                if kinds.is_empty() && together {
+                    continue;
+                }
+                let (src, want) = text(&[*i]);
+                let (k, d) = self.route(&src, &format!("r{i}"), &want);
+                kinds.extend(k);
+                detail.push_str(&d);
+                kinds.sort();
+                kinds.dedup();
+            }
+            out
+        })
+    }
 }
 
 fn for_each_parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(usize, &T) -> R + Sync) -> Vec<R> {
@@ -1460,13 +1536,13 @@ fn fnv(h: &mut u64, s: &str) {
     }
 }
 
-fn known_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pins/shapesweep-known.tsv")
+fn known_path(pin: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/pins/{pin}"))
 }
 
-/// The known failures as `(id, kinds)` rows, and the comment lines.
-fn known() -> BTreeMap<String, String> {
-    let text = std::fs::read_to_string(known_path()).unwrap_or_default();
+/// The known failures of the pin `path` as `(id, kinds)` rows.
+fn known(path: &Path) -> BTreeMap<String, String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
     text.lines()
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
         .map(|l| {
@@ -1482,22 +1558,7 @@ fn every_ownership_shape_is_refused_or_runs_clean() {
     let started = std::time::Instant::now();
     let only = std::env::var("VYRN_SHAPESWEEP_ONLY").ok();
     let dir = scratch("shapesweep");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let wasm2c = vyrn_codegen::toolchain::wasm2c_from(&root).ok().flatten();
-    let simde = vyrn_codegen::toolchain::simde_from(&root);
-    let route = match (wasm2c, simde, vyrn_codegen::toolchain::find_clang()) {
-        (Some(w), Some((s, _)), Some(_)) => Some((w.exe, s)),
-        _ => None,
-    };
-    if route.is_none() {
-        eprintln!("SKIP the route's leg: clang, wabt or simde is missing");
-    }
-    let rig = Rig {
-        dir: dir.to_path_buf(),
-        route,
-        engine_us: AtomicUsize::new(0),
-        route_us: AtomicUsize::new(0),
-    };
+    let rig = Rig::new(&dir);
     // A scratch directory unless the caller names one; a failing run keeps it.
     let scratch_dir = common::scratch("shapesweep");
     let out_dir = std::env::var_os("VYRN_SHAPESWEEP_OUT")
@@ -1600,59 +1661,9 @@ fn every_ownership_shape_is_refused_or_runs_clean() {
             batches.push(c.to_vec());
         }
     }
-    let results = for_each_parallel(&batches, |_, batch| {
-        let members: Vec<(usize, &Shape)> = batch.iter().map(|&i| (i, &shapes[i])).collect();
-        let ty = members[0].1.ty;
-        let src = program(ty, &members);
-        let want = expected_out(&members);
-        let tag = format!("b{}", members[0].0);
-        let (ek, _) = rig.engine(&src, &tag, &want);
-        let (rk, _) = rig.route(&src, &tag, &want);
-        if ek.is_empty() && rk.is_empty() {
-            return members
-                .iter()
-                .map(|(i, _)| (*i, Vec::new(), String::new()))
-                .collect::<Vec<_>>();
-        }
-        // Split. The engine runs each shape alone; the route builds the
-        // engine-clean shapes together once more, and each of the rest alone,
-        // so a failure names one shape without a build per shape.
-        let one = |i: usize, sh: &Shape| {
-            let one = [(i, sh)];
-            (program(sh.ty, &one), expected_out(&one))
-        };
-        let mut out: Vec<(usize, Vec<String>, String)> = Vec::new();
-        for (i, sh) in &members {
-            let (src, want) = one(*i, sh);
-            let (kinds, detail) = rig.engine(&src, &format!("s{i}"), &want);
-            out.push((*i, kinds, detail));
-        }
-        let clean: Vec<(usize, &Shape)> = members
-            .iter()
-            .zip(&out)
-            .filter(|(_, o)| o.1.is_empty())
-            .map(|(m, _)| *m)
-            .collect();
-        let together = if clean.is_empty() {
-            true
-        } else {
-            let (src, want) = (program(ty, &clean), expected_out(&clean));
-            rig.route(&src, &format!("t{}", clean[0].0), &want)
-                .0
-                .is_empty()
-        };
-        for (k, (i, sh)) in members.iter().enumerate() {
-            if out[k].1.is_empty() && together {
-                continue;
-            }
-            let (src, want) = one(*i, sh);
-            let (kinds, detail) = rig.route(&src, &format!("r{i}"), &want);
-            out[k].1.extend(kinds);
-            out[k].2.push_str(&detail);
-            out[k].1.sort();
-            out[k].1.dedup();
-        }
-        out
+    let results = rig.run_batches(&batches, &|is: &[usize]| {
+        let members: Vec<(usize, &Shape)> = is.iter().map(|&i| (i, &shapes[i])).collect();
+        (program(members[0].1.ty, &members), expected_out(&members))
     });
     let split = results
         .iter()
@@ -1715,7 +1726,28 @@ fn every_ownership_shape_is_refused_or_runs_clean() {
         rig.engine_us.load(Ordering::Relaxed) / 1_000_000,
         rig.route_us.load(Ordering::Relaxed) / 1_000_000
     );
-    eprintln!("shapesweep: refusal sentences:");
+    verdict(
+        "shapesweep",
+        "shapesweep-known.tsv",
+        &refusals,
+        &failures,
+        &out_dir,
+        only.is_some(),
+    );
+}
+
+/// Prints the refusal sentences and the failures of a sweep named `tag`, and
+/// holds the failures to the known pin `pin` unless `only` restricted the run.
+fn verdict(
+    tag: &str,
+    pin: &str,
+    refusals: &BTreeMap<String, usize>,
+    failures: &BTreeMap<String, String>,
+    out_dir: &Path,
+    only: bool,
+) {
+    let path = known_path(pin);
+    eprintln!("{tag}: refusal sentences:");
     let mut by: Vec<_> = refusals.iter().collect();
     by.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
     for (s, n) in by {
@@ -1725,23 +1757,23 @@ fn every_ownership_shape_is_refused_or_runs_clean() {
     for k in failures.values() {
         *kinds.entry(k.as_str()).or_default() += 1;
     }
-    eprintln!("shapesweep: {} failing; by kind: {kinds:?}", failures.len());
+    eprintln!("{tag}: {} failing; by kind: {kinds:?}", failures.len());
     if !failures.is_empty() {
         eprintln!(
-            "shapesweep: failing programs and logs are in {}",
+            "{tag}: failing programs and logs are in {}",
             out_dir.display()
         );
     }
 
-    if only.is_some() {
-        for (id, k) in &failures {
+    if only {
+        for (id, k) in failures {
             eprintln!("  FAIL {id}  {k}");
         }
         return;
     }
 
     // The ratchet.
-    let known = known();
+    let known = known(&path);
     let fresh: Vec<(&String, &String)> = failures
         .iter()
         .filter(|(id, k)| known.get(*id) != Some(*k))
@@ -1764,17 +1796,17 @@ fn every_ownership_shape_is_refused_or_runs_clean() {
 "
                 )
         );
-        let text = std::fs::read_to_string(known_path()).unwrap_or_default();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
         let mut keep: Vec<String> = text
             .lines()
-            .filter(|l| l.starts_with('#') || known_row_alive(l, &failures))
+            .filter(|l| l.starts_with('#') || known_row_alive(l, failures))
             .map(str::to_string)
             .collect();
         if known.is_empty() {
             keep.extend(failures.iter().map(|(id, k)| format!("{id}	{k}")));
         }
         std::fs::write(
-            known_path(),
+            &path,
             keep.join(
                 "
 ",
@@ -1824,4 +1856,287 @@ FAIL {id} ({k})
 fn known_row_alive(line: &str, failures: &BTreeMap<String, String>) -> bool {
     line.split_once('\t')
         .is_some_and(|(id, k)| failures.get(id).is_some_and(|f| f == k))
+}
+
+// ---------------------------------------------------------------- fn values
+
+/// A fn value the family hands along: its expression in `run`, what one call
+/// prints, and whether a call of it waits.
+struct Fv {
+    id: &'static str,
+    expr: &'static str,
+    prints: &'static str,
+    waits: bool,
+}
+
+const FVS: [Fv; 5] = [
+    Fv {
+        id: "lam",
+        expr: "() -> print(t)",
+        prints: "two",
+        waits: false,
+    },
+    Fv {
+        id: "bare",
+        expr: "() -> print(\"bare\")",
+        prints: "bare",
+        waits: false,
+    },
+    Fv {
+        id: "nm",
+        expr: "named",
+        prints: "nm",
+        waits: false,
+    },
+    Fv {
+        id: "lam2",
+        expr: "() -> print(t + u)",
+        prints: "two!",
+        waits: false,
+    },
+    Fv {
+        id: "wait",
+        expr: "waiter",
+        prints: "wt",
+        waits: true,
+    },
+];
+
+/// The signature of each hop: `fn() -> Unit`, one that returns the value
+/// back out, or one generic over the value's result.
+#[derive(PartialEq)]
+enum Sig {
+    Plain,
+    Ret,
+    Gen,
+}
+
+/// What the last holder does with the value. In `decl`, `body` and `later`,
+/// `{i}` is the shape's number and `{a}` the `await` a call of the value takes.
+/// `later` runs in `run` after the hops return. `waits`: the hops' calls wait
+/// whatever the value, or `None` where they wait when a call of it does.
+struct FnUse {
+    id: &'static str,
+    sig: Sig,
+    decl: &'static str,
+    body: &'static str,
+    later: &'static str,
+    calls: usize,
+    waits: Option<bool>,
+}
+
+// `timeout` takes a lambda that calls the value, not the value: a `match` on
+// a `Race` with a `Unit` payload fails to build with no fn value in it.
+#[rustfmt::skip]
+const FN_USES: [FnUse; 15] = [
+    FnUse { id: "call0", sig: Sig::Plain, decl: "", body: "", later: "", calls: 0, waits: Some(false) },
+    FnUse { id: "call1", sig: Sig::Plain, decl: "", body: "{a}p()", later: "", calls: 1, waits: None },
+    FnUse { id: "call2", sig: Sig::Plain, decl: "", body: "{a}p()\n{a}p()", later: "", calls: 2, waits: None },
+    FnUse { id: "local", sig: Sig::Plain, decl: "", body: "let g = p\n{a}g()", later: "", calls: 1, waits: None },
+    FnUse { id: "array", sig: Sig::Plain, decl: "",
+        body: "let xs: Array<fn() -> Unit> = [p]\nfor h in xs {\n    {a}h()\n}", later: "", calls: 1, waits: None },
+    FnUse { id: "record", sig: Sig::Plain, decl: "",
+        body: "let b = Box { run: p }\nlet g = b.run\n{a}g()", later: "", calls: 1, waits: None },
+    FnUse { id: "global", sig: Sig::Plain, decl: "let mut hooks{i}: Array<fn() -> Unit> = []\n",
+        body: "hooks{i}.push(p)", later: "for h in hooks{i} {\n    {a}h()\n}", calls: 1, waits: Some(false) },
+    FnUse { id: "option", sig: Sig::Plain, decl: "",
+        body: "let o = Some(p)\nmatch o {\n    Some(g) => {a}g(),\n    None => {},\n}", later: "", calls: 1, waits: None },
+    FnUse { id: "matchc", sig: Sig::Plain, decl: "",
+        body: "let o = Some(consume p)\nmatch consume o {\n    Some(g) => {a}g(),\n    None => {},\n}", later: "", calls: 1, waits: None },
+    FnUse { id: "capture", sig: Sig::Plain, decl: "",
+        body: "let h: fn() -> Unit = () -> {a}p()\n{a}h()", later: "", calls: 1, waits: None },
+    FnUse { id: "hof", sig: Sig::Plain, decl: "fn each{i}(f: fn(Int64) -> Unit) {\n    {a}f(1)\n}\n\n",
+        body: "{a}each{i}(x -> {a}p())", later: "", calls: 1, waits: None },
+    FnUse { id: "filter", sig: Sig::Plain, decl: "fn yes{i}(f: fn() -> Unit) -> Bool {\n    {a}f()\n    return true\n}\n\n",
+        body: "let r = {a}filter([1], x -> {a}yes{i}(p))", later: "", calls: 1, waits: None },
+    FnUse { id: "timeout", sig: Sig::Plain, decl: "fn one{i}(f: fn() -> Unit) -> Int64 {\n    {a}f()\n    return 1\n}\n\n",
+        body: "let r = await timeout(1000, () -> {a}one{i}(p))", later: "", calls: 1, waits: Some(true) },
+    FnUse { id: "return", sig: Sig::Ret, decl: "", body: "return p", later: "", calls: 1, waits: Some(false) },
+    FnUse { id: "generic", sig: Sig::Gen, decl: "", body: "{a}p()", later: "", calls: 1, waits: None },
+];
+
+/// One fn-value shape: the value, `consume` or `read` at each hop's
+/// parameter, the first hop first, and the last holder's use.
+struct FnShape {
+    id: String,
+    v: &'static Fv,
+    consume: Vec<bool>,
+    u: &'static FnUse,
+}
+
+fn fn_space() -> Vec<FnShape> {
+    let mut out = Vec::new();
+    for hops in 1..=3 {
+        for bits in 0..1u32 << hops {
+            let consume: Vec<bool> = (0..hops).map(|k| bits >> (hops - 1 - k) & 1 == 1).collect();
+            let chain: String = consume.iter().map(|&c| if c { 'c' } else { 'r' }).collect();
+            for u in &FN_USES {
+                for v in &FVS {
+                    let id = format!("fv.{chain}.{}.{}", u.id, v.id);
+                    out.push(FnShape {
+                        id,
+                        v,
+                        consume: consume.clone(),
+                        u,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+fn indent(text: &str) -> String {
+    text.lines().map(|l| format!("    {l}\n")).collect()
+}
+
+/// The declarations of shape `i`, and whether its `run{i}` waits.
+fn fn_decls(i: usize, sh: &FnShape) -> (String, bool) {
+    let a = if sh.v.waits { "await " } else { "" };
+    let fill = |t: &str| t.replace("{i}", &i.to_string()).replace("{a}", a);
+    let hops_wait = sh.u.waits.unwrap_or(sh.v.waits && sh.u.calls > 0);
+    let w = if hops_wait { "await " } else { "" };
+    let (tp, ty) = if sh.u.sig == Sig::Gen {
+        ("<T>", "T")
+    } else {
+        ("", "Unit")
+    };
+    let ret = if sh.u.sig == Sig::Ret {
+        " -> fn() -> Unit"
+    } else {
+        ""
+    };
+    let mut out = fill(sh.u.decl);
+    let n = sh.consume.len();
+    for (k, &c) in sh.consume.iter().enumerate() {
+        let cap = if c { "consume " } else { "" };
+        let body = match k + 1 == n {
+            true => fill(sh.u.body),
+            false if sh.u.sig == Sig::Ret => format!("return s{i}h{}(p)", k + 1),
+            false => format!("{w}s{i}h{}(p)", k + 1),
+        };
+        out += &format!(
+            "fn s{i}h{k}{tp}(p: {cap}fn() -> {ty}){ret} {{\n{}}}\n\n",
+            indent(&body)
+        );
+    }
+    let call = match sh.u.sig {
+        Sig::Ret => format!("let g = s{i}h0({})\n{a}g()", sh.v.expr),
+        _ => format!("{w}s{i}h0({})", sh.v.expr),
+    };
+    let run_waits = hops_wait || (sh.v.waits && (sh.u.sig == Sig::Ret || !sh.u.later.is_empty()));
+    let body = format!(
+        "let t = \"two\".copy()\nlet u = \"!\".copy()\n{call}\n{}\nprint(t)\nprint(u)",
+        fill(sh.u.later)
+    );
+    out += &format!("fn run{i}() {{\n{}}}\n\n", indent(&body));
+    (out, run_waits)
+}
+
+const FN_PRELUDE: &str = "import { filter } from \"std/arrays\"
+import { sleep, timeout } from \"std/task\"
+
+type Box = { run: fn() -> Unit }
+
+fn named() {
+    print(\"nm\")
+}
+
+fn waiter() {
+    await sleep(0)
+    print(\"wt\")
+}
+
+";
+
+fn fn_program(shapes: &[(usize, &FnShape)]) -> String {
+    let mut out = FN_PRELUDE.to_string();
+    let mut main = String::from("fn main() -> Int64 {\n");
+    for (i, sh) in shapes {
+        let (decls, waits) = fn_decls(*i, sh);
+        out += &decls;
+        main += &format!("    {}run{i}()\n", if waits { "await " } else { "" });
+    }
+    out + &main + "    return 0\n}\n"
+}
+
+fn fn_expected(shapes: &[(usize, &FnShape)]) -> String {
+    (shapes.iter())
+        .map(|(_, sh)| format!("{}\n", sh.v.prints).repeat(sh.u.calls) + "two\n!\n")
+        .collect()
+}
+
+#[test]
+#[ignore = "generates and runs the fn-value shapes; run explicitly: cargo test -p vyrn-cli --release --test shapesweep -- --ignored --nocapture"]
+fn every_fn_value_shape_is_refused_or_runs_clean() {
+    let started = std::time::Instant::now();
+    let only = std::env::var("VYRN_SHAPESWEEP_ONLY").ok();
+    let dir = scratch("fnsweep");
+    let rig = Rig::new(&dir);
+    let out_dir =
+        std::env::var_os("VYRN_SHAPESWEEP_OUT").map_or_else(|| dir.join("failing"), PathBuf::from);
+    let _ = std::fs::remove_dir_all(&out_dir);
+    let mut shapes = fn_space();
+    if let Some(only) = &only {
+        shapes.retain(|s| s.id.contains(only.as_str()));
+    }
+    let checked = for_each_parallel(&shapes, |i, sh| {
+        rig.check(&fn_program(&[(i, sh)]), &format!("c{i}"))
+    });
+    let mut refusals: BTreeMap<String, usize> = BTreeMap::new();
+    let mut failed: Vec<(usize, Vec<String>, String)> = Vec::new();
+    let mut accepted = Vec::new();
+    for (i, (ok, text)) in checked.iter().enumerate() {
+        if *ok {
+            accepted.push(i);
+            continue;
+        }
+        let s = sentence(text);
+        if s.contains("internal error") || s.contains("panicked") || s.is_empty() {
+            failed.push((i, vec!["refused-badly".into()], text.clone()));
+        }
+        *refusals.entry(s).or_default() += 1;
+    }
+    let batches: Vec<Vec<usize>> = accepted.chunks(BATCH).map(<[usize]>::to_vec).collect();
+    let results = rig.run_batches(&batches, &|is: &[usize]| {
+        let members: Vec<(usize, &FnShape)> = is.iter().map(|&i| (i, &shapes[i])).collect();
+        (fn_program(&members), fn_expected(&members))
+    });
+    failed.extend(results.into_iter().flatten().filter(|r| !r.1.is_empty()));
+    let mut failures: BTreeMap<String, String> = BTreeMap::new();
+    for (i, kinds, detail) in failed {
+        let one = [(i, &shapes[i])];
+        let log = format!(
+            "{}
+want:
+{}
+{detail}",
+            kinds.join("+"),
+            fn_expected(&one)
+        );
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(
+            out_dir.join(format!("{}.vyrn", shapes[i].id)),
+            fn_program(&one),
+        )
+        .unwrap();
+        std::fs::write(out_dir.join(format!("{}.log", shapes[i].id)), log).unwrap();
+        failures.insert(shapes[i].id.clone(), kinds.join("+"));
+    }
+    eprintln!(
+        "fnsweep: {} generated, {} refused, {} accepted, {} failing, {:.0?}",
+        shapes.len(),
+        shapes.len() - accepted.len(),
+        accepted.len(),
+        failures.len(),
+        started.elapsed()
+    );
+    verdict(
+        "fnsweep",
+        "fnsweep-known.tsv",
+        &refusals,
+        &failures,
+        &out_dir,
+        only.is_some(),
+    );
 }
