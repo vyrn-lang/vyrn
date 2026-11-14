@@ -2171,6 +2171,11 @@ impl Expr {
         slot!(self, &).0
     }
 
+    /// The 1-based column of the name this node spells, 0 for a node that spells none.
+    pub fn col(&self) -> usize {
+        slot!(self, &).col()
+    }
+
     /// The pattern, scrutinee and two blocks of a parsed `if let`: a statement
     /// `match` whose last arm is [`Pattern::Other`], which no source writes.
     pub fn as_if_let(&self) -> Option<(&Pattern, &Expr, &Block, &Block)> {

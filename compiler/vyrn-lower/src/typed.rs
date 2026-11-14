@@ -11,7 +11,7 @@ use vyrn_frontend::ast::{NodeId, Type};
 use vyrn_frontend::ast::Capability;
 use vyrn_frontend::core::check::Guard;
 use vyrn_frontend::core::{
-    rows, Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Use, Val,
+    rows, Arg, Body, Callee, Name, NameInfo, Place, Rhs, Said, Site, St, Use, Val,
 };
 
 use vyrn_frontend::rule;
@@ -50,8 +50,8 @@ pub fn stores(
     body: &Body,
     rules: &StoreRules,
     seen: &mut std::collections::HashSet<NodeId>,
-) -> Vec<(usize, String)> {
-    let mut out: Vec<(usize, String)> = Vec::new();
+) -> Vec<Said> {
+    let mut out: Vec<Said> = Vec::new();
     for f in body.frames() {
         let mut judge = |place: &Place, line, site: Option<NodeId>, removal: Option<&str>| {
             let (at, path) = split(place);
@@ -93,7 +93,7 @@ pub fn stores(
                 (_, Some(Place::Field(..)), _) if !elem => rule!(FieldNotMut, name),
                 (_, Some(_), _) => rule!(StoreNotMut, name),
             };
-            out.push((line, rule.render()));
+            out.push(Said::line(line, rule.render()));
         };
         rows(&f.stmts).for_each(|(s, _)| row_stores(s, &f.names, &mut judge));
     }
@@ -187,7 +187,7 @@ pub fn groups(
     body: &Body,
     rules: &StoreRules,
     refuted: &[Vec<crate::elide::Refuted>],
-) -> (Vec<(usize, String)>, bool) {
+) -> (Vec<Said>, bool) {
     let mut out = Vec::new();
     let mut ended = false;
     for (i, f) in body.frames().into_iter().enumerate() {
@@ -218,7 +218,7 @@ struct Groups<'b, 'r> {
     rules: &'b StoreRules<'r>,
     refuted: &'b [crate::elide::Refuted],
     ended: &'b mut bool,
-    out: &'b mut Vec<(usize, String)>,
+    out: &'b mut Vec<Said>,
 }
 
 impl Groups<'_, '_> {
@@ -373,7 +373,7 @@ impl Groups<'_, '_> {
     }
 
     fn refuse(&mut self, line: usize, rule: Rule) {
-        let u = (line, rule.render());
+        let u = Said::line(line, rule.render());
         if !self.out.contains(&u) {
             self.out.push(u);
         }
@@ -430,7 +430,7 @@ fn row_line(s: &St, names: &[NameInfo]) -> usize {
 /// the sentence `vyrn check` gives and its line. A lambda's body is a frame of
 /// its own, so a loop outside the lambda does not count. `seen` is as in
 /// [`stores`].
-pub fn loops(body: &Body, seen: &mut std::collections::HashSet<NodeId>) -> Vec<(usize, String)> {
+pub fn loops(body: &Body, seen: &mut std::collections::HashSet<NodeId>) -> Vec<Said> {
     let mut out = Vec::new();
     for f in body.frames() {
         for (s, _) in rows(&f.stmts).filter(|(_, depth)| *depth == 0) {
@@ -440,7 +440,7 @@ pub fn loops(body: &Body, seen: &mut std::collections::HashSet<NodeId>) -> Vec<(
                 _ => continue,
             };
             if seen.insert(*site) {
-                out.push((*line, rule!(OutsideLoop, what).render()));
+                out.push(Said::line(*line, rule!(OutsideLoop, what).render()));
             }
         }
     }
@@ -452,13 +452,11 @@ pub fn loops(body: &Body, seen: &mut std::collections::HashSet<NodeId>) -> Vec<(
 /// sentence `vyrn check` gives and its line: an unknown name, a condition
 /// that is not Bool, a value its slot does not take. The caller states each
 /// sentence once per line.
-pub fn refused(body: &Body, as_written: bool) -> Vec<(usize, String)> {
+pub fn refused(body: &Body, as_written: bool) -> Vec<Said> {
     let mut out = Vec::new();
     for f in body.frames() {
         let mistyped = f.mistyped.iter().filter(|_| as_written);
-        for (line, refusal) in f.refused.iter().chain(mistyped) {
-            out.push((*line, refusal.clone()));
-        }
+        out.extend(f.refused.iter().chain(mistyped).cloned());
     }
     out
 }
@@ -475,7 +473,7 @@ pub fn drops(
     body: &Body,
     program: &vyrn_frontend::ast::Program,
     decls: &HashMap<String, vyrn_frontend::ast::TypeDecl>,
-) -> Vec<(usize, String)> {
+) -> Vec<Said> {
     use vyrn_frontend::types;
     let mut out = Vec::new();
     for f in body.frames() {
@@ -486,7 +484,7 @@ pub fn drops(
                 true => rule!(DropModuleState, name),
                 false => rule!(DropUnbound, name),
             };
-            out.push((*line, rule.render()));
+            out.push(Said::line(*line, rule.render()));
         }
         let written = rows(&f.stmts).filter_map(|(s, _)| match s {
             St::Drop(n, _, line, _) if *line > 0 => Some((*n, *line)),
@@ -516,7 +514,7 @@ pub fn drops(
                 true => rule!(DropTypeParam, name, t),
                 false => rule!(DropNotHeap, name, t),
             };
-            out.push((line, rule.render()));
+            out.push(Said::line(line, rule.render()));
         }
     }
     out

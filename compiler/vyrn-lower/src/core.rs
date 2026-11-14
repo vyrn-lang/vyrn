@@ -38,7 +38,7 @@ use vyrn_frontend::core::check::{Ensures, Promise, Raises, Verdict};
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, AtRead, Await, Body, BorrowKind, Branch, Callee, Cand,
     Copied, Ctor, Facts, Fork, Form, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload,
-    Place, Rhs, Site, St, Target, Test, Use, Val, Walk,
+    Place, Rhs, Said, Site, St, Target, Test, Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::{DeclName, Rule};
@@ -485,7 +485,8 @@ pub(crate) fn returns(ss: &[St]) -> bool {
 /// `rule` states from the type owed.
 fn falls_through(body: &mut Body, owes: &Type, line: usize, rule: impl FnOnce(String) -> Rule) {
     if *owes != Type::Unit && !returns(&body.stmts) {
-        body.refused.push((line, rule(owes.to_string()).render()));
+        body.refused
+            .push(Said::line(line, rule(owes.to_string()).render()));
     }
 }
 
@@ -647,7 +648,7 @@ fn build_from<'a>(
 /// range, and at a node the checker typed `Err` whose operands it typed, the
 /// rule the node breaks (an operator, a field, a construction, a variant, a
 /// record literal, or a call's arity, type arguments and arguments).
-fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, String)> {
+fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<Said> {
     let decls = own.proto.types();
     let recorded = |e: &Expr| facts.types.get(&e.id()).filter(|t| **t != Type::Err);
     let resolved = |e: &Expr| recorded(e).map(|t| vyrn_frontend::types::resolve(t, decls));
@@ -868,7 +869,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
     facts
         .exprs
         .iter()
-        .filter_map(|(e, line)| Some((*line as usize, refusal(e)?)))
+        .filter_map(|(e, line)| Some(Said::of(*line as usize, e, refusal(e)?)))
         .collect()
 }
 
@@ -884,7 +885,7 @@ fn unbound(
     impls: &vyrn_frontend::types::Impls,
     outer: &HashMap<String, Vec<String>>,
     sp: &Speech,
-) -> Vec<(usize, String)> {
+) -> Vec<Said> {
     use vyrn_frontend::prelude::{signature, DECODABLE, FORGETTABLE};
     use vyrn_frontend::types::{self, SHOW};
     let decls = own.proto.types();
@@ -946,7 +947,7 @@ fn unbound(
                 }
                 bounds.get(tp)?.iter().find_map(|b| {
                     let named = [w, t].into_iter().find(|t| fails(t, b))?;
-                    Some((e.line(), sentence(shown, named, b)))
+                    Some(Said::of(e.line(), e, sentence(shown, named, b)))
                 })
             })
         })
@@ -1036,7 +1037,7 @@ fn fn_slot(
     decls: &HashMap<String, TypeDecl>,
     bound: &dyn Fn(&str) -> bool,
     sp: &Speech,
-) -> Option<(usize, String)> {
+) -> Option<Said> {
     use vyrn_frontend::types::{resolve, substitute};
     let recorded = |e: &Expr| types.get(&e.id()).filter(|t| **t != Type::Err);
     let (_, f) = fns.declared(program, name)?;
@@ -1068,6 +1069,7 @@ fn fn_slot(
                 params,
                 body,
                 line: at,
+                col,
                 ..
             } => {
                 let got = match body {
@@ -1082,7 +1084,11 @@ fn fn_slot(
                     }
                     Misfit::Param(..) => return None,
                 };
-                return Some((*at, says.render()));
+                return Some(Said::at(
+                    *at,
+                    vyrn_frontend::ast::Id::at(*col),
+                    says.render(),
+                ));
             }
             Expr::Var { name: vn, .. } if bound(vn) => match recorded(arg)
                 .map(|t| resolve(t, decls))
@@ -1093,7 +1099,7 @@ fn fn_slot(
             Expr::Var { name: vn, .. } => {
                 let (_, g) = fns.declared(program, vn)?;
                 if !g.type_params.is_empty() {
-                    return Some((line, rule!(GenericFnArg, vn).render()));
+                    return Some(Said::of(line, arg, rule!(GenericFnArg, vn).render()));
                 }
                 let vptys: Vec<Type> = g.params.iter().map(|p| p.ty.clone()).collect();
                 let ([], [vn]) = sp.say([], [vn]);
@@ -1119,12 +1125,16 @@ fn fn_slot(
                             l => l,
                         };
                         let ([aty], []) = sp.say([aty], []);
-                        return Some((at, rule!(NotFnArg, callee, n, aty).render()));
+                        return Some(Said::of(
+                            at,
+                            other,
+                            rule!(NotFnArg, callee, n, aty).render(),
+                        ));
                     }
                 }
             }
         };
-        says.map(|says| (line, says))
+        says.map(|says| Said::of(line, arg, says))
     })
 }
 
@@ -1136,9 +1146,8 @@ fn stored_slot(
     f: Option<&Function>,
     exp: &Type,
     decls: &HashMap<String, TypeDecl>,
-    line: usize,
     sp: &Speech,
-) -> Option<(usize, String)> {
+) -> Option<String> {
     let says = match (lambda, f) {
         (Some(got), _) => {
             let Type::Fn(ptys, _) = vyrn_frontend::types::resolve(exp, decls) else {
@@ -1172,7 +1181,7 @@ fn stored_slot(
         }
         (None, None) => return None,
     };
-    Some((line, says.render()))
+    Some(says.render())
 }
 
 fn seeded<'a>(
@@ -3011,7 +3020,7 @@ impl<'a> Builder<'a> {
                 rule!(FieldOnNonRecord, field, other)
             }
         };
-        self.body.mistyped.push((line, refusal.render()));
+        self.body.mistyped.push(Said::line(line, refusal.render()));
     }
 
     /// The place `name base..` as the reader wrote it, as the checker quotes it
@@ -3059,7 +3068,13 @@ impl<'a> Builder<'a> {
                 }
                 _ => None,
             };
-            self.body.mistyped.extend(refusal.map(|r| (line, r)));
+            let col = match s {
+                Some(Stmt::Let { col, .. }) => vyrn_frontend::ast::Id::at(*col),
+                _ => vyrn_frontend::ast::Id::NEW,
+            };
+            self.body
+                .mistyped
+                .extend(refusal.map(|r| Said::at(line, col, r)));
         }
         let ty = self.ty_of(value)?.into_owned();
         let check = annotation.and_then(|t| self.checked(&ty, t, value));
@@ -3212,7 +3227,7 @@ impl<'a> Builder<'a> {
                 name,
                 value,
                 line,
-                id: _,
+                id,
             } => {
                 if !self.known(name, *line, |name| rule!(AssignUnknown, name)) {
                     return Ok(());
@@ -3226,7 +3241,7 @@ impl<'a> Builder<'a> {
                         let ([to, vty], []) = self.body.speech().say([to, &vty], []);
                         let name = self.written(name);
                         let refusal = rule!(AssignMismatch, name, to, vty).render();
-                        self.body.mistyped.push((*line, refusal));
+                        self.body.mistyped.push(Said::at(*line, *id, refusal));
                     }
                 }
                 let n = self.lookup(name);
@@ -3379,7 +3394,10 @@ impl<'a> Builder<'a> {
                     if !vyrn_frontend::types::coercible(&vty, ret, self.proto.types()) {
                         let ([ret, vty], []) = self.body.speech().say([ret, &vty], []);
                         let refusal = rule!(ReturnMismatch, ret, vty).render();
-                        self.body.mistyped.push((*line, refusal));
+                        self.body.mistyped.push(match value {
+                            Some(e) => Said::of(*line, e, refusal),
+                            None => Said::line(*line, refusal),
+                        });
                     }
                 }
                 if let Some(e) = value {
@@ -3482,7 +3500,7 @@ impl<'a> Builder<'a> {
                     if t != Type::Err {
                         let ([t], []) = self.body.speech().say([&t], []);
                         let refusal = rule!(ForNeedsIterable, t).render();
-                        self.body.mistyped.push((*line, refusal));
+                        self.body.mistyped.push(Said::of(*line, iter, refusal));
                     }
                     return gap("a `for` over what no loop walks", *line);
                 };
@@ -4088,12 +4106,12 @@ impl<'a> Builder<'a> {
                         false => rule!(FieldMismatch, field, fty, vty),
                     }
                     .render();
-                    self.body.mistyped.push((line, refusal));
+                    self.body.mistyped.push(Said::of(line, value, refusal));
                     return Ok(());
                 }
             },
         };
-        self.body.mistyped.push((line, refusal));
+        self.body.mistyped.push(Said::line(line, refusal));
         gap("a store into a field its root has not", line)
     }
 
@@ -4123,11 +4141,11 @@ impl<'a> Builder<'a> {
                             && !coercible(&k, &vyrn_frontend::types::resolve(&key, decls)) =>
                     {
                         let ([key, k], []) = sp.say([&key, &k], []);
-                        Some(rule!(MapStoreKey, name, key, k))
+                        Some((rule!(MapStoreKey, name, key, k), index))
                     }
                     (_, Some(v)) if !coercible(&v, &val) => {
                         let ([val, v], []) = sp.say([&val, &v], []);
-                        Some(rule!(MapStoreValue, name, val, v))
+                        Some((rule!(MapStoreValue, name, val, v), value))
                     }
                     _ => None,
                 }
@@ -4145,7 +4163,7 @@ impl<'a> Builder<'a> {
                         None => {
                             let ([other], []) = sp.say([&shape], []);
                             let refusal = rule!(IndexStoreNoContainer, name, other).render();
-                            self.body.mistyped.push((line, refusal));
+                            self.body.mistyped.push(Said::line(line, refusal));
                             return gap("a store into an element of what has none", line);
                         }
                     },
@@ -4156,15 +4174,15 @@ impl<'a> Builder<'a> {
                 match (i, vty) {
                     (Some(i), _) if key == Type::Int => {
                         let ([i], []) = sp.say([&i], []);
-                        Some(rule!(ArrayIndexType, i))
+                        Some((rule!(ArrayIndexType, i), index))
                     }
                     (Some(i), _) => {
                         let ([key, i], []) = sp.say([&key, &i], []);
-                        Some(rule!(IndexStoreKey, name, key, i))
+                        Some((rule!(IndexStoreKey, name, key, i), index))
                     }
                     (None, Some(v)) if !coercible(&v, &elem) => {
                         let ([elem, v], []) = sp.say([&elem, &v], []);
-                        Some(rule!(ElementMismatch, name, elem, v))
+                        Some((rule!(ElementMismatch, name, elem, v), value))
                     }
                     _ => None,
                 }
@@ -4172,7 +4190,7 @@ impl<'a> Builder<'a> {
         };
         self.body
             .mistyped
-            .extend(refusal.map(|r| (line, r.render())));
+            .extend(refusal.map(|(r, at)| Said::of(line, at, r.render())));
         Ok(())
     }
 
@@ -4239,7 +4257,7 @@ impl<'a> Builder<'a> {
         if let (Place::Key(_, Val::Name(k)), Expr::Var { name: key, .. }) = (&place, index) {
             if crate::kernel::modifies(&out[mark..], Root::N(*k), &self.body.names) {
                 let refusal = rule!(MapKeyChanged, name, key).render();
-                self.body.refused.push((line, refusal));
+                self.body.refused.push(Said::of(line, index, refusal));
             }
         }
         let site = Site::Node(sid);
@@ -4294,7 +4312,7 @@ impl<'a> Builder<'a> {
             return true;
         }
         let refusal = rule(DeclName(name)).render_in(&self.body.speech());
-        self.body.refused.push((line, refusal));
+        self.body.refused.push(Said::line(line, refusal));
         false
     }
 
@@ -4312,7 +4330,7 @@ impl<'a> Builder<'a> {
         if !bool && t != Type::Err {
             let ([t], []) = self.body.speech().say([&t], []);
             let refusal = rule!(ConditionNotBool, word, t).render();
-            self.body.mistyped.push((line, refusal));
+            self.body.mistyped.push(Said::of(line, cond, refusal));
         }
         self.read_val(cond, out)
     }
@@ -4324,14 +4342,14 @@ impl<'a> Builder<'a> {
 
     /// The refusal of `e` where it names nothing: a variable no binding or
     /// module state answers, or `T?(..)` of an undeclared type.
-    fn unknown_of(&self, e: &Expr) -> Option<(usize, String)> {
+    fn unknown_of(&self, e: &Expr) -> Option<Said> {
         match e {
             Expr::Var { name, line, id: _ } if !self.answers(name) && !self.is_variant(name) => {
                 let refusal = rule!(UnknownVariable, name = DeclName(name));
-                Some((*line, refusal.render_in(&self.body.speech())))
+                Some(Said::of(*line, e, refusal.render_in(&self.body.speech())))
             }
             Expr::TryConstruct { name, line, .. } if !self.proto.types().contains_key(name) => {
-                Some((*line, rule!(UnknownType, n = name).render()))
+                Some(Said::of(*line, e, rule!(UnknownType, n = name).render()))
             }
             _ => None,
         }
@@ -4370,7 +4388,7 @@ impl<'a> Builder<'a> {
                 t = self.body.speech().ty(&other).to_string()
             ),
         };
-        self.body.mistyped.push((line, refusal.render()));
+        self.body.mistyped.push(Said::line(line, refusal.render()));
     }
 
     fn unknown_at(&mut self, e: &Expr) {
@@ -4831,7 +4849,7 @@ impl<'a> Builder<'a> {
                     let v = self.body.speech().name(&variants[t as usize].name);
                     self.body
                         .refused
-                        .push((line, rule!(DuplicateArm, v).render()));
+                        .push(Said::line(line, rule!(DuplicateArm, v).render()));
                     return Ok(());
                 }
                 *seen = true;
@@ -4843,7 +4861,7 @@ impl<'a> Builder<'a> {
         if let Some((v, _)) = variants.iter().zip(&taken).find(|(_, t)| !**t) {
             let v = self.body.speech().name(&v.name);
             let refusal = rule!(MissingVariant, v).render();
-            self.body.refused.push((line, refusal));
+            self.body.refused.push(Said::line(line, refusal));
         }
         Ok(())
     }
@@ -5369,8 +5387,10 @@ impl<'a> Builder<'a> {
                     let ty = self.types[&e.id()].clone();
                     let f = self.declared(name).map(|(_, f)| f);
                     let decls = self.proto.types();
-                    let refusal = stored_slot(None, f, &ty, &decls, *line, &self.body.speech());
-                    self.body.mistyped.extend(refusal);
+                    let refusal = stored_slot(None, f, &ty, &decls, &self.body.speech());
+                    self.body
+                        .mistyped
+                        .extend(refusal.map(|r| Said::of(*line, e, r)));
                     let t = self.name("@closure", ty, false, *line);
                     self.body.names[t.index()].borrow = false;
                     self.body.names[t.index()].not_owned = Some(NotOwned::Static);
@@ -5521,8 +5541,11 @@ impl<'a> Builder<'a> {
                             .filter(|g| *g != Type::Err);
                         let sp = self.body.speech();
                         let refusal =
-                            got.and_then(|g| stored_slot(Some(&g), None, &t, &decls, *line, &sp));
-                        self.body.mistyped.extend(refusal);
+                            got.and_then(|g| stored_slot(Some(&g), None, &t, &decls, &sp));
+                        let at = vyrn_frontend::ast::Id::at(*col);
+                        self.body
+                            .mistyped
+                            .extend(refusal.map(|r| Said::at(*line, at, r)));
                     }
                     (ptys, Some(*r))
                 }
@@ -6082,7 +6105,7 @@ impl<'a> Builder<'a> {
         } = e
         {
             let callee = prelude::method_surface(name);
-            (self.body.refused).push((*line, rule!(AwaitNoWait, callee).render()));
+            (self.body.refused).push(Said::of(*line, e, rule!(AwaitNoWait, callee).render()));
         }
     }
 
@@ -8378,20 +8401,21 @@ fn typed(
         .into_iter()
         .chain(groups)
     {
-        let said = |d: &Diagnostic| (&d.file, d.line, &d.message) == (file, u.0, &u.1);
-        if !out.iter().any(said) && !found.contains(&u) {
+        let said = |d: &Diagnostic| (&d.file, d.line, &d.message) == (file, u.line, &u.text);
+        let again = |f: &Said| (f.line, &f.text) == (u.line, &u.text);
+        if !out.iter().any(said) && !found.iter().any(again) {
             found.push(u);
         }
     }
     if as_written {
         found.extend(crate::typed::drops(top, program, own.proto.types()));
     }
-    found.sort_by_key(|(line, _)| *line);
+    found.sort_by_key(|s| s.line);
     let refused = !found.is_empty() || !unshown.is_empty();
     out.extend(
-        found.into_iter().map(|(line, message)| {
-            Diagnostic::error(line, 0, "check", message).in_file(file.clone())
-        }),
+        found
+            .into_iter()
+            .map(|s| Diagnostic::error(s.line, s.col(), "check", s.text).in_file(file.clone())),
     );
     out.extend(unshown);
     refused

@@ -1188,6 +1188,51 @@ impl<'a> Iterator for Rows<'a> {
         }
     }
 }
+
+/// A sentence a pass refuses a construct with, at the construct's line and the
+/// 1-based column of the name it spells: 0 where it spells none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Said {
+    pub line: usize,
+    col: usize,
+    pub text: String,
+}
+
+impl Said {
+    pub fn col(&self) -> usize {
+        self.col
+    }
+
+    /// `text` at `line`, on the name `e` spells when `e` starts on that line.
+    /// A callee with no spelling of its own (`@at`, whose column is its `]`)
+    /// spells none.
+    pub fn of(line: usize, e: &crate::ast::Expr, text: String) -> Said {
+        let unspelled =
+            matches!(e, crate::ast::Expr::Call { name, .. } if name == crate::project::AT);
+        let col = if e.line() == line && !unspelled {
+            e.col()
+        } else {
+            0
+        };
+        Said { line, col, text }
+    }
+
+    /// `text` at `line` on the name spelled at `id`'s column, as a binder or an
+    /// assignment records it.
+    pub fn at(line: usize, id: crate::ast::Id, text: String) -> Said {
+        Said {
+            line,
+            col: id.col(),
+            text,
+        }
+    }
+
+    /// `text` about the whole of `line`: a construct that spells no name.
+    pub fn line(line: usize, text: String) -> Said {
+        Said { line, col: 0, text }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Body {
     pub name: String,
@@ -1243,13 +1288,12 @@ pub struct Body {
     /// line. The core has no row for it; `vyrn_lower::typed::drops` refuses it.
     pub unbound_drops: Vec<(String, usize)>,
     /// A rule the checker let through that the builder met while lowering
-    /// its construct: the line and the sentence. An unknown name is one; the
-    /// builder binds the checker's `Err` there. `vyrn_lower::typed::refused`
-    /// refuses each.
-    pub refused: Vec<(usize, String)>,
+    /// its construct. An unknown name is one; the builder binds the checker's
+    /// `Err` there. `vyrn_lower::typed::refused` refuses each.
+    pub refused: Vec<Said>,
     /// The same for a rule about the checker's types that holds as written,
     /// not per instance: a non-Bool condition, a `for` over what no loop walks.
-    pub mistyped: Vec<(usize, String)>,
+    pub mistyped: Vec<Said>,
     /// Where the reader spelled a take of a heap name, keyed by the statement
     /// and the name: the line and the column just past its path. Where the
     /// statement takes the name twice, the first take is kept: the kernel walks
