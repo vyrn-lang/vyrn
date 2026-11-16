@@ -12709,14 +12709,16 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
         };
         // An awaited call waits only through a callee whose frame waits, a waiting type's
-        // dispatcher included. A fork branch may finish at its start.
+        // dispatcher included. Into any other frame it is a plain call, which finishes at its
+        // start: its point is never suspended at. A fork branch may finish at its start too.
         let awaited = self.awaiting.take();
         let branch = self.branch.take().map(|(st, _)| st);
         let site = match (awaited, sig.waits) {
             (Some((k, c)), true) => Some((self.await_open(b, line)?, k, c)),
-            (None, _) if branch.is_some() => None,
-            (None, false) => None,
-            _ => return unsupported("an `await` that disagrees with its callee's frame", line),
+            (None, true) if branch.is_none() => {
+                return unsupported("a call into a waiting frame with no `await`", line);
+            }
+            _ => None,
         };
         // The callee reads a `consume` argument at its address until it returns.
         let hint = hint.filter(|(d, _)| self.dest_apart(*d, &sig, args));
