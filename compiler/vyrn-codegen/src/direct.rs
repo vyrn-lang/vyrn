@@ -293,7 +293,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
 
     // A program that waits imports the host's wait and reserves the root dispatcher before any
     // function; every other module is as it was.
-    let waits = world.waiting(program).next().is_some().then(|| Waits {
+    let waits = world.waits(program).then(|| Waits {
         sleep: m.import(WAIT_IMPORTS, "sleep", &[ValType::I64], &[ValType::I64]),
         fetch: m.import(
             WAIT_IMPORTS,

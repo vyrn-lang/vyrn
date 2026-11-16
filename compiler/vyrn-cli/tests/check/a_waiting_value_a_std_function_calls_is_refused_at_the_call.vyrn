@@ -1,0 +1,11 @@
+import { sleep } from "std/task"
+import { filter } from "std/arrays"
+fn w(x: Int64) -> Bool {
+    await sleep(1)
+    return x > 1
+}
+fn main() -> Int64 {
+    let ys = await filter([1, 2, 3], w)
+    print(ys.length)
+    return 0
+}

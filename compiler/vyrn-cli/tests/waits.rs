@@ -156,6 +156,29 @@ fn a_waiting_lambda_runs_where_its_parameter_is_bound() {
     assert_eq!(seen, (Some(0), "3\n".to_string(), String::new()));
 }
 
+/// A fork with no `await` in a program that does not wait runs its calls in
+/// order, and the module links no run queue.
+#[test]
+fn an_unawaited_fork_runs_in_a_program_that_does_not_wait() {
+    let out = vyrn()
+        .args(["run", "unawaited.vyrn"])
+        .env("VYRN_LEAK_CHECK", "1")
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn run");
+    let seen = (out.status.code(), norm(&out.stdout), norm(&out.stderr));
+    assert_eq!(
+        seen,
+        (
+            Some(0),
+            "2
+"
+            .to_string(),
+            String::new()
+        )
+    );
+}
+
 /// What `tests/waits/result.vyrn` prints on each host: `vyrn run`, the native build and, where
 /// node runs, the browser shim, each with its exit code.
 #[test]

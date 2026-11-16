@@ -10,6 +10,7 @@ use vyrn_frontend::ast::{FnId, Function, Key, Program, Type};
 use vyrn_frontend::checker;
 use vyrn_frontend::core::{rows, Body, Callee, Facts, Rhs, St};
 use vyrn_frontend::diagnostics::{Diagnostic, Severity};
+use vyrn_frontend::loader::TASK_PREFIX;
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{self, Ownership};
 
@@ -373,7 +374,8 @@ pub(crate) fn add_callees(top: &Body, fns: &HashMap<&str, (FnId, &Function)>, ou
 /// `w`'s calls ([`World::callees`]). An entry is a function of a module
 /// [`Program::lazy`] does not name, an `extern` or `export extern` function,
 /// a function the emitter, a desugar or dispatch enters by its reserved
-/// spelling (a `$` in its name), a function a `fn` value may be
+/// spelling (a `$` in its name; the run queue's only where the program
+/// [`World::waits`]), a function a `fn` value may be
 /// ([`checker::StoredFnEffects::every_source`]), and every row that is no
 /// function: a projection, a test, a bench, a module-state initializer, a
 /// type's check, an instance, a lambda frame. A gen fn is none: it runs only
@@ -384,10 +386,10 @@ pub(crate) fn unreached(program: &Program, w: &World) -> HashSet<FnId> {
     };
     let lazy = |m: &Option<String>| m.as_ref().is_some_and(|k| lazy.contains(k));
     let fns = program.functions.len();
+    let queued = w.waits(program);
+    let reserved = |n: &str| n.contains('$') && (queued || !n.starts_with(TASK_PREFIX));
     let entry = |f: &Function| {
-        (!f.is_gen && (!lazy(&f.module) || f.name.contains('$')))
-            || f.is_extern
-            || f.is_export_extern
+        (!f.is_gen && (!lazy(&f.module) || reserved(&f.name))) || f.is_extern || f.is_export_extern
     };
     let mut work: Vec<FnId> = (0..fns)
         .filter(|&i| entry(&program.functions[i]))
@@ -636,6 +638,12 @@ impl World {
             let waits = u.effects.has(vyrn_frontend::effects::Effect::Waits);
             waits.then(|| (f, u.awaits_at.unwrap_or(f.line)))
         })
+    }
+
+    /// Whether a function of `program` waits. Only then does its module
+    /// import the host's waits and run `std/task`'s run queue.
+    pub fn waits(&self, program: &Program) -> bool {
+        self.waiting(program).next().is_some()
     }
 
     /// The frames from `f` to one whose own statements read or store module

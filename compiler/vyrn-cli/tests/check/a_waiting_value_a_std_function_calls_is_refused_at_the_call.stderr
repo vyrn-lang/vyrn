@@ -1,0 +1,2 @@
+a_waiting_value_a_std_function_calls_is_refused_at_the_call.vyrn:8:0: `filter` waits only because it calls `pred` with no `await`
+  fix: pass a function that does not wait

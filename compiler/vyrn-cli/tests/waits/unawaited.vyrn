@@ -1,0 +1,9 @@
+import { both, Both } from "std/task"
+fn one() -> Int64 {
+    return 1
+}
+fn main() -> Int64 {
+    let r = both(one(), one())
+    print(r.first + r.second)
+    return 0
+}

@@ -2692,17 +2692,26 @@ impl<'a> Builder<'a> {
         for s in ss {
             let (scope, at) = (self.frame.scope.len(), out.len());
             if let Err(g) = self.stmt(s, out) {
-                // The checker typed an unknown name `Err` and went on, so a
-                // gap may come before the builder meets it.
-                let mut named = Vec::new();
+                // The checker typed an unknown name or a shrink of a fixed
+                // array `Err` and went on, so a gap may come before the
+                // builder meets it.
+                let (mut named, mut shrunk) = (Vec::new(), Vec::new());
                 vyrn_frontend::ast::exprs_one(s, &mut |e, locals| {
                     let local = matches!(e, Expr::Var { name, .. } if locals.contains(name));
                     let typed = self.types.get(&e.id());
                     if !local && matches!(typed, None | Some(Type::Err)) {
                         named.extend(self.unknown_of(e));
+                        if let Expr::Call {
+                            name, args, line, ..
+                        } = e
+                        {
+                            shrunk.extend(self.shrink_of(name, args, *line));
+                        }
                     }
                 });
                 self.body.refused.extend(named);
+                shrunk.retain(|s| !self.body.mistyped.contains(s));
+                self.body.mistyped.extend(shrunk);
                 if self.body.refused.is_empty() && self.body.mistyped.is_empty() {
                     return Err(g);
                 }
@@ -4355,14 +4364,21 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The receiver rule of `pop` and `swapRemove`: the array they shrink is
-    /// growable, and its root is a `mut` name. A receiver that is no place, or
-    /// whose root is not `mut`, is refused elsewhere (the checker's
-    /// `mut_array_receiver`, [`crate::typed::stores`]).
-    fn shrinks(&mut self, op: &str, recv: &Expr, line: usize) {
-        let Some((_, root, _)) = vyrn_frontend::parser::place_steps(recv) else {
-            return;
-        };
+    /// The refusal of call `name(args)` by the receiver rule of `pop` and
+    /// `swapRemove`: the array they shrink is growable, and its root is a
+    /// `mut` name. A receiver that is no place, or whose root is not `mut`, is
+    /// refused elsewhere (the checker's `mut_array_receiver`,
+    /// [`crate::typed::stores`]).
+    fn shrink_of(&self, name: &str, args: &[Expr], line: usize) -> Option<Said> {
+        let shrinking = prelude::builtin(name).map(|b| b.shape_map);
+        if !matches!(
+            shrinking,
+            Some(prelude::ShapeMap::DropsLast | prelude::ShapeMap::SwapsOut(_))
+        ) {
+            return None;
+        }
+        let (op, recv) = (&name[1..], args.first()?);
+        let (_, root, _) = vyrn_frontend::parser::place_steps(recv)?;
         let mutable = match self.lookup(root) {
             Some(n) => self.body.names[n.index()].mutable,
             None => self
@@ -4376,19 +4392,15 @@ impl<'a> Builder<'a> {
             Expr::Var { .. } => self.named_place(root, line).ok().map(|(_, ty)| ty),
             _ => self.ty_of(recv).ok().map(Cow::into_owned),
         };
-        let Some(ty) = ty.filter(|_| mutable) else {
-            return;
+        let ty = ty.filter(|_| mutable)?;
+        let resolved = vyrn_frontend::types::resolve(&ty, self.proto.types());
+        let t = self.body.speech().ty(&resolved).to_string();
+        let refusal = match resolved {
+            Type::Array(_) | Type::SmallArray(..) | Type::Err => return None,
+            Type::ArrayN(..) => rule!(ShrinkFixedArray, op, t),
+            _ => rule!(ShrinkNeedsArray, op, t),
         };
-        let refusal = match vyrn_frontend::types::resolve(&ty, self.proto.types()) {
-            Type::Array(_) | Type::SmallArray(..) | Type::Err => return,
-            Type::ArrayN(..) => rule!(ShrinkFixedArray, op),
-            other => rule!(
-                ShrinkNeedsArray,
-                op,
-                t = self.body.speech().ty(&other).to_string()
-            ),
-        };
-        self.body.mistyped.push(Said::line(line, refusal.render()));
+        Some(Said::line(line, refusal.render()))
     }
 
     fn unknown_at(&mut self, e: &Expr) {
@@ -7143,12 +7155,8 @@ impl<'a> Builder<'a> {
             (Callee::Value(_), ..) => CapsOf::None,
             _ => self.own.arg_caps.named(name),
         };
-        let map = prelude::builtin(name).map(|b| b.shape_map);
-        if let (Some(prelude::ShapeMap::DropsLast | prelude::ShapeMap::SwapsOut(_)), Some(recv)) =
-            (map, args.first())
-        {
-            self.shrinks(&name[1..], recv, line);
-        }
+        let shrunk = self.shrink_of(name, args, line);
+        self.body.mistyped.extend(shrunk);
         if let (Callee::Projection, Some(recv)) = (kind, args.first()) {
             if let Some(p) = self.inlined(name, recv, &args[1..], line, out)? {
                 return Ok(Rhs::Read(p));
@@ -8718,10 +8726,23 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                     (id, Arc::clone(shared))
                 })
                 .collect();
+            // Per frame, whether its module is outside the root's: one a module
+            // imports by a `std/` path.
+            let std: HashSet<&str> = (program.spellings.paths.iter())
+                .filter(|(_, p)| p.starts_with("std/"))
+                .map(|((_, to), _)| to.as_str())
+                .collect();
+            let lazy = |m: &Option<String>| m.as_deref().is_some_and(|k| std.contains(k));
+            let served_jobs = (states.iter().filter(|s| s.answered().is_some())).map(|s| &s.job);
+            let mut foreign: Vec<bool> = refs.iter().map(|b| lazy(&b.file)).collect();
+            foreign.resize(judged.frames.len(), false);
+            for ((job, at), (_, frames)) in served_jobs.clone().zip(served_at).zip(&late) {
+                foreign[*at..*at + frames.len()].fill(lazy(job.module()));
+            }
             // The waiting rules over every frame, built, served or alone. The
             // memo keeps none of their refusals, because they read the judgment.
             let mut rules = |i: usize, at: Waiting, file: &Option<String>, body: &str| {
-                for (line, rule) in judged.wait_rules(i, at) {
+                for (line, rule) in judged.wait_rules(i, at, &foreign) {
                     let mut d = Diagnostic::refusal(line, 0, "check", rule).in_file(file.clone());
                     // A callee of `std/task` is linked as `task$sleep`.
                     d.speak(&program.spellings);
@@ -8742,7 +8763,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             for (i, b) in refs.iter().enumerate() {
                 rules(i, Waiting::Body, &b.file, &b.name);
             }
-            let served_jobs = (states.iter().filter(|s| s.answered().is_some())).map(|s| &s.job);
             for ((job, at), (_, frames)) in served_jobs.zip(served_at).zip(&late) {
                 for i in *at..*at + frames.len() {
                     rules(i, Waiting::Body, job.module(), job.owner());
