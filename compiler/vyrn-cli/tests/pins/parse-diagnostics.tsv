@@ -1061,6 +1061,7 @@ compiler/vyrn-cli/tests/unlicensed/u13_an_arm_binder_to_a_consume_parameter.vyrn
 compiler/vyrn-cli/tests/unlicensed/u25_consume_inside_a_loop_heapless.vyrn	0	cbf29ce484222325	20	17	011324d105f7c459
 compiler/vyrn-cli/tests/unlicensed/u25b_partial_take_across_iterations.vyrn	0	cbf29ce484222325	20	18	31af5e6360a6a630
 compiler/vyrn-cli/tests/waits/byvalue.vyrn	0	cbf29ce484222325	20	19	ebe7ff45301a0998
+compiler/vyrn-cli/tests/waits/byvalue_nowait.vyrn	0	cbf29ce484222325	20	18	8ea3080fe6d7bc2b
 compiler/vyrn-cli/tests/waits/lambda.vyrn	0	cbf29ce484222325	20	14	7e8a0ba1b59ddc36
 compiler/vyrn-cli/tests/waits/longsleep.vyrn	0	cbf29ce484222325	20	16	598eac905e55a826
 compiler/vyrn-cli/tests/waits/race.vyrn	0	cbf29ce484222325	20	17	5eaf328666292474

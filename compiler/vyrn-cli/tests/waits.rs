@@ -180,10 +180,14 @@ fn an_unawaited_fork_runs_in_a_program_that_does_not_wait() {
 }
 
 /// An `await` over a function value takes a function that waits and one that
-/// does not: a call into a frame that does not wait finishes at its start.
+/// does not, in a program that waits and in one that does not: a call into a
+/// frame that does not wait finishes at its start.
 #[test]
 fn an_await_over_a_function_value_takes_any_function() {
-    for (name, want) in [("byvalue.vyrn", "206\n10\n203\n30\n5\n")] {
+    for (name, want) in [
+        ("byvalue.vyrn", "206\n10\n203\n30\n5\n"),
+        ("byvalue_nowait.vyrn", "10\n30\n1\n5\n"),
+    ] {
         let out = vyrn()
             .args(["run", name])
             .env("VYRN_LEAK_CHECK", "1")

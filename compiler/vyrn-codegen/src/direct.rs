@@ -1232,8 +1232,9 @@ struct Sig {
     /// writes no separate result, so the call has no out-pointer and the caller moves the
     /// argument into the call's destination first.
     in_place: Option<usize>,
-    /// The callee's core holds an awaited call ([`vyrn_frontend::core::Body::waits`]): its frame
-    /// is a heap block, it takes the frame's address last and returns its status last.
+    /// The callee's core holds an awaited call ([`vyrn_frontend::core::Body::waits`]) in a
+    /// program that waits: its frame is a heap block, it takes the frame's address last and
+    /// returns its status last.
     waits: bool,
 }
 
@@ -2301,7 +2302,9 @@ impl<'a> Cx<'a> {
             Ret::Words(fl) if f.is_export_extern || f.is_gen => Ret::Out(fl.layout.clone()),
             r => r,
         };
-        let waits = self.world.body_of(key).is_some_and(|b| b.waits());
+        // In a program that does not wait, every awaited call finishes at its start, so no
+        // frame waits.
+        let waits = self.waits.is_some() && self.world.body_of(key).is_some_and(|b| b.waits());
         let in_place = (self.world.body_of(key))
             .filter(|_| ret.out().is_some() && !f.is_export_extern)
             .and_then(|body| {
@@ -4360,9 +4363,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Push a region scope: trap past `REGION_MAX`, the bound every engine shares, else bump
-    /// the counter and keep the arena's mark, or for a region that holds an `await`, the arena
-    /// outside it. The local is fresh because every region open at an exit edge needs its own
-    /// ([`Fn_::exit_regions_above`]).
+    /// the counter and keep the arena's mark, or for a region that holds an `await` in a frame
+    /// that waits, the arena outside it. The local is fresh because every region open at an
+    /// exit edge needs its own ([`Fn_::exit_regions_above`]).
     ///
     /// A resume enters a region that holds its point through here too: the counter goes back
     /// up, and the region's own arena, which the suspension left in the local, comes back.
@@ -4379,7 +4382,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::End);
         self.region_bump(b, 1);
         let region = match (waits, self.resume) {
-            (false, _) => {
+            (false, _) | (true, None) => {
                 let mark = b.local(ValType::I32);
                 b.ins(&Instruction::Call(self.cx.rt.region_enter))
                     .ins(&Instruction::LocalSet(mark));
@@ -4395,7 +4398,6 @@ impl<'p> Fn_<'_, 'p> {
                     .ins(&Instruction::LocalSet(outer));
                 Region::Own(outer)
             }
-            (true, None) => return unsupported("an `await` in a frame that does not wait", 0),
         };
         self.regions.push(region);
         Ok(())
@@ -11869,8 +11871,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
         hint: Option<(Dest, Type)>,
         line: usize,
     ) -> Result<Type, String> {
-        let (Some((k, aw)), Some(r)) = (self.awaiting.take(), self.resume) else {
-            return unsupported("a fork in a frame that does not wait", line);
+        let Some((k, aw)) = self.awaiting.take() else {
+            return unsupported("a fork with no `await`", line);
         };
         let (Some(fork), Some(ty)) = (aw.fork.as_ref(), ret.cloned()) else {
             return unsupported("a fork the core did not state", line);
@@ -11878,11 +11880,6 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
             return unsupported("a fork whose value is no layout", line);
         };
-        let (begin, end) = (
-            self.cx.task("cancelBegin", line)?,
-            self.cx.task("cancelEnd", line)?,
-        );
-        let body = self.body();
         // Each branch's status: 0 done, 1 cancelled, else its frame while it waits.
         let sts: Vec<u32> = (fork.branches.iter())
             .map(|_| b.local(ValType::I32))
@@ -11890,104 +11887,100 @@ impl<'a, 'p> Fn_<'a, 'p> {
         // The race's winner, from 1 by position; 0 while no branch won.
         let won = b.local(ValType::I32);
         let race = fork.form == Form::Race;
-        let mut started: Vec<Started> = Vec::with_capacity(sts.len());
-        // $settled, $check, $poll: a resume skips the starts to the polls, and every round
-        // ends in the check.
-        b.ins(&Instruction::Block(BlockType::Empty));
-        b.ins(&Instruction::Block(BlockType::Empty));
-        b.ins(&Instruction::Block(BlockType::Empty));
-        self.depth += 3;
-        b.ins(&Instruction::LocalGet(r.at))
-            .ins(&Instruction::BrIf(0));
-        for ((br, these), st) in fork.calls(args).zip(&sts) {
-            self.branch = Some((*st, None));
-            self.core_user_call(
-                m,
-                b,
-                &br.callee,
-                br.kind,
-                &br.solved,
-                &br.targets,
-                these,
-                None,
-                line,
-            )?;
-            let Some((_, Some(s))) = self.branch.take() else {
-                return unsupported("a fork branch that is no declared call", line);
-            };
-            let rty = body.names[br.result.index()].ty.clone();
-            let at = match self.cx.repr(&rty, line)? {
-                Repr::Unit => None,
-                Repr::Scalar(v) => Some(Place::Local(b.local(v))),
-                Repr::Agg(_) => match s.dest {
-                    Some((Dest::Slot(off), _)) => Some(Place::Slot(off)),
-                    _ => return unsupported("a fork branch's result with no slot", line),
-                },
-            };
-            if let Some(at) = at {
-                self.core_bind(br.result, at, rty)?;
-            }
-            self.fork_land(b, br.result);
-            started.push(s);
-        }
-        b.ins(&Instruction::Br(1)).ins(&Instruction::End);
-        self.depth -= 1;
-        b.ins(&Instruction::I32Const(0))
-            .ins(&Instruction::LocalSet(r.at));
-        // A poll that settles a branch ends the round: a race has its winner, and a cancelled
-        // branch cancels the fork.
-        for ((br, s), st) in fork.branches.iter().zip(&started).zip(&sts) {
-            if !s.sig.waits {
-                continue;
-            }
-            pending(b, *st);
-            b.ins(&Instruction::If(BlockType::Empty));
-            self.fork_poll(b, s, *st);
-            self.fork_land(b, br.result);
-            b.ins(&Instruction::LocalGet(*st))
-                .ins(&Instruction::I32Const(i32::from(race) + 1))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::End);
-        }
-        b.ins(&Instruction::End);
-        self.depth -= 1;
-        if race {
-            for (i, st) in sts.iter().enumerate() {
-                b.ins(&Instruction::LocalGet(won))
-                    .ins(&Instruction::I32Eqz)
-                    .ins(&Instruction::LocalGet(*st))
-                    .ins(&Instruction::I32Eqz)
-                    .ins(&Instruction::I32And)
-                    .ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::I32Const(i as i32 + 1))
-                    .ins(&Instruction::LocalSet(won))
+        match self.resume {
+            Some(r) => {
+                let (begin, end) = (
+                    self.cx.task("cancelBegin", line)?,
+                    self.cx.task("cancelEnd", line)?,
+                );
+                // $settled, $check, $poll: a resume skips the starts to the polls, and every
+                // round ends in the check.
+                b.ins(&Instruction::Block(BlockType::Empty));
+                b.ins(&Instruction::Block(BlockType::Empty));
+                b.ins(&Instruction::Block(BlockType::Empty));
+                self.depth += 3;
+                b.ins(&Instruction::LocalGet(r.at))
+                    .ins(&Instruction::BrIf(0));
+                let started = self.fork_starts(m, b, fork, args, &sts, line)?;
+                b.ins(&Instruction::Br(1)).ins(&Instruction::End);
+                self.depth -= 1;
+                b.ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::LocalSet(r.at));
+                // A poll that settles a branch ends the round: a race has its winner, and a
+                // cancelled branch cancels the fork.
+                for ((br, s), st) in fork.branches.iter().zip(&started).zip(&sts) {
+                    if !s.sig.waits {
+                        continue;
+                    }
+                    pending(b, *st);
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.fork_poll(b, s, *st);
+                    self.fork_land(b, br.result);
+                    b.ins(&Instruction::LocalGet(*st))
+                        .ins(&Instruction::I32Const(i32::from(race) + 1))
+                        .ins(&Instruction::I32LtU)
+                        .ins(&Instruction::BrIf(1))
+                        .ins(&Instruction::End);
+                }
+                b.ins(&Instruction::End);
+                self.depth -= 1;
+                if race {
+                    for (i, st) in sts.iter().enumerate() {
+                        b.ins(&Instruction::LocalGet(won))
+                            .ins(&Instruction::I32Eqz)
+                            .ins(&Instruction::LocalGet(*st))
+                            .ins(&Instruction::I32Eqz)
+                            .ins(&Instruction::I32And)
+                            .ins(&Instruction::If(BlockType::Empty))
+                            .ins(&Instruction::I32Const(i as i32 + 1))
+                            .ins(&Instruction::LocalSet(won))
+                            .ins(&Instruction::End);
+                    }
+                    b.ins(&Instruction::LocalGet(won))
+                        .ins(&Instruction::BrIf(0));
+                }
+                any_of(b, &sts, cancelled);
+                b.ins(&Instruction::BrIf(0));
+                any_of(b, &sts, pending);
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.regions_suspend(b, line)?;
+                b.ins(&Instruction::I32Const(k as i32))
+                    .ins(&Instruction::LocalSet(r.at))
+                    .ins(&Instruction::Br(self.depth + 2))
                     .ins(&Instruction::End);
+                b.ins(&Instruction::End);
+                self.depth -= 1;
+                // Settled. A cancelled branch cancels the rest, and the frame leaves by the edge.
+                any_of(b, &sts, cancelled);
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                self.fork_cancel(m, b, fork, &started, &sts, None, Some((begin, end)), line)?;
+                self.cancel_exit(m, b, r, &aw.rows)?;
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                if race {
+                    self.fork_cancel(
+                        m,
+                        b,
+                        fork,
+                        &started,
+                        &sts,
+                        Some(won),
+                        Some((begin, end)),
+                        line,
+                    )?;
+                }
             }
-            b.ins(&Instruction::LocalGet(won))
-                .ins(&Instruction::BrIf(0));
-        }
-        any_of(b, &sts, cancelled);
-        b.ins(&Instruction::BrIf(0));
-        any_of(b, &sts, pending);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.regions_suspend(b, line)?;
-        b.ins(&Instruction::I32Const(k as i32))
-            .ins(&Instruction::LocalSet(r.at))
-            .ins(&Instruction::Br(self.depth + 2))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::End);
-        self.depth -= 1;
-        // Settled. A cancelled branch cancels the rest, and the frame leaves by the edge.
-        any_of(b, &sts, cancelled);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        self.fork_cancel(m, b, fork, &started, &sts, None, (begin, end), line)?;
-        self.cancel_exit(m, b, r, &aw.rows)?;
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        if race {
-            self.fork_cancel(m, b, fork, &started, &sts, Some(won), (begin, end), line)?;
+            // In a frame that does not wait no branch waits: each finishes at its start, in
+            // order, and the first wins a race.
+            None => {
+                let started = self.fork_starts(m, b, fork, args, &sts, line)?;
+                if race {
+                    b.ins(&Instruction::I32Const(1))
+                        .ins(&Instruction::LocalSet(won));
+                    self.fork_cancel(m, b, fork, &started, &sts, Some(won), None, line)?;
+                }
+            }
         }
         let (dest, used) = match hint {
             Some((d, t)) if self.cx.shape(&t) == self.cx.shape(&ty) => (d, true),
@@ -12040,8 +12033,57 @@ impl<'a, 'p> Fn_<'a, 'p> {
         Ok(ty)
     }
 
+    /// Starts each branch of `fork` in argument order, its status into its local of `sts` and
+    /// its result into its result name.
+    fn fork_starts(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        fork: &Fork,
+        args: &[(Arg, vyrn_frontend::ast::Capability)],
+        sts: &[u32],
+        line: usize,
+    ) -> Result<Vec<Started>, String> {
+        let body = self.body();
+        let mut started: Vec<Started> = Vec::with_capacity(sts.len());
+        for ((br, these), st) in fork.calls(args).zip(sts) {
+            self.branch = Some((*st, None));
+            self.core_user_call(
+                m,
+                b,
+                &br.callee,
+                br.kind,
+                &br.solved,
+                &br.targets,
+                these,
+                None,
+                line,
+            )?;
+            let Some((_, Some(s))) = self.branch.take() else {
+                return unsupported("a fork branch that is no declared call", line);
+            };
+            let rty = body.names[br.result.index()].ty.clone();
+            let at = match self.cx.repr(&rty, line)? {
+                Repr::Unit => None,
+                Repr::Scalar(v) => Some(Place::Local(b.local(v))),
+                Repr::Agg(_) => match s.dest {
+                    Some((Dest::Slot(off), _)) => Some(Place::Slot(off)),
+                    _ => return unsupported("a fork branch's result with no slot", line),
+                },
+            };
+            if let Some(at) = at {
+                self.core_bind(br.result, at, rty)?;
+            }
+            self.fork_land(b, br.result);
+            started.push(s);
+        }
+        Ok(started)
+    }
+
     /// Cancels each pending branch of `fork` and releases each finished branch's result:
-    /// every branch, or with `winner`, every branch but the one that local names.
+    /// every branch, or with `winner`, every branch but the one that local names. The polls
+    /// run inside `bracket`, `std/task`'s `cancelBegin` and `cancelEnd`, which a fork whose
+    /// branches cannot wait does without.
     #[allow(clippy::too_many_arguments)]
     fn fork_cancel(
         &mut self,
@@ -12051,7 +12093,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         started: &[Started],
         sts: &[u32],
         winner: Option<u32>,
-        (begin, end): (u32, u32),
+        bracket: Option<(u32, u32)>,
         line: usize,
     ) -> Result<(), String> {
         let lost = |b: &mut Frame, i: usize| {
@@ -12062,7 +12104,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     .ins(&Instruction::I32And);
             }
         };
-        b.ins(&Instruction::Call(begin));
+        if let Some((begin, _)) = bracket {
+            b.ins(&Instruction::Call(begin));
+        }
         for (i, ((br, s), st)) in fork.branches.iter().zip(started).zip(sts).enumerate() {
             if !s.sig.waits {
                 continue;
@@ -12074,7 +12118,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
             self.fork_land(b, br.result);
             b.ins(&Instruction::End);
         }
-        b.ins(&Instruction::Call(end));
+        if let Some((_, end)) = bracket {
+            b.ins(&Instruction::Call(end));
+        }
         for (i, (br, st)) in fork.branches.iter().zip(sts).enumerate() {
             let Some((place, ty)) = self.core_place(br.result) else {
                 continue;

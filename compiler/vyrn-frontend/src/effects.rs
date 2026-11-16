@@ -301,6 +301,9 @@ pub struct Call {
     /// Whether the call binds an owned result, which is the frame's own
     /// allocation when the callee is no user body.
     pub born: bool,
+    /// Whether a marked call passes a function value, which the callee may
+    /// call; `false` on a call with no mark.
+    pub passes: bool,
     pub mark: Mark,
 }
 

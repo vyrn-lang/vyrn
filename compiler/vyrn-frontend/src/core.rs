@@ -1381,9 +1381,9 @@ impl Body {
         row.as_deref().unwrap_or(&self.names[n.index()].holes)
     }
 
-    /// Whether the body waits: it holds an awaited call. The effect judgment
-    /// marks a call `await` exactly where it waits, so this is the judgment
-    /// for the frame the core built, instance by instance.
+    /// Whether the body holds an awaited call. In a program that waits, its
+    /// frame waits, instance by instance, even where each awaited callee it
+    /// was given finishes at its start.
     pub fn waits(&self) -> bool {
         fn any(ss: &[St]) -> bool {
             (ss.iter()).any(|s| s.awaits().is_some() || s.lists().any(|l| any(l)))
