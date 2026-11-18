@@ -1,0 +1,10 @@
+// Two modules that do not import each other declare `len`: a protocol method
+// and a function. The caller imports both: `b.len()` is the method and
+// `len(s)` the function.
+import { Sized, Bag } from "./a_protocol_module_declaring_len"
+import { len } from "./a_module_declaring_a_len_function"
+
+fn main() -> Int64 {
+    let b = Bag { n: 3 }
+    return b.len() + len("abcd")
+}

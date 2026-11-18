@@ -670,59 +670,6 @@ fn check_accum_inner(
         .filter(|m| m.result_cap.is_some())
         .map(|m| m.name.clone())
         .collect();
-    // A free function named like a protocol method could never run: `call`
-    // dispatches that name to an impl first. The function is refused where its
-    // module imports the protocol; else the method is, because the function's
-    // module checks alone without the protocol and may be std, which no user
-    // edits.
-    let root = program.spellings.root.as_str();
-    let before_collisions = out.len();
-    for f in &program.functions {
-        let Some(owners) = protocol_methods.get(f.name.as_str()) else {
-            continue;
-        };
-        let home = f.module.as_deref().unwrap_or(root);
-        let module_of = |p: &str| {
-            program
-                .protocols
-                .iter()
-                .find(|d| d.name == p)
-                .map(|d| &d.module)
-        };
-        let (seen, unseen): (Vec<_>, Vec<_>) = owners.iter().partition(|(p, _)| {
-            let m = module_of(p).and_then(|m| m.as_deref()).unwrap_or(root);
-            program.spellings.reaches(home, m)
-        });
-        if !seen.is_empty() {
-            let owners: Vec<&str> = seen.iter().map(|(p, _)| p.as_str()).collect();
-            out.push(
-                cerr_at!(
-                    f.line,
-                    f.name_span(),
-                    FunctionShadowsProtocolMethod,
-                    name = f.name,
-                    owners = owners.join(", ")
-                )
-                .in_file(f.module.clone()),
-            );
-        }
-        for (p, sig) in unseen {
-            let d = cerr!(
-                sig.line,
-                MethodShadowsForeignFunction,
-                name = f.name,
-                protocol = p
-            );
-            out.push(d.in_file(module_of(p).cloned().flatten()));
-        }
-    }
-    // A collision changes what a body dispatches to, std bodies included, so
-    // no body is typed after one: no verdict it gave would be the program's.
-    let bodies_from = if out.len() > before_collisions {
-        program.functions.len()
-    } else {
-        bodies_from
-    };
     // The program's own declaration of a prelude protocol's name replaces it.
     let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> = (crate::prelude::protocols())
         .iter()
@@ -1049,6 +996,7 @@ fn check_accum_inner(
         all_bounds: &all_bounds,
         protocol_methods: &protocol_methods,
         protocols: &program.protocols,
+        spellings: &program.spellings,
         protocol_places: &protocol_places,
         impls: &program.impls,
         expansions: &program.expansions,
@@ -1708,6 +1656,7 @@ struct Cx<'a> {
     protocol_methods: &'a HashMap<String, Vec<(String, MethodSig)>>,
     /// The declared protocols, the prelude's included.
     protocols: &'a [crate::ast::ProtocolDecl],
+    spellings: &'a crate::ast::Spellings,
     /// Projection names protocols declare.
     protocol_places: &'a std::collections::HashSet<String>,
     /// Every `impl` block, by type key.
@@ -5068,6 +5017,19 @@ impl<'a> Checker<'a> {
         self.call_declared(name, (args, dot), written, line, scope, expected, fn_ret)
     }
 
+    /// Whether a call of `name` a protocol declares dispatches to the method
+    /// rather than the function of that name: where no function has it, or
+    /// written `recv.name(..)` in a module that reaches the protocol
+    /// ([`crate::ast::Spellings::reaches_method`]).
+    fn calls_method(&self, name: &str, dot: bool) -> bool {
+        self.protocol_methods.contains_key(name)
+            && (self.sig(name).is_none()
+                || dot && {
+                    let here = self.frame.borrow();
+                    (self.spellings).reaches_method(self.protocols, here.here.as_deref(), name)
+                })
+    }
+
     /// Types the method call `recv.name(..)`, `args[0]` the receiver, by
     /// dispatch on the receiver's type among the protocols that declare
     /// `name`: only `via` where the call names it (`recv::P.name(..)`). A
@@ -5840,7 +5802,7 @@ impl<'a> Checker<'a> {
             return self.check_construction(decl, args, line, scope, fn_ret);
         }
 
-        if self.protocol_methods.contains_key(name) {
+        if self.calls_method(name, dot) {
             return self.method_call(name, None, args, scope, expected, fn_ret, line);
         }
 
@@ -6547,7 +6509,8 @@ impl<'a> Checker<'a> {
                 {
                     return false;
                 }
-                if let Some(cs) = ck.caps(name).filter(|_| via.is_none()) {
+                let method = via.is_some() || ck.calls_method(name, form.has_receiver());
+                if let Some(cs) = ck.caps(name).filter(|_| !method) {
                     return cs.get(k) == Some(&Capability::Consume);
                 }
                 let key = match args.first() {
@@ -8111,18 +8074,16 @@ mod tests {
         assert!(e.contains("`copy` cannot copy `Ring`"), "{e}");
     }
 
-    /// Method names dispatch to impls before free functions, so a top-level
-    /// fn sharing a protocol method's name could never run; it is refused at
-    /// the declaration.
+    /// A top-level fn may share a protocol method's name: `frob(5)` is the
+    /// function and `t.frob()` the method.
     #[test]
-    fn a_top_level_fn_may_not_take_a_protocol_methods_name() {
+    fn a_top_level_fn_may_take_a_protocol_methods_name() {
         let src = "type T = { v: Int64 } \
                    protocol P { fn frob(self) -> Int64 } \
                    impl P for T { fn frob(self) -> Int64 { return self.v } } \
                    fn frob(x: Int64) -> Int64 { return x * 2 } \
-                   fn main() -> Int64 { return frob(5) }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("could never run"), "{e}");
+                   fn main() -> Int64 { let t = T { v: 1 } return frob(5) + t.frob() }";
+        assert_eq!(check_src(src).map(|_| ()), Ok(()));
     }
 
     /// Two distinct recursive records compared by width subtyping answer "not

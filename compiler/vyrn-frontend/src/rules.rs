@@ -199,15 +199,6 @@ rules! {
     FunctionIsVariant { name } "`{name}` is both a function and an enum variant";
     FunctionDefinedTwice { name } "function `{name}` defined twice";
     FunctionIsType { name } "`{name}` is both a type and a function name";
-    FunctionShadowsProtocolMethod { name, owners }
-        "`{name}` collides with protocol {owners}'s method of the same name: \
-        method names dispatch to impls before free functions, so this \
-        declaration could never run";
-    MethodShadowsForeignFunction { name, protocol }
-        "protocol {protocol}'s method `{name}` collides with the function `{name}` \
-        of a module that does not import {protocol}: method names dispatch to \
-        impls before free functions, so that function could never run; rename \
-        the method";
     ImplMissesAssociatedType { protocol, ty, name }
         "`impl {protocol} for {ty}` does not bind the associated type `{name}`: \
         add `type {name} = ..` (protocol `{protocol}` declares it)";
