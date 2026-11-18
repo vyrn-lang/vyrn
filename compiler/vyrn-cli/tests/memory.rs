@@ -2547,6 +2547,48 @@ fn main() -> Int64 { print(vyrnTestMain().toString()) return 0 }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A must-use element moves through `replace`, `sortBy` and `Slots` without a
+/// copy: each comes back to the caller owned, and each is disposed of once.
+#[test]
+fn a_must_use_element_is_replaced_sorted_and_removed_by_moves() {
+    let src = r#"import { sortBy } from "std/arrays"
+import { Slots, newSlots, insert, remove } from "std/slots"
+
+type Txn = { label: String, n: Int64 }
+
+impl MustUse for Txn {}
+
+fn txn(label: String, n: Int64) -> Txn {
+    return Txn { label: label.copy(), n: n }
+}
+
+fn vyrnTestMain() -> Int64 {
+    let mut ts: Array<Txn> = []
+    ts.push(txn("a", 3))
+    ts.push(txn("b", 1))
+    let old = ts.replace(0, txn("c", 2))
+    let mut total = old.n
+    drop old
+    let up = sortBy(ts, (t) -> t.n)
+    total = total * 10 + up[0].n
+    drop up
+    let mut s: Slots<Txn> = newSlots()
+    let h = insert(s, ts.swapRemove(0))
+    match remove(s, h) {
+        Some(t) => {
+            total = total * 10 + t.n
+            drop t
+        }
+        None => {}
+    }
+    drop s
+    drop ts
+    return total
+}
+"#;
+    runs_clean("mustusemoves", src, "312\n");
+}
+
 // A removal from a map held in a record field takes the field's place as its
 // receiver (record `0125-m7-mapleak`).
 #[test]

@@ -168,7 +168,7 @@ pull request.
 - A refusal quotes what the reader wrote, never a compiler temporary (`@t1`): `vyrn_lower::rules::refusal` panics in a debug build on a sentence that does.
 - A refusal sits on the column where the reader spelled the name it refuses, and keeps column 0 where that spelling is on another line: a column never moves a refusal's line.
 - A lend is refused, never tracked through stores. Tracking it would need an alias analysis.
-- `consume <place>` moves a value out of a place; only the taken path dies. No `take` keyword and no `.take()`: an element leaves with `swapRemove`.
+- `consume <place>` moves a value out of a place; only the taken path dies. No `take` keyword and no `.take()`: an element leaves with `swapRemove`, or with `xs.replace(i, v)`, which stores `v` in its place and answers it to the caller, who owns it (decided 2026-11-18 by the user).
 - A statement's value is released where the statement ends. A part read as a statement (`p.f`, `xs[i].f`) takes nothing: only `consume` moves a value out of a place.
 - A heap part of an element of a call's result (`mk()[0]`, `mk()[0].s`) is copied, and the result is released whole: a release cannot skip a hole in one element. An element of a type with `impl Copy` is copied by the impl where it is taken; a field under one and a scrutinee stay borrows.
 - Iterating a place binds a `read` borrow. `for x in consume xs` takes the container; a loop over a temporary owns its elements.

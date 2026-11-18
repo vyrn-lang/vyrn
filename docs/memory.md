@@ -181,8 +181,8 @@ A program that needs a graph, a free list or two names for one node keeps the
 nodes in `std/slots`. `Slots<T>` is a container; `Handle<T>` is a plain value
 that owns no heap and copies freely. `slots[h]` traps on a dead handle, as
 `a[i]` traps out of range. `slots.get(h)` answers `Option<T>` and
-`slots.tryAt(h)` lends the element under `if let`. `remove(h)` bumps the
-slot's generation, and dropping the container releases every node. A dead
+`slots.tryAt(h)` lends the element under `if let`. `remove(slots, h)` hands
+the element back and bumps the slot's generation, and dropping the container releases every node. A dead
 handle is a value-level miss, never a use after free. `std/slots` is ordinary
 Vyrn.
 

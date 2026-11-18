@@ -71,9 +71,7 @@ export fn sortWith<T>(xs: Array<T>, cmp: fn(T, T) -> Int64) -> Array<T> {
         let mut j = i
         while j > 0 {
             if cmp(out[j - 1], out[j]) > 0 {
-                let tmp = out[j - 1].copy()
-                out[j - 1] = out[j].copy()
-                out[j] = tmp
+                swapDown(out, j)
                 j = j - 1
             } else {
                 j = 0
@@ -107,6 +105,20 @@ test "sortWith orders across the Int64 limits" {
     assertEq(up[3], max)
 }
 
+/// Swaps elements `j - 1` and `j` of `xs`, `j` in `1` to `xs.length - 1`, by
+/// moves alone, so a must-use element is never copied. `swapRemove` takes
+/// `j - 1` and fills it from the end, which `push` puts back.
+fn swapDown<T>(xs: modify Array<T>, j: Int64) {
+    let a = xs.swapRemove(j - 1)
+    if j == xs.length {
+        xs.push(a)
+        return
+    }
+    let b = xs.replace(j, a)
+    let last = xs.replace(j - 1, b)
+    xs.push(last)
+}
+
 /// A stable sorted copy, ascending by an `Int64` key. Insertion sort.
 export fn sortBy<T>(xs: Array<T>, key: fn(T) -> Int64) -> Array<T> {
     let mut out: Array<T> = []
@@ -118,9 +130,7 @@ export fn sortBy<T>(xs: Array<T>, key: fn(T) -> Int64) -> Array<T> {
         let mut j = i
         while j > 0 {
             if key(out[j - 1]) > key(out[j]) {
-                let tmp = out[j - 1].copy()
-                out[j - 1] = out[j].copy()
-                out[j] = tmp
+                swapDown(out, j)
                 j = j - 1
             } else {
                 j = 0

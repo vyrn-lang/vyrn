@@ -131,7 +131,7 @@ A name before a string literal is a tagged template. `tag"a \{x} b"` calls `tag(
 
 - `xs[i]` reads and `xs[i] = v` writes in place on a `mut` binding. The index is checked, and an out-of-range index traps.
 - `xs.length` is the element count.
-- `xs.push(v)` appends. `xs.pop()` answers `Option<T>`. `xs.swapRemove(i)` removes element `i` and moves the last one into its place.
+- `xs.push(v)` appends. `xs.pop()` answers `Option<T>`. `xs.swapRemove(i)` removes element `i` and moves the last one into its place. `xs.replace(i, v)` stores `v` at element `i` and answers the element it displaced, which the caller owns; an out-of-range `i` traps as `xs[i]` does.
 - `xs.reserve(n)`, `xs.append(ys)`, `xs.copyFrom(ys)` and `xs.clear()` grow, extend, overwrite and empty in place. `small.toArray()` copies a `SmallArray` out.
 - `for x in xs { .. }` visits each element. `for x in consume xs` takes each element as an owned value and leaves `xs` dead after the loop.
 - `push` on a fixed `Array<T, N>` is refused, because its length is part of its type.

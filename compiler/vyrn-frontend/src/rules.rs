@@ -539,7 +539,7 @@ rules! {
     UnaryOperand { what, admits, t } "`{what}` needs {admits}, found {t}";
     BytesOffsets { n } "`bytes` needs Int64 offsets, found {n}";
     PushReceiver { other } "`push` needs an Array as its first argument, found {other}";
-    PushValue { v, elem } "`push` value is {v} but the array holds {elem}";
+    ArrayOpValue { op, v, elem } "`{op}` value is {v} but the array holds {elem}";
     MapKeyMismatch { key, k } "the map is keyed by {key}, but the key here is {k}";
     IndexReceiver { other } "indexing needs an Array or String, found {other}";
     IndexType { i } "`at` index must be an Int64, found {i}";
@@ -550,7 +550,7 @@ rules! {
     StreamElementMismatch { name, want, exp } "`{name}` answers a `{want}`, not {exp}";
     TakesNone { name } "`{name}` takes no arguments";
     SwapRemoveArity { got } "`swapRemove` takes 1 argument (an index), got {got}";
-    SwapRemoveIndex { i } "`swapRemove` index must be an Int64, found {i}";
+    ArrayOpIndex { op, i } "`{op}` index must be an Int64, found {i}";
     ToArrayReceiver { other } "`toArray` needs a SmallArray, found {other}";
     CopyOwned { declared }
         "`copy` cannot copy `{declared}`: it declares `impl Owned for \

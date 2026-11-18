@@ -53,12 +53,19 @@ pub enum ArgVerdict {
     AlreadyFreed,
 }
 
-/// Whether the builtin `name` hands an argument back: its seeded row returns
-/// the bare type parameter of one of its parameters (`blackBox`).
+/// Whether the builtin `name` hands an argument back ([`hands_back_arg`]).
 pub fn hands_back(name: &str) -> bool {
+    crate::prelude::signature(name)
+        .is_some_and(|f| (0..f.params.len()).any(|i| hands_back_arg(name, i)))
+}
+
+/// Whether the builtin `name` may hand argument `i` back: its seeded row
+/// returns the bare type parameter of that parameter (`blackBox`). A
+/// `consume` argument is the callee's to keep (`@replace` stores it).
+fn hands_back_arg(name: &str, i: usize) -> bool {
     crate::prelude::signature(name).is_some_and(|f| {
-        matches!(&f.ret, Type::Param(r)
-            if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)))
+        matches!((&f.ret, f.params.get(i)), (Type::Param(r), Some(p))
+            if matches!(&p.ty, Type::Param(q) if q == r) && p.capability != Capability::Consume)
     })
 }
 
@@ -105,12 +112,7 @@ const ARG_ROWS: [(ArgVerdict, fn(&ArgTemp) -> bool); 7] = [
     // argument back (`blackBox`), so freeing it here is a use-after-free
     // (`examples/membench.vyrn`). `lends` cannot say this: the row yields the
     // parameter itself, not a place inside it.
-    (ArgVerdict::Lent, |s| {
-        crate::prelude::signature(&s.callee).is_some_and(|f| {
-            matches!((&f.ret, f.params.get(s.ix).map(|p| &p.ty)),
-                (Type::Param(r), Some(Type::Param(p))) if r == p)
-        })
-    }),
+    (ArgVerdict::Lent, |s| hands_back_arg(&s.callee, s.ix)),
     // `@copy`'s row is held back from the return table, so no capability
     // answers for its receiver below, and `("" + s).copy()` would leak.
     (ArgVerdict::Released, |s| s.callee == "@copy" && s.ix == 0),

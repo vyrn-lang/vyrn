@@ -5396,7 +5396,7 @@ impl<'a> Checker<'a> {
             };
             let v = self.expr(&args[1], scope, Some(&elem), fn_ret)?;
             if !self.coercible(&v, &elem) {
-                return Err(cerr!(line, PushValue, v, elem));
+                return Err(cerr!(line, ArrayOpValue, op = "push", v, elem));
             }
             self.prove_coercion(&args[1], &elem, line)?;
             // Inside a `region`, a heap element pushed into an outer buffer
@@ -5477,13 +5477,25 @@ impl<'a> Checker<'a> {
                 t => Type::option(t),
             });
         }
-        // O(1) unordered remove: the last element moves into slot `i`.
-        if name == "@swapRemove" {
-            let elem = self.mut_array_receiver(&args[0], scope, line, "swapRemove", fn_ret)?;
+        // O(1) unordered remove: the last element moves into slot `i`. A
+        // `replace` stores `v` there instead and hands back what it displaced.
+        if name == "@swapRemove" || name == "@replace" {
+            let op = &name[1..];
+            let elem = self.mut_array_receiver(&args[0], scope, line, op, fn_ret)?;
             self.record_modify_place(&args[0], scope, fn_ret, line);
             let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if !matches!(i, Type::Int | Type::Err) {
-                return Err(cerr!(line, SwapRemoveIndex, i));
+                return Err(cerr!(line, ArrayOpIndex, op, i));
+            }
+            if let [recv, _, value] = args {
+                let v = self.expr(value, scope, Some(&elem), fn_ret)?;
+                if !self.coercible(&v, &elem) {
+                    return Err(cerr!(line, ArrayOpValue, op, v, elem));
+                }
+                self.prove_coercion(value, &elem, line)?;
+                if let Expr::Var { name: aname, .. } = recv {
+                    self.region_store_guard(aname, &elem, scope, line, Id::NEW)?;
+                }
             }
             return Ok(elem);
         }
@@ -6926,14 +6938,14 @@ impl<'a> Checker<'a> {
         Some(&f.type_params).filter(|ps| !ps.is_empty())
     }
 
-    /// The element type of the array a `pop` or `swapRemove` receiver names;
-    /// `op` is the spelling a diagnostic quotes.
+    /// The element type of the array a `pop`, `swapRemove` or `replace`
+    /// receiver names; `op` is the spelling a diagnostic quotes.
     ///
     /// The receiver is a variable, or a field or element of one, in any
     /// position. An unknown or non-`mut` root is the typed judgment's refusal
     /// (`typed::stores`), typed `Err` before its type is read because a
-    /// literal bound without `mut` is a fixed-size array. A receiver that is
-    /// no growable array is `Builder::shrinks`'s refusal.
+    /// literal bound without `mut` is a fixed-size array. A shrinking call on
+    /// a receiver that is no growable array is `Builder::shrink_of`'s refusal.
     fn mut_array_receiver(
         &self,
         recv: &Expr,
@@ -6954,7 +6966,7 @@ impl<'a> Checker<'a> {
         };
         match self.base(&ty) {
             Type::Array(inner) => Ok((*inner).clone()),
-            Type::SmallArray(inner, _) => Ok((*inner).clone()),
+            Type::SmallArray(inner, _) | Type::ArrayN(inner, _) => Ok((*inner).clone()),
             Type::Err => Ok(Type::Err),
             _ => self.judged(),
         }

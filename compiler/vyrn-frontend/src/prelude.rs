@@ -175,6 +175,8 @@ pub enum ShapeMap {
     /// Each position but the last reads itself, except the one operand `k`
     /// names, which reads the last. An empty receiver traps.
     SwapsOut(usize),
+    /// Each position reads itself, except one, which operand `k` replaces.
+    Writes(usize),
     /// No position stays.
     Empties,
     /// Each position reads the same position of operand `k`, for each of its
@@ -598,6 +600,20 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Removes)
             .hover("array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot")
             .resizes(ShapeMap::SwapsOut(1))
+            .indexes(Indexes::Element),
+        b("@replace")
+            .takes(&[3], |n, _, got| takes_two(n, 0, got.saturating_sub(1)))
+            .sig(row(
+                "@replace",
+                &["T"],
+                &[("self", Modify, arr(t())), ("i", Read, Int), ("v", Consume, t())],
+                t(),
+                &[],
+            ))
+            .method("replace", &[Array])
+            .spec(Spec::Removes)
+            .hover("array.replace(index, value) -> T — store value at index and return the element it held")
+            .resizes(ShapeMap::Writes(2))
             .indexes(Indexes::Element),
         // Rebuilds like `push`: the result carries the possibly reallocated
         // buffer and the statement form writes it back. A named array type
@@ -1416,9 +1432,11 @@ pub enum Spec {
     /// generator host synthesizes, or a `std` function a builtin routes to
     /// ([`Builtin::route`]). The emitter reads it as a declared callee.
     Routes(&'static str),
-    /// A receiver the call shrinks in its own storage. `@pop` takes an array
+    /// A receiver the call changes in its own storage. `@pop` takes an array
     /// and hands back an `Option` of the last element, `@swapRemove` an
     /// array and an index at `Int64` and hands back the element there.
+    /// `@replace` takes an array, an index at `Int64` and an element, stores
+    /// the element there and hands back the one it displaced.
     /// `@remove` takes a map and a key at the map's key type, releases the
     /// key and value the entry held, and answers whether it held one.
     Removes,

@@ -1345,7 +1345,7 @@ examples/simdround.vyrn	0	cbf29ce484222325	20	19	9681cd18bc1edacb
 examples/simdwide.vyrn	0	cbf29ce484222325	20	18	48b03665557c7c62
 examples/sizedints.vyrn	0	cbf29ce484222325	20	17	cc005af03a773e3d
 examples/slots.vyrn	0	cbf29ce484222325	20	19	7e1dac6f23e955cb
-examples/slottable.vyrn	0	cbf29ce484222325	20	16	aceca0536d229286
+examples/slottable.vyrn	0	cbf29ce484222325	20	15	cae66e4ff7b53fdf
 examples/smallarray.vyrn	0	cbf29ce484222325	20	20	86c074f168e196a8
 examples/sparseset.vyrn	0	cbf29ce484222325	20	16	eb45dee92f41b28c
 examples/spectralnorm.vyrn	0	cbf29ce484222325	20	15	312e95c26c321219
@@ -1378,7 +1378,7 @@ examples/testing.vyrn	0	cbf29ce484222325	20	19	7a855069eb8489a1
 examples/textbytes.vyrn	0	cbf29ce484222325	20	17	5c2ee16702490e61
 examples/threeengines.vyrn	0	cbf29ce484222325	20	16	323d67049a679746
 examples/tree.vyrn	0	cbf29ce484222325	20	17	b64942392240e92e
-examples/tryplace.vyrn	0	cbf29ce484222325	20	19	f3b0d0adc529a309
+examples/tryplace.vyrn	0	cbf29ce484222325	20	20	61e05604e23c0b64
 examples/twdemo.vyrn	0	cbf29ce484222325	20	16	3e17d1dd20ec9456
 examples/unionfind.vyrn	0	cbf29ce484222325	20	18	73e28961192a50e1
 examples/unionfindtested.vyrn	0	cbf29ce484222325	20	18	3559f44060acf63a
@@ -1457,7 +1457,7 @@ site/guide/text.vyrn	0	cbf29ce484222325	20	19	483234dbaf9afaef
 site/guide/validated.vyrn	0	cbf29ce484222325	20	14	ad08c6c983d1c8dd
 site/markup.vyrn	0	cbf29ce484222325	20	17	dec25373dda5c291
 std/args.vyrn	0	cbf29ce484222325	20	18	f4b938afd0b09fc0
-std/arrays.vyrn	0	cbf29ce484222325	20	18	cd992ebb735b9ae8
+std/arrays.vyrn	0	cbf29ce484222325	20	19	a2e1e6359103df56
 std/bench.vyrn	0	cbf29ce484222325	20	15	2825b3d36aaa04dc
 std/cli.vyrn	0	cbf29ce484222325	20	17	26c8e4e681a4debb
 std/code.vyrn	0	cbf29ce484222325	20	17	3b7294d64896b46c
@@ -1494,7 +1494,7 @@ std/rpc.editor.vyrn	0	cbf29ce484222325	20	15	5308db71b62b6a5c
 std/rpc.vyrn	0	cbf29ce484222325	20	17	1fb054967659d958
 std/runtime.vyrn	0	cbf29ce484222325	20	18	0cc927f4a1d0d36e
 std/scan.vyrn	0	cbf29ce484222325	20	16	fa2868ab13f061b1
-std/slots.vyrn	0	cbf29ce484222325	20	18	ada7e63f76e123a9
+std/slots.vyrn	0	cbf29ce484222325	20	12	a359c895d32dc21a
 std/storage.vyrn	0	cbf29ce484222325	20	14	838ee66367094974
 std/stream.vyrn	0	cbf29ce484222325	20	18	7b33eaedd834b02c
 std/strings.vyrn	0	cbf29ce484222325	20	17	b629a5aa6d142897
