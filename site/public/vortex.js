@@ -933,9 +933,10 @@ export function vortexWidget(root) {
     cam.view = lookAt(cam.p, cam.look);
     const k = Math.min(1, dt * 2.2), w1 = w(1), w2 = w(2), w3 = w(3);
     if (draining) {
-      const freed = Math.min(WATER_N, Math.round(WATER_N * SS((T - drainT) / 9, 0, 1)));
-      text("[data-vx=freed]", freed.toLocaleString("en"));
-      if (freed >= WATER_N) text("[data-vx=own-state]", "done: 90,000 = 90,000");
+      // The card's program, under `vyrn run --profile`: 4 blocks, 4 freed.
+      const freed = Math.round(4 * SS((T - drainT) / 9, 0, 1));
+      text("[data-vx=freed]", String(freed));
+      if (freed >= 4) text("[data-vx=own-state]", "done: 4 = 4");
     }
     const ringOn = Math.max(0, 1 - pageP * 1.7);
     ringR += (ruleR(rule) - ringR) * Math.min(1, dt * 6);

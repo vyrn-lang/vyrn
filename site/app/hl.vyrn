@@ -94,10 +94,19 @@ fn main() -> Int64 {
         },
         Piece {
             id: "cardOwn",
-            src: "fn main() {
-    let xs = readAges()     // owned by xs
-    let s = summarize(xs)   // xs moves in
-    print(s)                // released at its end
+            src: "fn readAges() -> Array<Int64> {
+    return [41, 17, 30]
+}
+
+fn summarize(xs: consume Array<Int64>) -> String {
+    return \"\\{xs.length} ages\"
+}
+
+fn main() -> Int64 {
+    let xs = readAges() // owned by xs
+    let s = summarize(xs) // xs moves in, and is released there
+    print(s) // s is released at the end of main
+    return 0
 }
 ",
         },
