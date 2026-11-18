@@ -20,7 +20,7 @@ fn whyCommand() -> String {
 fn nonGoals() -> Array<NonGoal> {
     return [
         NonGoal { what: "No garbage collector", why: TrustedMarkup("Collection time is a cost you cannot see in the source. Ownership is declared instead, and memory is reclaimed at a site the compiler can name.") },
-        NonGoal { what: "No async, no await", why: TrustedMarkup("Two colours of function split a library in half. The host owns the loop; Vyrn owns the state and the logic.") },
+        NonGoal { what: "No async", why: TrustedMarkup("Two colours of function split a library in half. Nothing declares a function async: the compiler infers which functions wait, and <code>await</code> marks each call that does. The host owns the loop; Vyrn owns the state and the logic.") },
         NonGoal { what: "No macros", why: TrustedMarkup("A generator is ordinary Vyrn that runs at compile time and returns Vyrn source, and <code>vyrn emit-gen</code> prints what it produced. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way.") },
         NonGoal { what: "No higher-kinded types", why: TrustedMarkup("The cost lands on every error message, paid by every reader, to serve a few abstractions.") },
         NonGoal { what: "No inheritance, no metaclasses", why: TrustedMarkup("A protocol states what a type does. A record states what it holds. Nothing needs a third relationship.") },

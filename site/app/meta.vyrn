@@ -9,7 +9,7 @@ export fn pageMetas() -> Array<PageMeta> {
         PageMeta { path: "/guide", title: "Docs — Vyrn", blurb: "The book, in reading order. Every code block in it is a program this site compiled and ran while it built the page." },
         PageMeta { path: "/web", title: "Web — Vyrn", blurb: "The web stack, page by page: the view tree, single-file components, routes and RPC, styling and icons — all libraries, none of it compiler." },
         PageMeta { path: "/tooling", title: "Tooling — Vyrn", blurb: "Everything the vyrn binary does: run and build, test and bench, format and document, and the pins that keep a build reproducible." },
-        PageMeta { path: "/benchmarks", title: "Benchmarks — Vyrn", blurb: "Eight Benchmarks Game programs against C, Rust and node, with peak memory, the raw table, and a named cause under every deviation." },
+        PageMeta { path: "/benchmarks", title: "Benchmarks — Vyrn", blurb: "The Benchmarks Game programs against C, Rust, node and bun, with peak memory, the raw table, and a named cause under every deviation." },
         PageMeta { path: "/docs", title: "Reference — Vyrn", blurb: "Every standard library module and every name it exports, with the signature, the tests and the example programs for each." },
         PageMeta { path: "/explore", title: "Explore — Vyrn", blurb: "The packages you can install, each with the vyrn add line that installs it and the manifest it resolves to." },
         PageMeta { path: "/releases", title: "Releases — Vyrn", blurb: "What is published, whether it is safe to depend on, and how a release is made." },

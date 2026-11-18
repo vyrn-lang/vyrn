@@ -63,7 +63,7 @@ fn scriptDownload(p: InstallTarget) -> String {
         <section class="hero mid">
             <p class="eyebrow">{{ kicker() }}</p>
             <h1 class="display">Install Vyrn</h1>
-            <p class="lede">One command installs one self-contained binary. To uninstall, delete its directory.</p>
+            <p class="lede">One command installs the compiler, its language server and the standard library in one directory. To uninstall, delete that directory.</p>
 
             <!-- Inputs first, so `:checked ~ .ospanes` reaches the panes. Written out because only the first carries `checked`, and `checked=""` still checks. -->
             <fieldset class="picker">
@@ -105,7 +105,7 @@ fn scriptDownload(p: InstallTarget) -> String {
             <h2>Advanced</h2>
             <details class="disc">
                 <summary>Pin a version, check by hand, uninstall, build from source</summary>
-                <p>It installs one archive into <code>~/.vyrn/bin</code>, or <code>%USERPROFILE%\.vyrn\bin</code> on Windows, and writes nothing outside it.</p>
+                <p>It unpacks one archive into <code>~/.vyrn</code>, or <code>%USERPROFILE%\.vyrn</code> on Windows, with the binaries in its <code>bin</code>. On Windows it also adds that <code>bin</code> to the user <code>PATH</code>; elsewhere it writes nothing outside the directory.</p>
                 <p>Pin a tag instead of taking the newest release:</p>
                 <div class="cmd" data-copy>
                     <code v-html="shellHtml(pinnedInstall())"></code>
@@ -121,7 +121,7 @@ fn scriptDownload(p: InstallTarget) -> String {
                     <code v-html="shellHtml(uninstall())"></code>
                     <button type="button" data-copy-btn aria-label="Copy the uninstall command">Copy</button>
                 </div>
-                <p>Build from source, for the newest commit or a machine with no archive. It needs a recent Rust toolchain, and <code>clang</code> on <code>PATH</code> for a native binary.</p>
+                <p>Build from source, for the newest commit or a machine with no archive. It needs a recent Rust toolchain. A native binary also needs <code>clang</code>, and wabt's <code>wasm2c</code> and simde, which <code>vyrn update --locked</code> fetches.</p>
                 <div class="cmd" data-copy>
                     <code v-html="shellHtml(sourceBuild())"></code>
                     <button type="button" data-copy-btn aria-label="Copy the build commands">Copy</button>
