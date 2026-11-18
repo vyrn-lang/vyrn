@@ -75,6 +75,7 @@ Each archive holds one directory, named after the archive:
 ```
 vyrn-x86_64-linux/
 ├── vyrn          the driver
+├── vyrn-lsp      the language server, which the VS Code extension finds beside vyrn
 ├── std/          the standard library
 ├── web/          the browser-side runtimes `vyrn dev` serves
 ├── README.md
@@ -102,10 +103,10 @@ produces, so the notice has to reach whoever ends up holding one.
 
 | Command | Extra tooling |
 |---------|---------------|
-| `vyrn run`, `check`, `test`, `bench`, `fmt`, `doc` | none |
+| `vyrn run`, `check`, `test`, `bench --check`, `fmt`, `doc` | none |
 | `vyrn build --target wasm` | none |
-| `vyrn build` (native) | `clang` on `PATH` (or `$CLANG`), plus `wasm2c` and simde (or `$VYRN_WASM2C` and `$VYRN_SIMDE`) |
-| the route harness | a `wasmtime` binary via `$VYRN_WASMTIME` |
+| `vyrn build` (native) and `vyrn bench` | `clang` on `PATH` (or `$CLANG`), plus `wasm2c` and simde (or `$VYRN_WASM2C` and `$VYRN_SIMDE`) |
+| the route harness | a `wasmtime` binary: `$VYRN_WASMTIME`, or the pin in `vyrn.lock` |
 
 ## Install scripts
 
@@ -151,8 +152,8 @@ re-check.
 
 Add one row to the `build` matrix with `os`, `name`, `target` and `bin`, then
 teach both install scripts the new `uname`/`PROCESSOR_ARCHITECTURE` case. The
-archive name is `vyrn-<name>.tar.gz` (or `.zip` on Windows). Candidates:
-`aarch64-linux` (`ubuntu-22.04-arm`) and `x86_64-macos`.
+archive name is `vyrn-<name>.tar.gz` (or `.zip` on Windows). The
+candidate is `x86_64-macos`.
 
 ## Known gaps
 
