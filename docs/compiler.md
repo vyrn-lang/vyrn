@@ -540,7 +540,9 @@ The module's shape:
 - Waiting bodies: a function that waits takes one more `i32`, its frame, and
   returns one more `i32`, its status: 0 done, 1 cancelled, else the frame's
   address while it waits. The frame is a heap block (`Frame::heap_prologue`).
-  Each awaited call row is a resume point, numbered in source order. A
+  A body waits when its core holds an awaited call and the program waits.
+  Each awaited call row is a resume point, numbered in source order; one
+  into a frame that does not wait is a plain call, never suspended at. A
   suspension saves every local into the frame (`Frame::save_locals`) and
   returns. A resume restores them, and at each structured construct on the
   path to the point a `br_table` enters the arm that holds it
@@ -575,9 +577,10 @@ The module's shape:
 - Forks: an awaited `both` or `race` is one call row of kind `Callee::Fork`,
   whose arguments are every branch's in order and whose `core::Fork` holds each
   branch's callee and argument count, so the kernel judges the branches as one
-  call. The row is one resume point (`Fn_::core_fork`). Its start calls each
-  branch with frame 0 in argument order; a resume polls each branch still
-  waiting. A branch's call is `Fn_::core_user_call`'s, and its result lands in
+  call. The row is one resume point (`Fn_::core_fork`); in a frame that does
+  not wait it calls its branches in order, and the first wins a race. Its
+  start calls each branch with frame 0 in argument order; a resume polls
+  each branch still waiting. A branch's call is `Fn_::core_user_call`'s, and its result lands in
   the branch's `result` name until the fork builds the row's value from them.
   To cancel a branch the fork polls it between `std/task`'s `cancelBegin` and
   `cancelEnd`, where every host wait answers cancelled, so each frame on the

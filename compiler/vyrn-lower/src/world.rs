@@ -663,7 +663,11 @@ impl World {
             path.push(next);
         }
         let last = self.body_at(path[path.len() - 1]);
-        Some((path, last.and_then(crate::effects::first_global)))
+        let decls = self.ownership.proto.types();
+        Some((
+            path,
+            last.and_then(|b| crate::effects::first_global(b, decls)),
+        ))
     }
 
     /// The file `f` is declared in, when that is not the root file and a call to `f` may

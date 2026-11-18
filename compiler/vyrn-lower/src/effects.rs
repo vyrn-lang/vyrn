@@ -10,11 +10,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use vyrn_frontend::ast::{FnId, Type, TypeDecl};
+use vyrn_frontend::ast::{Capability, FnId, Type, TypeDecl};
 use vyrn_frontend::floor;
 use vyrn_frontend::own::StateCallees;
 
-use vyrn_frontend::core::{rows, Arg, Body, Made, Name, Place, Rhs, St};
+use vyrn_frontend::core::{rows, Arg, Body, Made, Name, Place, Rhs, St, Target, Val};
 use vyrn_frontend::rules::{rule, DeclName, Rule};
 
 /// The lattice's table lives in `vyrn_frontend::effects` because the
@@ -186,10 +186,22 @@ impl Judged<'_> {
         param
     }
 
+    /// Whether call `c`, resolved to callee `k`, waits or not by a function
+    /// value the caller gives: it runs through one, or passes one into a body
+    /// that opens ([`StateUse::opens`]).
+    fn waits_by_value(&self, c: &Call, k: usize) -> bool {
+        c.through.is_some()
+            || c.passes
+                && matches!(&self.callees[k], Callee::Bodies(idx) | Callee::Dispatched(idx)
+                    if idx.iter().any(|j| self.solved[*j].2))
+    }
+
     /// Each call of frame `i`, run where `at` says, that breaks a waiting
     /// rule, with its line: a mark on a call that does not wait, and a waiting
     /// call without one or where nothing may wait. A fork waits when one of
-    /// its branches does, and a branch has no mark of its own to break.
+    /// its branches does, and a branch has no mark of its own to break. A mark
+    /// on a call that waits by a function value is kept where the value does
+    /// not wait, because the call finishes at its start.
     ///
     /// A frame outside the root's modules (`foreign`, per frame) that waits
     /// only by calls through a parameter with no `await` is refused at each
@@ -206,10 +218,14 @@ impl Judged<'_> {
         (0..calls.len()).filter_map(move |j| {
             let c = &calls[j];
             let callee = DeclName(&c.callee);
-            let waits = match c.mark {
-                Mark::Fork(n) => (j + 1..j + 1 + n).any(|b| self.waits(ks[b])),
-                _ => self.waits(ks[j]),
+            let span = match c.mark {
+                Mark::Fork(n) => j + 1..j + 1 + n,
+                _ => j..j + 1,
             };
+            let waits = span.clone().any(|b| self.waits(ks[b]));
+            let by_value = span
+                .into_iter()
+                .any(|b| self.waits_by_value(&calls[b], ks[b]));
             if c.through.is_some() && c.mark == Mark::None && inside(i).is_some() {
                 return None;
             }
@@ -225,6 +241,7 @@ impl Judged<'_> {
             let r = match (waits, at, c.mark) {
                 (true, Waiting::Initializer, _) => rule!(InitializerWaits, callee),
                 (true, Waiting::Body, Mark::None) => rule!(AwaitMissing, callee),
+                (false, _, Mark::Await | Mark::Fork(_)) if by_value => return None,
                 (false, _, Mark::Await | Mark::Fork(_)) => rule!(AwaitNoWait, callee),
                 (true, Waiting::Body, Mark::Await | Mark::Fork(_) | Mark::Branch)
                 | (false, _, Mark::None | Mark::Branch) => return None,
@@ -332,13 +349,13 @@ pub fn writes_state(state: &StateCallees, frame: Option<FnId>, callee: &str) -> 
 /// Walks every frame of `bodies`, on every thread. A body's lambdas are
 /// joined only when their frames are in `bodies`, and each comes after the
 /// frame that builds it, as [`Body::frames`] lists them.
-pub fn walk_frames(bodies: &[&Body]) -> Vec<Walked> {
+pub fn walk_frames(bodies: &[&Body], decls: &HashMap<String, TypeDecl>) -> Vec<Walked> {
     let mut out = vyrn_frontend::par::in_parallel(
         bodies,
         // A frame's walk takes about 3 us on `site/export.vyrn`; each weighs one.
         |_| 1,
         || (),
-        |_, b| walk(b).out,
+        |_, b| walk(b, decls).out,
     );
     let index: HashMap<*const Body, usize> = bodies
         .iter()
@@ -489,14 +506,15 @@ fn global_root(p: &Place) -> Option<&String> {
 
 /// Returns the first global `b`'s own statements read or store, as the effect
 /// judgment reads them; `None` when they touch no module state.
-pub fn first_global(b: &Body) -> Option<&str> {
-    walk(b).global
+pub fn first_global<'a>(b: &'a Body, decls: &'a HashMap<String, TypeDecl>) -> Option<&'a str> {
+    walk(b, decls).global
 }
 
 /// Walks the frame `b`: its own statements and its names' releases.
-fn walk(b: &Body) -> Walk<'_> {
+fn walk<'a>(b: &'a Body, decls: &'a HashMap<String, TypeDecl>) -> Walk<'a> {
     let mut w = Walk {
         body: b,
+        decls,
         global: None,
         out: Walked {
             name: b.name.clone(),
@@ -509,7 +527,7 @@ fn walk(b: &Body) -> Walk<'_> {
     rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
     for info in b.names.iter().filter(|i| !i.borrow) {
         for r in &info.runs {
-            w.call(r, None, info.line, false, Mark::None);
+            w.call(r, None, info.line, (false, false), Mark::None);
         }
     }
     w
@@ -518,6 +536,8 @@ fn walk(b: &Body) -> Walk<'_> {
 /// One frame's walk, which resolves no callee.
 struct Walk<'a> {
     body: &'a Body,
+    /// The program's type declarations, which name a `fn` type an argument has.
+    decls: &'a HashMap<String, TypeDecl>,
     /// The first global a place of the frame is rooted at.
     global: Option<&'a str>,
     out: Walked,
@@ -579,6 +599,7 @@ impl<'a> Walk<'a> {
             kind,
             args,
             awaits,
+            targets,
             ..
         } = r
         else {
@@ -599,19 +620,53 @@ impl<'a> Walk<'a> {
             (Some(_), None) => Mark::Await,
             (None, _) => Mark::None,
         };
-        self.call(callee, kind.value(), line, born, mark);
-        for b in fork.iter().flat_map(|f| &f.branches) {
-            self.call(&b.callee, b.kind.value(), line, false, Mark::Branch);
+        // Only a mark reads whether a call passes a value (Judged::wait_rules).
+        let passes = mark != Mark::None && self.passes(args, targets);
+        self.call(callee, kind.value(), line, (born, passes), mark);
+        for (b, these) in fork.into_iter().flat_map(|f| f.calls(args)) {
+            let passes = self.passes(these, &b.targets);
+            self.call(
+                &b.callee,
+                b.kind.value(),
+                line,
+                (false, passes),
+                Mark::Branch,
+            );
         }
     }
 
-    /// Records a call to `callee`, through `value` when it is a function value.
-    fn call(&mut self, callee: &str, value: Option<Name>, line: usize, born: bool, mark: Mark) {
+    /// Whether a call with `args` and `targets` passes a function value: a
+    /// target the specialization binds, or an argument of a `fn` type.
+    fn passes(&self, args: &[(Arg, Capability)], targets: &[Target]) -> bool {
+        !targets.is_empty()
+            || args.iter().any(|(a, _)| {
+                let Arg::Val(Val::Name(n)) = a else {
+                    return false;
+                };
+                let ty = &self.body.names[n.index()].ty;
+                matches!(
+                    &*vyrn_frontend::types::resolved(ty, self.decls),
+                    Type::Fn(..)
+                )
+            })
+    }
+
+    /// Records a call to `callee`, through `value` when it is a function value,
+    /// with whether it binds an owned result and whether it passes a value.
+    fn call(
+        &mut self,
+        callee: &str,
+        value: Option<Name>,
+        line: usize,
+        (born, passes): (bool, bool),
+        mark: Mark,
+    ) {
         self.out.calls.push(Call {
             callee: callee.to_string(),
             through: value.map(|n| self.body.names[n.index()].ty.clone()),
             line,
             born,
+            passes,
             mark,
         });
     }
@@ -902,7 +957,7 @@ pub(crate) fn judge_built<R>(
     for (i, (name, _)) in tops.iter().enumerate() {
         by_name.entry(name).or_default().push(top[i]);
     }
-    let built = walk_frames(&refs);
+    let built = walk_frames(&refs, own.proto.types());
     let mut frames: Vec<&Walked> = built.iter().collect();
     let mut served_at: Vec<usize> = Vec::with_capacity(served.len());
     for (name, walked) in served {
@@ -916,7 +971,7 @@ pub(crate) fn judge_built<R>(
         }
         frames.extend(walked.iter());
     }
-    let alone = walk_frames(outside);
+    let alone = walk_frames(outside, own.proto.types());
     frames.extend(alone.iter());
     let mut impl_methods: HashMap<&str, Vec<usize>> = HashMap::new();
     for im in &program.impls {

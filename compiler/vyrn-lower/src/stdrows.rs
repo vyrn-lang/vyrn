@@ -41,7 +41,7 @@ use vyrn_frontend::movecheck::{Judgment, JudgmentKey};
 use vyrn_frontend::session::Session;
 
 /// The format word that opens an entry.
-const TAG: &str = "stdrows4";
+const TAG: &str = "stdrows5";
 
 /// The stored rows of a program's given functions, each decoded once from
 /// its module's entry and named as the program names it.
@@ -652,7 +652,8 @@ const LAZY: usize = INT_N + 13;
 const ELEM: usize = INT_N + 14;
 const MAP: usize = INT_N + 15;
 
-/// The code of a call's mark and whether it binds an owned result.
+/// The code of a call's mark, whether it passes a function value and whether
+/// it binds an owned result.
 fn mark_code(c: &Call) -> usize {
     let mark = match c.mark {
         Mark::None => 0,
@@ -660,18 +661,19 @@ fn mark_code(c: &Call) -> usize {
         Mark::Branch => 2,
         Mark::Fork(n) => 3 + n,
     };
-    mark * 2 + usize::from(c.born)
+    mark * 4 + usize::from(c.passes) * 2 + usize::from(c.born)
 }
 
-/// The mark and the owned result [`mark_code`] coded as `code`.
-fn mark_of(code: usize) -> (Mark, bool) {
-    let mark = match code / 2 {
+/// The mark, the passed value and the owned result [`mark_code`] coded as
+/// `code`.
+fn mark_of(code: usize) -> (Mark, bool, bool) {
+    let mark = match code / 4 {
         0 => Mark::None,
         1 => Mark::Await,
         2 => Mark::Branch,
         n => Mark::Fork(n - 3),
     };
-    (mark, code % 2 == 1)
+    (mark, code & 2 != 0, code & 1 != 0)
 }
 
 impl Written {
@@ -1010,12 +1012,13 @@ impl<'t> Dec<'t> {
     fn call(&mut self) -> Option<Call> {
         let callee = self.s()?;
         let line = self.u()?;
-        let (mark, born) = mark_of(self.u()?);
+        let (mark, passes, born) = mark_of(self.u()?);
         Some(Call {
             callee,
             through: self.opt(Dec::ty)?,
             line,
             born,
+            passes,
             mark,
         })
     }

@@ -12,10 +12,11 @@
 //! (`movecheck::Judgments`) is held to the same: each root is analysed twice
 //! in one session that arms it, under `Host::Check` and under `Host::Emit`,
 //! and the second analysis, served the first's verdicts and fact summaries,
-//! must print what the first printed, as after an editor restart.
+//! must print what the first printed, as after an editor restart. Over the
+//! corpus, the second analyses must be served at least one body.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use vyrn_frontend::movecheck::{declare, Host};
@@ -134,6 +135,8 @@ fn every_given_verdict_is_the_built_one() {
     }
     let next = AtomicUsize::new(0);
     let moved = Mutex::new(Vec::new());
+    // The bodies the second analyses were served from the memo, over every root.
+    let served_bodies = AtomicU64::new(0);
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     std::thread::scope(|s| {
         for _ in 0..threads {
@@ -152,7 +155,10 @@ fn every_given_verdict_is_the_built_one() {
                     for (host, label) in [(Host::Check, "memo"), (Host::Emit, "unrun memo")] {
                         let session = Session::new(true);
                         let first = editor(path, host, &session);
+                        vyrn_frontend::movecheck::reset_judgment_tally();
                         let served = editor(path, host, &session);
+                        let (_, reused) = vyrn_frontend::movecheck::judgment_tally();
+                        served_bodies.fetch_add(reused, Ordering::Relaxed);
                         let label = format!("{label} served");
                         diffs.extend(common::first_diff(
                             &rel,
@@ -179,6 +185,10 @@ fn every_given_verdict_is_the_built_one() {
             .expect("a worker starts");
         }
     });
+    assert!(
+        served_bodies.into_inner() > 0,
+        "no second analysis was served a body from the memo"
+    );
     let mut moved = moved.into_inner().expect("no worker panicked");
     moved.sort();
     assert!(
