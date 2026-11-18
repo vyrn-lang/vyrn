@@ -444,7 +444,11 @@ the kernel's. `refusals.rs` records the owner of each sentence this way, and
 literals both ways. A program only the kernel refuses is a finding.
 
 `columns.rs` holds every refusal to a real token, so the editor underlines the
-name, not the whole line.
+name, not the whole line. A kernel refusal sits on the reader's spelling of the
+use it refuses, which the builder records per statement and name
+(`core::Body::ends`); an obligation row sits on its binder
+(`core::NameInfo::binder`). A spelling on another line than the refusal's
+leaves column 0.
 
 ## The free audit checks the emitted module
 

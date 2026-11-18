@@ -46,6 +46,9 @@ pub struct NameInfo {
     /// from the place. The kernel needs this to refuse a take of a parameter.
     pub borrow_kind: Option<BorrowKind>,
     pub line: usize,
+    /// Where the reader spelled the binder of a `let` or a parameter; `None`
+    /// for any other name. An obligation row names it.
+    pub binder: Option<Spelled>,
     /// The statement the name was made under, [`NodeId::NONE`] outside one.
     /// With the name, it keys [`Body::ends`].
     pub stmt: NodeId,
@@ -1233,6 +1236,36 @@ impl Said {
     }
 }
 
+/// A name or a path the reader spelled on one line: the 1-based column of its
+/// first name, 0 where that name sits on another line, and the column just
+/// past its last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spelled {
+    pub line: usize,
+    pub col: usize,
+    pub end: usize,
+}
+
+impl Spelled {
+    /// The binder `name` spelled at `col` of `line`; `None` for a binder no
+    /// source token spells (`col` 0).
+    pub fn binder(line: usize, col: usize, name: &str) -> Option<Spelled> {
+        (col > 0).then(|| Spelled {
+            line,
+            col,
+            end: col + name.chars().count(),
+        })
+    }
+
+    /// The edit that copies the path where it is spelled.
+    pub fn copy(self) -> crate::diagnostics::Fix {
+        crate::diagnostics::Fix::Copy {
+            line: self.line,
+            col: self.end,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Body {
     pub name: String,
@@ -1295,13 +1328,13 @@ pub struct Body {
     /// not per instance: a non-Bool condition, a `for` over what no loop walks.
     pub mistyped: Vec<Said>,
     /// Where the reader spelled a take of a heap name, keyed by the statement
-    /// and the name: the line and the column just past its path. Where the
-    /// statement takes the name twice, the first take is kept: the kernel walks
-    /// the rows in the order the builder wrote them, and the first take of a
-    /// name is the one it moves or refuses. A name read out of a place is the
-    /// temporary that read made. A `let` that binds a name to a place read
-    /// keys that read by the bound name.
-    pub ends: std::collections::HashMap<(NodeId, Name), (usize, usize)>,
+    /// and the name ([`Spelled`]). Where the statement takes the name twice,
+    /// the first take is kept: the kernel walks the rows in the order the
+    /// builder wrote them, and the first take of a name is the one it moves or
+    /// refuses. A name read out of a place is the temporary that read made. A
+    /// `let` that binds a name to a place read keys that read by the bound
+    /// name.
+    pub ends: std::collections::HashMap<(NodeId, Name), Spelled>,
     /// The edits that turn a prefix `consume` of a place into a copy, keyed by
     /// the statement, the root name and the hole path the take leaves: empty
     /// where the reader's text does not place the take on one line.
