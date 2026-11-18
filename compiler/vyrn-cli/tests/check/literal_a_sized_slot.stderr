@@ -1,1 +1,1 @@
-literal_a_sized_slot.vyrn:3:0: integer literal 300 does not fit Int8 (its range is -128..=127)
+literal_a_sized_slot.vyrn:3:19: integer literal 300 does not fit Int8 (its range is -128..=127)

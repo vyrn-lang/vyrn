@@ -168,31 +168,65 @@ pub struct MethodId {
     pub member: u32,
 }
 
-/// A node's slot for its [`NodeId`], [`NodeId::NONE`] until numbered, and
-/// the 1-based column of the name the node spells, 0 when a desugar built it.
-/// Any two slots compare equal, so two trees compare by structure alone. `{:?}`
-/// prints every slot alike, so a fingerprint over a tree's debug text ignores
-/// ids too; `{:#?}` prints the id as `#unit.local`.
+/// A node's slot for its [`NodeId`], [`NodeId::NONE`] until numbered, the
+/// 1-based column of the name the node spells, 0 when a desugar built it, and
+/// where the node starts. Any two slots compare equal, so two trees compare by
+/// structure alone. `{:?}` prints every slot alike, so a fingerprint over a
+/// tree's debug text ignores ids too; `{:#?}` prints the id as `#unit.local`.
 #[derive(Clone, Copy, Default)]
-pub struct Id(pub NodeId, u32);
+pub struct Id(pub NodeId, u32, Start);
+
+/// The 1-based line and column of a node's first token. The parser gives it
+/// to every node it builds, and [`Numbering`] gives a node a desugar built
+/// its parent's, the construct it stands for. Only a node synthesized outside
+/// any parsed construct, such as a function the loader writes, starts at
+/// `(0, 0)`.
+#[derive(Clone, Copy, Default)]
+struct Start {
+    line: u32,
+    col: u32,
+}
 
 impl Id {
     /// The slot a node is built with.
-    pub const NEW: Id = Id(NodeId::NONE, 0);
+    pub const NEW: Id = Id(NodeId::NONE, 0, Start { line: 0, col: 0 });
 
     /// The slot of a node whose name is spelled at column `col`.
     pub fn at(col: usize) -> Id {
-        Id(NodeId::NONE, col as u32)
+        Id(NodeId::NONE, col as u32, Start::default())
     }
 
     /// The slot of the node numbered `node`, which spells no name.
     pub fn of(node: NodeId) -> Id {
-        Id(node, 0)
+        Id(node, 0, Start::default())
     }
 
     /// The column of the name the node spells, 0 for none.
     pub fn col(self) -> usize {
         self.1 as usize
+    }
+
+    /// The line and column the node starts at; `(0, 0)` for a node synthesized
+    /// outside any parsed construct.
+    pub fn start(self) -> (usize, usize) {
+        (self.2.line as usize, self.2.col as usize)
+    }
+
+    /// The slot of a node that starts at `at` and spells no name.
+    pub fn started(at: (usize, usize)) -> Id {
+        let mut id = Id::NEW;
+        id.starts(at);
+        id
+    }
+
+    /// Sets where the node starts, unless it has a start already.
+    pub fn starts(&mut self, (line, col): (usize, usize)) {
+        if self.2.line == 0 {
+            self.2 = Start {
+                line: line as u32,
+                col: col as u32,
+            };
+        }
     }
 }
 
@@ -2171,6 +2205,16 @@ impl Expr {
         slot!(self, &).0
     }
 
+    /// The line and column the expression starts at ([`Id::start`]).
+    pub fn start(&self) -> (usize, usize) {
+        slot!(self, &).start()
+    }
+
+    /// Sets where the expression starts, unless it has a start already.
+    pub fn starts(&mut self, at: (usize, usize)) {
+        slot!(self, &mut).starts(at)
+    }
+
     /// The 1-based column of the name this node spells, 0 for a node that spells none.
     pub fn col(&self) -> usize {
         slot!(self, &).col()
@@ -2245,6 +2289,16 @@ impl Stmt {
 
     pub fn id(&self) -> NodeId {
         stmt_slot!(self, &).0
+    }
+
+    /// The line and column the statement starts at ([`Id::start`]).
+    pub fn start(&self) -> (usize, usize) {
+        stmt_slot!(self, &).start()
+    }
+
+    /// Sets where the statement starts, unless it has a start already.
+    pub fn starts(&mut self, at: (usize, usize)) {
+        stmt_slot!(self, &mut).starts(at)
     }
 }
 
@@ -2371,8 +2425,9 @@ impl Program {
     }
 }
 
-/// The walk behind [`Program::number`]: numbers the nodes of one unit.
-pub struct Numbering(NodeId);
+/// The walk behind [`Program::number`]: numbers the nodes of one unit, and
+/// gives a node with no start the start of the node around it.
+pub struct Numbering(NodeId, (usize, usize));
 
 impl Numbering {
     /// Starts unit `unit`, whose first node gets index 1.
@@ -2382,7 +2437,7 @@ impl Numbering {
 
     /// Continues unit `unit` after its first `used` nodes.
     pub fn resume(unit: u32, used: u32) -> Numbering {
-        Numbering(NodeId { unit, local: used })
+        Numbering(NodeId { unit, local: used }, (0, 0))
     }
 
     /// How many nodes the unit holds so far.
@@ -2390,14 +2445,23 @@ impl Numbering {
         self.0.local
     }
 
-    fn next(&mut self, slot: &mut Id) {
+    /// Numbers `slot` and makes its start the one its children inherit.
+    /// Returns the start to restore once they are walked.
+    fn next(&mut self, slot: &mut Id) -> (usize, usize) {
         self.0.local += 1;
         slot.0 = self.0;
+        slot.starts(self.1);
+        std::mem::replace(&mut self.1, slot.start())
+    }
+
+    /// Numbers a node without children.
+    fn leaf(&mut self, slot: &mut Id) {
+        self.1 = self.next(slot);
     }
 
     pub fn function(&mut self, f: &mut Function) {
         for p in &mut f.params {
-            self.next(&mut p.id);
+            self.leaf(&mut p.id);
         }
         if let Body::Written(b) = &mut f.body {
             self.block(b);
@@ -2406,19 +2470,25 @@ impl Numbering {
 
     fn binders(&mut self, bs: Vec<&mut Binder>) {
         for b in bs {
-            self.next(&mut b.id);
+            self.leaf(&mut b.id);
         }
     }
 
     pub fn block(&mut self, b: &mut Block) {
-        self.next(&mut b.id);
+        let outer = self.next(&mut b.id);
         for s in &mut b.stmts {
             self.stmt(s);
         }
+        self.1 = outer;
     }
 
     pub fn stmt(&mut self, s: &mut Stmt) {
-        self.next(stmt_slot!(s, &mut));
+        let outer = self.next(stmt_slot!(s, &mut));
+        self.stmt_children(s);
+        self.1 = outer;
+    }
+
+    fn stmt_children(&mut self, s: &mut Stmt) {
         match s {
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } => self.expr(value),
             Stmt::Store {
@@ -2463,7 +2533,12 @@ impl Numbering {
     }
 
     pub fn expr(&mut self, e: &mut Expr) {
-        self.next(slot!(e, &mut));
+        let outer = self.next(slot!(e, &mut));
+        self.expr_children(e);
+        self.1 = outer;
+    }
+
+    fn expr_children(&mut self, e: &mut Expr) {
         match e {
             Expr::Int(..)
             | Expr::Byte(..)
