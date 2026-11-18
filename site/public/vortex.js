@@ -395,7 +395,7 @@ export function vortexWidget(root) {
   }, { passive: true });
 
   /* state the panels control */
-  let rule = 18, hit = 0, ringR = 1.6, cur = 0, T = 0, spin = 1;
+  let rule = 18, hit = 0, ringR = 1.6, cur = 0, T = 0;
   const mouse = { x: 0, y: 0 }, sm = { x: 0, y: 0 };
   const ruleR = (v) => 0.5 + (v - 1) * 0.065;
   on(window, "keydown", (e) => {
@@ -411,38 +411,38 @@ export function vortexWidget(root) {
       rule = Math.max(1, Math.min(40, rule + (e.key === "ArrowUp" ? 1 : -1)));
     }
   });
-  const ops = { p: { sort: true, reverse: false, filter: false, map: false, push: false }, e: { gen: false, print: false, state: false } };
-  let tgt = { spin: 1 };
+  const ops = { p: { sort: true, insert: false, filter: false, map: false, push: false }, e: { gen: false, print: false, state: false } };
   const text = (sel, t, bad) => {
     const el = $(sel);
     if (!el) return;
     el.textContent = t;
     if (bad !== undefined) el.classList.toggle("bad", bad);
   };
+  // What `vyrn check ages.vyrn` prints first for the card's program, with each
+  // line of lines 6 to 10 that is off written as a comment. Index: the five
+  // lines as bits, sort first. Recorded from the compiler, not composed here.
+  const CHECKED = [
+    "ages.vyrn:11:0: `lowerBound` needs `ages` sorted by `Asc<Int64>`, and nothing shows it is",
+    "ages.vyrn:11:0: `lowerBound` needs `ages` sorted by `Asc<Int64>`, and the push on line 10 may break it",
+    "ages.vyrn:11:0: `lowerBound` needs `ages` sorted by `Asc<Int64>`, and the store on line 8 may break it",
+    "ages.vyrn:11:0: `lowerBound` needs `ages` sorted by `Asc<Int64>`, and the store on line 9 may break it",
+    "ages.vyrn:7:0: `insertSorted` needs `ages` sorted by `Asc<Int64>`, and nothing shows it is",
+    "ok",
+  ];
+  const VERDICT = "00000000444444445133220051332200";
   function verdicts() {
     const o = ops.p;
-    let f = o.sort ? "asc" : "none", drop = "";
-    if (o.reverse && f !== "none") f = "desc";
-    if (o.map && f !== "none") {
-      drop = ".map(jitter) on line 6";
-      f = "none";
-    }
-    if (o.push) {
-      if (f !== "none") drop = "xs.push(17) on line 7";
-      f = "none";
-    }
-    const ok = f === "asc";
-    tgt = { spin: f === "desc" ? -1 : 1 };
-    text("[data-vx=props-diag]", ok ? "proved: xs is sorted(byAge), so binarySearch may halve"
-      : f === "desc" ? "refused: binarySearch needs xs sorted(byAge); .reverse() on line 4 made it sorted(byAge, descending)"
-      : drop ? `refused: binarySearch needs xs sorted(byAge); ${drop} dropped the fact`
-      : "refused: binarySearch needs xs sorted(byAge); nothing sorts xs", !ok);
-    text("[data-vx=props-state]", ok ? "proved" : "refused", !ok);
-    const e = ops.e, fx = [e.print && "io", e.state && "writes count"].filter(Boolean), pure = !(e.gen && fx.length);
-    text("[data-vx=fx-state]", !pure ? "refused" : fx.length ? "effects: " + fx.join(", ") : "pure", !pure);
-    text("[data-vx=fx-diag]", !pure ? `refused: a gen fn that reaches an effect (${fx.join(", ")}): a build must be deterministic`
-      : fx.length ? `table() ${fx.join(" and ")}; a caller sees it in the signature's effects`
-      : "table() is pure: same answer on every machine", !pure);
+    const said = CHECKED[+VERDICT[["sort", "insert", "filter", "map", "push"].reduce((n, k) => n * 2 + (o[k] ? 1 : 0), 0)]];
+    const ok = said === "ok";
+    text("[data-vx=props-diag]", ok ? "vyrn check: ok" : said, !ok);
+    text("[data-vx=props-state]", ok ? "ok" : "refused", !ok);
+    // The effect set is what `vyrn why --cost` prints for table(); the refusal is
+    // the sentence `vyrn check` prints. Module state is reported before print.
+    const e = ops.e, set = ["alloc", e.print && "write-output", e.state && "module-state"].filter(Boolean).join(", ");
+    const why = e.state ? "reads or writes module state" : "calls `print`", pure = !(e.gen && (e.print || e.state));
+    text("[data-vx=fx-state]", pure ? "effects: " + set : "refused", !pure);
+    text("[data-vx=fx-diag]", pure ? "vyrn check: ok; its effect set is " + set
+      : `\`gen fn table\` is not comptime-pure: it ${why} (generators run at compile time: they may not use \`extern\`, module state, \`print\`, \`writeFile\`, \`readLine\`, \`args\`, \`readFileBytes\`, the clock, entropy, or logging sinks)`, !pure);
   }
   root.querySelectorAll("[data-op]").forEach((el) => {
     const g = ops[el.dataset.g];
@@ -591,8 +591,8 @@ export function vortexWidget(root) {
   }
 
   /* properties: the hero's ring becomes a stack, one ring per line; one droplet carries the fact from rim to eye */
-  const OPS = ["sort", "reverse", "filter", "map", "push"];
-  const OPNAME = { sort: ".sort(byAge)", reverse: ".reverse()", filter: ".filter(isAdult)", map: ".map(jitter)", push: "xs.push(17)", bs: "binarySearch(xs, 30)" };
+  const OPS = ["sort", "insert", "filter", "map", "push"];
+  const OPNAME = { sort: "sort", insert: "insertSorted", filter: "filter", map: "map", push: "push", bs: "lowerBound" };
   const stack = [0, 1, 2, 3, 4, 5].map(() => ({ g: ring(0.0035), el: label("vx-pill"), r: 1, vis: 0, name: "", col: new V3(1, 1, 1) }));
   const drop = sprite(2.4, 2.5, 2.7, 0.16), halo = sprite(0.3, 2, 1.7, 0.5);
   const sparks = [...Array(14)].map(() => ({ s: sprite(4, 1.4, 1, 0.07), v: new V3(), t: 9 }));
@@ -643,24 +643,25 @@ export function vortexWidget(root) {
       if (op === "sort") {
         dl.fact = "asc";
         g.col.set(0.4, 1.4, 1.3);
-        tagAt(ringAt, "sort: now sorted(byAge)", "var(--vx-teal)");
-      } else if (op === "reverse" && dl.fact !== "none") {
-        dl.fact = dl.fact === "asc" ? "desc" : "asc";
-        g.col.set(1.2, 0.9, 1.8);
-        tagAt(ringAt, "reverse: sorted(byAge, descending)", "var(--vx-violet)");
-      } else if (op === "filter" && dl.fact !== "none") {
+        tagAt(ringAt, "sort: sorted<Asc<Int64>>", "var(--vx-teal)");
+      } else if (op === "insert" && dl.fact === "asc") {
         g.col.set(0.4, 1.4, 1.3);
-        tagAt(ringAt, "filter: order kept", "var(--vx-teal)");
-      } else if ((op === "map" || op === "push") && dl.fact !== "none") {
+        tagAt(ringAt, "insertSorted: still sorted", "var(--vx-teal)");
+      } else if (op === "insert") {
+        dl.dead = true;
+        g.col.set(1.8, 0.5, 0.4);
+        burst(ringAt, [4, 1.3, 1]);
+        tagAt(ringAt, "refused: insertSorted needs it sorted", "var(--vx-coral)");
+      } else if ((op === "filter" || op === "map" || op === "push") && dl.fact !== "none") {
         dl.fact = "none";
         g.col.set(1.6, 0.55, 0.45);
         burst(ringAt, [4, 1.3, 1]);
-        tagAt(ringAt, `${op}: the fact is dropped`, "var(--vx-coral)");
+        tagAt(ringAt, `${op}: may break the order`, "var(--vx-coral)");
       } else if (op === "bs") {
         if (dl.fact === "asc") {
           g.col.set(1.6, 1.7, 1.9);
           lit("[data-vx=proves]");
-          tagAt(ringAt, "binarySearch: proved", "var(--vx-moon)");
+          tagAt(ringAt, "lowerBound: ok", "var(--vx-moon)");
         } else {
           dl.dead = true;
           g.col.set(1.8, 0.5, 0.4);
@@ -668,7 +669,7 @@ export function vortexWidget(root) {
           slow = 1;
           flash.p.copy(ringAt);
           flash.o = 1;
-          tagAt(ringAt, "refused: needs sorted(byAge)", "var(--vx-coral)");
+          tagAt(ringAt, "refused: lowerBound needs it sorted", "var(--vx-coral)");
         }
       }
     }
@@ -678,7 +679,7 @@ export function vortexWidget(root) {
     drop.s = 0.16 * sink;
     if (dl.dead) drop.c.set(3, 1, 0.8);
     else drop.c.set(2.4, 2.5, 2.7);
-    const want = dl.fact === "asc" ? new V3(0.3, 2, 1.7) : dl.fact === "desc" ? new V3(1.3, 0.9, 2.4) : new V3();
+    const want = dl.fact === "asc" ? new V3(0.3, 2, 1.7) : new V3();
     haloC.lerp(want, Math.min(1, dt * 6));
     halo.c.copy(haloC);
     halo.o = vis * (dl.dead ? 0 : 1);
@@ -931,7 +932,6 @@ export function vortexWidget(root) {
     cam.p.set(Math.sin(az) * Math.cos(elev) * dist, Math.sin(elev) * dist - 0.4, Math.cos(az) * Math.cos(elev) * dist);
     cam.view = lookAt(cam.p, cam.look);
     const k = Math.min(1, dt * 2.2), w1 = w(1), w2 = w(2), w3 = w(3);
-    spin += (tgt.spin - spin) * k;
     if (draining) {
       const freed = Math.min(WATER_N, Math.round(WATER_N * SS((T - drainT) / 9, 0, 1)));
       text("[data-vx=freed]", freed.toLocaleString("en"));
@@ -954,7 +954,7 @@ export function vortexWidget(root) {
     stackFrame(dt, w1);
     const focus = Math.hypot(cam.p.x - cam.look.x, cam.p.y - cam.look.y, cam.p.z - cam.look.z);
     render({
-      water: { uT: T, uPx: PX, uFocus: focus, uRing: ringOn > 0.02 ? ringR : 99, uHit: hit * (1 - w1), uSpin: spin, uVis: 1,
+      water: { uT: T, uPx: PX, uFocus: focus, uRing: ringOn > 0.02 ? ringR : 99, uHit: hit * (1 - w1), uSpin: 1, uVis: 1,
         uDrain: draining * w3 > 0.01 ? 1 : 0, uDrainT: drainT, uCalm: w(4) },
       drops: { uT: T, uPx: PX, uFocus: focus, uRing: ringR, uRule: (ringR - 0.5) / 0.065 + 1, uVis: w(0) },
     });
