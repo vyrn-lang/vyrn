@@ -4,8 +4,6 @@
 //! a loop ([`loops`]), the rules the builder met at its construct
 //! ([`refused`]), and a `drop` that cannot release what it names ([`drops`]).
 
-use std::collections::HashMap;
-
 use vyrn_frontend::ast::{NodeId, Type};
 
 use vyrn_frontend::ast::Capability;
@@ -472,8 +470,9 @@ pub fn refused(body: &Body, as_written: bool) -> Vec<Said> {
 pub fn drops(
     body: &Body,
     program: &vyrn_frontend::ast::Program,
-    decls: &HashMap<String, vyrn_frontend::ast::TypeDecl>,
+    proto: &vyrn_frontend::declared::Owned,
 ) -> Vec<Said> {
+    let decls = proto.types();
     use vyrn_frontend::types;
     let mut out = Vec::new();
     for f in body.frames() {
@@ -501,10 +500,11 @@ pub fn drops(
             ) || (types::is_sum_alias(&t)
                 && vyrn_frontend::declared::owns_heap(&t, decls));
             // A must-use value's last owner has no other way to discharge
-            // it, whatever its representation. `Err` is a name the checker
-            // could not type, and its refusal is the unknown name's
-            // (`refused`).
-            let must_use = matches!(info.linear, Some(vyrn_frontend::own::Linear::Declared(_)));
+            // it, whatever its representation, and a record that holds one
+            // may release it. `Err` is a name the checker could not type, and
+            // its refusal is the unknown name's (`refused`).
+            let must_use = matches!(info.linear, Some(vyrn_frontend::own::Linear::Declared(_)))
+                || proto.holds_must_use(&info.ty);
             if owned || heap || must_use || t == Type::Err {
                 continue;
             }

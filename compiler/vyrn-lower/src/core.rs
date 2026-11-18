@@ -8451,7 +8451,7 @@ fn typed(
         }
     }
     if as_written {
-        found.extend(crate::typed::drops(top, program, own.proto.types()));
+        found.extend(crate::typed::drops(top, program, &own.proto));
     }
     found.sort_by_key(|s| s.line);
     let refused = !found.is_empty() || !unshown.is_empty();
