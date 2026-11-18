@@ -50,6 +50,8 @@ html:not(.vx-live) .vx-js { display: none; }
   padding: 16px 18px; border: 1px solid var(--vx-line); border-radius: 14px;
   background: var(--vx-glass); backdrop-filter: blur(14px);
   font: var(--t-code)/1.75 var(--mono);
+  width: max-content; max-width: min(680px, 88vw);
+  overflow: auto hidden; scrollbar-width: thin; scrollbar-color: var(--vx-line) transparent;
 }
 .vx-line { white-space: pre; }
 .vx-head { display: flex; justify-content: space-between; margin-bottom: 8px; font: 500 var(--t-key)/1.4 var(--sans); letter-spacing: 0.14em; text-transform: uppercase; color: var(--vx-dim); }
@@ -101,8 +103,9 @@ html:not(.vx-live) .vx-js { display: none; }
   position: fixed; left: max(var(--gut), calc((100% - var(--sheet)) / 2 + var(--gut))); top: max(13vh, 88px); bottom: 6vh; z-index: 3;
   width: min(470px, 88vw); max-width: none; padding: 0; border: 0;
   display: flex; flex-direction: column; justify-content: space-between; gap: 20px;
-  opacity: 0; pointer-events: none;
+  pointer-events: none;
 }
+.vx-live .vx-panel > * { opacity: 0; }
 .vx-live .vx-panel[data-panel="Install"] { width: min(760px, 88vw); }
 /* The ring and the brightest water cross the prose; a soft backing of the deep colour dims them under the text block, and the halo below keeps each glyph clear of what still shows. */
 .vx-live .vx-panel > div:first-child { position: relative; isolation: isolate; }
