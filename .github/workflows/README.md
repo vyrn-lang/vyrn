@@ -8,8 +8,8 @@ three are for, when they run, and how to do the jobs people actually need to do.
 
 | workflow | what it proves | when it runs |
 | --- | --- | --- |
-| `ci.yml` | the compiler builds, the tests pass, and the three backends agree | every push, and on demand |
-| `site.yml` | the site builds and every route answers | on a pull request, after CI passes on `main`, and when a release is published |
+| `ci.yml` | the compiler builds, the tests pass, and the wasm and native runs agree | every pull request, every push to `main` that changes more than Markdown or `editor/`, and on demand |
+| `site.yml` | the site builds and every route answers | on a pull request, after CI passes on `main`, when a release is published or edited, daily, and on demand |
 | `release.yml` | a tagged commit becomes a published release with binaries | when a tag starting with `v` is pushed |
 
 `site.yml` runs on a pull request **before** a merge, not only after. That is
@@ -23,25 +23,22 @@ and the release goes through.
 
 ## How to update the benchmarks
 
-Read this part before trusting the benchmark gate.
+The `benchmarks` job runs on a push to `main` only. It builds the commit the
+push replaced and the pushed commit, times both on the same runner, and fails
+when a bench's minimum grows past `BENCH_THRESHOLD` over the base's. A bench
+named in `bench/ungated.txt` is timed and reported, never failed.
 
-**The gate does not catch regressions today.** `bench/baseline.json` is a
-placeholder: it carries `placeholder: true` and an empty `benches` list, so
-`vyrn bench --compare` reports every benchmark as `new` and exits 0. What the
-gate proves is that every benchmark still builds, runs, and produces a report.
-That is worth having and it is not what the name suggests.
+`bench/baseline.json` is the recorded trend. Each run compares against it and
+prints the result, and that comparison never fails the job. To reseed it:
 
-To turn the regression half on, seed the baseline:
-
-1. Push to `main`, or start `ci.yml` by hand. The `benchmarks` job runs and
-   uploads an artifact called `bench-json`.
+1. Push to `main`; a run started by hand skips this job. The `benchmarks` job
+   runs and uploads an artifact called `bench-json`.
 2. Download it. It contains a seedable baseline assembled from that run.
 3. Replace `bench/baseline.json` with it and commit.
 
-One thing to know before you do: the comparison runs per example, not over the
-whole corpus. Once a baseline exists, every example's run will report the other
-examples' entries as `missing-from-run`. That verdict is deliberately not
-counted as a regression. The side effect is that **a deleted benchmark is
+The comparison runs per example, not over the whole corpus, so every example's
+run reports the other examples' entries as `missing-from-run`. That verdict is
+deliberately not counted as a regression. The side effect is that **a deleted benchmark is
 invisible**, and no threshold or setting fixes that. Making the comparison
 whole-corpus is the change that would.
 
@@ -57,11 +54,9 @@ speed things up.
 Vyrn executing test corpora — the site's own test blocks in one case, forty
 route programs in another. No change to a YAML file reaches it.
 
-**What the site's test step is made of is now known.** Run
-`vyrn test --profile site/export.vyrn` and it answers in one command: `slice`
-from `std/strpred` is 59 percent of it over 508,664 calls, and `findSkipping` is
-another 15. Two functions are three quarters of the step. There is nothing to
-tune in the workflow.
+**What the site's test step is made of is one command away.**
+`vyrn test --profile site/export.vyrn` prints the time of each compile phase of
+the step, and `vyrn run --profile` counts the operations of each function.
 
 **There are two bench gates and they check different things.**
 `Bench --check`, in the `checks` job, runs every bench body once, compiled. It
@@ -70,7 +65,7 @@ exercises the native timing path. The `benchmarks` job below does run that path.
 Knowing which is which matters: a defect lived in the harness merge for a long
 time and neither gate saw it, because the corpus is the project's own files and
 the defect was triggered by a name a user picks. `The native bench harness` step
-in the `parity` job is the one that tests that, and it picks the names on
+in the `route` job is the one that tests that, and it picks the names on
 purpose.
 
 ## If a run fails and you did not expect it

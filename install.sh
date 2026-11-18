@@ -150,4 +150,4 @@ esac
 
 say ""
 say "vyrn run, check, test and build --target wasm need nothing else."
-say "vyrn build (a native binary) needs clang on PATH."
+say "vyrn build (a native binary) also needs clang, wabt's wasm2c and simde; vyrn deps shows where it finds each."

@@ -64,7 +64,7 @@ fn main() -> Int64 {
 The two commented-out lines are real compiler errors:
 
 ```
-bad.vyrn:4:0: 5 does not satisfy `Age` (predicate `where value >= 18` is false)
+bad.vyrn:4:15: 5 does not satisfy `Age` (predicate `where value >= 18` is false)
 uac.vyrn:8:0: `a` is used here but was already consumed by `redeem(..)` on line 7
   (a `consume` parameter takes ownership; the value can't be used afterward)
 ```
@@ -99,7 +99,7 @@ To try it without installing, the [playground](https://vyrn-lang.github.io/play.
 - **One module, two ways to run it.** `vyrn build --target wasm` emits WebAssembly directly, with no LLVM and no clang. `vyrn build` turns the same module into a native executable, and CI checks that both print the same output.
 - **Generators, not compiler features.** A `gen fn` is ordinary Vyrn that runs at compile time and returns source. RPC, UI, i18n, OpenAPI and GraphQL are libraries in [`std/`](std/), not keywords. ([gendemo](examples/gendemo.vyrn))
 - **Failure is a value.** No null: `Option<T>`, `Result<T, E>`, exhaustive `match` and `?`. ([option](examples/option.vyrn), [fallible](examples/fallible.vyrn))
-- **No async.** The host owns the event loop: the browser page, the HTTP server, or a runtime you write. ([eventloop](examples/eventloop.vyrn), [server](examples/server.vyrn))
+- **Waiting is inferred.** A call of `sleep`, `fetch` or a function that reaches one waits, and `await` marks it; nothing declares a function async. `both` and `race` run two waiting calls at once, and the host delivers each completion. ([waiting](examples/waiting.vyrn), [concurrent](examples/concurrent.vyrn), [eventloop](examples/eventloop.vyrn))
 - **Tools in the box.** A formatter, a test runner and a benchmark runner for blocks in the source file, a doc generator, a package manager with a lock file, a dev server that rebuilds on save and reloads the page, and a language server with a VS Code extension.
 
 ## Examples
@@ -178,7 +178,7 @@ cargo build --release -p vyrn-cli
 cargo run --release -p vyrn-cli -- run ../examples/fib.vyrn
 ```
 
-The binary finds `std/` and `web/` by walking up from its own path, so it works in place inside a clone. [`compiler/README.md`](compiler/README.md) has the crate map and the build notes for `vyrn-lsp` and `vyrn-genwasm`. The pinned toolchain versions are in [`vyrn.json`](vyrn.json), with every artifact's sha256 in [`vyrn.lock`](vyrn.lock). [`docs/releasing.md`](docs/releasing.md) says how a release is cut.
+The binary finds `std/` and `web/` by walking up from its own path, so it works in place inside a clone. [`compiler/README.md`](compiler/README.md) has the build notes for `vyrn-lsp`, `vyrn-genwasm` and `vyrn-play`, and [`docs/compiler.md`](docs/compiler.md) says what each crate owns. The pinned toolchain versions are in [`vyrn.json`](vyrn.json), with every artifact's sha256 in [`vyrn.lock`](vyrn.lock). [`docs/releasing.md`](docs/releasing.md) says how a release is cut.
 
 ## Status
 
@@ -192,7 +192,7 @@ The verification is stable. Every example that is meant to run runs as wasm and 
 - [`docs/api/`](docs/api/) is the generated reference for the standard library, and CI fails if it drifts from [`std/`](std/).
 - [`ROADMAP.md`](ROADMAP.md) lists the open work and what blocks each item.
 - [`editor/vscode/`](editor/vscode/) is the VS Code extension. Every release publishes it as a `.vsix`.
-- Not in v1: higher-kinded types, dependent types, macros, class inheritance and `async`/`await`.
+- Not in v1: higher-kinded types, dependent types, macros and class inheritance.
 
 ## License
 
