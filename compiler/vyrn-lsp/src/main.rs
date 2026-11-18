@@ -929,34 +929,45 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     }))
 }
 
-/// The definition the claiming generator module's editor companion gives at
-/// `line`, `col` of the input `uri`
-/// ([`vyrn_frontend::audience::input_definition`]): a foreign grammar's own
-/// names, such as a component tag, are no identifier in the generated module.
+/// The [`companion_definition`] at `line`, `col` of the input `uri`, as a location.
 fn input_definition(
     server: &Server,
     uri: &Url,
     line: usize,
     col: usize,
 ) -> Option<GotoDefinitionResponse> {
-    let (root, claim, file) = input_claim(server, uri)?;
-    let overlays = overlays_of(server);
-    let (opts, resolver, _, _) = load_context(&server.session, &root, &overlays)?;
-    let at = vyrn_frontend::audience::input_definition(
-        &claim,
-        &file,
-        line,
-        col,
-        &opts,
-        &resolver,
-        Some(&*engine()),
-    )?;
+    let at = companion_definition(server, uri, line, col)?;
     let target = Url::from_file_path(at.file.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
     let text = doc_text(server, &target).unwrap_or_default();
     Some(GotoDefinitionResponse::Scalar(Location {
         range: lsp_range(&text, at.line, at.col, at.col),
         uri: target,
     }))
+}
+
+/// The definition the claiming generator module's editor companion gives at
+/// `line`, `col` of the input `uri`
+/// ([`vyrn_frontend::audience::input_definition`]): a foreign grammar's own
+/// names, such as a component tag, are no identifier in the generated module.
+fn companion_definition(
+    server: &Server,
+    uri: &Url,
+    line: usize,
+    col: usize,
+) -> Option<vyrn_frontend::origin::Origin> {
+    let (root, claim, file) = input_claim(server, uri)?;
+    let overlays = overlays_of(server);
+    let (opts, resolver, _, _) = load_context(&server.session, &root, &overlays)?;
+    let engine = engine();
+    vyrn_frontend::audience::input_definition(
+        &claim,
+        &file,
+        line,
+        col,
+        &opts,
+        &resolver,
+        Some(&*engine),
+    )
 }
 
 /// The top of the file an import specifier string under the cursor names,
@@ -1453,28 +1464,25 @@ struct InputFwd {
 
 /// Map an input cursor into its analyzed generated module (forward
 /// origin mapping). A verbatim region maps column-exactly; a derived one (a `{#for}`
-/// head) maps to the region's start. `None` outside any region or when the
-/// owner cannot generate.
+/// head) maps to the region's start. Outside every region, a name on an import
+/// line maps to the import that kept it, and a component tag to the declaration
+/// of what its file provides. `None` anywhere else or when the owner cannot
+/// generate.
 fn input_forward(server: &Server, input_uri: &Url, line: usize, col: usize) -> Option<InputFwd> {
     let input_path = uri_path(input_uri)?;
     let owner = server.input_owner.get(&input_path)?.clone();
     let owner_analysis = server.analyses.get(&owner)?;
-
-    // The rightmost region on this line that starts at or before the cursor.
-    let mut region: Option<vyrn_frontend::origin::Region> = None;
-    for r in owner_analysis.origins.regions_for(&input_path) {
-        if r.origin.line == line && r.origin.col <= col {
-            let better = region
-                .as_ref()
-                .map(|b| r.origin.col >= b.origin.col)
-                .unwrap_or(true);
-            if better {
-                region = Some(r);
-            }
-        }
-    }
-    let region = region?;
-
+    let regions = owner_analysis.origins.regions_for(&input_path);
+    let Some(region) = (regions.iter())
+        .filter(|r| r.origin.line == line && r.origin.col <= col)
+        .max_by_key(|r| r.origin.col)
+    else {
+        let synth = synth_for(server, &owner, &regions.first()?.gen_module)?;
+        let input_text = doc_text(server, input_uri)?;
+        let input_line = input_text.lines().nth(line.checked_sub(1)?)?;
+        return kept_import(synth, input_line, col)
+            .or_else(|| component_tag(server, &owner, input_uri, line, col));
+    };
     let synth = synth_for(server, &owner, &region.gen_module)?;
 
     let input_text = doc_text(server, input_uri)?;
@@ -1496,6 +1504,51 @@ fn input_forward(server: &Server, input_uri: &Url, line: usize, col: usize) -> O
         line: gline,
         col: gcol,
     })
+}
+
+/// A name on an input's import line that the generated module dropped as a
+/// repeat, at the same name on the import line it kept. A name binds through one
+/// import there, since the generator refuses a name imported from two
+/// specifiers.
+fn kept_import(synth: Rc<AnalyzedSynth>, input_line: &str, col: usize) -> Option<InputFwd> {
+    use vyrn_frontend::lexer::Tok;
+    let tokens = vyrn_frontend::lexer::lex(input_line).ok()?;
+    if tokens.first()?.tok != Tok::Import {
+        return None;
+    }
+    let (name, into) = tokens.iter().find_map(|t| match &t.tok {
+        Tok::Ident(s) if (t.col..t.col + s.chars().count()).contains(&col) => {
+            Some((s, col - t.col))
+        }
+        _ => None,
+    })?;
+    let gen_lines: Vec<&str> = synth.gen_source.lines().collect();
+    let tok = (synth.analysis.tokens.iter()).find(|t| {
+        t.text == *name
+            && (gen_lines.get(t.line - 1)).is_some_and(|l| l.trim_start().starts_with("import "))
+    })?;
+    let (line, col) = (tok.line, tok.col + into);
+    Some(InputFwd { synth, line, col })
+}
+
+/// A component tag, at the declaration of the first name its file provides
+/// ([`vyrn_frontend::audience::InputView::provided`]): the file the claiming
+/// generator module's editor companion names as the tag's definition.
+fn component_tag(
+    server: &Server,
+    owner: &Url,
+    uri: &Url,
+    line: usize,
+    col: usize,
+) -> Option<InputFwd> {
+    let at = companion_definition(server, uri, line, col)?;
+    let target = Url::from_file_path(at.file.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
+    let name = input_view(server, &target)?.provided.into_iter().next()?;
+    let regions = server.analyses.get(owner)?.origins.regions_for(&at.file);
+    let synth = synth_for(server, owner, &regions.first()?.gen_module)?;
+    let decl = (synth.analysis.symbols.iter()).find(|s| s.name == name && s.file.is_none())?;
+    let (line, col) = (decl.line, decl.col);
+    Some(InputFwd { synth, line, col })
 }
 
 /// The analysis of `owner`'s generated module `banner`, cached until the owner's

@@ -1560,6 +1560,98 @@ fn child_argument_definition_reaches_the_declaration() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const SHOP_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { listing } from components(\"./comp\")\n\
+    fn main() -> Int64 { return 0 }\n";
+const SHOP_MODELS: &str =
+    "/// One line of the order.\nexport type Item = { id: Int64, name: String, qty: Int64 }\n";
+/// Imports `Item` as `SHOP_LISTING` does, so the generated module keeps
+/// `SHOP_LISTING`'s import line and drops this one.
+const SHOP_ROW: &str = "<script>\nimport { Item } from \"./models\"\nprops { item: Item }\n\
+    </script>\n<template>\n<li>{{ item.name }}</li>\n</template>\n";
+const SHOP_LISTING: &str = "<script>\nimport { Item } from \"./models\"\n\
+    props { items: Array<Item> }\n</script>\n<template>\n<ul>\n\
+    <Row v-for=\"it in items\" :key=\"it.id\" :item=\"it\"/>\n</ul>\n</template>\n";
+
+/// Opens the shop app, which records the components' owner, then the
+/// component `name` of the shop with the text `text`, and returns the client
+/// and the component's URI. Each component imports its record type from a file
+/// beside it, which resolves only beside the `.vyx`.
+fn open_shop(name: &str, text: &str) -> (LspClient, String) {
+    let files = [
+        ("comp/models.vyrn", SHOP_MODELS),
+        ("comp/Row.vyx", SHOP_ROW),
+        ("comp/Listing.vyx", SHOP_LISTING),
+    ];
+    let dir = input_scratch(SHOP_APP, &files);
+    let mut client = spawn_client();
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        SHOP_APP,
+    );
+    let _ = read_diags_for(&mut client, name);
+    let uri = file_uri(&dir.join("comp").join(name));
+    did_open(&mut client, &uri, "vyx", text);
+    (client, uri)
+}
+
+#[test]
+fn vyx_hover_on_a_prop_type_shows_the_imported_type() {
+    let (mut client, uri) = open_shop("Row.vyx", SHOP_ROW);
+    let (l, c) = pos_after(SHOP_ROW, "props { item: It");
+    let hover = hover_value(&mut client, &uri, l, c).unwrap_or_default();
+    assert!(
+        hover.contains("type Item = {") && hover.contains("One line of the order."),
+        "{hover}"
+    );
+}
+
+#[test]
+fn vyx_hover_on_a_field_shows_its_type() {
+    let (mut client, uri) = open_shop("Row.vyx", SHOP_ROW);
+    let (l, c) = pos_after(SHOP_ROW, "item.na");
+    let hover = hover_value(&mut client, &uri, l, c).unwrap_or_default();
+    assert!(hover.contains("name: String"), "{hover}");
+}
+
+#[test]
+fn vyx_member_completion_offers_the_imported_fields() {
+    let (mut client, uri) = open_shop("Row.vyx", SHOP_ROW);
+    let (l, c) = pos_after(SHOP_ROW, "item.");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    for field in ["id", "name", "qty"] {
+        assert!(labels.iter().any(|x| x == field), "{field}: {labels:?}");
+    }
+}
+
+/// The generated module drops `SHOP_ROW`'s import line as a repeat of
+/// `SHOP_LISTING`'s.
+#[test]
+fn vyx_hover_on_a_repeated_import_shows_the_type() {
+    let (mut client, uri) = open_shop("Row.vyx", SHOP_ROW);
+    let (l, c) = pos_after(SHOP_ROW, "import { It");
+    let hover = hover_value(&mut client, &uri, l, c).unwrap_or_default();
+    assert!(hover.contains("type Item = {"), "{hover}");
+}
+
+#[test]
+fn vyx_hover_on_a_for_name_shows_its_type() {
+    let (mut client, uri) = open_shop("Listing.vyx", SHOP_LISTING);
+    let (l, c) = pos_after(SHOP_LISTING, "v-for=\"i");
+    let hover = hover_value(&mut client, &uri, l, c).unwrap_or_default();
+    assert!(hover.contains("it: Item"), "{hover}");
+}
+
+#[test]
+fn vyx_hover_on_a_component_tag_shows_its_props() {
+    let (mut client, uri) = open_shop("Listing.vyx", SHOP_LISTING);
+    let (l, c) = pos_after(SHOP_LISTING, "<Ro");
+    let hover = hover_value(&mut client, &uri, l, c).unwrap_or_default();
+    assert!(hover.contains("fn row(item: Item) -> Html"), "{hover}");
+}
+
 /// The `v-for` key's splice line sits under the key's origin.
 /// `    <li v-for="r in rows" :key="` is 32 bytes.
 #[test]
