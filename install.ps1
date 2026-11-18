@@ -166,4 +166,4 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
 
 Write-Host ""
 Write-Host "vyrn run, check, test and build --target wasm need nothing else."
-Write-Host "vyrn build (a native binary) needs clang on PATH."
+Write-Host "vyrn build (a native binary) also needs clang, wabt's wasm2c and simde; vyrn deps shows where it finds each."

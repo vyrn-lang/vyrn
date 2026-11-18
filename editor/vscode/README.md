@@ -21,7 +21,7 @@ It is deliberately tiny and plain-JavaScript (no TypeScript compile step):
   operators, and the naming conventions for types and calls. Works even without
   the server. Do not edit it: `VYRN_PIN=write cargo test -p vyrn-syntax` rewrites it.
 - `snippets/vyrn.json` — snippets for `fn`, `main`, record/enum `type`,
-  `protocol`, `impl`, `match`, `import`, the `logging` block, and `test`.
+  `protocol`, `impl`, `match`, `import`, the `logging` block, `test` and `bench`.
 - `language-configuration.json` — `//` comment toggle + bracket matching.
 
 ## Run a file
@@ -33,7 +33,8 @@ compiler is resolved as: the `vyrn.path` setting, else
 build, else `cargo run -p vyrn-cli -- run <file>`.
 
 Beside it, a **◷ Profile** CodeLens runs `vyrn run --profile <file>`: the same
-program under the interpreter, plus a table of where its time went. The flag
+program as an audited build, plus a table of the operations and bytes each line
+and function spent. The flag
 goes BEFORE the file on purpose — everything past the file is the program's own
 `args()`, so `vyrn run app.vyrn --profile` hands the flag to
 `app.vyrn` and prints no table at all.
@@ -115,7 +116,7 @@ editor/vscode/
   package.json              extension manifest + grammar/language/snippet contributions
   extension.js              the LSP client + ▶ Run / ▶ Run test CodeLenses/commands (plain JS)
   vyrn.tmLanguage.json      TextMate grammar, written from vyrn.syntax
-  snippets/vyrn.json        snippets (fn, main, type, protocol, impl, match, import, logging, test)
+  snippets/vyrn.json        snippets (fn, main, type, protocol, impl, match, import, logging, test, bench)
   language-configuration.json   written from vyrn.syntax
   syntax.tmLanguage.json    TextMate grammar of .syntax files, written from syntax.syntax
   syntax-language-configuration.json   written from syntax.syntax
@@ -147,6 +148,4 @@ Code setting `editor.inlayHints.enabled`; no extension setting is involved.
 **Formatting** (Shift+Alt+F, or Format on Save) runs the canonical formatter
 over the whole document; a buffer that fails to lex is left untouched
 (no edit) rather than corrupted mid-edit. Deferred: range formatting
-(whole-document only in v1), user
-`protocol`/`impl` method-call resolution (the checker itself does not resolve
-`impl` methods yet), and parser error recovery.
+(whole-document only in v1) and find-all-references.

@@ -68,13 +68,18 @@ match seat(t) {
         },
         Piece {
             id: "cardProps",
-            src: "let xs = readAges()
-  .sort(byAge)
-  .reverse()
-  .filter(isAdult)
-  .map(jitter)
-xs.push(17)
-binarySearch(xs, 30)  // needs sorted(byAge)
+            src: "import { Asc, sort, insertSorted, lowerBound } from \"std/order\"
+import { filter, map } from \"std/arrays\"
+
+fn main() -> Int64 {
+    let mut ages: Array<Int64> = [41, 17, 30]
+    ages = sort<Asc<Int64>>(ages)
+    ages = insertSorted<Asc<Int64>>(ages, 25)
+    ages = filter(ages, a -> a >= 18)
+    ages = map(ages, a -> a + 1)
+    ages.push(17)
+    return lowerBound<Asc<Int64>>(ages, 30)
+}
 ",
         },
         Piece {
@@ -89,10 +94,19 @@ binarySearch(xs, 30)  // needs sorted(byAge)
         },
         Piece {
             id: "cardOwn",
-            src: "fn main() {
-    let xs = readAges()     // owned by xs
-    let s = summarize(xs)   // xs moves in
-    print(s)                // released at its end
+            src: "fn readAges() -> Array<Int64> {
+    return [41, 17, 30]
+}
+
+fn summarize(xs: consume Array<Int64>) -> String {
+    return \"\\{xs.length} ages\"
+}
+
+fn main() -> Int64 {
+    let xs = readAges() // owned by xs
+    let s = summarize(xs) // xs moves in, and is released there
+    print(s) // s is released at the end of main
+    return 0
 }
 ",
         },

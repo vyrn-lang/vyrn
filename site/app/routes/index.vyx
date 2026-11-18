@@ -26,6 +26,11 @@ fn own(n: Int64) -> Markup {
     return vyrnLine("cardOwn", n)
 }
 
+/// A template escapes an angle bracket twice, so a fact that holds one is built here.
+fn sortedFact() -> String {
+    return "sorted<Asc<Int64>>"
+}
+
 fn installLabel() -> String {
     if !hasRelease() {
         return "Install Vyrn"
@@ -50,18 +55,23 @@ fn installLabel() -> String {
         <div>
             <p class="vx-eyebrow">Facts on results</p>
             <h2 class="vx-h">A result carries what is true of it.</h2>
-            <p class="vx-lede"><em>sort</em> makes xs <em>sorted(byAge)</em>. <em>binarySearch</em> needs that fact, and the compiler checks it before anything runs. Every other line keeps it, turns it, or drops it.</p>
+            <p class="vx-lede"><em>sort</em> makes ages <em>{{ sortedFact() }}</em>. <em>lowerBound</em> needs that fact, and the compiler checks it before anything runs. <em>insertSorted</em> keeps it; a store or a push may break it.</p>
         </div>
         <div class="vx-code">
             <div class="vx-head"><span>ages.vyrn</span><span data-vx="props-state">proved</span></div>
             <div class="vx-line" v-html="props(0)"></div>
-            <div class="vx-line vx-op" data-g="p" data-op="sort" v-html="props(1)"></div>
-            <div class="vx-line vx-op" data-g="p" data-op="reverse" v-html="props(2)"></div>
-            <div class="vx-line vx-op" data-g="p" data-op="filter" v-html="props(3)"></div>
-            <div class="vx-line vx-op" data-g="p" data-op="map" v-html="props(4)"></div>
-            <div class="vx-line vx-op" data-g="p" data-op="push" v-html="props(5)"></div>
-            <div class="vx-line" v-html="props(6)"></div>
-            <div class="vx-line c vx-js">// click a line to add or remove it</div>
+            <div class="vx-line" v-html="props(1)"></div>
+            <div class="vx-line" v-html="props(2)"></div>
+            <div class="vx-line" v-html="props(3)"></div>
+            <div class="vx-line" v-html="props(4)"></div>
+            <div class="vx-line vx-op" data-g="p" data-op="sort" v-html="props(5)"></div>
+            <div class="vx-line vx-op" data-g="p" data-op="insert" v-html="props(6)"></div>
+            <div class="vx-line vx-op" data-g="p" data-op="filter" v-html="props(7)"></div>
+            <div class="vx-line vx-op" data-g="p" data-op="map" v-html="props(8)"></div>
+            <div class="vx-line vx-op" data-g="p" data-op="push" v-html="props(9)"></div>
+            <div class="vx-line" v-html="props(10)"></div>
+            <div class="vx-line" v-html="props(11)"></div>
+            <div class="vx-line c vx-js">// click lines 6 to 10 to comment one out</div>
             <p class="vx-diag" data-vx="props-diag" aria-live="polite"></p>
         </div>
     </section>
@@ -98,7 +108,16 @@ fn installLabel() -> String {
             <div class="vx-line" v-html="own(2)"></div>
             <div class="vx-line" v-html="own(3)"></div>
             <div class="vx-line" v-html="own(4)"></div>
-            <div class="vx-stat vx-js"><span><b>90,000</b>allocated</span><span><b data-vx="freed">0</b>released</span></div>
+            <div class="vx-line" v-html="own(5)"></div>
+            <div class="vx-line" v-html="own(6)"></div>
+            <div class="vx-line" v-html="own(7)"></div>
+            <div class="vx-line" v-html="own(8)"></div>
+            <div class="vx-line" v-html="own(9)"></div>
+            <div class="vx-line" v-html="own(10)"></div>
+            <div class="vx-line" v-html="own(11)"></div>
+            <div class="vx-line" v-html="own(12)"></div>
+            <div class="vx-line" v-html="own(13)"></div>
+            <div class="vx-stat vx-js"><span><b>4</b>allocated</span><span><b data-vx="freed">0</b>released</span></div>
             <div class="vx-cta vx-js"><button type="button" class="vx-btn" data-vx="run">Run</button><button type="button" class="vx-btn ghost" data-vx="refill">Refill</button></div>
         </div>
     </section>

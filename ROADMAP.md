@@ -4,7 +4,7 @@ Open work, one line each, with what blocks it. [docs/decisions.md](docs/decision
 
 ## Compiler
 
-- Bring the compiler toward 45k lines (about 179k with std; `checker.rs` is 11k). Blocked by the checker's typing rules that `vyrn-lower`'s typed judgment does not state.
+- Bring the compiler toward 45k lines (about 179k with std; `checker.rs` is 8k). Blocked by the checker's typing rules that `vyrn-lower`'s typed judgment does not state.
 - Move the map value paths (`map_set`, `map_tally`, `map_at`) from the emitter into `std/runtime`. Blocked by the call cost: needs a wasm inliner before emit, or a wasmtime that inlines.
 - Make `push` one runtime call per element instead of two. Blocked by the same missing inliner.
 - Delete the free audit. Blocked by a second oracle: the kernel corpus must catch what the audit catches.
@@ -25,7 +25,7 @@ Open work, one line each, with what blocks it. [docs/decisions.md](docs/decision
 
 ## Language
 
-- Compile-time facts on values: `sorted` under an order, `unique` and `grouped` under an equivalence, `all` under a predicate, `subsetOf` and `disjointFrom` between two values. Each is proven with no run-time check and kept by an operation exactly where it stays true; user functions, comparators, keys and containers take part. Designed; the builtin shape maps and `vyrn why --provenance` are built (#178). Next: canonical identity for relations, then orders and the first facts.
+- Compile-time facts on values: `sorted` under an order, `unique` and `grouped` under an equivalence, `all` under a predicate, `subsetOf` and `disjointFrom` between two values. Each is proven with no run-time check and kept by an operation exactly where it stays true; user functions, comparators, keys and containers take part. Built: the builtin shape maps, `vyrn why --provenance` (#178), the orders of `std/order` and the `sorted` and `strict` facts. Not built: `unique`, `grouped`, `all`, `subsetOf` and `disjointFrom`.
 - Field and variant docs in reflection (`FieldInfo.doc`). Blocked by a parser change: `ast::Field` has no doc. It would remove the source re-scans in `std/http`, `std/graphql` and `std/cli`.
 - `FromElements` and `FromEntries`, so `[]` and `[:]` build user containers. Blocked by a receiver-less protocol method dispatched by expected type.
 - A `Codable` protocol in place of the codec's hand-written verdicts. Designed, not started.
@@ -51,7 +51,7 @@ Open work, one line each, with what blocks it. [docs/decisions.md](docs/decision
 - Compiled reactivity (dirty bits instead of render and diff). Blocked by a profile that shows the diff is the cost.
 - Shared components inside `.vyx` pages; `.vyx` pages in the `pages()` router. Blocked by a components-directory convention and a page call convention.
 - Column numbers in `.vyx` diagnostics. Blocked by `VNElem`, which carries no column.
-- Host runtime gaps for server programs: fetch, child processes, environment variables, timers, TLS, SQL, cookies. Undecided which belong in the language.
+- Host runtime gaps for server programs: child processes, environment variables, TLS, SQL, cookies. Undecided which belong in the language.
 
 ## Tooling
 
