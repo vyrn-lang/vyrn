@@ -217,17 +217,17 @@ impl Atom {
 /// parameter index, over `Val::Name(Name(k))` for parameter `k`
 /// ([`Atom::with`]). The clause holds for the whole call: it reads only
 /// `read` parameters, which the body cannot assign and no write reaches
-/// while the call runs. The error is the line and the rule the checker
+/// while the call runs. The error is the parameter and the rule the checker
 /// refuses the first bad clause with.
-pub fn clauses(
-    f: &Function,
+pub fn clauses<'f>(
+    f: &'f Function,
     decls: &dyn Decls,
-) -> Result<Vec<(usize, Vec<Atom>)>, (usize, crate::rules::Rule)> {
+) -> Result<Vec<(usize, Vec<Atom>)>, (&'f crate::ast::Param, crate::rules::Rule)> {
     let mut out = Vec::new();
     for (k, p) in f.params.iter().enumerate() {
         let Some(e) = &p.clause else { continue };
         let name = crate::rules::DeclName(&f.name);
-        let entry = |why: &str| (p.line, rule!(ClauseEntry, name, why));
+        let entry = |why: &str| (p, rule!(ClauseEntry, name, why));
         if f.is_gen || f.is_export_extern {
             return Err(entry("the host calls it by name and checks no clause"));
         }
@@ -239,8 +239,7 @@ pub fn clauses(
             ));
         }
         let mut atoms = Vec::new();
-        conjuncts(Of::Param(f, k), e, decls, &mut atoms, &mut Vec::new())
-            .map_err(|r| (p.line, r))?;
+        conjuncts(Of::Param(f, k), e, decls, &mut atoms, &mut Vec::new()).map_err(|r| (p, r))?;
         // A fact holds of the argument the call proved it of, whatever the
         // body does with it; a comparison must hold for the whole call.
         if atoms.is_empty() {
@@ -248,7 +247,7 @@ pub fn clauses(
         }
         if p.capability != Capability::Read {
             let (param, cap) = (p.name.as_str(), p.capability.word());
-            return Err((p.line, rule!(ClauseChanges, param, name = param, cap)));
+            return Err((p, rule!(ClauseChanges, param, name = param, cap)));
         }
         out.push((k, atoms));
     }

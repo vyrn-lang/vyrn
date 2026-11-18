@@ -77,6 +77,15 @@ fn spelled_at(d: Diagnostic, line: usize, col: usize, name: &str) -> Diagnostic 
     }
 }
 
+/// `d` on the name spelled at `col` (0 for none), where `d` has no column.
+/// The editor spans the token there.
+fn on_name(mut d: Diagnostic, col: usize) -> Diagnostic {
+    if d.col == 0 {
+        d.col = col;
+    }
+    d
+}
+
 /// The receiver of a protocol-call sentence as the source wrote it: a name or a
 /// field path, else `x`, because no other expression keeps its spelling.
 fn receiver_text(e: Option<&Expr>) -> String {
@@ -3101,7 +3110,8 @@ impl<'a> Checker<'a> {
                 return Err(cerr_at!(f.line, f.name_span(), GenReturnsFn));
             }
             self.ensure_type_exists(&f.ret, f.line)?;
-            crate::core::check::clauses(f, self).map_err(|(line, rule)| cerr!(line; rule))?;
+            crate::core::check::clauses(f, self)
+                .map_err(|(p, rule)| on_name(cerr!(p.line; rule), p.col))?;
             crate::core::check::Ensures::of(f, self, &f.name)
                 .map_err(|(line, rule)| cerr!(line; rule))?;
             crate::core::check::requirements(f, self, self.orders)
@@ -3362,7 +3372,7 @@ impl<'a> Checker<'a> {
                 }
                 let frame = self.frame.borrow();
                 crate::core::check::Promise::of(stmt, Some(&frame.bounds), self, self.orders)
-                    .map_err(|(line, rule)| cerr!(line; rule))?;
+                    .map_err(|(line, rule)| on_name(cerr!(line; rule), *col))?;
                 drop(frame);
                 let vty = self.expr(value, scope, ty.as_ref(), Some(ret))?;
                 // The typed judgment refuses a value its slot does not take,
@@ -3385,7 +3395,7 @@ impl<'a> Checker<'a> {
                 name,
                 value,
                 line,
-                id: _,
+                id,
             } => {
                 let Some(b) = self.lookup(scope, name) else {
                     self.unknown.set(true);
@@ -3396,7 +3406,7 @@ impl<'a> Checker<'a> {
                     self.prove_coercion(value, &b.ty, *line)?;
                     self.prove_string_interpolation(value, &b.ty, scope, Some(ret), *line)?;
                 }
-                self.region_store_guard(name, &b.ty, scope, *line)?;
+                self.region_store_guard(name, &b.ty, scope, *line, *id)?;
                 Ok(())
             }
             // The typed judgment refuses a field or element store; where one
@@ -3407,7 +3417,7 @@ impl<'a> Checker<'a> {
                 leaf,
                 value,
                 line,
-                id: _,
+                id,
             } => {
                 let Some(b) = self.lookup(scope, name) else {
                     self.unknown.set(true);
@@ -3446,7 +3456,7 @@ impl<'a> Checker<'a> {
                         }) {
                             return Ok(());
                         }
-                        self.region_store_guard(name, &fty, scope, *line)?;
+                        self.region_store_guard(name, &fty, scope, *line, *id)?;
                         self.record_store(name, base, leaf, value, &tys, ret, scope);
                         Ok(())
                     }
@@ -3465,7 +3475,7 @@ impl<'a> Checker<'a> {
                             self.prove_coercion(value, &val, *line)?;
                             self.prove_string_interpolation(value, &val, scope, Some(ret), *line)?;
                             self.record_store(name, base, leaf, value, &tys, ret, scope);
-                            return self.region_store_guard(name, &val, scope, *line);
+                            return self.region_store_guard(name, &val, scope, *line, *id);
                         }
                         // A builtin container is keyed by `Int64`, a user one by what
                         // its `atSet` takes.
@@ -3498,7 +3508,7 @@ impl<'a> Checker<'a> {
                         }
                         self.prove_coercion(value, &elem, *line)?;
                         self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
-                        self.region_store_guard(name, &elem, scope, *line)?;
+                        self.region_store_guard(name, &elem, scope, *line, *id)?;
                         self.record_store(name, base, leaf, value, &tys, ret, scope);
                         Ok(())
                     }
@@ -3804,11 +3814,12 @@ impl<'a> Checker<'a> {
         stored_ty: &Type,
         scope: &Scope,
         line: usize,
+        at: Id,
     ) -> Result<(), Diagnostic> {
         if let Some(&floor) = self.region_floor.borrow().last() {
             let idx = scope.iter().rposition(|f| f.contains_key(name));
             if idx.map_or(false, |i| i < floor) && self.contains_heap(stored_ty) {
-                return Err(cerr!(line, RegionEscape, name));
+                return Err(on_name(cerr!(line, RegionEscape, name), at.col()));
             }
         }
         Ok(())
@@ -3903,10 +3914,12 @@ impl<'a> Checker<'a> {
             if matches!(self.base(exp), Type::Fn(..)) {
                 match expr {
                     Expr::Lambda { .. } => return self.stored_fn_lambda(expr, exp, scope, fn_ret),
-                    Expr::Var { name, line, id: _ }
+                    Expr::Var { name, line, id }
                         if self.lookup(scope, name).is_none() && self.sig(name).is_some() =>
                     {
-                        return self.stored_fn_named(name, exp, *line);
+                        return self
+                            .stored_fn_named(name, exp, *line)
+                            .map_err(|d| on_name(d, id.col()));
                     }
                     _ => {}
                 }
@@ -3948,7 +3961,7 @@ impl<'a> Checker<'a> {
             }),
             Expr::Bool(_, _) => Ok(Type::Bool),
             Expr::Str(_, _) => Ok(Type::Str),
-            Expr::Var { name, line, id: _ } => {
+            Expr::Var { name, line, id } => {
                 if name == "None" {
                     // The expectation is resolved to find the Option, but the
                     // written type is returned, so an alias keeps its name.
@@ -3988,7 +4001,8 @@ impl<'a> Checker<'a> {
                 // A bare function name as a value is a stored function value
                 // source: `let g = double` takes its signature.
                 if let Some((sptys, sret)) = self.sig(name) {
-                    self.storable_named_fn(name, *line)?;
+                    self.storable_named_fn(name, *line)
+                        .map_err(|d| on_name(d, id.col()))?;
                     let sig = Type::Fn(sptys.clone(), Box::new(sret.clone()));
                     let source = StoredSource {
                         sig: self.base(&sig),
@@ -5387,9 +5401,9 @@ impl<'a> Checker<'a> {
             self.prove_coercion(&args[1], &elem, line)?;
             // Inside a `region`, a heap element pushed into an outer buffer
             // dies before the buffer. The Assign guard catches the rebind form;
-            // this catches the statement form.
+            // this catches the statement form, which the call's name places.
             if let Expr::Var { name: aname, .. } = &args[0] {
-                self.region_store_guard(aname, &elem, scope, line)?;
+                self.region_store_guard(aname, &elem, scope, line, Id::NEW)?;
             }
             return Ok(rebuild(elem));
         }
@@ -7169,7 +7183,7 @@ fn check_comptime_purity<'a>(
                     let (name, cur) = (DeclName(&g.name), DeclName(cur));
                     cerr!(g.line, GenImpureVia, name, cur, chain, reason)
                 };
-                out.push(msg.in_file(g.module.clone()));
+                out.push(on_name(msg, g.col).in_file(g.module.clone()));
                 break;
             }
             for callee in calls.clone() {
