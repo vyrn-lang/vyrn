@@ -1,1 +1,1 @@
-disagreeing_fields_report_the_mismatch_2.vyrn:2:0: type parameter `T` is both Int64 and String
+disagreeing_fields_report_the_mismatch_2.vyrn:2:30: type parameter `T` is both Int64 and String

@@ -153,20 +153,20 @@ checker-rules.vyrn:826:33: `boolOf` returns Bool, but the expected function type
 checker-rules.vyrn:834:28: `byteCount` expects a String argument, but `passThrough` will pass it U
 checker-rules.vyrn:843:0: cannot assign to `k` (declared without `mut`)
 checker-rules.vyrn:853:8: `impl Weighed for Rod` does not match protocol `Weighed`: it declares `fn weight(self) -> Int64`, this provides `fn weight(self) -> Bool`
-checker-rules.vyrn:839:0: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
-checker-rules.vyrn:172:0: integer literal 9223372036854775808 exceeds Int64's maximum (9223372036854775807); only `UInt64` can hold it: annotate the binding (`let x: UInt64 = ...`)
-checker-rules.vyrn:180:0: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
-checker-rules.vyrn:188:0: cannot infer the type of `Nothing`; add an annotation
-checker-rules.vyrn:254:0: `[]` is an array literal, but Map<String, Int64> is not an array type
-checker-rules.vyrn:258:0: cannot infer the element type of `[]`; annotate it, e.g. `let a: Array<Int64> = [];`
-checker-rules.vyrn:270:0: array elements must share a type: expected Int64, found String
-checker-rules.vyrn:274:0: `[:]` is a map literal, but Array<Int64> is not a map type
-checker-rules.vyrn:278:0: cannot infer the type of `[:]`; annotate it, e.g. `let m: Map<String, Int64> = [:];`
-checker-rules.vyrn:282:0: the map is keyed by String, but this key is Int64
-checker-rules.vyrn:286:0: map values must share a type: expected Int64, found String
-checker-rules.vyrn:290:0: a lambda `x -> ..` needs a function type from context: pass it to a `fn`-typed parameter, or give the binding a function type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`)
-checker-rules.vyrn:309:0: cannot infer the element type of `[]`; annotate it, e.g. `let a: Array<Int64> = [];`
-checker-rules.vyrn:433:0: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
+checker-rules.vyrn:839:20: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
+checker-rules.vyrn:172:13: integer literal 9223372036854775808 exceeds Int64's maximum (9223372036854775807); only `UInt64` can hold it: annotate the binding (`let x: UInt64 = ...`)
+checker-rules.vyrn:180:13: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
+checker-rules.vyrn:188:13: cannot infer the type of `Nothing`; add an annotation
+checker-rules.vyrn:254:33: `[]` is an array literal, but Map<String, Int64> is not an array type
+checker-rules.vyrn:258:13: cannot infer the element type of `[]`; annotate it, e.g. `let a: Array<Int64> = [];`
+checker-rules.vyrn:270:13: array elements must share a type: expected Int64, found String
+checker-rules.vyrn:274:27: `[:]` is a map literal, but Array<Int64> is not a map type
+checker-rules.vyrn:278:13: cannot infer the type of `[:]`; annotate it, e.g. `let m: Map<String, Int64> = [:];`
+checker-rules.vyrn:282:33: the map is keyed by String, but this key is Int64
+checker-rules.vyrn:286:13: map values must share a type: expected Int64, found String
+checker-rules.vyrn:290:13: a lambda `x -> ..` needs a function type from context: pass it to a `fn`-typed parameter, or give the binding a function type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`)
+checker-rules.vyrn:309:13: cannot infer the element type of `[]`; annotate it, e.g. `let a: Array<Int64> = [];`
+checker-rules.vyrn:433:13: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
 checker-rules.vyrn:563:13: call to unknown function `Label`
 checker-rules.vyrn:571:13: call to unknown function `Label`
 checker-rules.vyrn:869:12: `addPair` is a local of type Int64, not a function
