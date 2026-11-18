@@ -11988,7 +11988,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
         };
         match fork.form {
             Form::Both => {
-                let Some(decl) = self.cx.fields(&ty) else {
+                // Declaration order is argument order; `fields` is layout order.
+                let Type::Record(decl) = &*self.cx.resolved(&ty) else {
                     return unsupported("a fork whose value is no record", line);
                 };
                 let fields = decl.iter().map(|f| f.name.clone()).collect();
