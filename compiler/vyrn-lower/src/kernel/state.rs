@@ -12,13 +12,14 @@
 use std::rc::Rc;
 
 use vyrn_frontend::core::Name;
+use vyrn_frontend::core::Spelled;
 use vyrn_frontend::diagnostics::Fix;
 
 use super::{Alias, By, Own, Taker};
 
 /// What consumed a name, for a refusal's wording only: the line, the taker,
-/// and the edit that copies the name there.
-pub(super) type Taken = (usize, By, Taker, Option<Fix>);
+/// and where the reader spelled the name there.
+pub(super) type Taken = (usize, By, Taker, Option<Spelled>);
 
 /// Where a hole was taken: `(name, path, line, the edits that copy the path
 /// in the take's place)`.

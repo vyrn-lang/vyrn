@@ -166,6 +166,7 @@ pull request.
 - A projection (a field, element or pattern binder of a place) borrows its root. It may be read, not stored or returned; the fix is `.copy()` or a take.
 - A read through a `lazy` field names no place: each read forces the field, and a part of the forced value is the reader's, as a part of a call's result is.
 - A refusal quotes what the reader wrote, never a compiler temporary (`@t1`): `vyrn_lower::rules::refusal` panics in a debug build on a sentence that does.
+- A refusal sits on the column where the reader spelled the name it refuses, and keeps column 0 where that spelling is on another line: a column never moves a refusal's line.
 - A lend is refused, never tracked through stores. Tracking it would need an alias analysis.
 - `consume <place>` moves a value out of a place; only the taken path dies. No `take` keyword and no `.take()`: an element leaves with `swapRemove`.
 - A statement's value is released where the statement ends. A part read as a statement (`p.f`, `xs[i].f`) takes nothing: only `consume` moves a value out of a place.

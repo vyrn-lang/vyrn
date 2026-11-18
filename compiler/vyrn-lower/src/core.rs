@@ -38,7 +38,7 @@ use vyrn_frontend::core::check::{Ensures, Promise, Raises, Verdict};
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, AtRead, Await, Body, BorrowKind, Branch, Callee, Cand,
     Copied, Ctor, Facts, Fork, Form, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload,
-    Place, Rhs, Said, Site, St, Target, Test, Use, Val, Walk,
+    Place, Rhs, Said, Site, Spelled, St, Target, Test, Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::{DeclName, Rule};
@@ -1226,6 +1226,7 @@ fn seeded<'a>(
                 }
                 b.body.names[n.index()].borrow_kind = param_borrow(p.capability, &p.name, false);
                 b.body.names[n.index()].mutable = p.capability == Capability::Modify;
+                b.body.names[n.index()].binder = Spelled::binder(p.line, p.col, &p.name);
                 b.frame.scope.push((p.name.clone(), n));
                 b.keyed(n, p.id());
                 b.body.params.push(n);
@@ -1462,7 +1463,7 @@ struct Frame {
     /// A join's result, and the name an arm handed out of it from outside the
     /// enclosing loop. [`Builder::loop_alias`] refuses where something owns
     /// the result and releases it once per turn.
-    loop_aliased: HashMap<Name, (String, Option<(usize, usize)>)>,
+    loop_aliased: HashMap<Name, (String, Option<Spelled>)>,
     /// Whether the value being lowered is a rebind's. The slot is released by
     /// its final value, so the temporary the value passes through owns
     /// nothing and the back edge repeats no release (`std/html.vyrn`'s
@@ -1625,6 +1626,7 @@ impl<'a> Builder<'a> {
             borrow: heap && !releases,
             borrow_kind: None,
             line,
+            binder: None,
             stmt: self.frame.stmt,
             binding: None,
             receiver: None,
@@ -1766,14 +1768,14 @@ impl<'a> Builder<'a> {
         if self.frame.stmt == NodeId::NONE || !self.body.names[n.index()].heap {
             return;
         }
-        if let Some(at) = self.spelled_end(e) {
+        if let Some(at) = self.spelled(e) {
             self.body.ends.entry((self.frame.stmt, n)).or_insert(at);
         }
     }
 
-    /// The line and column just past `e`, a name, a field or an element,
-    /// where the reader spelled it in the root module's own source.
-    fn spelled_end(&self, e: &Expr) -> Option<(usize, usize)> {
+    /// Where the reader spelled `e`, a name, a field or an element, in the
+    /// root module's own source.
+    fn spelled(&self, e: &Expr) -> Option<Spelled> {
         let (end, root) = match e {
             Expr::Var { name, id, .. } => (id.col() + name.chars().count(), id),
             Expr::Field { field, id, .. } => (id.col() + field.chars().count(), id),
@@ -1783,7 +1785,23 @@ impl<'a> Builder<'a> {
         };
         let spelled =
             root.col() > 0 && root.0.unit() < NodeId::EXPANDED && self.body.file.is_none();
-        spelled.then(|| (e.line(), end))
+        let mut first = e;
+        loop {
+            first = match first {
+                Expr::Field { expr, .. } => expr,
+                Expr::Call { name, args, .. } if name == "@at" && !args.is_empty() => &args[0],
+                _ => break,
+            };
+        }
+        let col = match first {
+            Expr::Var { line, id, .. } if *line == e.line() => id.col(),
+            _ => 0,
+        };
+        spelled.then(|| Spelled {
+            line: e.line(),
+            col,
+            end,
+        })
     }
 
     /// The edits that replace `consume PLACE` by `PLACE.copy()` where the
@@ -1795,8 +1813,8 @@ impl<'a> Builder<'a> {
         while let Expr::Field { expr, .. } = root {
             root = expr;
         }
-        match (self.spelled_end(place), root) {
-            (Some((line, end)), Expr::Var { line: l, id, .. })
+        match (self.spelled(place), root) {
+            (Some(Spelled { line, end, .. }), Expr::Var { line: l, id, .. })
                 if kw > 0 && *l == line && line == kw_line =>
             {
                 vec![
@@ -1817,11 +1835,20 @@ impl<'a> Builder<'a> {
         self.keyed(n, s.id());
         let info = &mut self.body.names[n.index()];
         info.bound_by_let = true;
-        (info.mutable, info.annotation) = match s {
-            Stmt::Let { mutable, ty, .. } => {
-                (*mutable, ty.as_ref().filter(|t| **t != info.ty).cloned())
-            }
-            _ => (false, None),
+        (info.mutable, info.annotation, info.binder) = match s {
+            Stmt::Let {
+                name,
+                mutable,
+                ty,
+                line,
+                col,
+                ..
+            } => (
+                *mutable,
+                ty.as_ref().filter(|t| **t != info.ty).cloned(),
+                Spelled::binder(*line, *col, name),
+            ),
+            _ => (false, None, None),
         };
     }
 
@@ -1842,9 +1869,7 @@ impl<'a> Builder<'a> {
         let Some((a, end)) = self.frame.loop_aliased.get(m) else {
             return Ok(());
         };
-        let fixes = (end.map(|(line, col)| Fix::Copy { line, col }))
-            .into_iter()
-            .collect();
+        let fixes = end.map(Spelled::copy).into_iter().collect();
         refuse(rule!(HandedOutOfLoopArm, a), Vec::new(), line).map_err(|g| Gap {
             rule: g.rule.map(|d| Box::new(d.with_fixes(fixes))),
             ..g
@@ -5798,12 +5823,7 @@ impl<'a> Builder<'a> {
     ///
     /// `mark` is the name count before the arms were lowered, which tells an
     /// outside name from a payload binder minted inside the arm.
-    fn alias_out(
-        &self,
-        e: &Expr,
-        v: &Val,
-        mark: usize,
-    ) -> Option<(String, Option<(usize, usize)>)> {
+    fn alias_out(&self, e: &Expr, v: &Val, mark: usize) -> Option<(String, Option<Spelled>)> {
         let Val::Name(m) = v else { return None };
         let m = m.index();
         // Only an owning name can be freed twice. A loop variable is minted
@@ -5811,7 +5831,7 @@ impl<'a> Builder<'a> {
         (m < mark
             && self.body.names[m].releases
             && self.frame.loop_marks.last().is_some_and(|lm| m < *lm))
-        .then(|| (self.body.names[m].source.clone(), self.spelled_end(e)))
+        .then(|| (self.body.names[m].source.clone(), self.spelled(e)))
     }
 
     /// A move out of a sub-place: `consume x.f`, or the receiver a rebuilding
