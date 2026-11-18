@@ -921,7 +921,8 @@ export function vortexWidget(root) {
     cur = Math.round(pageP);
     const w = (i) => Math.max(0, 1 - Math.abs(pageP - i) * 1.7);
     panels.forEach((el, i) => {
-      el.style.opacity = String(w(i));
+      // The fade sits on each child, not the panel: an ancestor below full opacity is the backdrop root, and the code glass would lose its blur until the fade ends.
+      for (const c of el.children) c.style.opacity = String(w(i));
       el.classList.toggle("live", w(i) > 0.5);
       el.inert = i !== cur;
     });
