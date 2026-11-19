@@ -1581,9 +1581,16 @@ impl<'b> Kernel<'b> {
         r
     }
 
-    /// `r`, with the edit that copies `n` where it is taken.
+    /// `r`, with the edit that copies `n` where it is taken: a take written
+    /// `consume n` also loses its keyword ([`Body::consumes`]).
     fn copying(&self, n: Name, r: Refusal) -> Refusal {
-        Self::fixed(r, self.copy_at(n))
+        match self.body.consumes.get(&(self.stmt, n, String::new())) {
+            Some(fixes) => Refusal {
+                diagnostic: r.diagnostic.with_fixes(fixes.clone()),
+                ..r
+            },
+            None => Self::fixed(r, self.copy_at(n)),
+        }
     }
 
     /// `r`, with the edit `fix`, if there is one.

@@ -370,11 +370,16 @@ fn gap_d<T>(what: &'static str, detail: &str, line: usize) -> Result<T, Gap> {
 /// reports `rule` at `line`, with the ways out `more`, as it reports the
 /// kernel's refusals.
 fn refuse<T>(rule: Rule, more: Vec<String>, line: usize) -> Result<T, Gap> {
+    refused(crate::rules::refusal(line, rule, more))
+}
+
+/// The refusal `d`, which the program breaks.
+fn refused<T>(d: Diagnostic) -> Result<T, Gap> {
     Err(Gap {
         what: "a rule the program breaks",
         detail: String::new(),
-        line,
-        rule: Some(Box::new(crate::rules::refusal(line, rule, more))),
+        line: d.line,
+        rule: Some(Box::new(d)),
     })
 }
 
@@ -1828,6 +1833,14 @@ impl<'a> Builder<'a> {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Records the edits that replace `consume n`, the keyword at `kw`, by
+    /// `n.copy()` ([`Body::consumes`], under the empty path).
+    fn uncopy_name(&mut self, place: &Expr, n: Name, kw: (usize, usize)) {
+        let fixes = self.uncopy(place, kw);
+        let key = (self.frame.stmt, n, String::new());
+        self.body.consumes.entry(key).or_insert(fixes);
     }
 
     /// [`Builder::keyed`] for a `let` the reader wrote.
@@ -3586,7 +3599,7 @@ impl<'a> Builder<'a> {
                             // A stream is pulled to its end and closed by the
                             // loop through its own name (below), so the loop
                             // takes it as `close` does.
-                            self.consume_names_a_borrow(iter, *line)?;
+                            self.consume_names_a_borrow(iter, *line, None)?;
                             n
                         } else {
                             // The loop reads the container through a borrow,
@@ -4805,6 +4818,7 @@ impl<'a> Builder<'a> {
                     if self.body.released == Some(n) {
                         return Ok((Val::Name(n), true));
                     }
+                    self.uncopy_name(place, n, (*line, id.col()));
                     let t = self.temp(self.body.names[n.index()].ty.clone(), *line);
                     out.push(St::Let(t, Rhs::Val(Val::Name(n))));
                     self.keyed(t, construct);
@@ -5482,7 +5496,10 @@ impl<'a> Builder<'a> {
             },
             Expr::Consume { place, line, id } => match &**place {
                 Expr::Var { name, .. } => match self.lookup(name) {
-                    Some(n) => Ok(Val::Name(n)),
+                    Some(n) => {
+                        self.uncopy_name(place, n, (*line, id.col()));
+                        Ok(Val::Name(n))
+                    }
                     // `consume <module state>`: a borrow whose take the
                     // kernel refuses.
                     None => self.global_read(place, name, *line, out),
@@ -5789,7 +5806,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<Val, Gap> {
         take_names_a_place(e, &self.own.place_names, line, false)?;
-        self.consume_names_a_borrow(e, line)?;
+        self.consume_names_a_borrow(e, line, Some(kw))?;
         if self.in_module_state(e) {
             return self.read_val(e, out);
         }
@@ -5811,8 +5828,14 @@ impl<'a> Builder<'a> {
     /// the keyword: the write-back of `s.dense.push(i)` reaches
     /// [`Builder::take_place`] with no `consume` and changes no owner. The
     /// refusal names the root, as `movecheck::check_take` does; a heapless
-    /// root is no borrow.
-    fn consume_names_a_borrow(&self, e: &'a Expr, line: usize) -> Result<(), Gap> {
+    /// root is no borrow. Where the keyword sits at column `kw`, the edits
+    /// copy the place instead ([`Builder::uncopy`]).
+    fn consume_names_a_borrow(
+        &self,
+        e: &'a Expr,
+        line: usize,
+        kw: Option<usize>,
+    ) -> Result<(), Gap> {
         let Some((root, path)) = vyrn_frontend::ast::place_path(e) else {
             return Ok(());
         };
@@ -5824,11 +5847,11 @@ impl<'a> Builder<'a> {
             // The sentence names the root; the fixes name the path.
             Some(k) if info.borrow => {
                 let what = k.what(&root);
-                refuse(
-                    rule!(ConsumedBorrow, root, what),
-                    k.fixes(&path, info.copies()),
-                    line,
-                )
+                let more = k.fixes(&path, info.copies());
+                let kw = kw.filter(|_| info.copies());
+                let fixes = kw.map_or_else(Vec::new, |kw| self.uncopy(e, (line, kw)));
+                let d = crate::rules::refusal(line, rule!(ConsumedBorrow, root, what), more);
+                refused(d.with_fixes(fixes))
             }
             _ => Ok(()),
         }

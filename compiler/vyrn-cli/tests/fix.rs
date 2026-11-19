@@ -331,6 +331,33 @@ fn it_replaces_the_consume_a_loop_repeats() {
 }
 
 #[test]
+fn it_replaces_the_consume_of_an_alias_of_a_field() {
+    let src = format!(
+        "{PERSON}type Held = {{ p: Person }}\n\
+         fn main() -> Int64 {{\n    let h = Held {{ p: Person {{ name: \"n\", age: 1 }} }}\n    \
+         let p = h.p\n    return keep(consume p)\n}}\n"
+    );
+    assert!(!checks("alias-take-before", &src));
+    let (log, after) = fix("alias-take", &src);
+    assert!(after.contains("keep(p.copy())"), "{after}");
+    assert!(log.contains("2 fix(es) applied, 0 left"), "{log}");
+    assert!(checks("alias-take-after", &after), "{after}");
+}
+
+#[test]
+fn it_replaces_the_consume_of_a_part_of_a_read_parameter() {
+    let src = format!(
+        "{PERSON}fn f(p: Person) -> Int64 {{\n    return take(consume p.name)\n}}\n\
+         fn main() -> Int64 {{\n    return f(Person {{ name: \"n\", age: 1 }})\n}}\n"
+    );
+    assert!(!checks("read-param-take-before", &src));
+    let (log, after) = fix("read-param-take", &src);
+    assert!(after.contains("take(p.name.copy())"), "{after}");
+    assert!(log.contains("2 fix(es) applied, 0 left"), "{log}");
+    assert!(checks("read-param-take-after", &after), "{after}");
+}
+
+#[test]
 fn it_copies_the_first_of_two_takes_of_one_name_in_a_statement() {
     let cases = [
         (
