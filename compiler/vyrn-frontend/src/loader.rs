@@ -1854,6 +1854,14 @@ fn load_modules(
             if !errors.is_empty() {
                 return Err(errors);
             }
+            let read = |file: &str| resolver.read(file).ok();
+            for d in crate::classes::warnings(&text, &ctx, &read) {
+                let seen = (w.warnings.iter())
+                    .any(|x| x.file == d.file && x.line == d.line && x.message == d.message);
+                if !seen {
+                    w.warnings.push(d);
+                }
+            }
         }
 
         // A `.json` module is a JSON Schema document: synthesize validated type

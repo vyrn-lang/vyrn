@@ -27,7 +27,12 @@
 ///                of the scope from where it stands. The rules inside `@media` and
 ///                `@supports` are scoped; every other at-rule, `@keyframes` among
 ///                them, is copied as written. A CSS syntax error is a refusal at
-///                its line and column.
+///                its line and column. Only in a component with a block, the
+///                compiler warns of a class the template names that no source
+///                defines (the block, a sheet a layout links, a `stylesheets`
+///                glob), unless the module is themed, and of a rule whose class
+///                the template never names, unless a `:class` builds classes at
+///                run time (`vyrn_frontend::classes`).
 ///
 /// Every written module exports `vyxCss() -> Array<String>`: one chunk of scoped
 /// rules per component with a block, in directory order, then the chunks of each
@@ -117,6 +122,7 @@ import { Json, JsonField, emit } from "std/json"
 import { contains, endsWith, startsWith } from "std/strpred"
 import { report, reportHere, Severity } from "std/diag"
 import { join, arm, ifChain, ifChainOr } from "std/code"
+import { Symbol, symbol, strField, symbolMapFn } from "std/symbolmap"
 import { catalogue } from "std/i18n"
 import { syntax } from "std/syntax"
 // Each by a namespace: a written module's names, such as `Row`, are program-wide.
@@ -1144,6 +1150,7 @@ type VyxComp = {
     root: VyxFlow,
     takesChildren: Bool,
     css: String,
+    classes: Array<VyxClassUse>,
     errs: Array<VyxErr>,
 }
 
@@ -1375,7 +1382,7 @@ gen fn vyxCompileAt(source: String, compName: String, srcPath: String, kw: Strin
 
     let read = match vx.parseVyxFile(source) {
         Ok(file) => vyxReadFile(file, ba, srcPath),
-        Err(errors) => VyxRead { grouped: VyxGroup { nodes: [], errs: [vyxErrAt(srcPath, errors[0].line, vyxFaultCol(outline, ba, errors[0].line, errors[0].col), vyxSay(errors[0].row))] }, src: VyxSource { path: srcPath.copy(), bytes: [], scope: "" }, css: "" },
+        Err(errors) => VyxRead { grouped: VyxGroup { nodes: [], errs: [vyxErrAt(srcPath, errors[0].line, vyxFaultCol(outline, ba, errors[0].line, errors[0].col), vyxSay(errors[0].row))] }, src: VyxSource { path: srcPath.copy(), bytes: [], scope: "" }, css: "", classes: [] },
     }
     if read.grouped.errs.length > 0 {
         return vyxCompErr(compName, fnName, srcPath, read.grouped.errs)
@@ -1409,7 +1416,7 @@ gen fn vyxCompileAt(source: String, compName: String, srcPath: String, kw: Strin
     }
     // The node itself, not `[root]`: an array literal would take the root.
     let takesChildren = vyxNodeUsesChildren(root)
-    return VyxComp { name: compName.copy(), fnName: fnName, src: read.src.copy(), script: script, root: root, takesChildren: takesChildren, css: read.css.copy(), errs: [] }
+    return VyxComp { name: compName.copy(), fnName: fnName, src: read.src.copy(), script: script, root: root, takesChildren: takesChildren, css: read.css.copy(), classes: read.classes.copy(), errs: [] }
 }
 
 /// The control flow of `file`, once each element closed under its own name. A close
@@ -1431,7 +1438,11 @@ gen fn vyxGroupFile(file: vx.VyxFile, src: VyxSource) -> VyxGroup {
 
 /// A component's tree read from its file: the grouped template, the source its
 /// positions read with the component's scope, and its scoped rules.
-type VyxRead = { grouped: VyxGroup, src: VyxSource, css: String }
+type VyxRead = { grouped: VyxGroup, src: VyxSource, css: String, classes: Array<VyxClassUse> }
+
+/// One row of a component's class map ([`vyxClassMap`]): `name` at `line` and
+/// `col` of `file`, of the `kind` the row names.
+type VyxClassUse = { name: String, file: String, line: Int64, col: Int64, kind: String }
 
 /// Reads the parsed `file` of the `.vyx` at `srcPath`, whose bytes are `ba`. A
 /// component with a style block gets the scope `data-v-<id>`, where `id` is 8 hex
@@ -1440,13 +1451,66 @@ type VyxRead = { grouped: VyxGroup, src: VyxSource, css: String }
 gen fn vyxReadFile(file: vx.VyxFile, ba: Array<UInt8>, srcPath: String) -> VyxRead {
     let mut scope = ""
     let mut css = ""
+    let mut classes: Array<VyxClassUse> = []
     if let Some(st) = file.style {
         let key = appPath(srcPath)
         scope = "data-v-" + vyxSlice(bytes(toHex(fnv1aStr(key))), 0, 8)
         css = "/* " + key + " */\n" + vyxScopeItems(st.body.items, ba, scope)
+        classes.push(VyxClassUse { name: "<style>", file: srcPath.copy(), line: vyxLineAt(ba, st.start), col: 1, kind: "class-block" })
+        if let Some(t) = file.template {
+            vyxClassUses(t.body.nodes, ba, srcPath, classes)
+        }
     }
     let src = VyxSource { path: srcPath.copy(), bytes: ba.copy(), scope: scope }
-    return VyxRead { grouped: vyxGroupFile(file, src), src: src, css: css }
+    return VyxRead { grouped: vyxGroupFile(file, src), src: src, css: css, classes: classes }
+}
+
+/// Appends to `out` each class the elements of `nodes` name, read from `ba`, at its
+/// place in `path`: a `.<class>` row for each word of a static `class` and of a
+/// `:class` that is one string literal, and a `:class` row for any other `:class`,
+/// whose classes are built at run time. `vyrn_frontend::classes` warns from them.
+fn vyxClassUses(nodes: Array<vx.VyxNode>, ba: Array<UInt8>, path: String, out: modify Array<VyxClassUse>) {
+    for n in nodes {
+        if let VyxNodeVyxElem(e) = n {
+            for a in e.attrs {
+                if a.name.text == "class" && vyxEvt(a) == false {
+                    let v = vyxAttrValue(ba, a)
+                    let vb = bytes(v.text)
+                    let literal = vb.length >= 2 && vb[0] == '"' && vyxFind(vb, [vb[0]], 1) == vb.length - 1
+                    if vyxDyn(a) == false {
+                        vyxClassWords(v, 0, vb.length, path, out)
+                    } else if literal {
+                        vyxClassWords(v, 1, vb.length - 1, path, out)
+                    } else {
+                        out.push(VyxClassUse { name: ":class", file: path.copy(), line: v.line, col: v.col, kind: "class-dynamic" })
+                    }
+                }
+            }
+            if let Some(kids) = e.body {
+                vyxClassUses(kids.nodes, ba, path, out)
+            }
+        }
+    }
+}
+
+/// Appends a `.<class>` row to `out` for each whitespace-separated word of the
+/// bytes `[from, to)` of the value `v`.
+fn vyxClassWords(v: VyxSpan, from: Int64, to: Int64, path: String, out: modify Array<VyxClassUse>) {
+    let vb = bytes(v.text)
+    let mut i = from
+    while i < to {
+        while i < to && vyxIsWs(vb[i]) {
+            i = i + 1
+        }
+        let start = i
+        while i < to && vyxIsWs(vb[i]) == false {
+            i = i + 1
+        }
+        if i > start {
+            let word = vyxSlice(vb, start, i)
+            out.push(VyxClassUse { name: "." + word, file: path.copy(), line: v.line, col: v.col + start, kind: "class" })
+        }
+    }
 }
 
 /// The top-level rules `items`, each scoped by `scope`, one per line.
@@ -1701,7 +1765,7 @@ fn vyxRootLine(roots: Array<VyxFlow>) -> Int64 {
 }
 
 fn vyxCompErr(name: String, fnName: String, srcPath: String, errs: Array<VyxErr>) -> VyxComp {
-    return VyxComp { name: name.copy(), fnName: fnName.copy(), src: VyxSource { path: srcPath.copy(), bytes: [], scope: "" }, script: vyxNoScript([], []), root: VNText(""), takesChildren: false, css: "", errs: errs.copy() }
+    return VyxComp { name: name.copy(), fnName: fnName.copy(), src: VyxSource { path: srcPath.copy(), bytes: [], scope: "" }, script: vyxNoScript([], []), root: VNText(""), takesChildren: false, css: "", classes: [], errs: errs.copy() }
 }
 
 /// `s`, copied from `src` where it stands, one line at a time: a copy maps its first
@@ -2041,7 +2105,8 @@ gen fn vyxEmitAttrs(attrs: Array<vx.VyxAttr>, reg: VyxRegistry, src: VyxSource, 
             pre.push(at(vyrn"let \{slot}: Attr = Cls((\{vyxCopy(src.path, v)}).copy())", src.path, v.line, v.col))
             parts.push(vyrn"\{slot}")
         } else if n == "class" {
-            parts.push(vyrn"Cls(\{v.text})")
+            // At the value, so the editor maps a class token into the call.
+            parts.push(at(vyrn"Cls(\{v.text})", src.path, v.line, v.col))
         } else if dyn {
             pre.push(at(vyrn"let \{slot}: Attr = A(\{n}, (\{vyxCopy(src.path, v)}).copy())", src.path, v.line, v.col))
             parts.push(vyrn"\{slot}")
@@ -2397,7 +2462,27 @@ gen fn vyxBuildModule(comps: consume Array<VyxComp>, themed: Bool, theme: String
     }
     top.push(join(views, vyrn"\n"))
     top.push(vyxEmitCss(reg.comps, pulls))
+    top.push(vyxClassMap(reg.comps, themed))
     return join(top, vyrn"\n")
+}
+
+/// The symbol map of the classes the components of `comps` with a style block
+/// name ([`vyxClassUses`]), empty when none has one. A `themed` module adds a
+/// `vyxTheme` row: its classes are the theme's, which the compiler checks.
+gen fn vyxClassMap(comps: Array<VyxComp>, themed: Bool) -> Code {
+    let mut rows: Array<Symbol> = []
+    for c in comps {
+        for r in c.classes {
+            rows.push(symbol(r.name, Origin { file: r.file.copy(), line: r.line, col: r.col, name: "" }, [strField("kind", r.kind)]))
+        }
+    }
+    if rows.length == 0 {
+        return vyrn""
+    }
+    if themed {
+        rows.push(symbol("vyxTheme", Origin { file: "", line: 0, col: 0, name: "" }, [strField("kind", "class-theme")]))
+    }
+    return symbolMapFn("vyxClasses(" + comps[0].src.path + ")", rows)
 }
 
 fn vyxImportedNames(comps: Array<VyxComp>) -> Array<String> {

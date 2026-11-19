@@ -1418,20 +1418,37 @@ fn a_style_block_scopes_its_rules_and_its_elements() {
 #[test]
 fn a_css_syntax_error_is_refused_at_its_line_and_column() {
     for (css, at, says) in [
-        ("  .card { color: red;\n", "Widget.vyx:5:9", "is never closed"),
+        (
+            "  .card { color: red;\n",
+            "Widget.vyx:5:9",
+            "is never closed",
+        ),
         (".a { b: c; }\n}\n", "Widget.vyx:6:1", "belongs to no rule"),
-        (".a { b: c; }\ncolor: red;\n", "Widget.vyx:6:11", "expected to hold \"{\" here"),
-        (".a { .b { c: d; } }\n", "Widget.vyx:5:9", "opens a block inside one"),
+        (
+            ".a { b: c; }\ncolor: red;\n",
+            "Widget.vyx:6:11",
+            "expected to hold \"{\" here",
+        ),
+        (
+            ".a { .b { c: d; } }\n",
+            "Widget.vyx:5:9",
+            "opens a block inside one",
+        ),
     ] {
         let dir = scratch("csserr");
         write(
             &dir.join("comp/Widget.vyx"),
-            &format!("<template>\n<div class=\"card\"></div>\n</template>\n<style>\n{css}</style>\n"),
+            &format!(
+                "<template>\n<div class=\"card\"></div>\n</template>\n<style>\n{css}</style>\n"
+            ),
         );
         write(&dir.join("app.vyrn"), APP);
         let (ok, err) = run_app(&dir);
         assert!(!ok, "a CSS syntax error must fail the load:\n{err}");
-        assert!(err.contains(at) && err.contains(says), "want {at} {says}:\n{err}");
+        assert!(
+            err.contains(at) && err.contains(says),
+            "want {at} {says}:\n{err}"
+        );
     }
 }
 
@@ -1449,4 +1466,59 @@ fn a_style_block_out_of_place_is_refused() {
         assert!(!ok, "a misplaced style block must fail the load:\n{err}");
         assert!(err.contains(at) && err.contains(says), "want {at} {says}:\n{err}");
     }
+}
+/// `vyrn check` on `dir/app.vyrn`: whether it passed, and stdout then stderr.
+fn check_app(dir: &Path) -> (bool, String) {
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("check");
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    (out.status.success(), text)
+}
+
+/// A component with a style block is warned of a class no source defines and of a
+/// local rule its template never names. A layout's linked sheet and a manifest
+/// glob define classes; a component with no block is never warned.
+#[test]
+fn a_style_block_warns_of_undefined_classes_and_unused_rules() {
+    let dir = scratch("classwarn");
+    write(
+        &dir.join("vyrn.json"),
+        "{ \"name\": \"w\", \"stylesheets\": [\"css/*.css\"] }\n",
+    );
+    write(&dir.join("css/extra.css"), ".globbed { a: b; }\n");
+    write(&dir.join("public/app.css"), ".linked { a: b; }\n");
+    write(
+        &dir.join("routes/layout.vyx"),
+        "<script>\nhead {\n    stylesheet \"/app.css\"\n}\n</script>\n<template>\n<div><slot/></div>\n</template>\n",
+    );
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<p class=\"used linked globbed missing\"><b :class='\"lit\"'>x</b></p>\n</template>\n\
+         <style>\n.used { a: b; }\n.lit { a: b; }\n.spare { a: b; }\n</style>\n",
+    );
+    write(
+        &dir.join("comp/Bare.vyx"),
+        "<template>\n<p class=\"nowhere\">x</p>\n</template>\n",
+    );
+    write(
+        &dir.join("comp/Dyn.vyx"),
+        "<script>\nfn pick() -> String {\n    return \"spare2\"\n}\n</script>\n\
+         <template>\n<p :class=\"pick()\">x</p>\n</template>\n<style>\n.spare2 { a: b; }\n</style>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, out) = check_app(&dir);
+    assert!(ok, "warnings do not fail the check:\n{out}");
+    assert!(
+        out.contains("Widget.vyx:2:31: warning: no stylesheet defines the class `missing`"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Widget.vyx:7:1: warning: the rule for `.spare` styles nothing"),
+        "{out}"
+    );
+    assert_eq!(out.matches("warning:").count(), 2, "{out}");
 }

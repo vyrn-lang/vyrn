@@ -1421,10 +1421,17 @@ pub fn class_completions(
     )
 }
 
+/// The class word under the cursor, `""` before one is typed, when the cursor
+/// is in a string literal [`class_call_arg`] accepts; `None` anywhere else.
+pub fn class_site(analysis: &Analysis, source: &str, line: usize, col: usize) -> Option<String> {
+    class_call_arg(analysis, source, line, col)
+        .then(|| class_token_at(source, line, col).unwrap_or_default())
+}
+
 /// Whether the string literal under the cursor lies in the arguments of a call
-/// of [`Analysis::class_call`], bare or as the last segment of `ns.<call>`, at
-/// any depth: a `.vyx` `:class` expression such as `pick(on, "p-2")` reaches
-/// the call as its argument.
+/// of [`Analysis::class_call`] or of the `Cls` attribute, bare or as the last
+/// segment of `ns.<call>`, at any depth: a `.vyx` `:class` expression such as
+/// `pick(on, "p-2")` reaches the call as its argument.
 fn class_call_arg(analysis: &Analysis, source: &str, line: usize, col: usize) -> bool {
     let Ok(toks) = lexer::lex(source) else {
         return false;
@@ -1450,7 +1457,8 @@ fn class_call_arg(analysis: &Analysis, source: &str, line: usize, col: usize) ->
         match &toks[i].tok {
             Tok::RParen => depth += 1,
             Tok::LParen if depth == 0 => {
-                if i >= 1 && matches!(&toks[i - 1].tok, Tok::Ident(c) if *c == analysis.class_call)
+                if i >= 1
+                    && matches!(&toks[i - 1].tok, Tok::Ident(c) if *c == analysis.class_call || c == "Cls")
                 {
                     return true;
                 }
@@ -1481,24 +1489,16 @@ fn sequence_type_at(
         .cloned()
 }
 
-/// The hover of a class token in a class call's string.
-pub struct ClassHover {
-    pub text: String,
-    /// The class, when the theme safelists it without a rule of its own, so
-    /// the host may add the app's rules.
-    pub safelisted: Option<String>,
-}
-
 /// Hover for the class token under the cursor in a class call's string: the
 /// CSS rule [`Analysis::class_css`] holds for a utility, or "safelisted" for a
-/// safelist entry. `None` when the cursor is not on a class token of a linked
-/// theme.
+/// safelist entry, whose rules the host adds from the app's sheets. `None` when
+/// the cursor is not on a class token of a linked theme.
 pub fn class_token_hover(
     analysis: &Analysis,
     source: &str,
     line: usize,
     col: usize,
-) -> Option<ClassHover> {
+) -> Option<String> {
     if !class_call_arg(analysis, source, line, col) {
         return None;
     }
@@ -1508,14 +1508,8 @@ pub fn class_token_hover(
         return None;
     }
     Some(match css_rule_for(&analysis.class_css, &token) {
-        Some(rule) => ClassHover {
-            text: format!("**`{token}`** — `{ty_name}` utility class\n\n```css\n{rule}\n```"),
-            safelisted: None,
-        },
-        None => ClassHover {
-            text: format!("**`{token}`** — safelisted (app-styled)"),
-            safelisted: Some(token),
-        },
+        Some(rule) => format!("**`{token}`** — `{ty_name}` utility class\n\n```css\n{rule}\n```"),
+        None => format!("**`{token}`** — safelisted (app-styled)"),
     })
 }
 
@@ -3476,10 +3470,10 @@ mod tests {
         assert!(items.iter().any(|c| c.label == "a-2"));
 
         // Hover on `flex` shows its CSS rule; on `a-1`, its rule too.
-        let hv = (class_token_hover(&a, src, line, col).expect("hover on class token")).text;
+        let hv = class_token_hover(&a, src, line, col).expect("hover on class token");
         assert!(hv.contains("display:flex"), "utility CSS: {hv}");
         let col_a1 = src.lines().nth(4).unwrap().find("a-1\")").unwrap() + 1 + 1;
-        let hv2 = (class_token_hover(&a, src, line, col_a1).expect("hover a-1")).text;
+        let hv2 = class_token_hover(&a, src, line, col_a1).expect("hover a-1");
         assert!(hv2.contains("color:red"), "a-1 rule: {hv2}");
     }
 
@@ -4323,7 +4317,7 @@ fn main() -> Int64 {
         assert!(items.iter().any(|c| c.label == "dog"), "{items:?}");
         assert!(!items.iter().any(|c| c.label == "red"), "{items:?}");
         // Hover names the type it answered from.
-        let hv = class_token_hover(&a, src, line, col).expect("hover").text;
+        let hv = class_token_hover(&a, src, line, col).expect("hover");
         assert!(hv.contains("`TwB`"), "{hv}");
     }
 

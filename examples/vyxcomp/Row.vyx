@@ -27,6 +27,7 @@ fn qtyClass(q: Int64) -> String {
 .hot { color: #b3261e; }
 .cool, .some { color: #49454f; }
 .one:hover { text-decoration: underline; }
+.rm, .q { margin-left: auto; }
 @media (max-width: 30rem) {
     .row { flex-direction: column; }
 }

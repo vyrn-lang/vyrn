@@ -29,7 +29,12 @@ A `.vyx` file has three sections:
                of the scope from where it stands. The rules inside `@media` and
                `@supports` are scoped; every other at-rule, `@keyframes` among
                them, is copied as written. A CSS syntax error is a refusal at
-               its line and column.
+               its line and column. Only in a component with a block, the
+               compiler warns of a class the template names that no source
+               defines (the block, a sheet a layout links, a `stylesheets`
+               glob), unless the module is themed, and of a rule whose class
+               the template never names, unless a `:class` builds classes at
+               run time (`vyrn_frontend::classes`).
 
 Every written module exports `vyxCss() -> Array<String>`: one chunk of scoped
 rules per component with a block, in directory order, then the chunks of each

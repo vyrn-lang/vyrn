@@ -5,6 +5,7 @@ pub mod artifacts;
 pub mod ast;
 pub mod audience;
 pub mod checker;
+pub mod classes;
 pub mod classify;
 pub mod codec;
 pub mod consteval;
@@ -48,12 +49,12 @@ pub mod types;
 pub mod validate;
 
 pub use symbols::{
-    analyze, analyze_judged, analyze_linked, at_module_scope, class_completions, class_token_hover,
-    classify_at, completions, doc_links, import_spec_at, inlay_hints, member_completions,
-    member_context, module_doc, references, references_to, resolve, scope_completions,
-    semantic_tokens, string_context, string_literal_completions, Analysis, Completion, CostLine,
-    DocExport, FnCost, InlayHint, Judge, LocalBinding, LocalKind, MemoryNote, ModuleDoc, RefRange,
-    Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
+    analyze, analyze_judged, analyze_linked, at_module_scope, class_completions, class_site,
+    class_token_hover, classify_at, completions, doc_links, import_spec_at, inlay_hints,
+    member_completions, member_context, module_doc, references, references_to, resolve,
+    scope_completions, semantic_tokens, string_context, string_literal_completions, Analysis,
+    Completion, CostLine, DocExport, FnCost, InlayHint, Judge, LocalBinding, LocalKind, MemoryNote,
+    ModuleDoc, RefRange, Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
 };
 // Hover's type spelling, shared with the LSP's inlay hints.
 pub use symbols::type_to_string;
