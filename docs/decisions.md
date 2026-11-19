@@ -481,6 +481,7 @@ pull request.
 - Native builds choose from a curated set of microarchitectures and always pass `-ffp-contract=off`, because FMA changes float bits.
 - `vyrn_syntax::textmate` writes the editor's TextMate grammar and language configuration from a grammar, committed and held by a pin test, so the editor colours only what the grammar states. A `.syntax` file carries no scope: a class comes from a lexical rule's name, in the writer's one vocabulary, and a naming convention no grammar can state is a value the caller passes.
 - A generator input is analysed through the module that claims it and whose generated code maps to it through its span table. A module claims a file when the first string argument of one of its generator imports resolves to the file or a directory above it; the import graph is the only registry, so there is no extension map.
+- A file's language is a module: one map, `manifest::language_of`, from a glob to the module that reads the file, with the toolchain's defaults as rows of the same map (`DEFAULT_LANGUAGES`) and a project's `languages` entries over them. The module states its grammar through its own `syntax(...)` import, and its editor companion adds to what the grammar gives.
 - One `.vsix` serves every platform; the server ships in each platform's release archive.
 
 ## Process

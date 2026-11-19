@@ -428,6 +428,7 @@ policy.
 | `hints` | per-rule severity for the hint libraries (`std/hints`, `std/vyx-hints`) |
 | `stylesheets` | globs naming the app's own CSS that no layout links, whose classes the editor offers and whose rules it shows |
 | `inputs` | globs naming the generator inputs the editor sends the language server, beside the `.vyx` files the VS Code extension sends |
+| `languages` | glob to the module that reads the files it names, as an import specifier (`"*.calc": "./calc"`); the toolchain's defaults, `**/*.syntax` to `std/grammar`, are rows of the same map, and a project's entry wins over a default. A relative module that does not exist is refused at its key, and two entries over one file are refused naming both |
 | `proved` | globs naming the modules where every check must be proved (language.md, Proofs); `vyrn check`, `build`, `run`, `why` and the editor read it, and no flag replaces it |
 
 An unknown tool name under `toolchain` is refused and the error lists the known
