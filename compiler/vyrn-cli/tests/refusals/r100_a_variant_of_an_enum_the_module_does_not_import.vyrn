@@ -1,0 +1,11 @@
+// A pattern names a variant of the scrutinee's enum, which another module
+// declares: the module that matches imports the enum, and so its variants.
+import { race } from "std/task"
+
+fn main() -> Int64 {
+    match race(1, 2) {
+        First(v) => print("first \{v}"),
+        Second(v) => print("second \{v}"),
+    }
+    return 0
+}

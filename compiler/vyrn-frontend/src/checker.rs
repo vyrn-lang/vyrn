@@ -693,17 +693,14 @@ fn check_accum_inner(
         .collect();
     // Protocol registries: each method name to its protocol and
     // signature, and which (protocol, type key) pairs are implemented.
-    let mut protocol_methods: HashMap<String, Vec<(String, MethodSig)>> = HashMap::new();
-    for p in &program.protocols {
+    let mut protocol_methods: HashMap<&str, Vec<(&str, &MethodSig)>> = HashMap::new();
+    for p in crate::prelude::protocols(&program.protocols).chain(&program.protocols) {
         for m in &p.methods {
             // A projection requirement never dispatches as a method.
             if m.result_cap.is_some() {
                 continue;
             }
-            protocol_methods
-                .entry(m.name.clone())
-                .or_default()
-                .push((p.name.clone(), m.clone()));
+            (protocol_methods.entry(&m.name).or_default()).push((&p.name, m));
         }
     }
     // Projection names protocols declare, for refusing one on a bounded
@@ -715,12 +712,11 @@ fn check_accum_inner(
         .filter(|m| m.result_cap.is_some())
         .map(|m| m.name.clone())
         .collect();
-    // The program's own declaration of a prelude protocol's name replaces it.
-    let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> = (crate::prelude::protocols())
-        .iter()
-        .chain(&program.protocols)
-        .map(|p| (p.name.as_str(), p))
-        .collect();
+    let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> =
+        (crate::prelude::protocols(&program.protocols))
+            .chain(&program.protocols)
+            .map(|p| (p.name.as_str(), p))
+            .collect();
     for imp in &program.impls {
         let mark = out.len();
         // The impl binds exactly the associated types the protocol declares.
@@ -1698,7 +1694,7 @@ struct Cx<'a> {
     /// Function name to (type parameter to bounds).
     all_bounds: &'a HashMap<&'a str, &'a HashMap<String, Vec<String>>>,
     /// Method name to (protocol, signature).
-    protocol_methods: &'a HashMap<String, Vec<(String, MethodSig)>>,
+    protocol_methods: &'a HashMap<&'a str, Vec<(&'a str, &'a MethodSig)>>,
     /// The declared protocols, the prelude's included.
     protocols: &'a [crate::ast::ProtocolDecl],
     spellings: &'a crate::ast::Spellings,
@@ -2096,7 +2092,7 @@ impl<'a> Checker<'a> {
             return Ok(None);
         }
         self.refuse_chained_projection(&args[0], scope, line)?;
-        if !matches!(pattern, crate::ast::Pattern::Variant(v, _) if v == "Some") {
+        if !matches!(pattern, crate::ast::Pattern::Variant(v, ..) if v == "Some") {
             return Err(cerr!(line, OptionalPlaceTested, name));
         }
         let subst =
@@ -2902,7 +2898,7 @@ impl<'a> Checker<'a> {
             _ if self
                 .protocol_methods
                 .values()
-                .any(|entries| entries.iter().any(|(p, _)| p == bound))
+                .any(|entries| entries.iter().any(|(p, _)| *p == bound))
                 || self.impls.iter().any(|i| i.protocol == bound) =>
             {
                 self.declares_an_impl(ty, &base, bound)
@@ -4506,6 +4502,41 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
+    /// The refusal of a pattern naming `vname`, which is no variant of `sty`,
+    /// at `at` where the pattern is spelled. A variant of `sty` written
+    /// `vname` in a module that does not import `sty` needs that import.
+    fn not_a_variant(
+        &self,
+        vname: &str,
+        sty: &Type,
+        evs: &[EnumVariant],
+        line: usize,
+        at: (usize, usize),
+    ) -> Diagnostic {
+        let (line, col) = match at {
+            (l, c) if c > 0 => (l, c),
+            _ => (line, 0),
+        };
+        let sp = self.spellings;
+        let hidden = (evs.iter()).find_map(|v| sp.decls.get(&v.name).filter(|(w, _)| w == vname));
+        let enum_name = match sty {
+            Type::App(n, _) | Type::Named(n) => Some(n),
+            _ => None,
+        };
+        let d = match (hidden, enum_name) {
+            (Some((_, m)), Some(n)) => {
+                let here = self.frame.borrow().here.clone();
+                let module = sp.import_path(here.as_ref().unwrap_or(&sp.root), m);
+                cerr!(line, VariantNotImported, vname, ty = sp.written(n), module)
+            }
+            _ => cerr!(line, NotAVariant, vname = DeclName(vname), sty),
+        };
+        match col {
+            0 => d,
+            c => d.at(c, c + vname.chars().count()),
+        }
+    }
+
     /// Checks a `match` over a sum: every arm a valid variant pattern, its
     /// bindings matching the payloads. Exhaustiveness is the core's rule,
     /// stated where it builds the switch.
@@ -4538,8 +4569,8 @@ impl<'a> Checker<'a> {
                 }
                 continue;
             }
-            let (vname, bind) = match &arm.pattern {
-                Pattern::Variant(n, b) => (n.clone(), b.clone()),
+            let (vname, bind, at) = match &arm.pattern {
+                Pattern::Variant(n, b, at) => (n.clone(), b.clone(), at.start()),
                 // The `??` desugar's patterns name a tag of an
                 // `Option` or `Result`: variant 1 succeeds, variant 0 fails.
                 // Another enum has no success side as a pattern.
@@ -4556,6 +4587,7 @@ impl<'a> Checker<'a> {
                         } else {
                             vec![b.clone()]
                         },
+                        (0, 0),
                     )
                 }
                 Pattern::Success(_) | Pattern::Failure(_) => {
@@ -4563,10 +4595,9 @@ impl<'a> Checker<'a> {
                 }
                 Pattern::Other => unreachable!("the default arm is checked above the match"),
             };
-            let ev = evs
-                .iter()
-                .find(|v| v.name == vname)
-                .ok_or_else(|| cerr!(line, NotAVariant, vname = DeclName(&vname), sty))?;
+            let Some(ev) = evs.iter().find(|v| v.name == vname) else {
+                return Err(self.not_a_variant(&vname, sty, evs, line, at));
+            };
             if ev.payload.len() != bind.len() {
                 return Err(cerr!(
                     line,
@@ -5096,7 +5127,7 @@ impl<'a> Checker<'a> {
         let mut candidates = self.protocol_methods.get(name).cloned().unwrap_or_default();
         let written = receiver_text(args.first());
         if let Some(p) = via {
-            candidates.retain(|(q, _)| q == p);
+            candidates.retain(|(q, _)| *q == p);
             if candidates.is_empty() {
                 let declared = self.protocols.iter().any(|d| d.name == p)
                     || crate::types::KNOWN_PROTOCOLS.iter().any(|(k, _)| *k == p);
@@ -5149,7 +5180,7 @@ impl<'a> Checker<'a> {
                                 first = bounded[0].0,
                                 protocols = bounded
                                     .iter()
-                                    .map(|(p, _)| p.as_str())
+                                    .map(|(p, _)| *p)
                                     .collect::<Vec<_>>()
                                     .join(", ")
                             ));
@@ -5166,7 +5197,7 @@ impl<'a> Checker<'a> {
                         first = matching[0].0,
                         protocols = matching
                             .iter()
-                            .map(|(p, _)| p.as_str())
+                            .map(|(p, _)| *p)
                             .collect::<Vec<_>>()
                             .join(", ")
                     ));

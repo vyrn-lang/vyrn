@@ -1643,7 +1643,9 @@ impl Spellings {
 
     /// Whether `recv.name(..)`, written in `home` (`None` the root), may
     /// dispatch to a method of one of `protocols` that declares `name` while a
-    /// function has the name too: `home` reaches the protocol's module. The
+    /// function has the name too: `home` reaches the protocol's module, and
+    /// every module reaches a prelude protocol `protocols` does not replace
+    /// ([`crate::prelude::protocols`]). The
     /// form picks the declaration, so `x.len()` is the method and `len(x)` the
     /// function; a module that reaches no such protocol, std included, calls
     /// the function either way, as in its own load.
@@ -1654,9 +1656,12 @@ impl Spellings {
         name: &str,
     ) -> bool {
         let home = home.unwrap_or(&self.root);
-        (protocols.iter())
-            .filter(|p| (p.methods.iter()).any(|m| m.name == name && m.result_cap.is_none()))
-            .any(|p| self.reaches(home, p.module.as_deref().unwrap_or(&self.root)))
+        let declares = |p: &&ProtocolDecl| {
+            (p.methods.iter()).any(|m| m.name == name && m.result_cap.is_none())
+        };
+        crate::prelude::protocols(protocols).any(|p| declares(&p))
+            || (protocols.iter().filter(declares))
+                .any(|p| self.reaches(home, p.module.as_deref().unwrap_or(&self.root)))
     }
 
     /// Whether module `from` is `to` or imports it, through any chain of
@@ -1678,6 +1683,12 @@ impl Spellings {
             next.extend(imported.filter(|t| seen.insert(t)));
         }
         false
+    }
+
+    /// The path module `from` wrote to import module `m`, else `m`'s key.
+    pub fn import_path<'a>(&'a self, from: &str, m: &'a str) -> &'a str {
+        let path = self.paths.get(&(from.to_string(), m.to_string()));
+        path.map_or(m, String::as_str)
     }
 
     /// The name the declaration `linked` was written as.
@@ -1731,8 +1742,7 @@ impl<'a> Speech<'a> {
         let from = self.from.as_ref().unwrap_or(&self.table.root);
         match self.table.decls.get(linked) {
             Some((_, m)) if m != from && self.qualified.iter().any(|q| q == linked) => {
-                let path = self.table.paths.get(&(from.clone(), m.clone()));
-                format!("{written} from \"{}\"", path.unwrap_or(m))
+                format!("{written} from \"{}\"", self.table.import_path(from, m))
             }
             _ => written.to_string(),
         }
@@ -2098,8 +2108,8 @@ pub struct MatchArm {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     /// `Circle(r)`, `Empty`, `Some(x)`, `None`, `Ok(x)`, `Err(e)`. The scrutinee
-    /// decides what the name means.
-    Variant(String, Vec<Binder>),
+    /// decides what the name means. The slot starts where the name is spelled.
+    Variant(String, Vec<Binder>, Id),
     /// The tag-1 arm: `Some` or `Ok`. The parser's `??` desugar has no types to
     /// choose with, so it builds this and `??` inherits `match`'s drops,
     /// ownership and validation.
@@ -2128,7 +2138,7 @@ impl Pattern {
     pub fn binders(&self) -> &[Binder] {
         match self {
             Pattern::Success(b) | Pattern::Failure(b) => std::slice::from_ref(b),
-            Pattern::Variant(_, binds) => binds,
+            Pattern::Variant(_, binds, _) => binds,
             Pattern::Other => &[],
         }
     }
@@ -2136,7 +2146,7 @@ impl Pattern {
     pub fn binders_mut(&mut self) -> Vec<&mut Binder> {
         match self {
             Pattern::Success(b) | Pattern::Failure(b) => vec![b],
-            Pattern::Variant(_, binds) => binds.iter_mut().collect(),
+            Pattern::Variant(_, binds, _) => binds.iter_mut().collect(),
             Pattern::Other => Vec::new(),
         }
     }
@@ -2596,6 +2606,9 @@ impl Numbering {
             } => {
                 self.expr(scrutinee);
                 for a in arms {
+                    if let Pattern::Variant(_, _, at) = &mut a.pattern {
+                        self.leaf(at);
+                    }
                     self.binders(a.pattern.binders_mut());
                     match &mut a.body {
                         ArmBody::Expr(x) => self.expr(x),

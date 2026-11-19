@@ -1,0 +1,20 @@
+// Every module reaches the prelude's `Show`: `p.show()` is the method and
+// `show(3)` the function.
+type P = { n: Int64 }
+
+impl Show for P {
+    fn show(read self) -> String {
+        return "p"
+    }
+}
+
+fn show(n: Int64) -> String {
+    return "n"
+}
+
+fn main() -> Int64 {
+    let p = P { n: 1 }
+    print(p.show())
+    print(show(3))
+    return 0
+}

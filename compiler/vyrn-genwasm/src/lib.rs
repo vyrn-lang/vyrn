@@ -493,11 +493,11 @@ fn at_type(e: Expr, ty: &Type) -> Expr {
         scrutinee: Box::new(Expr::call(GEN_HOST.parse, vec![e], 0)),
         arms: vec![
             MatchArm {
-                pattern: Pattern::Variant("Some".into(), vec![Binder::synthetic("v")]),
+                pattern: Pattern::Variant("Some".into(), vec![Binder::synthetic("v")], Id::NEW),
                 body: ArmBody::Expr(Expr::var("v", 0)),
             },
             MatchArm {
-                pattern: Pattern::Variant("None".into(), Vec::new()),
+                pattern: Pattern::Variant("None".into(), Vec::new(), Id::NEW),
                 body: ArmBody::Expr(Expr::int(0)),
             },
         ],

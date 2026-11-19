@@ -5730,7 +5730,7 @@ impl BodyVisitMut for NsResolver<'_> {
     fn arm_pattern(&mut self, p: &mut Pattern, line: usize, _locals: &HashSet<String>) {
         // An `ns.Enum.Variant` pattern becomes the bare variant: variants are
         // global, and the enum need only be an exported member of the namespace.
-        if let Pattern::Variant(v, _) = p {
+        if let Pattern::Variant(v, ..) = p {
             if let Some(idx) = v.find('.') {
                 let ns = v[..idx].to_string();
                 let rest = &v[idx + 1..];
@@ -7078,7 +7078,7 @@ impl BodyVisit<'_> for RefNames<'_> {
     fn arm_pattern(&mut self, p: &Pattern, line: usize, locals: &HashSet<String>) {
         // The variant constructor is a reference; its binds are new locals. The
         // four built-in sum names have no declaration.
-        if let Pattern::Variant(v, _) = p {
+        if let Pattern::Variant(v, ..) = p {
             if !locals.contains(v) && !is_sum_arm(v) {
                 self.out.push((v.clone(), line, "variant"));
             }
@@ -7235,7 +7235,7 @@ impl BodyVisitMut for Renamer<'_> {
 
 impl Renamer<'_> {
     fn rename_variant(&self, p: &mut Pattern) {
-        if let Pattern::Variant(v, _) = p {
+        if let Pattern::Variant(v, ..) = p {
             if !self.variants.contains(v.as_str()) {
                 *v = ren(self.map, v);
             }

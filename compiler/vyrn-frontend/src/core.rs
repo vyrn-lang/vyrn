@@ -46,8 +46,9 @@ pub struct NameInfo {
     /// from the place. The kernel needs this to refuse a take of a parameter.
     pub borrow_kind: Option<BorrowKind>,
     pub line: usize,
-    /// Where the reader spelled the binder of a `let` or a parameter; `None`
-    /// for any other name. An obligation row names it.
+    /// Where the reader spelled the binder of a `let` or a parameter, or
+    /// where a must-use temporary's expression starts; `None` for any other
+    /// name. An obligation row names it.
     pub binder: Option<Spelled>,
     /// The statement the name was made under, [`NodeId::NONE`] outside one.
     /// With the name, it keys [`Body::ends`].

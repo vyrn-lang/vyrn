@@ -248,7 +248,9 @@ The compiler releases an owned value at each exit where it is still held:
   waiting and releases each finished branch's result it does not keep;
 - the end of a `match`, `if let` or `for` that owns a temporary scrutinee;
 - the end of an arm, for a payload binder the arm did not move;
-- each edge of a join where one path consumed the value and another did not.
+- each edge of a join where one path consumed the value, or a part of it,
+  and another did not; each `break` out of a loop is an edge of the join
+  after it.
 
 A store releases the value its place held, unless the place owns no heap or
 the value hands the place back (`xs = xs.push(v)`). Releasing a record, enum

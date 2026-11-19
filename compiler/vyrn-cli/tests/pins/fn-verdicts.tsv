@@ -332,6 +332,9 @@ examples/consume_handover.vyrn	take	yes	no, `xs` is Array<Int64>, not an integer
 examples/consume_handover.vyrn	owner	yes	no, `ys` is Array<Int64>, not an integer, Bool or a read array of one
 examples/consume_handover.vyrn	lender	yes	no, its effect set is alloc
 examples/consume_handover.vyrn	main	yes	no, its effect set is alloc, write-output
+examples/consume_hole_break.vyrn	eat	yes	no, `v` is String, not an integer, Bool or a read array of one
+examples/consume_hole_break.vyrn	use	yes	no, `g` is Parts, not an integer, Bool or a read array of one
+examples/consume_hole_break.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/consumeloop.vyrn	spliced	yes	no, its effect set is alloc
 examples/consumeloop.vyrn	make	yes	no, its effect set is alloc
 examples/consumeloop.vyrn	lengthsOf	yes	no, its effect set is alloc

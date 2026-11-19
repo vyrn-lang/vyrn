@@ -1,0 +1,27 @@
+// A `consume` parameter taken apart on one path out of a loop: each `break`
+// edge that did not take `g.x` releases it, as an `if` arm would.
+
+type Parts = { x: String, z: String }
+
+fn eat(v: consume String) -> Int64 {
+    return v.byteLength
+}
+
+fn use(g: consume Parts, k: Int64) -> Int64 {
+    let mut out = 0
+    while true {
+        if g.z.byteLength == k {
+            break
+        }
+        out = eat(consume g.x)
+        break
+    }
+    return out + g.z.byteLength
+}
+
+fn main() -> Int64 {
+    let a = use(Parts { x: "ab".copy(), z: "zz".copy() }, 0)
+    let b = use(Parts { x: "ab".copy(), z: "zz".copy() }, 2)
+    print("\{a} \{b}")
+    return 0
+}

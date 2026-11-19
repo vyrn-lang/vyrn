@@ -1,0 +1,14 @@
+// A method call's must-use result, dropped as a statement, is refused at the
+// call, which the sentence quotes.
+type Txn = { label: String }
+
+impl MustUse for Txn {}
+
+fn main() -> Int64 {
+    let mut ts: Array<Txn> = [Txn { label: "a".copy() }]
+    ts.replace(0, Txn { label: "b".copy() })
+    for t in consume ts {
+        drop t
+    }
+    return 0
+}

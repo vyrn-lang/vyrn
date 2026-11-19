@@ -46,11 +46,12 @@ pub fn type_decls() -> &'static [TypeDecl] {
     &prelude().type_decls
 }
 
-/// Returns the protocols the compiler gives a meaning (`Show`, `Owned`, ...).
-/// None enters a program: the checker reads one as the declaration an impl of
-/// that name conforms to when the program declares none.
-pub fn protocols() -> &'static [ProtocolDecl] {
-    &prelude().protocols
+/// Returns the protocols the compiler gives a meaning (`Show`, `Owned`, ...)
+/// that `declared`, a program's protocols, does not replace by name. None
+/// enters a program: the checker reads one as the declaration an impl of that
+/// name conforms to, and every module reaches its methods.
+pub fn protocols<'a>(declared: &'a [ProtocolDecl]) -> impl Iterator<Item = &'a ProtocolDecl> {
+    (prelude().protocols.iter()).filter(|p| !declared.iter().any(|d| d.name == p.name))
 }
 
 /// One seeded signature. `place` is empty for a row that allocates its result;
@@ -1586,7 +1587,7 @@ mod tests {
             type_decls().iter().all(|t| t.line == 0 && !t.exported),
             "every prelude declaration is line 0 and unexported"
         );
-        let protocols: Vec<&str> = protocols().iter().map(|p| p.name.as_str()).collect();
+        let protocols: Vec<&str> = protocols(&[]).map(|p| p.name.as_str()).collect();
         assert_eq!(
             protocols,
             ["Owned", "MustUse", "Show", "Hashable", "Fallible"]
