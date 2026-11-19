@@ -433,6 +433,7 @@ pull request.
 - `std/vyx`'s public API is `components`, `componentsThemed`, the `Component` contract and the read-only template tree (`vyxParseTemplate`, `VyxTemplate`, and the types `std/vyx.syntax` writes) for generators and tools. What only `std/ui` needs is `export to` it, the generators its router imports included (`vyxPage`, `vyxLayout`, `vyxError` and their themed and client forms); a user mounts a page through `pages`.
 - Pages declare data through `export fn data()` returning `Query`, `Lazy`, `ParamQuery` or `ParamLazy`, and head through `export fn head()`. Laziness is in the type name.
 - A layout is the nearest `layout.vyx`; a load failure renders the nearest `error.vyx`.
+- A `.vyx` style block is scoped as Vue scopes one: the last compound of each selector gains `[data-v-<id>]`, and `id` hashes the file's `appPath`, so a server render and a client render agree. The router serves every chunk its `.vyx` modules export at `/vyx.css` and links it with no line from the user. A client-only component is outside the server's program, so its sheet is served by hand. Decided 2026-11-19.
 - The first load is full SSR; navigation renders on the client, and falls back to an HTML swap, then a hard navigation. Soft navigation is progressive enhancement, never a correctness layer.
 - Page data is served by content negotiation on the page URL (`Accept: application/json`), and no response carries the string "vyrn".
 - `std/tw`'s class vocabulary is closed and checked at compile time: no arbitrary values, no `dark:`.

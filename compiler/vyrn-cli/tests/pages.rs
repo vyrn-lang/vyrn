@@ -1305,3 +1305,78 @@ fn two_slugs_reaching_one_helper_name_are_a_diagnostic() {
         "the diagnostic names both routes:\n{err}"
     );
 }
+
+/// The app that prints what the router answers for `/` and `/vyx.css`.
+const SHEET_APP: &str = "import { pages } from \"std/ui\"\n\
+     import { route } from pages(\"./pages\")\n\
+     fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path.copy(), headers: [:], body: \"\" }) }\n\
+     fn main() -> Int64 {\n\
+     print(h(\"/\").body)\n\
+     let css = h(\"/vyx.css\")\n\
+     print(\"sheet:\\{css.status}:\\{css.contentType}\")\n\
+     print(css.body)\n\
+     return 0\n\
+     }\n";
+
+/// The router serves the scoped rules of every `.vyx` module its pages reach at
+/// `/vyx.css`, each component once, and links the sheet from every document; a
+/// router whose components hold no style block does neither.
+#[test]
+fn the_router_serves_and_links_the_component_sheet() {
+    let dir = scratch("sheet");
+    write(
+        &dir.join("pages/layout.vyx"),
+        "<template>\n<div class=\"shell\"><slot/></div>\n</template>\n<style>\n.shell { margin: 0; }\n</style>\n",
+    );
+    let page = "<script>\nimport { components } from \"std/vyx\"\n\
+                import { toMarkup, Markup } from \"std/html\"\n\
+                import { card } from components(\"../widgets\")\n\
+                fn cardOf() -> Markup {\n    return toMarkup(card())\n}\n</script>\n\
+                <template>\n<h1 v-html=\"cardOf()\"></h1>\n</template>\n";
+    write(&dir.join("pages/index.vyx"), page);
+    write(&dir.join("pages/about.vyx"), page);
+    write(
+        &dir.join("widgets/Card.vyx"),
+        "<template>\n<b class=\"card\">c</b>\n</template>\n<style>\n.card { color: red; }\n</style>\n",
+    );
+    write(&dir.join("app.vyrn"), SHEET_APP);
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "the app must run:\n{text}");
+    assert!(
+        text.contains("<link rel=\"stylesheet\" href=\"/vyx.css\">"),
+        "{text}"
+    );
+    assert!(text.contains("sheet:200:text/css"), "{text}");
+    assert_eq!(text.matches("/* widgets/Card.vyx */").count(), 1, "{text}");
+    assert!(
+        text.contains("/* pages/layout.vyx */\n.shell[data-v-"),
+        "{text}"
+    );
+
+    let bare = scratch("nosheet");
+    write(
+        &bare.join("pages/layout.vyx"),
+        "<template>\n<div><slot/></div>\n</template>\n",
+    );
+    write(
+        &bare.join("pages/index.vyx"),
+        "<template>\n<h1>Home</h1>\n</template>\n",
+    );
+    write(&bare.join("app.vyrn"), SHEET_APP);
+    let out = vyrn()
+        .arg("run")
+        .arg(bare.join("app.vyrn"))
+        .output()
+        .expect("run");
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "the app must run:\n{text}");
+    assert!(!text.contains("/vyx.css"), "{text}");
+    assert!(text.contains("sheet:404:"), "{text}");
+}

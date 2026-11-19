@@ -11,13 +11,33 @@ layouts and error pages through `vyxPage`, `vyxLayout` and `vyxError`.
   import { components } from "std/vyx"
   import { itemRow, cart } from components("./components")
 
-A `.vyx` file has two sections:
+A `.vyx` file has three sections:
   <script>   -- optional: a `props { name: Type, ... }` block (the view fn's
                parameters), `import` lines (copied as written, so a
                relative path resolves beside the `.vyx`; a name a sibling
                already imports from the same path is dropped), and plain
                `fn`/`let`/`type` helpers (module-private).
   <template> -- exactly one root element, compiled to the view fn body.
+  <style>    -- optional, last: CSS scoped to the component. A component with a
+               block stamps `data-v-<id>` on every element its template writes,
+               where `id` is 8 hex digits of the FNV-1a hash of the file's
+               `appPath`. The last compound of each selector gains
+               `[data-v-<id>]` before its pseudo-classes, so `.row:hover`
+               becomes `.row[data-v-<id>]:hover`. A child component's root also
+               carries its caller's id, so a caller styles that root and
+               nothing inside it. `:global(s)` is written as `s` and opts out
+               of the scope from where it stands. The rules inside `@media` and
+               `@supports` are scoped; every other at-rule, `@keyframes` among
+               them, is copied as written. A CSS syntax error is a refusal at
+               its line and column.
+
+Every written module exports `vyxCss() -> Array<String>`: one chunk of scoped
+rules per component with a block, in directory order, then the chunks of each
+components module its scripts import by name. `std/ui`'s router serves the
+chunks of every page, layout and error page it routes, each once, at
+`/vyx.css` from `route` (the `routes()` mount tree holds pages only), and links that sheet first in every document's head when it holds a
+rule. A component only a client program reaches is outside the server's
+router: serve its `vyxCss()` from the server by hand.
 
 Template grammar (Vue-flavored):
   {{ expr }}                  -> text((expr).toString())     (escaped)

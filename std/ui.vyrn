@@ -1360,8 +1360,8 @@ gen fn uiNs(prefix: String, n: Int64) -> Name {
 
 /// The `try`/`render` pair for page `n`. `at` shows a type error in this
 /// derived glue at line 1 of the page file.
-gen fn uiEmitRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64) -> Code {
-    let glue = uiEmitTryFn(p, n, "uiTry", "uiRender") + uiEmitRender(p, n, layoutIdxs, errorIdx)
+gen fn uiEmitRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64, sheet: Bool) -> Code {
+    let glue = uiEmitTryFn(p, n, "uiTry", "uiRender") + uiEmitRender(p, n, layoutIdxs, errorIdx, sheet)
     return at(glue, p.modPath + (if p.isVyx { ".vyx" } else { ".vyrn" }), 1, 1)
 }
 
@@ -1555,21 +1555,23 @@ gen fn uiTitleExpr(layoutIdxs: Array<Int64>, pageTitle: Option<Code>, dflt: Stri
     }
 }
 
-/// The `text/html` reply whose body is `document(title, head, body)`.
-gen fn uiDocResponse(status: Code, title: Code, head: Code, body: Code) -> Code {
-    return vyrn"Response { status: \{status}, contentType: \"text/html\", body: document(\{title}, \{head}, \{body}), vary: \"\", headers: [:] }"
+/// The `text/html` reply whose body is `document(title, head, body)`. With
+/// `sheet`, the head links `/vyx.css` first ([`uiVyxRuntime`]).
+gen fn uiDocResponse(status: Code, title: Code, head: Code, body: Code, sheet: Bool) -> Code {
+    let linked = if sheet { vyrn"uiVyxHead(\{head})" } else { head }
+    return vyrn"Response { status: \{status}, contentType: \"text/html\", body: document(\{title}, \{linked}, \{body}), vary: \"\", headers: [:] }"
 }
 
 /// `d` must be in scope when the page has a loader.
-gen fn uiSuccessResponse(p: UiPageInfo, ns: Name, layoutIdxs: Array<Int64>) -> Code {
+gen fn uiSuccessResponse(p: UiPageInfo, ns: Name, layoutIdxs: Array<Int64>, sheet: Bool) -> Code {
     let body = uiWrapLayout(uiBodyCall(p, ns), layoutIdxs)
     if uiNeedsThreading(p, layoutIdxs) == false {
-        return uiDocResponse(vyrn"200", vyrn"\{p.urlPattern}", vyrn"[]", body)
+        return uiDocResponse(vyrn"200", vyrn"\{p.urlPattern}", vyrn"[]", body, sheet)
     }
     let args = uiPageCallArgs(p)
     let pageHead: Option<Code> = if p.isVyx { Some(vyrn"\{ns}.head(\{args})") } else { None }
     let pageTitle: Option<Code> = if p.isVyx { Some(vyrn"\{ns}.headTitle(\{args})") } else { None }
-    return uiDocResponse(vyrn"200", uiTitleExpr(layoutIdxs, pageTitle, p.urlPattern), uiHeadExpr(layoutIdxs, pageHead), body)
+    return uiDocResponse(vyrn"200", uiTitleExpr(layoutIdxs, pageTitle, p.urlPattern), uiHeadExpr(layoutIdxs, pageHead), body, sheet)
 }
 
 /// A `Result` loader, or a `Validation` loader with an `error.vyx`.
@@ -1582,9 +1584,9 @@ gen fn uiUsesErrDoc(p: UiPageInfo, errorIdx: Int64) -> Bool {
 
 /// Renders a `PageError` at its status through the nearest `error.vyx`, or a
 /// built-in body, inside the page's layouts.
-gen fn uiEmitErrDoc(n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64) -> Code {
+gen fn uiEmitErrDoc(n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64, sheet: Bool) -> Code {
     let inner = if errorIdx >= 0 { vyrn"\{uiNs("uiErrPg", errorIdx)}.errorPage(uiPe)" } else { vyrn"uiRoutePageError(uiPe)" }
-    let doc = uiDocResponse(vyrn"uiPe.status", uiTitleExpr(layoutIdxs, None, "Error"), uiHeadExpr(layoutIdxs, None), uiWrapLayout(inner, layoutIdxs))
+    let doc = uiDocResponse(vyrn"uiPe.status", uiTitleExpr(layoutIdxs, None, "Error"), uiHeadExpr(layoutIdxs, None), uiWrapLayout(inner, layoutIdxs), sheet)
     return vyrn"""
         fn \{uiNs("uiErrDoc", n)}(uiPe: PageError) -> Response {
             return \{doc}
@@ -1664,14 +1666,14 @@ gen fn uiRenderFn(p: UiPageInfo, n: Int64, fnName: String, tail: Code) -> Code {
 
 /// `uiRender<n>`: the page in its layouts with its head threaded, and the
 /// page's `uiErrDoc<n>` after it when a load failure renders one.
-gen fn uiEmitRender(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64) -> Code {
+gen fn uiEmitRender(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64, sheet: Bool) -> Code {
     let ns = uiNs("p", n)
     let bound = p.dynNames.length > 0
     if p.hasRespond {
         let respond = if bound { vyrn"return \{ns}.respond(p)" } else { vyrn"return \{ns}.respond()" }
         return uiRenderFn(p, n, "uiRender", respond)
     }
-    let success = uiSuccessResponse(p, ns, layoutIdxs)
+    let success = uiSuccessResponse(p, ns, layoutIdxs, sheet)
     if p.hasLoad == false {
         return uiRenderFn(p, n, "uiRender", vyrn"return \{success}")
     }
@@ -1680,11 +1682,11 @@ gen fn uiEmitRender(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx:
     } else if errorIdx >= 0 {
         vyrn"\{uiNs("uiErrDoc", n)}(uiIssuesToError(issues))"
     } else {
-        uiDocResponse(vyrn"422", vyrn"\"Error\"", vyrn"[]", vyrn"uiRouteError(issues)")
+        uiDocResponse(vyrn"422", vyrn"\"Error\"", vyrn"[]", vyrn"uiRouteError(issues)", sheet)
     }
     let out = uiRenderFn(p, n, "uiRender", uiMatchLoad(p, uiLoadCall(p, ns, bound), success, failure))
     if uiUsesErrDoc(p, errorIdx) {
-        return out + uiEmitErrDoc(n, layoutIdxs, errorIdx)
+        return out + uiEmitErrDoc(n, layoutIdxs, errorIdx, sheet)
     }
     return out
 }
@@ -1940,6 +1942,10 @@ gen fn uiBuildModule(call: String, pages: Array<UiPageInfo>, layouts: Array<UiCh
     }
 
     out = out + uiFixedRuntime()
+    let sheet = uiAnyVyx(pages) || layouts.length > 0 || errors.length > 0
+    if sheet {
+        out = out + uiVyxRuntime(pages, layouts.length, errors.length)
+    }
     if anyThreading {
         out = out + uiHeadRuntime()
     }
@@ -1948,7 +1954,7 @@ gen fn uiBuildModule(call: String, pages: Array<UiPageInfo>, layouts: Array<UiCh
     }
     i = 0
     while i < pages.length {
-        out = out + uiEmitRoute(pages[i], i, uiLayoutChain(pages[i], layouts), uiErrorIndex(pages[i], errors))
+        out = out + uiEmitRoute(pages[i], i, uiLayoutChain(pages[i], layouts), uiErrorIndex(pages[i], errors), sheet)
         i = i + 1
     }
     // The data channel, for client-renderable pages only.
@@ -1959,13 +1965,88 @@ gen fn uiBuildModule(call: String, pages: Array<UiPageInfo>, layouts: Array<UiCh
         }
         i = i + 1
     }
-    return out + uiEmitRouteFn(pages, anyClientPage) + uiEmitMountable(call, pages)
+    return out + uiEmitRouteFn(pages, anyClientPage, sheet) + uiEmitMountable(call, pages)
+}
+
+/// The style sheet of a router that reaches a `.vyx` module: `uiVyxSheet()`, every
+/// chunk the `vyxCss` of its `.vyx` pages, then its layouts, then its error pages
+/// answer, each once in that order; and `uiVyxHead(h)`, `h` after a link to
+/// `/vyx.css` when the sheet holds a rule. A chunk names its component's scope, so
+/// two equal chunks are one component's.
+gen fn uiVyxRuntime(pages: Array<UiPageInfo>, layouts: Int64, errors: Int64) -> Code {
+    let mut mods: Array<Code> = []
+    let mut i = 0
+    while i < pages.length {
+        if pages[i].isVyx {
+            mods.push(vyrn"\{uiNs("p", i)}.vyxCss()")
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < layouts {
+        mods.push(vyrn"\{uiNs("uiLay", i)}.vyxCss()")
+        i = i + 1
+    }
+    i = 0
+    while i < errors {
+        mods.push(vyrn"\{uiNs("uiErrPg", i)}.vyxCss()")
+        i = i + 1
+    }
+    let mut pulls = vyrn""
+    for m in mods {
+        pulls = pulls + vyrn"""
+            for chunk in \{m} {
+                uiVyxKeep(seen, chunk)
+            }
+            """
+    }
+    return vyrn"""
+        fn uiVyxKeep(seen: modify Array<String>, chunk: String) {
+            for s in seen {
+                if s == chunk {
+                    return
+                }
+            }
+            seen.push(chunk.copy())
+        }
+        fn uiVyxSheet() -> String {
+            let mut seen: Array<String> = []
+            \{pulls}
+            let mut out = ""
+            for s in seen {
+                out = out + s
+            }
+            return out
+        }
+        fn uiVyxHead(h: consume Array<Html>) -> Array<Html> {
+            if uiVyxSheet() == "" {
+                return h
+            }
+            let mut out: Array<Html> = [el("link", [A("rel", "stylesheet"), A("href", "/vyx.css")], [])]
+            for x in consume h {
+                out.push(x)
+            }
+            return out
+        }
+
+        """
 }
 
 /// `route(req)`: static routes first, first hit wins. Only a request that
 /// negotiated JSON consults the data channel.
-gen fn uiEmitRouteFn(pages: Array<UiPageInfo>, anyClientPage: Bool) -> Code {
+gen fn uiEmitRouteFn(pages: Array<UiPageInfo>, anyClientPage: Bool, sheet: Bool) -> Code {
     let mut body = vyrn""
+    if sheet {
+        body = vyrn"""
+            if req.method == "GET" && req.path == "/vyx.css" {
+                let sheet = uiVyxSheet()
+                if sheet != "" {
+                    return Response { status: 200, contentType: "text/css", body: sheet, vary: "", headers: [:] }
+                }
+            }
+
+            """
+    }
     for order in uiDispatchOrder(pages) {
         body = body + vyrn"""
             if uiRouteNone(hit) {

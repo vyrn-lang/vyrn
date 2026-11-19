@@ -548,8 +548,8 @@ fn demo_tests_run_green() {
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "demo tests failed:\n{combined}");
     assert!(
-        combined.contains("1 passed, 0 failed"),
-        "expected 1 green test:\n{combined}"
+        combined.contains("2 passed, 0 failed"),
+        "expected 2 green tests:\n{combined}"
     );
 }
 
@@ -1357,4 +1357,96 @@ fn a_script_import_is_judged_as_its_vyx() {
         err.contains("Widget.vyx:2:0: `runQuery` is exported"),
         "{err}"
     );
+}
+
+/// The app that prints the components' sheet and `widget()`.
+const STYLED_APP: &str = "import { components } from \"std/vyx\"\n\
+     import { toHtmlString } from \"std/html\"\n\
+     import { joinWith } from \"std/strings\"\n\
+     import { widget, vyxCss } from components(\"./comp\")\n\
+     fn main() -> Int64 {\n\
+     print(joinWith(vyxCss(), \"\"))\n\
+     print(toHtmlString(widget()))\n\
+     return 0\n\
+     }\n";
+
+#[test]
+fn a_style_block_scopes_its_rules_and_its_elements() {
+    let dir = scratch("styled");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<template>\n<div class=\"card\"><Inner/><Plain/></div>\n</template>\n\
+         <style>\n.card { color: red; }\n.card :global(.x) { color: blue; }\n\
+         h1, .card > p::before { content: \"{\"; }\n:global(body) { margin: 0; }\n\
+         @keyframes spin { from { opacity: 0; } }\n\
+         @media (min-width: 1px) { .card:hover { color: green; } }\n</style>\n",
+    );
+    write(
+        &dir.join("comp/Inner.vyx"),
+        "<template>\n<p class=\"in\">x</p>\n</template>\n<style>\n.in { color: gray; }\n</style>\n",
+    );
+    write(
+        &dir.join("comp/Plain.vyx"),
+        "<template>\n<b class=\"plain\"><i>y</i></b>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), STYLED_APP);
+    let (ok, out) = run_app(&dir);
+    assert!(ok, "the styled app must run:\n{out}");
+    // 8 hex digits of the FNV-1a hash of `comp/Widget.vyx` and `comp/Inner.vyx`.
+    let (w, i) = ("data-v-00047b99", "data-v-d9e2dae9");
+    for rule in [
+        format!("/* comp/Inner.vyx */\n.in[{i}] {{ color: gray; }}"),
+        format!("/* comp/Widget.vyx */\n.card[{w}] {{ color: red; }}"),
+        format!(".card[{w}] .x {{ color: blue; }}"),
+        format!("h1[{w}], .card > p[{w}]::before {{ content: \"{{\"; }}"),
+        "body { margin: 0; }".to_string(),
+        "@keyframes spin { from { opacity: 0; } }".to_string(),
+        format!("@media (min-width: 1px) {{\n.card[{w}]:hover {{ color: green; }}\n}}"),
+    ] {
+        assert!(out.contains(&rule), "missing `{rule}`:\n{out}");
+    }
+    // A child's root carries its own scope and the parent's; nothing inside a
+    // child carries the parent's.
+    assert!(
+        out.contains(&format!(
+            "<div class=\"card\" {w}=\"\"><p class=\"in\" {i}=\"\" {w}=\"\">x</p><b class=\"plain\" {w}=\"\"><i>y</i></b></div>"
+        )),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_css_syntax_error_is_refused_at_its_line_and_column() {
+    for (css, at, says) in [
+        ("  .card { color: red;\n", "Widget.vyx:5:9", "is never closed"),
+        (".a { b: c; }\n}\n", "Widget.vyx:6:1", "belongs to no rule"),
+        (".a { b: c; }\ncolor: red;\n", "Widget.vyx:6:11", "expected to hold \"{\" here"),
+        (".a { .b { c: d; } }\n", "Widget.vyx:5:9", "opens a block inside one"),
+    ] {
+        let dir = scratch("csserr");
+        write(
+            &dir.join("comp/Widget.vyx"),
+            &format!("<template>\n<div class=\"card\"></div>\n</template>\n<style>\n{css}</style>\n"),
+        );
+        write(&dir.join("app.vyrn"), APP);
+        let (ok, err) = run_app(&dir);
+        assert!(!ok, "a CSS syntax error must fail the load:\n{err}");
+        assert!(err.contains(at) && err.contains(says), "want {at} {says}:\n{err}");
+    }
+}
+
+#[test]
+fn a_style_block_out_of_place_is_refused() {
+    for (vyx, at, says) in [
+        ("<style>\n.a { b: c; }\n</style>\n<template>\n<div></div>\n</template>\n", "Widget.vyx:1:1", "stands outside its place"),
+        ("<template>\n<div></div>\n</template>\n<style>\n.a { b: c; }\n</style>\n<style>\n</style>\n", "Widget.vyx:7:1", "stands outside its place"),
+        ("<template>\n<div></div>\n</template>\n<style>\n.a { content: \"x }\n", "Widget.vyx:4:1", "`<style>` section is never closed"),
+    ] {
+        let dir = scratch("stylepos");
+        write(&dir.join("comp/Widget.vyx"), vyx);
+        write(&dir.join("app.vyrn"), APP);
+        let (ok, err) = run_app(&dir);
+        assert!(!ok, "a misplaced style block must fail the load:\n{err}");
+        assert!(err.contains(at) && err.contains(says), "want {at} {says}:\n{err}");
+    }
 }

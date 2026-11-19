@@ -22,16 +22,21 @@ row VforRunsIn
 row VforEmpty
 row ElseIfOrphan
 row ElseOrphan
+row StyleUnclosed
+row StyleStray
 
 // The sections and their bounds. It refuses nothing, so a tool reads a script beside a
 // broken template, and a reader judges a section before it reads the next.
 VyxOutline = anyPart (script:VyxScriptPart noTemplate template:VyxTemplatePart?
-                      / template:VyxTemplatePart noScript script:VyxScriptPart?)? rest
+                      / template:VyxTemplatePart noScript script:VyxScriptPart?)?
+             noStyle style:VyxStylePart? rest
 VyxScriptPart = open:'<script>' body:code close:'</script>'?
 VyxTemplatePart = open:'<template>' body:markup close:'</template>'?
+VyxStylePart = open:'<style>' body:css close:'</style>'?
 
-VyxFile = anyPart (scriptPart noTemplate)? template:VyxSection? rest
+VyxFile = anyPart (scriptPart noTemplate)? template:VyxSection? noStyle style:VyxStyle? rest
 VyxSection = '<template>' body:embed(markup, VyxMarkup) '</template>'
+VyxStyle = '<style>' body:embed(css, VyxCss) '</style>'
 VyxMarkup = comments (nodes:VyxNode comments)* stray:VyxClose?
 VyxNode = VyxElem / VyxInterp / VyxText
 VyxText = value:text
@@ -47,7 +52,8 @@ VyxAttrName = attrName fail ^AttrName
 
 anyPart = (!'<script>' !'<template>' .)*
 noTemplate = (!'<template>' .)*
-noScript = (!'<script>' .)*
+noScript = (!'<script>' !'<style>' .)*
+noStyle = (scriptPart / !'<style>' .)*
 rest = .*
 scriptPart = '<script>' code '</script>'?
 
@@ -62,6 +68,24 @@ nested = '<template' &([ \t\r\n>/] / eof) openRest markup '</template>'?
 openRest = (!'/>' !'>' (quoted / .))* '>'
 tagSkip = '<' (quoted / [^>])* '>'?
 quoted = '"' ('\\' . / [^"])* '"'? / '\'' ('\\' . / [^'])* '\''?
+
+// A style block's extent: a comment or a string hides a close tag. Its rules: a
+// rule's selector is the text before its `{`, an at-rule's block holds rules or
+// declarations, and a rule's block holds declarations only.
+css = (cssComment / quoted / !'</style>' .)*
+VyxCss = cssGap (items:VyxCssItem cssGap)* (eof / ^CssStray)
+VyxCssItem = VyxCssAt / VyxCssRule
+VyxCssAt = '@' name:cssName prelude:cssText? (';' / block:VyxCssBlock)
+VyxCssBlock = open:'{' cssGap (items:VyxCssInner cssGap)* ('}' / ^CssUnclosed@open)
+VyxCssInner = VyxCssAt / VyxCssRule / VyxCssDecl
+VyxCssRule = selector:cssText open:'{' decls:cssDecls
+             ('}' / &'{' ^CssNested / ^CssUnclosed@open)
+VyxCssDecl = text:cssText (';' / &'}')
+cssText = (cssComment / quoted / [^{};"'/] / '/' !'*')+
+cssDecls = (cssComment / quoted / [^{}"'/] / '/' !'*')*
+cssName = [A-Za-z0-9_-]+
+cssGap = ([ \t\r\n] / cssComment)*
+cssComment = '/*' (!'*/' .)* '*/'?
 
 comments = ('<!--' (!'-->' .)* '-->'?)*
 blank = [ \t\r\n]*

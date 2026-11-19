@@ -4,9 +4,27 @@
   "scopeName": "source.vyx",
   "patterns": [
     { "include": "#script-section" },
-    { "include": "#template-section" }
+    { "include": "#template-section" },
+    { "include": "#style-section" }
   ],
   "repository": {
+    "style-section": {
+      "comment": "The <style> block holds CSS, scoped to the component.",
+      "begin": "(<)(style)(>)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.vyx" },
+        "2": { "name": "entity.name.tag.style.vyx" },
+        "3": { "name": "punctuation.definition.tag.end.vyx" }
+      },
+      "end": "(</)(style)(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.vyx" },
+        "2": { "name": "entity.name.tag.style.vyx" },
+        "3": { "name": "punctuation.definition.tag.end.vyx" }
+      },
+      "contentName": "source.css",
+      "patterns": [{ "include": "source.css" }]
+    },
     "script-section": {
       "comment": "The <script> block holds ordinary Vyrn (props/params, imports, helpers).",
       "begin": "(<)(script)(>)",
