@@ -1601,7 +1601,8 @@ fn open_shop(name: &str, text: &str) -> (LspClient, String) {
         ("comp/models.vyrn", SHOP_MODELS),
         ("comp/Row.vyx", SHOP_ROW),
         ("comp/Listing.vyx", SHOP_LISTING),
-    ];
+    ]
+    .map(|(path, t)| (path, if path.ends_with(name) { text } else { t }));
     let dir = input_scratch(SHOP_APP, &files);
     let mut client = spawn_client();
     did_open(
@@ -1667,6 +1668,17 @@ fn vyx_hover_on_a_for_name_shows_its_type() {
 fn vyx_hover_on_a_component_tag_shows_its_props() {
     let (mut client, uri) = open_shop("Listing.vyx", SHOP_LISTING);
     let (l, c) = pos_after(SHOP_LISTING, "<Ro");
+    let hover = hover_value(&mut client, &uri, l, c).unwrap_or_default();
+    assert!(hover.contains("fn row(item: Item) -> Html"), "{hover}");
+}
+
+/// A region holds a position only up to its end: on `{{ x }} <Row/>` the tag
+/// does not map through `x`'s region.
+#[test]
+fn vyx_hover_on_a_tag_after_an_interpolation_shows_its_props() {
+    let listing = SHOP_LISTING.replace("<ul>\n", "<ul>\n{{ items.length }} ");
+    let (mut client, uri) = open_shop("Listing.vyx", &listing);
+    let (l, c) = pos_after(&listing, "}} <Ro");
     let hover = hover_value(&mut client, &uri, l, c).unwrap_or_default();
     assert!(hover.contains("fn row(item: Item) -> Html"), "{hover}");
 }
