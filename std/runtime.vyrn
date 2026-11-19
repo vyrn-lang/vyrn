@@ -1845,6 +1845,12 @@ export fn listDirKindsGenV(path: String) -> Result<Array<String>, String> {
     return adopt(listDirGenAt(addr(path), 4))
 }
 
+/// `appPath` under a generation: the host answers in mode 8 (`vyrn-genwasm`'s
+/// `MODE_APP_PATH`) with status 0, or aborts the run.
+export fn appPathGenV(path: String) -> String {
+    return adopt(slurpGen(addr(path), 8, true))
+}
+
 // Traps and the printer. Parity compares stderr, so every `error:` line in
 // the corpus tests these. A trap writes through `writeAll`, so the stdout
 // buffer is flushed first; `std/mem`'s `trap` is that write and

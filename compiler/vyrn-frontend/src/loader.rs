@@ -578,10 +578,9 @@ pub fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<St
     if remote_base(importer).is_none() {
         if let Some(target) = opts.aliases.get(spec) {
             if target.starts_with("./") || target.starts_with("../") {
-                let joined = if opts.alias_base.is_empty() {
-                    target.clone()
-                } else {
-                    format!("{}/{target}", opts.alias_base)
+                let joined = match opts.alias_base.as_deref() {
+                    Some(base) if !base.is_empty() => format!("{base}/{target}"),
+                    _ => target.clone(),
                 };
                 return Ok(normalize(&with_ext(joined)));
             }
@@ -607,8 +606,9 @@ pub fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<St
 pub struct LoadOptions {
     pub std_root: Option<String>,
     pub aliases: std::collections::HashMap<String, String>,
-    /// The manifest's directory, slash-separated; empty means the current one.
-    pub alias_base: String,
+    /// The manifest's directory, slash-separated, empty for the current one;
+    /// `None` without a manifest.
+    pub alias_base: Option<String>,
     /// The project's audience vocabulary, or `None` when `vyrn.json`
     /// has no `audience` key. `None` makes every module universal.
     pub audience: Option<crate::audience::AudienceMap>,
@@ -1818,17 +1818,9 @@ fn load_modules(
         // reports are diagnostics at the generator's severity.
         if let Some(g) = written {
             let importer = generated_importer(key).unwrap_or(key);
-            // The project that bounds an origin is the manifest's directory, or
-            // without a manifest the entry file's directory. A bound at the
-            // filesystem root made the refusal depend on the project's depth.
-            let project = if opts.alias_base.is_empty() {
-                dir_of(root_key)
-            } else {
-                opts.alias_base.as_str()
-            };
             let ctx = crate::origin::Context {
                 importer_dir: dir_of(importer),
-                project,
+                project: project_dir(opts, root_key),
             };
             w.origins.add_spans(key, &text, &g.spans, &ctx);
             // A page is generated twice and a generator can be re-entered, so
@@ -3240,7 +3232,7 @@ fn unlinked_import(
     if !only_named || !in_std(target, opts) {
         return None;
     }
-    let gens = match recorded_gens(imp, target, (key, program), opts, resolver, read) {
+    let gens = match recorded_gens(imp, target, (key, program), root_key, opts, resolver, read) {
         Some(gens) => gens,
         None => {
             let text = resolver.read(target).ok()?;
@@ -3264,6 +3256,7 @@ fn recorded_gens(
     imp: &ImportDecl,
     target: &str,
     (key, program): (&str, &Program),
+    root_key: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
     read: &mut HashMap<String, Option<String>>,
@@ -3284,7 +3277,7 @@ fn recorded_gens(
         .map(|a| crate::consteval::eval(a, &empty))
         .collect();
     let consts = consts?;
-    let call = gen_call(key, &consts, opts);
+    let call = gen_call(key, &consts, root_key, opts);
     let id = crate::gen::compiler_identity();
     let entry_key = generator_cache_key(&id, target, name, &call, opts);
     cached(&entry_key, target, opts, resolver, read)?
@@ -3589,7 +3582,7 @@ fn run_resolved(
 ) -> Result<Generated, Vec<Diagnostic>> {
     let Site { line, root_key } = site;
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
-    let call = gen_call(importer, consts, opts);
+    let call = gen_call(importer, consts, root_key, opts);
     let arg_repr = call.arg_repr.clone();
     let inner = generator_opts(opts, importer).map_err(err)?;
     generation(
@@ -3629,10 +3622,22 @@ fn run_resolved(
     })
 }
 
-/// What the generator import of `consts` written in `importer` runs on.
+/// The project a load of `root_key` stands in: the manifest's directory, or
+/// without a manifest the entry file's directory. A bound at the filesystem
+/// root made a refusal depend on the project's depth.
+pub(crate) fn project_dir<'a>(opts: &'a LoadOptions, root_key: &'a str) -> &'a str {
+    match opts.alias_base.as_deref() {
+        Some(base) => base,
+        None => dir_of(root_key),
+    }
+}
+
+/// What the generator import of `consts` written in `importer`, in the load of
+/// `root_key`, runs on.
 fn gen_call<'a>(
     importer: &str,
     consts: &'a [crate::consteval::ConstVal],
+    root_key: &str,
     opts: &LoadOptions,
 ) -> GenCall<'a> {
     let importer_dir = dir_of(generated_importer(importer).unwrap_or(importer)).to_string();
@@ -3670,6 +3675,7 @@ fn gen_call<'a>(
         type_arg: None,
         arg_repr: args_repr(consts),
         importer_dir,
+        project: project_dir(opts, root_key).to_string(),
         allowed,
         aliased,
     }
@@ -3685,6 +3691,8 @@ pub(crate) struct GenCall<'a> {
     pub(crate) arg_repr: String,
     /// The directory a relative read resolves against.
     pub(crate) importer_dir: String,
+    /// The directory `appPath` answers relative to ([`project_dir`]).
+    pub(crate) project: String,
     /// The sandbox's input roots, and the alias pairs it cannot resolve.
     pub(crate) allowed: Vec<String>,
     pub(crate) aliased: Vec<(String, String)>,
@@ -3767,6 +3775,7 @@ pub(crate) fn generation(
                 opts: inner,
                 module: gen_mod_key.to_string(),
                 importer_dir: call.importer_dir.clone(),
+                project: call.project.clone(),
                 allowed: call.allowed.clone(),
                 aliased: call.aliased.clone(),
                 fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
@@ -4163,7 +4172,7 @@ fn generator_cache_key(
         gen_mod_key,
         name,
         &call.arg_repr,
-        &opts.alias_base,
+        &call.project,
         &count,
     ]
     .into_iter()
@@ -7711,7 +7720,7 @@ mod tests {
 
     #[test]
     fn two_compilers_do_not_share_a_generator_output() {
-        let call = gen_call("m.vyrn", &[], &LoadOptions::default());
+        let call = gen_call("m.vyrn", &[], "m.vyrn", &LoadOptions::default());
         let key = |id: &str| generator_cache_key(id, "m.vyrn", "g", &call, &LoadOptions::default());
         assert_ne!(key("0.1.0:1:2"), key("0.1.0:1:3"));
     }
@@ -7724,7 +7733,7 @@ mod tests {
             aliases: [("pad".to_string(), target.to_string())].into(),
             ..Default::default()
         };
-        let call = gen_call("m.vyrn", &[], &LoadOptions::default());
+        let call = gen_call("m.vyrn", &[], "m.vyrn", &LoadOptions::default());
         let key = |o: &LoadOptions| generator_cache_key("id", "g.vyrn", "mk", &call, o);
         assert_ne!(key(&pinned("./a.vyrn")), key(&pinned("./b.vyrn")));
     }

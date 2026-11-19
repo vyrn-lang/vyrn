@@ -531,6 +531,9 @@ pub struct GenInputs<'a> {
     pub module: String,
     /// The importing module's directory: the base for relative paths.
     pub importer_dir: String,
+    /// The directory `appPath` answers relative to: the manifest's, or without
+    /// one the entry file's (`loader::project_dir`).
+    pub project: String,
     /// Resolved path prefixes the generator may read under: its constant path
     /// arguments. Empty means no filesystem access.
     pub allowed: Vec<String>,
@@ -555,6 +558,47 @@ pub struct GenInputs<'a> {
     /// `sources_fingerprint`; otherwise the engine answers
     /// [`GenError::Unchecked`].
     pub checked: bool,
+}
+
+/// Answers `appPath`: the resolver key `resolved` spelled from `project`, which
+/// is empty for the working directory. On Windows the comparison folds ASCII case.
+///
+/// # Errors
+///
+/// The trap message when `resolved` lies outside `project`: an answer there
+/// would spell the machine's layout.
+pub fn app_path(project: &str, resolved: &str) -> Result<String, String> {
+    // A key is as relative as the path the CLI was handed, and the manifest's
+    // directory may be absolute: the key is then spelled from the working
+    // directory, which need not be the project's.
+    let absolute = crate::audience::is_absolute;
+    let cwd = std::env::current_dir().ok();
+    let key = match cwd.filter(|_| absolute(project) && !absolute(resolved)) {
+        Some(dir) => {
+            let dir = dir.to_string_lossy().replace('\\', "/");
+            crate::loader::normalize(&format!("{dir}/{resolved}"))
+        }
+        None => resolved.to_string(),
+    };
+    let fold = |s: &str| {
+        if cfg!(windows) {
+            s.to_ascii_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+    let base = fold(project.trim_end_matches('/'));
+    let under = fold(&key);
+    if base.is_empty() {
+        return Ok(key.trim_start_matches('/').to_string());
+    }
+    let rel = under
+        .strip_prefix(&base)
+        .and_then(|r| r.strip_prefix('/'))
+        .map(|r| key[key.len() - r.len()..].to_string());
+    rel.ok_or_else(|| {
+        format!("`appPath` answers only a path inside the project `{project}`, and `{resolved}` is outside it")
+    })
 }
 
 /// Resolves a mediated path argument against the importer's directory and
@@ -944,6 +988,7 @@ pub fn derive(
             type_arg: Some(&arg),
             arg_repr: format!("{arg:?}"),
             importer_dir: String::new(),
+            project: crate::loader::project_dir(opts, root).to_string(),
             allowed: Vec::new(),
             aliased: Vec::new(),
         };
