@@ -157,7 +157,8 @@ consume s { .. }` takes `s`, and each binder is owned. A refutable `let`
 variant does not match; its binders borrow as a `match` arm's do.
 
 A value read out of a place is an alias of that place. `let a = b.xs[0]`
-followed by a store of `a` is refused, because `b.xs` still owns the element.
+followed by a store of `a`, or by `consume a.name`, is refused, because `b.xs`
+still owns the element. `let a = consume b.f` takes the field instead.
 So is `xs[0] = xs[1]`, even where the two indices are equal; the fix is
 `xs[1].copy()`.
 A `let mut` name that owns its value stays an owner: `s = xs[1]` stores a copy

@@ -3210,3 +3210,84 @@ fn main() -> Int64 {
         )
     );
 }
+
+/// The field-move family: a record moved out of a field of a local, by
+/// `let g = consume r.g` or into a `consume` parameter, left early by
+/// `return`, `break` or `?`, then taken apart one or two fields at a time.
+/// Each shape runs once through and once out at the exit. A take out of
+/// `let g = r.g`, an alias, is refused (refusals.rs, r98).
+#[test]
+fn a_record_moved_out_of_a_field_is_taken_apart_and_released_once() {
+    // A field's type, a value, the value's measure, and that measure.
+    let kinds = r#"String|"ab".copy()|v.byteLength|2
+Bx|Bx { s: "abc".copy() }|v.s.byteLength|3
+Array<String>|["a".copy(), "bc".copy()]|v.length|2
+K|Ka("abcd".copy())|match consume v { Ka(s) => s.byteLength, Kb => 0 }|4
+Option<String>|Some("abcde".copy())|match consume v { Some(s) => s.byteLength, None => 0 }|5"#;
+    // An exit, what it adds through, and what a run out at it gives by `let`
+    // and by passing. A `consume` parameter taken apart in a loop is
+    // refused, its hole on one edge of the join, so no passing shape breaks.
+    let exits = [
+        ("if g.z.byteLength == k { return 99 }", "0", 99, Some(102)),
+        ("if g.z.byteLength == k { break }", "0", 0, None),
+        ("let w = gate(g.z.byteLength, k)?", "w", 99, Some(99)),
+    ];
+    let mut src = String::from(
+        "type Bx = { s: String }\ntype K = enum { Ka(String), Kb }\n\
+         fn gate(z: Int64, k: Int64) -> Option<Int64> {\nif z == k { return None }\nreturn Some(z)\n}\n",
+    );
+    let (mut main, mut want, mut i) = (String::new(), String::new(), 0);
+    for kind in kinds.lines() {
+        let k: Vec<&str> = kind.split('|').collect();
+        let (ty, mk, eat, m) = (k[0], k[1], k[2], k[3].parse::<i64>().unwrap());
+        for (leave, w, by_let, by_pass) in exits {
+            let opt = w == "w";
+            let (q, rt, some) = match opt {
+                true => ("?", "Option<Int64>", "Some"),
+                false => ("", "Int64", ""),
+            };
+            let (open, close) = match by_pass {
+                None => ("while true {\n", "}\nreturn 0\n"),
+                Some(_) => ("", ""),
+            };
+            for (pass, out) in [(false, Some(by_let)), (true, by_pass)] {
+                let Some(out) = out else { continue };
+                for parts in [1, 2] {
+                    let b = match parts {
+                        2 => format!("eat{i}(consume g.y)"),
+                        _ => "0".to_string(),
+                    };
+                    let take = format!("{leave}\nlet a = eat{i}(consume g.x)\nlet b = {b}\n");
+                    src += &format!(
+                        "type In{i} = {{ x: {ty}, y: {ty}, z: String }}\ntype Ou{i} = {{ g: In{i}, c: String }}\n\
+                         fn mk{i}() -> Ou{i} {{\nlet g = In{i} {{ x: {mk}, y: {mk}, z: \"zz\".copy() }}\n\
+                         return Ou{i} {{ g: g, c: \"ccc\".copy() }}\n}}\n\
+                         fn eat{i}(v: consume {ty}) -> Int64 {{ return {eat} }}\n"
+                    );
+                    src += &match pass {
+                        true => format!(
+                            "fn use{i}(g: consume In{i}, k: Int64) -> {rt} {{\n{take}\
+                             return {some}(a + b + g.z.byteLength + {w})\n}}\n\
+                             fn in{i}(k: Int64) -> {rt} {{\nlet r = mk{i}()\nlet n = use{i}(consume r.g, k){q}\n\
+                             let c = consume r.c\nreturn {some}(n + c.byteLength)\n}}\n"
+                        ),
+                        false => format!(
+                            "fn in{i}(k: Int64) -> {rt} {{\n{open}let r = mk{i}()\nlet g = consume r.g\n{take}\
+                             let c = consume r.c\nreturn {some}(a + b + c.byteLength + g.z.byteLength + {w})\n{close}}}\n"
+                        ),
+                    };
+                    let run = match opt {
+                        true => format!("match in{i}(k) {{ Some(v) => v, None => 99 }}"),
+                        false => format!("in{i}(k)"),
+                    };
+                    src += &format!("fn run{i}(k: Int64) -> Int64 {{ return {run} }}\n");
+                    main += &format!("print(\"\\{{run{i}(0)}} \\{{run{i}(2)}}\")\n");
+                    want += &format!("{} {out}\n", m * parts + 5 + 2 * opt as i64);
+                    i += 1;
+                }
+            }
+        }
+    }
+    src += &format!("fn main() -> Int64 {{\n{main}return 0\n}}\n");
+    assert_eq!(audited_run("fieldmove", &src), (Some(0), want));
+}

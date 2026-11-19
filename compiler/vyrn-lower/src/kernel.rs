@@ -933,11 +933,11 @@ impl<'b> Kernel<'b> {
                 Some(Alias { via: Some(m), .. }) if self.owned(*m))
     }
 
-    /// A payload binder handed on leaves its payload as a hole in the
-    /// scrutinee, which the scrutinee's release walks around. A type that
-    /// declares `release` owns the whole of its value, so the hand-off is
-    /// refused.
-    fn leaves_payload(&self, st: &mut State, n: Name) -> Result<(), Refusal> {
+    /// A payload binder handed on, or its part at `under` taken, leaves a
+    /// hole in the scrutinee, which the scrutinee's release walks around. A
+    /// type that declares `release` owns the whole of its value, so the
+    /// hand-off is refused.
+    fn leaves_payload(&self, st: &mut State, n: Name, under: &str) -> Result<(), Refusal> {
         let payload = match &self.body.names[n.index()].payload {
             None => return Ok(()),
             Some(Payload::Sealed(ty)) => {
@@ -959,7 +959,7 @@ impl<'b> Kernel<'b> {
         else {
             return Ok(());
         };
-        let (r, hole) = (*r, format!("{path}{payload}"));
+        let (r, hole) = (*r, format!("{path}{payload}{under}"));
         if !st.holes(r).contains(&hole) {
             st.hole_taken((r, hole.clone(), self.here, Vec::new()));
             st.add_hole(r, hole);
@@ -1514,6 +1514,9 @@ impl<'b> Kernel<'b> {
                 None => format!("`{s}` may not be stored into the literal"),
             };
         }
+        if *by == By::Consume {
+            return format!("`{s}` may not be consumed");
+        }
         if !matches!(by, By::Call(_)) && self.takes.get() != Taker::Writes {
             return format!("`{s}` may not be stored into {by}");
         }
@@ -2008,7 +2011,7 @@ impl<'b> Kernel<'b> {
                 // A payload binder handed on moves that part, whatever takes
                 // it (#572).
                 if consume || self.body.names[n.index()].heap {
-                    self.leaves_payload(st, *n)?;
+                    self.leaves_payload(st, *n, "")?;
                 }
                 return Ok(());
             }
@@ -2060,20 +2063,29 @@ impl<'b> Kernel<'b> {
         }
     }
 
-    /// A take out of a sub-place: the root keeps a hole there.
+    /// A take out of a sub-place: the root keeps a hole there. Under an
+    /// alias the take reaches the place the alias reads, so it is judged as
+    /// a take of the alias whole ([`Kernel::take_arg`]).
     fn take_place(&self, st: &mut State, p: &Place) -> Result<(), Refusal> {
         self.place(st, p)?;
-        if let Some((n, path)) = root_of(p) {
-            if self.owned(n) && !path.is_empty() {
-                let fixes = self.body.consumes.get(&(self.stmt, n, path.clone()));
-                st.hole_taken((
-                    n,
-                    path.clone(),
-                    self.here,
-                    fixes.cloned().unwrap_or_default(),
-                ));
-                st.add_hole(n, path);
+        let Some((n, path)) = root_of(p).filter(|(_, path)| !path.is_empty()) else {
+            return Ok(());
+        };
+        if st.alias(n).is_some() {
+            if !self.gives(st, n) {
+                return Err(self.alias_take(st, n, false));
             }
+            return self.leaves_payload(st, n, &path);
+        }
+        if self.owned(n) {
+            let fixes = self.body.consumes.get(&(self.stmt, n, path.clone()));
+            st.hole_taken((
+                n,
+                path.clone(),
+                self.here,
+                fixes.cloned().unwrap_or_default(),
+            ));
+            st.add_hole(n, path);
         }
         Ok(())
     }
@@ -2644,7 +2656,7 @@ impl<'b> Kernel<'b> {
             // hand-off ([`Kernel::equalize`] places one on an edge).
             St::Drop(n, ..) if self.gives(st, *n) => {
                 self.alias_read(st, *n, "used")?;
-                self.leaves_payload(st, *n)?;
+                self.leaves_payload(st, *n, "")?;
             }
             // A placed release of a must-use temporary abandons it: no
             // position took it, and only a loop takes one by releasing it.

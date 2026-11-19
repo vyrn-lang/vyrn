@@ -670,6 +670,12 @@ fn census() -> Vec<Row> {
              parameter",
             Kernel::Its,
         ),
+        row(
+            "r98_a_prefix_consume_of_a_part_of_a_field_read.vyrn",
+            "rule 2: a prefix `consume` of a part of a field read",
+            "`g` may not be consumed: it is read out of a place that owns it",
+            Kernel::Its,
+        ),
     ]
 }
 
