@@ -98,10 +98,29 @@ fn main() -> Int64 {
     assert_eq!(d.end_col, 13);
 }
 
-/// The pinner's keyword path: the message's first backticked token is `if`, a reserved
-/// word the keyword column map resolves.
+/// The pinner's keyword path: the message's first backticked token is `break`, a
+/// reserved word the keyword column map resolves.
 #[test]
-fn if_condition_pinned_to_if_keyword() {
+fn break_outside_a_loop_pinned_to_break_keyword() {
+    let src = "\
+fn main() -> Int64 {
+    break
+    return 0
+}
+";
+    let d = first(src).expect("a break diagnostic");
+    // `    break`: `break` at cols 5-9.
+    assert_eq!(d.line, 2);
+    assert_eq!(
+        d.col, 5,
+        "pinned to the `break` keyword, not col 0 (whole line)"
+    );
+    assert_eq!(d.end_col, 10);
+}
+
+/// A condition that is no Bool sits where the condition starts.
+#[test]
+fn if_condition_sits_on_the_condition() {
     let src = "\
 fn main() -> Int64 {
     if 5 {
@@ -111,13 +130,8 @@ fn main() -> Int64 {
 }
 ";
     let d = first(src).expect("an if-condition diagnostic");
-    // `    if 5 {`: `if` at cols 5-6.
-    assert_eq!(d.line, 2);
-    assert_eq!(
-        d.col, 5,
-        "pinned to the `if` keyword, not col 0 (whole line)"
-    );
-    assert_eq!(d.end_col, 7);
+    // `    if 5 {`: `5` at col 8.
+    assert_eq!((d.line, d.col), (2, 8));
 }
 
 /// The core states the rule where it builds the switch, and the pinner reads the

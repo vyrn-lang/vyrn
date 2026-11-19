@@ -482,11 +482,10 @@ pub(crate) fn returns(ss: &[St]) -> bool {
 }
 
 /// The refusal of a frame that can end without the value it owes, which
-/// `rule` states from the type owed.
-fn falls_through(body: &mut Body, owes: &Type, line: usize, rule: impl FnOnce(String) -> Rule) {
+/// `said` states from the type owed.
+fn falls_through(body: &mut Body, owes: &Type, said: impl FnOnce(String) -> Said) {
     if *owes != Type::Unit && !returns(&body.stmts) {
-        body.refused
-            .push(Said::line(line, rule(owes.to_string()).render()));
+        body.refused.push(said(owes.to_string()));
     }
 }
 
@@ -1258,8 +1257,9 @@ fn seeded<'a>(
             cut(&mut out);
             b.body.stmts = out;
             let name = b.body.spelled(&f.name).to_string();
-            falls_through(&mut b.body, &f.ret, f.line, |owes| {
-                rule!(FunctionFallsThrough, name, owes)
+            falls_through(&mut b.body, &f.ret, |owes| {
+                let rule = rule!(FunctionFallsThrough, name, owes);
+                Said::at(f.line, Id::at(f.col), rule.render())
             });
         }
         Source::Block(ob) => {
@@ -2648,7 +2648,7 @@ impl<'a> Builder<'a> {
                         index: i as u32,
                     });
                 }
-                self.covers(&core_arms, &rt, *mline, out)?;
+                self.covers(&core_arms, &rt, e, *mline, out)?;
                 out.push(St::Switch {
                     on: sv,
                     arms: core_arms,
@@ -4862,11 +4862,13 @@ impl<'a> Builder<'a> {
     /// Refuses a `match` whose arms do not take each variant of `sty` once:
     /// a tag twice, or, with no default arm, a variant no arm takes. A
     /// `match` with no arm also gets a `trap` ahead of the switch, so the
-    /// kernel never joins a switch no edge leaves.
+    /// kernel never joins a switch no edge leaves. A refusal sits on `m`, the
+    /// `match`.
     fn covers(
         &mut self,
         arms: &[Arm],
         rt: &Type,
+        m: &Expr,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -4886,7 +4888,7 @@ impl<'a> Builder<'a> {
                     let v = self.body.speech().name(&variants[t as usize].name);
                     self.body
                         .refused
-                        .push(Said::line(line, rule!(DuplicateArm, v).render()));
+                        .push(Said::of(line, m, rule!(DuplicateArm, v).render()));
                     return Ok(());
                 }
                 *seen = true;
@@ -4898,7 +4900,7 @@ impl<'a> Builder<'a> {
         if let Some((v, _)) = variants.iter().zip(&taken).find(|(_, t)| !**t) {
             let v = self.body.speech().name(&v.name);
             let refusal = rule!(MissingVariant, v).render();
-            self.body.refused.push(Said::line(line, refusal));
+            self.body.refused.push(Said::of(line, m, refusal));
         }
         Ok(())
     }
@@ -5688,8 +5690,8 @@ impl<'a> Builder<'a> {
         cut(&mut stmts);
         self.body.stmts = stmts;
         if let (Some(owes), LambdaBody::Block(_)) = (self.frame.ret.clone(), body) {
-            falls_through(&mut self.body, &owes, *line, |owes| {
-                rule!(LambdaFallsThrough, owes)
+            falls_through(&mut self.body, &owes, |owes| {
+                Said::of(*line, e, rule!(LambdaFallsThrough, owes).render())
             });
         }
         let frame = std::mem::replace(&mut self.body, outer);
@@ -6617,7 +6619,7 @@ impl<'a> Builder<'a> {
                         index: i as u32,
                     });
                 }
-                self.covers(&core_arms, &rt, *line, out)?;
+                self.covers(&core_arms, &rt, e, *line, out)?;
                 self.join_borrows(res, &yields);
                 out.push(St::Switch {
                     on: sv,

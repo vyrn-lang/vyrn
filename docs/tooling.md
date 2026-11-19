@@ -523,7 +523,11 @@ one warning that names the search. Completion and go-to-definition in the
 input's own grammar come from the `gen fn vyrnComplete*` and
 `vyrnDefinition*` in the claiming generator module's editor companion
 (`loader::call_generator`), `std/vyx.editor`'s for `.vyx`; anywhere else the
-cursor maps through `OriginMaps` into the generated module.
+cursor maps through `OriginMaps` into the generated module. There a name on an
+import line the module dropped as a repeat maps to the import that kept it, and
+a component tag to the declaration of the view its file provides, so its hover
+shows the props. The module is analysed as a file beside its root, with each
+relative import respelled from there (`loader::generated_modules`).
 
 Each line that allocates, copies, grows a container, enters an allocating
 function of another file or keeps a check ends in an inlay hint of a few plain

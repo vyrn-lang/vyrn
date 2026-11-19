@@ -1539,6 +1539,10 @@ pub fn routed_callee<'e>(
 /// Returns the generated source of every generator module reachable from the
 /// root, as `(banner, source)` pairs in load order. Runs the whole load, cache
 /// included, and discards the link.
+///
+/// Each source loads as a file beside the root: a relative import resolves
+/// beside its writer ([`spec_base`]), such as the `.vyx` it was copied from,
+/// so it is respelled from the root's directory. Only the specifier moves.
 pub fn generated_modules(
     root_source: &str,
     root_path: &str,
@@ -1546,10 +1550,36 @@ pub fn generated_modules(
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
 ) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
-    let (graph, _) = module_graph(root_source, root_path, opts, resolver, engine);
-    Ok(graph?
+    let (modules, root_key, ..) =
+        load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
+    let dir = dir_of(&root_key);
+    let std_root = opts.std_root.as_deref();
+    Ok(modules
         .into_iter()
-        .filter_map(|(key, _, gen)| gen.map(|g| (key, g.source)))
+        .filter_map(|m| {
+            let mut text = m.generated?.source;
+            let paths = m.program.imports.iter().zip(&m.import_targets);
+            // Last first, so an earlier specifier's offset holds.
+            for (imp, target) in paths.rev() {
+                let ImportSource::Path(spec) = &imp.source else {
+                    continue;
+                };
+                let (line, col) = imp.source_at;
+                let start: usize = text
+                    .split_inclusive('\n')
+                    .take(line - 1)
+                    .map(str::len)
+                    .sum();
+                let at =
+                    (text[start..].char_indices().nth(col - 1)).map_or(start, |(i, _)| start + i);
+                let quoted = format!("\"{spec}\"");
+                if spec.starts_with('.') && text[at..].starts_with(&quoted) {
+                    let respelled = format!("\"{}\"", import_specifier(dir, target, std_root));
+                    text.replace_range(at..at + quoted.len(), &respelled);
+                }
+            }
+            Some((m.key, text))
+        })
         .collect())
 }
 

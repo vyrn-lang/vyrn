@@ -1193,7 +1193,8 @@ impl<'a> Iterator for Rows<'a> {
 }
 
 /// A sentence a pass refuses a construct with, at the construct's line and the
-/// 1-based column of the name it spells: 0 where it spells none.
+/// 1-based column of the name it spells, else of where it starts: 0 where
+/// neither is on that line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Said {
     pub line: usize,
@@ -1206,16 +1207,16 @@ impl Said {
         self.col
     }
 
-    /// `text` at `line`, on the name `e` spells when `e` starts on that line.
-    /// A callee with no spelling of its own (`@at`, whose column is its `]`)
-    /// spells none.
+    /// `text` at `line`, on the name `e` spells when `e` starts on that line,
+    /// else where `e` starts when that is on `line`. A callee with no spelling
+    /// of its own (`@at`, whose column is its `]`) spells none.
     pub fn of(line: usize, e: &crate::ast::Expr, text: String) -> Said {
         let unspelled =
             matches!(e, crate::ast::Expr::Call { name, .. } if name == crate::project::AT);
-        let col = if e.line() == line && !unspelled {
-            e.col()
-        } else {
-            0
+        let col = match e.start() {
+            _ if e.line() == line && !unspelled && e.col() > 0 => e.col(),
+            (l, col) if l == line => col,
+            _ => 0,
         };
         Said { line, col, text }
     }

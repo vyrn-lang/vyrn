@@ -86,6 +86,15 @@ fn on_name(mut d: Diagnostic, col: usize) -> Diagnostic {
     d
 }
 
+/// `d` at the column of `start`, the node it refuses, when `d` has no column
+/// and `start` is on its line.
+fn on_start(d: Diagnostic, (line, col): (usize, usize)) -> Diagnostic {
+    match d.line == line && d.file.is_none() {
+        true => on_name(d, col),
+        false => d,
+    }
+}
+
 /// The receiver of a protocol-call sentence as the source wrote it: a name or a
 /// field path, else `x`, because no other expression keeps its spelling.
 fn receiver_text(e: Option<&Expr>) -> String {
@@ -3866,10 +3875,12 @@ impl<'a> Checker<'a> {
         {
             self.note_use(scope, name, *line, *id);
         }
+        let typed = self.expr_inner(expr, scope, expected, fn_ret);
+        let typed = typed.map_err(|d| on_start(d, expr.start()));
         if !self.recording() {
-            return self.expr_inner(expr, scope, expected, fn_ret);
+            return typed;
         }
-        let t = self.expr_inner(expr, scope, expected, fn_ret)?;
+        let t = typed?;
         let key = expr.id();
         assert_ne!(
             key,
