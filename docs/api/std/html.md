@@ -105,14 +105,6 @@ fn keyed(k: consume String, node: consume Html) -> Html
 
 Keying a non-element node returns it unchanged.
 
-## withAttr
-
-```vyrn
-fn withAttr(node: consume Html, a: consume Attr) -> Html
-```
-
-`node` with `a` after its attributes. A non-element node returns unchanged.
-
 ## toHtmlString
 
 ```vyrn
@@ -180,3 +172,11 @@ fn document(title: String, head: Array<Html>, body: Html) -> String
 ```
 
 A full `<!doctype html>` page. `title` is escaped.
+
+## withAttr
+
+```vyrn
+fn withAttr(node: consume Html, a: consume Attr) -> Html
+```
+
+`node` with `a` after its attributes. A non-element node returns unchanged.
