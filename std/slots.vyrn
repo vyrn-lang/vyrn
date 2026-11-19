@@ -10,15 +10,13 @@
 ///     let h = insert(people, Person { name: "ada" })
 ///     people[h].name = "lovelace"       // traps on a dead handle, like a[i] on OOB
 ///     match get(people, h) { Some(p) => .., None => .. }     // liveness as a value
-///     remove(people, h)                 // the slot's generation bumps
+///     let gone = remove(people, h)      // the payload; the generation bumps
 ///
 /// A handle from another container of the same element type is dead, not
 /// plausible: every container takes an identity and every handle carries it.
-/// `remove` does not clear the payload, because the language has no
-/// uninitialized place; the dead payload is released when the slot is reused or
-/// the container drops. `remove` moves the last live element into the hole, so
-/// iteration order is not insertion order; iterate `handles` if the order
-/// matters.
+/// `remove` hands the payload back and moves the last live element into its
+/// place, so iteration order is not insertion order; iterate `handles` if the
+/// order matters.
 
 /// A handle into a `Slots<T>`. `T` only brands it, so the compiler refuses a
 /// `Handle<Order>` where a `Handle<Person>` belongs.
@@ -26,10 +24,11 @@ export type Handle<T> = { slot: Int64, gen: Int64, owner: Int64 }
 
 /// A generational slab.
 ///
-/// `vals` and `gens` are parallel and indexed by slot. `dense` orders every
-/// slot, the live ones in iteration order and then the last `free`, the most
-/// recently freed first. `denseAt` maps a slot back to its position, so
-/// `remove` is O(1) and iteration skips free slots.
+/// `gens` is indexed by slot. `dense` orders every slot, the live ones in
+/// iteration order and then the last `free`, the most recently freed first.
+/// `denseAt` maps a slot back to its position. `vals` holds the live payloads
+/// at their positions, so `remove` is O(1) and moves a payload out, and
+/// iteration reads `vals` in order.
 export type Slots<T> = {
     vals: Array<T>,
     gens: Array<Int64>,
@@ -61,16 +60,16 @@ export fn newSlots<T>() -> Slots<T> {
 }
 
 /// Puts `v` in the slab and returns a handle to it. Reuses a free slot when there
-/// is one, and the store releases the dead payload it held.
+/// is one: the first free position is the one after the live ones, where `v`
+/// lands.
 export fn insert<T>(s: modify Slots<T>, v: consume T) -> Handle<T> {
+    s.vals.push(v)
     if s.free > 0 {
         let i = s.dense[s.dense.length - s.free]
-        s.vals[i] = v
         s.free = s.free - 1
         return Handle { slot: i, gen: s.gens[i], owner: s.owner }
     }
-    let i = s.vals.length
-    s.vals.push(v)
+    let i = s.gens.length
     s.gens.push(1)
     s.dense.push(i)
     s.denseAt.push(i)
@@ -96,15 +95,15 @@ export fn get<T>(s: Slots<T>, h: Handle<T>) -> Option<T> {
     if !alive(s, h) {
         return None
     }
-    return Some(s.vals[h.slot].copy())
+    return Some(s.vals[s.denseAt[h.slot]].copy())
 }
 
-/// Releases the element `h` names: bumps the slot's generation, so every handle
-/// to it is dead, and returns the slot to the free list. Answers whether `h` was
-/// alive, so removing twice is a no-op.
-export fn remove<T>(s: modify Slots<T>, h: Handle<T>) -> Bool {
+/// Takes the element `h` names out of `s`: bumps the slot's generation, so every
+/// handle to it is dead, and returns the slot to the free list. Answers the
+/// element, or `None` when `h` was not alive, so removing twice is a no-op.
+export fn remove<T>(s: modify Slots<T>, h: Handle<T>) -> Option<T> {
     if !alive(s, h) {
-        return false
+        return None
     }
     let d = s.denseAt[h.slot]
     let end = s.dense.length - s.free - 1
@@ -115,7 +114,7 @@ export fn remove<T>(s: modify Slots<T>, h: Handle<T>) -> Bool {
     s.denseAt[h.slot] = end
     s.free = s.free + 1
     s.gens[h.slot] = h.gen + 1
-    return true
+    return Some(s.vals.swapRemove(d))
 }
 
 /// How many elements are live.
@@ -125,7 +124,7 @@ export fn count<T>(s: Slots<T>) -> Int64 {
 
 /// How many slots the table holds, live and free together.
 export fn capacity<T>(s: Slots<T>) -> Int64 {
-    return s.vals.length
+    return s.gens.length
 }
 
 /// A handle to every live element, in iteration order.
@@ -149,37 +148,36 @@ impl<T> Index for Slots<T> {
         if !alive(self, h) {
             return None
         }
-        return Some(self.vals[h.slot])
+        return Some(self.vals[self.denseAt[h.slot]])
     }
 
     fn at(read self, h: Handle<T>) -> read T {
         if !alive(self, h) {
             panic("slots: handle is not alive")
         }
-        return self.vals[h.slot]
+        return self.vals[self.denseAt[h.slot]]
     }
     fn atSet(modify self, h: Handle<T>) -> modify T {
         if !alive(self, h) {
             panic("slots: handle is not alive")
         }
-        return self.vals[h.slot]
+        return self.vals[self.denseAt[h.slot]]
     }
 }
 
 /// `for x in s` walks the live elements in `dense` order.
 impl<T> Iterate for Slots<T> {
     fn size(self) -> Int64 {
-        return self.dense.length - self.free
+        return self.vals.length
     }
     fn nth(read self, i: Int64) -> read T {
-        return self.vals[self.dense[i]]
+        return self.vals[i]
     }
 }
 
-/// Releases the four buffers. `drop vals` also releases every payload in `vals`,
-/// removed ones included: every slot below `vals.length` holds exactly one
-/// payload this slab owns, because `insert` consumes and a store releases what it
-/// replaces. Do not add a loop over `vals` as well: it frees each payload twice.
+/// Releases the four buffers. `drop vals` also releases every live payload:
+/// `insert` consumes each and `remove` hands each back. Do not add a loop over
+/// `vals` as well: it frees each payload twice.
 impl<T> Owned for Slots<T> {
     fn release(consume self) {
         let vals = consume self.vals
@@ -211,8 +209,8 @@ impl<T> Copy for Slots<T> {
 test "a handle built by hand to a freed slot is not alive" {
     let mut s: Slots<Int64> = newSlots()
     let h = insert(s, 7)
-    assert(remove(s, h))
+    assert((remove(s, h) ?? 0) == 7)
     let f: Handle<Int64> = Handle { slot: h.slot, gen: h.gen + 1, owner: h.owner }
     assert(!alive(s, f))
-    assert(!remove(s, f))
+    assert((remove(s, f) ?? 0) == 0)
 }

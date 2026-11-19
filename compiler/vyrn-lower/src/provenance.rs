@@ -1184,7 +1184,9 @@ impl Walk<'_> {
                             _ => Arr::new(a.id),
                         };
                     }
-                    ShapeMap::Extends | ShapeMap::Unknown => a.lost("a builtin changes it"),
+                    ShapeMap::Extends | ShapeMap::Writes(_) | ShapeMap::Unknown => {
+                        a.lost("a builtin changes it")
+                    }
                 }
                 match cap {
                     Capability::Modify => {

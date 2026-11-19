@@ -586,6 +586,9 @@ fn check_accum_inner(
             continue;
         }
         if types.contains_key(t.name.as_str()) {
+            // Each body is judged under each declaration
+            // (`vyrn_lower::pipeline`).
+            in_bodies += 1;
             out.push(cerr!(t.line, TypeDefinedTwice, name).in_file(t.module.clone()));
             continue;
         }
@@ -655,7 +658,11 @@ fn check_accum_inner(
     let mut fn_decls: HashMap<&str, DeclId> = HashMap::new();
     for (i, f) in program.functions.iter().enumerate() {
         let name = &f.name;
-        let refused = if RESERVED.contains(&name.as_str()) {
+        // A refused declaration still leaves every other body to the typed
+        // judgment: a name declared twice is judged under each declaration
+        // (`vyrn_lower::pipeline`), and any other refused name leaves with
+        // the bodies that name it.
+        let rule = if RESERVED.contains(&name.as_str()) {
             rule!(ReservedName, name)
         } else if variants.contains_key(name) {
             rule!(FunctionIsVariant, name)
@@ -667,9 +674,13 @@ fn check_accum_inner(
             fn_decls.insert(name, DeclId::nth(DeclKind::Fn, i));
             continue;
         };
+        if !fn_decls.contains_key(name.as_str()) {
+            refused.insert(name.clone());
+        }
+        in_bodies += 1;
         let (col, end_col) = f.name_span();
         out.push(
-            cerr!(f.line; refused)
+            cerr!(f.line; rule)
                 .at(col, end_col)
                 .in_file(f.module.clone()),
         );
@@ -703,59 +714,6 @@ fn check_accum_inner(
         .filter(|m| m.result_cap.is_some())
         .map(|m| m.name.clone())
         .collect();
-    // A free function named like a protocol method could never run: `call`
-    // dispatches that name to an impl first. The function is refused where its
-    // module imports the protocol; else the method is, because the function's
-    // module checks alone without the protocol and may be std, which no user
-    // edits.
-    let root = program.spellings.root.as_str();
-    let before_collisions = out.len();
-    for f in &program.functions {
-        let Some(owners) = protocol_methods.get(f.name.as_str()) else {
-            continue;
-        };
-        let home = f.module.as_deref().unwrap_or(root);
-        let module_of = |p: &str| {
-            program
-                .protocols
-                .iter()
-                .find(|d| d.name == p)
-                .map(|d| &d.module)
-        };
-        let (seen, unseen): (Vec<_>, Vec<_>) = owners.iter().partition(|(p, _)| {
-            let m = module_of(p).and_then(|m| m.as_deref()).unwrap_or(root);
-            program.spellings.reaches(home, m)
-        });
-        if !seen.is_empty() {
-            let owners: Vec<&str> = seen.iter().map(|(p, _)| p.as_str()).collect();
-            out.push(
-                cerr_at!(
-                    f.line,
-                    f.name_span(),
-                    FunctionShadowsProtocolMethod,
-                    name = f.name,
-                    owners = owners.join(", ")
-                )
-                .in_file(f.module.clone()),
-            );
-        }
-        for (p, sig) in unseen {
-            let d = cerr!(
-                sig.line,
-                MethodShadowsForeignFunction,
-                name = f.name,
-                protocol = p
-            );
-            out.push(d.in_file(module_of(p).cloned().flatten()));
-        }
-    }
-    // A collision changes what a body dispatches to, std bodies included, so
-    // no body is typed after one: no verdict it gave would be the program's.
-    let bodies_from = if out.len() > before_collisions {
-        program.functions.len()
-    } else {
-        bodies_from
-    };
     // The program's own declaration of a prelude protocol's name replaces it.
     let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> = (crate::prelude::protocols())
         .iter()
@@ -1082,6 +1040,7 @@ fn check_accum_inner(
         all_bounds: &all_bounds,
         protocol_methods: &protocol_methods,
         protocols: &program.protocols,
+        spellings: &program.spellings,
         protocol_places: &protocol_places,
         impls: &program.impls,
         expansions: &program.expansions,
@@ -1741,6 +1700,7 @@ struct Cx<'a> {
     protocol_methods: &'a HashMap<String, Vec<(String, MethodSig)>>,
     /// The declared protocols, the prelude's included.
     protocols: &'a [crate::ast::ProtocolDecl],
+    spellings: &'a crate::ast::Spellings,
     /// Projection names protocols declare.
     protocol_places: &'a std::collections::HashSet<String>,
     /// Every `impl` block, by type key.
@@ -5103,6 +5063,19 @@ impl<'a> Checker<'a> {
         self.call_declared(name, (args, dot), written, line, scope, expected, fn_ret)
     }
 
+    /// Whether a call of `name` a protocol declares dispatches to the method
+    /// rather than the function of that name: where no function has it, or
+    /// written `recv.name(..)` in a module that reaches the protocol
+    /// ([`crate::ast::Spellings::reaches_method`]).
+    fn calls_method(&self, name: &str, dot: bool) -> bool {
+        self.protocol_methods.contains_key(name)
+            && (self.sig(name).is_none()
+                || dot && {
+                    let here = self.frame.borrow();
+                    (self.spellings).reaches_method(self.protocols, here.here.as_deref(), name)
+                })
+    }
+
     /// Types the method call `recv.name(..)`, `args[0]` the receiver, by
     /// dispatch on the receiver's type among the protocols that declare
     /// `name`: only `via` where the call names it (`recv::P.name(..)`). A
@@ -5431,7 +5404,7 @@ impl<'a> Checker<'a> {
             };
             let v = self.expr(&args[1], scope, Some(&elem), fn_ret)?;
             if !self.coercible(&v, &elem) {
-                return Err(cerr!(line, PushValue, v, elem));
+                return Err(cerr!(line, ArrayOpValue, op = "push", v, elem));
             }
             self.prove_coercion(&args[1], &elem, line)?;
             // Inside a `region`, a heap element pushed into an outer buffer
@@ -5512,13 +5485,25 @@ impl<'a> Checker<'a> {
                 t => Type::option(t),
             });
         }
-        // O(1) unordered remove: the last element moves into slot `i`.
-        if name == "@swapRemove" {
-            let elem = self.mut_array_receiver(&args[0], scope, line, "swapRemove", fn_ret)?;
+        // O(1) unordered remove: the last element moves into slot `i`. A
+        // `replace` stores `v` there instead and hands back what it displaced.
+        if name == "@swapRemove" || name == "@replace" {
+            let op = &name[1..];
+            let elem = self.mut_array_receiver(&args[0], scope, line, op, fn_ret)?;
             self.record_modify_place(&args[0], scope, fn_ret, line);
             let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if !matches!(i, Type::Int | Type::Err) {
-                return Err(cerr!(line, SwapRemoveIndex, i));
+                return Err(cerr!(line, ArrayOpIndex, op, i));
+            }
+            if let [recv, _, value] = args {
+                let v = self.expr(value, scope, Some(&elem), fn_ret)?;
+                if !self.coercible(&v, &elem) {
+                    return Err(cerr!(line, ArrayOpValue, op, v, elem));
+                }
+                self.prove_coercion(value, &elem, line)?;
+                if let Expr::Var { name: aname, .. } = recv {
+                    self.region_store_guard(aname, &elem, scope, line, Id::NEW)?;
+                }
             }
             return Ok(elem);
         }
@@ -5863,7 +5848,7 @@ impl<'a> Checker<'a> {
             return self.check_construction(decl, args, line, scope, fn_ret);
         }
 
-        if self.protocol_methods.contains_key(name) {
+        if self.calls_method(name, dot) {
             return self.method_call(name, None, args, scope, expected, fn_ret, line);
         }
 
@@ -6570,7 +6555,8 @@ impl<'a> Checker<'a> {
                 {
                     return false;
                 }
-                if let Some(cs) = ck.caps(name).filter(|_| via.is_none()) {
+                let method = via.is_some() || ck.calls_method(name, form.has_receiver());
+                if let Some(cs) = ck.caps(name).filter(|_| !method) {
                     return cs.get(k) == Some(&Capability::Consume);
                 }
                 let key = match args.first() {
@@ -6961,14 +6947,14 @@ impl<'a> Checker<'a> {
         Some(&f.type_params).filter(|ps| !ps.is_empty())
     }
 
-    /// The element type of the array a `pop` or `swapRemove` receiver names;
-    /// `op` is the spelling a diagnostic quotes.
+    /// The element type of the array a `pop`, `swapRemove` or `replace`
+    /// receiver names; `op` is the spelling a diagnostic quotes.
     ///
     /// The receiver is a variable, or a field or element of one, in any
     /// position. An unknown or non-`mut` root is the typed judgment's refusal
     /// (`typed::stores`), typed `Err` before its type is read because a
-    /// literal bound without `mut` is a fixed-size array. A receiver that is
-    /// no growable array is `Builder::shrinks`'s refusal.
+    /// literal bound without `mut` is a fixed-size array. A shrinking call on
+    /// a receiver that is no growable array is `Builder::shrink_of`'s refusal.
     fn mut_array_receiver(
         &self,
         recv: &Expr,
@@ -6989,7 +6975,7 @@ impl<'a> Checker<'a> {
         };
         match self.base(&ty) {
             Type::Array(inner) => Ok((*inner).clone()),
-            Type::SmallArray(inner, _) => Ok((*inner).clone()),
+            Type::SmallArray(inner, _) | Type::ArrayN(inner, _) => Ok((*inner).clone()),
             Type::Err => Ok(Type::Err),
             _ => self.judged(),
         }
@@ -8134,18 +8120,16 @@ mod tests {
         assert!(e.contains("`copy` cannot copy `Ring`"), "{e}");
     }
 
-    /// Method names dispatch to impls before free functions, so a top-level
-    /// fn sharing a protocol method's name could never run; it is refused at
-    /// the declaration.
+    /// A top-level fn may share a protocol method's name: `frob(5)` is the
+    /// function and `t.frob()` the method.
     #[test]
-    fn a_top_level_fn_may_not_take_a_protocol_methods_name() {
+    fn a_top_level_fn_may_take_a_protocol_methods_name() {
         let src = "type T = { v: Int64 } \
                    protocol P { fn frob(self) -> Int64 } \
                    impl P for T { fn frob(self) -> Int64 { return self.v } } \
                    fn frob(x: Int64) -> Int64 { return x * 2 } \
-                   fn main() -> Int64 { return frob(5) }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("could never run"), "{e}");
+                   fn main() -> Int64 { let t = T { v: 1 } return frob(5) + t.frob() }";
+        assert_eq!(check_src(src).map(|_| ()), Ok(()));
     }
 
     /// Two distinct recursive records compared by width subtyping answer "not

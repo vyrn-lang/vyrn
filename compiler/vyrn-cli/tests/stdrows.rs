@@ -509,18 +509,17 @@ fn a_std_body_reading_immutable_state_stays_given() {
     assert!(spells[0].contains("\nviaFixed "), "viaFixed is not given");
 }
 
-/// A program refused for a protocol method named like a function a std body
-/// calls prints the collision alone, cold, warm, without the cache and under
-/// build: no body is typed after it, given or not.
+/// A protocol method named like a function a std body calls leaves that call
+/// alone: std reaches no user protocol, so every host, cold, warm, without the
+/// cache and under build, accepts the program as the std body's own load did.
 #[test]
-fn a_name_collision_prints_one_text_under_every_host() {
+fn a_method_named_like_a_function_a_std_body_calls_leaves_the_call_alone() {
     let root = "import { cursorGet, Cursor } from \"std/stream\"\n\n\
                 protocol Hd {\n    fn handleOf(read self) -> Int64\n}\n\n\
                 impl Hd for Cursor {\n    fn handleOf(read self) -> Int64 {\n        return 0\n    }\n}\n\n\
                 fn main() -> Int64 {\n    let c = Cursor { slot: 0, gen: 0 }\n    return cursorGet(c)\n}\n";
     let t = tree_of("stdrows-collision", root);
-    let err = agree(&t, "cursorGet", 1);
-    assert_eq!(err.lines().count(), 1, "{err}");
+    agree(&t, "cursorGet", 0);
 }
 
 /// `std/sgstate`'s closed entry: its name and text.

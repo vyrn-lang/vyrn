@@ -1578,7 +1578,7 @@ examples/simdwide.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/sizedints.vyrn	wrap32	yes	yes, native
 examples/sizedints.vyrn	main	yes	no, its effect set is write-output
 examples/slots.vyrn	main	no, it calls `panic`	no, its effect set is alloc, write-output, module-state, trap
-examples/slottable.vyrn	main	yes	no, its effect set is alloc, write-output, module-state
+examples/slottable.vyrn	main	no, it calls `get`, which is not trap-free	no, its effect set is alloc, write-output, module-state
 examples/smallarray.vyrn	firstPoint	yes	no, its effect set is alloc
 examples/smallarray.vyrn	sumSmall	yes	yes, emulated Int64
 examples/smallarray.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output
@@ -1705,7 +1705,7 @@ examples/tree.vyrn	freeNode	no, it calls `panic`	no, its effect set is alloc, tr
 examples/tree.vyrn	leaf	yes	no, its effect set is alloc
 examples/tree.vyrn	main	no, it calls `treeSum`, which is not trap-free	no, its effect set is alloc, write-output, module-state, trap
 examples/tryplace.vyrn	ensureSlab	yes	no, its effect set is alloc, module-state
-examples/tryplace.vyrn	main	no, it calls `panic`	no, its effect set is alloc, write-output, module-state, trap
+examples/tryplace.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output, module-state, trap
 examples/twdemo.vyrn	badge	no, it calls `toHtmlString`, which is not trap-free	no, its effect set is alloc, trap
 examples/twdemo.vyrn	main	no, it calls `badge`, which is not trap-free	no, its effect set is alloc, write-output, trap
 examples/twdemo.vyrn	where$pTw	yes	no, `value` is String, not an integer, Bool or a read array of one

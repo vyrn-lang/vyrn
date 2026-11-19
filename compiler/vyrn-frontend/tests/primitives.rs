@@ -48,6 +48,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@toArray", Memory, "SmallArray: copy the inline/spilled buffer out"),
     ("@pop", Memory, "Array: shrink by one, writing back through the binding"),
     ("@swapRemove", Memory, "Array: swap-and-shrink; also traps"),
+    ("@replace", Memory, "Array: store in place, the old element out; also traps"),
     ("@has", Memory, "Map: key probe"),
     ("@keys", Memory, "Map: a fresh snapshot of the key column"),
     ("@remove", Memory, "Map: order-preserving removal in place"),

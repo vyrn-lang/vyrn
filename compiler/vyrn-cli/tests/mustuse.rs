@@ -741,18 +741,21 @@ fn a_loop_that_takes_its_container_owns_each_must_use_element() {
     judged("mustuse-loop", cases);
 }
 
-/// A record field and an enum payload hold their part's obligation, as an
-/// array's element does, so the holder is disposed of by name.
+/// An enum payload holds its part's obligation, as an array's element does,
+/// so the holder is disposed of by name. A record is must-use only when it
+/// declares `impl MustUse`: one that holds a must-use field may leave scope,
+/// and `drop` may still release it.
 #[test]
-fn a_record_or_an_enum_holding_a_must_use_value_is_must_use() {
+fn an_enum_holding_a_must_use_value_is_must_use_and_a_record_is_not() {
     let cases: [(&str, String, Result<&str, &str>); 4] = [
         (
             "record",
             format!(
                 "{TXN} type Pool = {{ n: Int64, xs: Array<Txn> }} \
-                 fn main() -> Int64 {{ let p = Pool {{ n: 1, xs: pool() }} return p.n }}"
+                 fn main() -> Int64 {{ let p = Pool {{ n: 1, xs: pool() }} print(p.n) return 0 }}"
             ),
-            Err("`p` is a `Pool` and is never disposed"),
+            Ok("1
+end a"),
         ),
         (
             "enum",

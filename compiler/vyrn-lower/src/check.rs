@@ -3,7 +3,7 @@
 //!
 //! [`state`] inserts a [`St::Check`] before each row whose operation can trap:
 //! an element place on an array or a String, an integer `/`, `%`, `<<` or
-//! `>>`, `@swapRemove`, a SIMD span load or store, `bytes(s, a, b)`, a
+//! `>>`, `@swapRemove`, `@replace`, a SIMD span load or store, `bytes(s, a, b)`, a
 //! record type's constructor run on a name to check its `where` rule, a
 //! validated integer type's constructor run on a name, and a call to a
 //! function whose parameters carry `where` clauses. The emitter
@@ -355,7 +355,7 @@ fn call_guards(callee: &str, args: &[(Arg, Capability)], out: &mut Vec<(Rule, Gu
         return;
     };
     match (indexes, args) {
-        (Indexes::Element, [(r, _), (i, _)]) => {
+        (Indexes::Element, [(r, _), (i, _), ..]) => {
             if let (Some(p), Some(i)) = (base(r), val(i)) {
                 out.push((Rule::ArrayIndex, Guard::Index(p, i)));
             }

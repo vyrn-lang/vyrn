@@ -199,15 +199,6 @@ rules! {
     FunctionIsVariant { name } "`{name}` is both a function and an enum variant";
     FunctionDefinedTwice { name } "function `{name}` defined twice";
     FunctionIsType { name } "`{name}` is both a type and a function name";
-    FunctionShadowsProtocolMethod { name, owners }
-        "`{name}` collides with protocol {owners}'s method of the same name: \
-        method names dispatch to impls before free functions, so this \
-        declaration could never run";
-    MethodShadowsForeignFunction { name, protocol }
-        "protocol {protocol}'s method `{name}` collides with the function `{name}` \
-        of a module that does not import {protocol}: method names dispatch to \
-        impls before free functions, so that function could never run; rename \
-        the method";
     ImplMissesAssociatedType { protocol, ty, name }
         "`impl {protocol} for {ty}` does not bind the associated type `{name}`: \
         add `type {name} = ..` (protocol `{protocol}` declares it)";
@@ -539,7 +530,7 @@ rules! {
     UnaryOperand { what, admits, t } "`{what}` needs {admits}, found {t}";
     BytesOffsets { n } "`bytes` needs Int64 offsets, found {n}";
     PushReceiver { other } "`push` needs an Array as its first argument, found {other}";
-    PushValue { v, elem } "`push` value is {v} but the array holds {elem}";
+    ArrayOpValue { op, v, elem } "`{op}` value is {v} but the array holds {elem}";
     MapKeyMismatch { key, k } "the map is keyed by {key}, but the key here is {k}";
     IndexReceiver { other } "indexing needs an Array or String, found {other}";
     IndexType { i } "`at` index must be an Int64, found {i}";
@@ -550,7 +541,7 @@ rules! {
     StreamElementMismatch { name, want, exp } "`{name}` answers a `{want}`, not {exp}";
     TakesNone { name } "`{name}` takes no arguments";
     SwapRemoveArity { got } "`swapRemove` takes 1 argument (an index), got {got}";
-    SwapRemoveIndex { i } "`swapRemove` index must be an Int64, found {i}";
+    ArrayOpIndex { op, i } "`{op}` index must be an Int64, found {i}";
     ToArrayReceiver { other } "`toArray` needs a SmallArray, found {other}";
     CopyOwned { declared }
         "`copy` cannot copy `{declared}`: it declares `impl Owned for \

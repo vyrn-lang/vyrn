@@ -131,7 +131,7 @@ A name before a string literal is a tagged template. `tag"a \{x} b"` calls `tag(
 
 - `xs[i]` reads and `xs[i] = v` writes in place on a `mut` binding. The index is checked, and an out-of-range index traps.
 - `xs.length` is the element count.
-- `xs.push(v)` appends. `xs.pop()` answers `Option<T>`. `xs.swapRemove(i)` removes element `i` and moves the last one into its place.
+- `xs.push(v)` appends. `xs.pop()` answers `Option<T>`. `xs.swapRemove(i)` removes element `i` and moves the last one into its place. `xs.replace(i, v)` stores `v` at element `i` and answers the element it displaced, which the caller owns; an out-of-range `i` traps as `xs[i]` does.
 - `xs.reserve(n)`, `xs.append(ys)`, `xs.copyFrom(ys)` and `xs.clear()` grow, extend, overwrite and empty in place. `small.toArray()` copies a `SmallArray` out.
 - `for x in xs { .. }` visits each element. `for x in consume xs` takes each element as an owned value and leaves `xs` dead after the loop.
 - `push` on a fixed `Array<T, N>` is refused, because its length is part of its type.
@@ -525,6 +525,7 @@ fn label<T: Show>(x: T) -> String {
 - An impl must provide every method with the protocol's signature and receiver capability. A missing method, an extra method or a mismatched receiver is refused. There are no inherent methods: a helper is a top-level `fn`, which `x.helper()` calls.
 - Dispatch keys on the type constructor, so a protocol has at most one impl per constructor: `impl Show for Option<Int64>` beside `impl<T> Show for Option<T>` is refused.
 - A record dispatches by its static type, so a value assigned into a slot of another record type with the same shape uses that type's impl.
+- A protocol method and a function of one name do not clash. In a module that reaches the protocol, `x.m()` is the method and `m(x)` the function; a module that reaches only the function calls it either way.
 - Where two protocols the receiver implements, or two of its bounds, declare one method name, `x.m()` is refused as ambiguous. `x::P.m(args)` calls `m` as protocol `P` declares it, on receiver `x`: `P` is named as an impl head names it, declared or imported flat, and `x`'s type implements `P` by an impl or a bound. The form is allowed where `x.m()` is not ambiguous, and means the same call. `x::P` alone is no value.
 - `impl<T> P for Box<T>` is a generic impl, specialized per instantiation.
 - A protocol may declare an associated type, `type Output`, that each impl fixes: `type Output = Int64`. A method signature names it.
@@ -821,6 +822,7 @@ Each line is a program the compiler refuses, and the reason.
 - A module-state initializer that calls a function of its own module or reads later state.
 - Two modules' exports of one name imported flat: a top-level name is program-wide.
 - An enum variant name declared twice.
+- A function or type name declared twice. Every body is still checked, under each declaration, so one run prints every error.
 - An `impl` of a protocol for a validated scalar type.
 - `x.m()` where two protocols declare `m` for the receiver: name one, `x::P.m()`.
 - An extern signature with a type the host boundary cannot carry.

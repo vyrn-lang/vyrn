@@ -12,9 +12,9 @@ fn main() -> Int64 {
     print(get(t, a) ?? 0 - 1) // 42 — live
 
     let freed = remove(t, a)
-    print(freed) // true
+    print(freed ?? 0 - 1) // 42 - the payload comes back
     print(get(t, a) ?? 0 - 1) // -1 — released
-    print(remove(t, a)) // false — removing a dead handle is a no-op
+    print(remove(t, a) ?? 0 - 1) // -1 - removing a dead handle is a no-op
 
     let seven = 7
     let c = insert(t, seven)
@@ -35,7 +35,7 @@ test "a stale handle stays dead across a reuse" {
     let one = 1
     let a = insert(t, one)
     assertEq(get(t, a) ?? 0 - 1, 1)
-    assert(remove(t, a))
+    assertEq(remove(t, a) ?? 0 - 1, 1)
     let two = 2
     let b = insert(t, two)
     assertEq(b.slot, a.slot) // same slot
@@ -47,8 +47,8 @@ test "remove is idempotent and does not corrupt the free list" {
     let mut t: Slots<Int64> = newSlots()
     let one = 1
     let a = insert(t, one)
-    assert(remove(t, a))
-    assert(!remove(t, a))
+    assertEq(remove(t, a) ?? 0 - 1, 1)
+    assertEq(remove(t, a) ?? 0 - 1, 0 - 1)
     assertEq(count(t), 0)
     let two = 2
     let b = insert(t, two)
@@ -76,7 +76,7 @@ test "many writes through the field, and the values all land" {
         let v = i
         let h = insert(t, v)
         assertEq(get(t, h) ?? 0 - 1, i)
-        assert(remove(t, h))
+        assertEq(remove(t, h) ?? 0 - 1, i)
         i = i + 1
     }
     assertEq(capacity(t), 1) // one slot, recycled 4,096 times

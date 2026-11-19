@@ -199,6 +199,144 @@ fn an_await_over_a_function_value_takes_any_function() {
     }
 }
 
+/// The result types of the fork family: the type, the value a call returns (none for
+/// `Unit`; a waiting `Int64` call returns its wait), how `show` prints a value `v`, and
+/// what it prints.
+type Forked = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
+const FORKED: [Forked; 5] = [
+    ("int", "Int64", "41", r#""\{v}""#, "41"),
+    ("str", "String", r#""s" + "t""#, r#""\{v}""#, "st"),
+    (
+        "rec",
+        "P",
+        r#"P { x: 3, s: "r" + "c" }"#,
+        r#""\{v.x} \{v.s}""#,
+        "3 rc",
+    ),
+    (
+        "opt",
+        "Option<String>",
+        r#"Some("o" + "p")"#,
+        r#"match v { Some(s) => "\{s}", None => "none" }"#,
+        "op",
+    ),
+    ("unit", "Unit", "", r#""unit""#, "unit"),
+];
+
+/// A program that forks over every ordered pair of [`FORKED`] types with `form`, and what
+/// it prints. `mode` is `wait` (both branches wait, the second sooner), `mixed` (only the
+/// second waits) or `plain` (no `await`, no branch waits).
+fn fork_family(form: &str, mode: &str) -> (String, String) {
+    let waits = mode != "plain";
+    let mut src =
+        "import { both, race, sleep, Race } from \"std/task\"\ntype P = { x: Int64, s: String }\n"
+            .to_string();
+    for (k, ty, val, show, _) in FORKED {
+        let ret = |e: &str| match e {
+            "" => String::new(),
+            _ => format!("    return {e}\n"),
+        };
+        src += &format!("fn now{k}() -> {ty} {{\n{}}}\n", ret(val));
+        if waits {
+            let val = if k == "int" { "ms" } else { val };
+            src += &format!(
+                "fn later{k}(ms: Int64) -> {ty} {{\n    await sleep(ms)\n{}}}\n",
+                ret(val)
+            );
+        }
+        src += &format!("fn show{k}(v: {ty}) -> String {{\n    return {show}\n}}\n");
+    }
+    // Each branch's wait in milliseconds, or `None` for a call that finishes at its start.
+    let (wa, wb) = match mode {
+        "wait" => (Some(10), Some(5)),
+        "mixed" => (None, Some(5)),
+        _ => (None, None),
+    };
+    let call = |k: &str, ms: Option<i32>| match ms {
+        Some(ms) => format!("later{k}({ms})"),
+        None => format!("now{k}()"),
+    };
+    let shown = |(k, .., out): &Forked, ms: Option<i32>| match (*k, ms) {
+        ("int", Some(ms)) => ms.to_string(),
+        _ => out.to_string(),
+    };
+    let aw = if waits { "await " } else { "" };
+    let (mut main, mut want) = (String::new(), String::new());
+    for (x, y) in FORKED
+        .iter()
+        .flat_map(|x| FORKED.iter().map(move |y| (x, y)))
+    {
+        let (a, b) = (x.0, y.0);
+        let (ca, cb) = (call(a, wa), call(b, wb));
+        if form == "both" {
+            main += &format!("    let r{a}{b} = {aw}both({ca}, {cb})\n    print(show{a}(r{a}{b}.first) + \" \" + show{b}(r{a}{b}.second))\n");
+            want += &format!("{} {}\n", shown(x, wa), shown(y, wb));
+        } else {
+            main += &format!("    match {aw}race({ca}, {cb}) {{\n        First(v) => print(\"1 \" + show{a}(v)),\n        Second(v) => print(\"2 \" + show{b}(v)),\n    }}\n");
+            want += &match mode {
+                "wait" => format!("2 {}\n", shown(y, wb)),
+                _ => format!("1 {}\n", shown(x, wa)),
+            };
+        }
+    }
+    (
+        format!("{src}fn main() -> Int64 {{\n{main}    return 0\n}}\n"),
+        want,
+    )
+}
+
+/// A `both` or a `race` over two result types builds and runs on the engine and the native
+/// route, awaited or not, and frees every value: the emitter fills the `Both` record by
+/// field name, not by layout position.
+#[test]
+fn a_fork_over_any_two_result_types_runs_on_both_engines() {
+    let dir = scratch("waits-forks");
+    for (form, mode) in ["both", "race"]
+        .iter()
+        .flat_map(|f| ["wait", "mixed", "plain"].map(|m| (*f, m)))
+    {
+        let (src, want) = fork_family(form, mode);
+        let file = dir.join(format!("{form}_{mode}.vyrn"));
+        std::fs::write(&file, &src).unwrap();
+        let engine = vyrn()
+            .env("VYRN_LEAK_CHECK", "1")
+            .arg("run")
+            .arg(&file)
+            .output()
+            .expect("run vyrn run");
+        let seen = |o: &std::process::Output| (o.status.code(), norm(&o.stdout), norm(&o.stderr));
+        assert_eq!(
+            seen(&engine),
+            (Some(0), want.clone(), String::new()),
+            "{form} {mode}"
+        );
+        let exe = dir.join(format!("{form}_{mode}.exe"));
+        let built = vyrn()
+            .env("VYRN_LEAK_CHECK", "1")
+            .arg("build")
+            .arg(&file)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("run vyrn build");
+        assert!(
+            built.status.success(),
+            "{form} {mode}: {}",
+            norm(&built.stderr)
+        );
+        let native = std::process::Command::new(&exe)
+            .output()
+            .expect("run the binary");
+        assert_eq!(seen(&native), seen(&engine), "{form} {mode} native");
+    }
+}
+
 /// What `tests/waits/result.vyrn` prints on each host: `vyrn run`, the native build and, where
 /// node runs, the browser shim, each with its exit code.
 #[test]

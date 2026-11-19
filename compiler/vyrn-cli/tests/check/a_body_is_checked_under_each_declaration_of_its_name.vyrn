@@ -1,0 +1,19 @@
+type Pair = { a: Int64 }
+type Pair = { b: Int64 }
+
+fn first(p: Pair) -> Int64 {
+    return p.b
+}
+
+fn size() -> Int64 {
+    return "one"
+}
+
+fn size() -> Int64 {
+    return true
+}
+
+fn main() -> Int64 {
+    let x: String = 3
+    return size() + first(Pair { a: 1 })
+}

@@ -39,7 +39,10 @@ fn main() -> Int64 {
     let mut people: Slots<Row> = newSlots()
     let a = insert(people, Row { label: "alpha", n: 1 })
     let b = insert(people, Row { label: "beta", n: 2 })
-    let gone = remove(people, a)
+    let gone = match remove(people, a) {
+        Some(r) => r.n,
+        None => 0,
+    }
 
     if let Some(r) = people.tryAt(b) {
         print("live: \{r.label} \{r.n}")

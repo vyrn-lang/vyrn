@@ -12,15 +12,13 @@ it copies freely and is never released.
     let h = insert(people, Person { name: "ada" })
     people[h].name = "lovelace"       // traps on a dead handle, like a[i] on OOB
     match get(people, h) { Some(p) => .., None => .. }     // liveness as a value
-    remove(people, h)                 // the slot's generation bumps
+    let gone = remove(people, h)      // the payload; the generation bumps
 
 A handle from another container of the same element type is dead, not
 plausible: every container takes an identity and every handle carries it.
-`remove` does not clear the payload, because the language has no
-uninitialized place; the dead payload is released when the slot is reused or
-the container drops. `remove` moves the last live element into the hole, so
-iteration order is not insertion order; iterate `handles` if the order
-matters.
+`remove` hands the payload back and moves the last live element into its
+place, so iteration order is not insertion order; iterate `handles` if the
+order matters.
 
 ## Handle
 
@@ -39,10 +37,11 @@ type Slots = { vals: Array<T>, gens: Array<Int64>, dense: Array<Int64>, denseAt:
 
 A generational slab.
 
-`vals` and `gens` are parallel and indexed by slot. `dense` orders every
-slot, the live ones in iteration order and then the last `free`, the most
-recently freed first. `denseAt` maps a slot back to its position, so
-`remove` is O(1) and iteration skips free slots.
+`gens` is indexed by slot. `dense` orders every slot, the live ones in
+iteration order and then the last `free`, the most recently freed first.
+`denseAt` maps a slot back to its position. `vals` holds the live payloads
+at their positions, so `remove` is O(1) and moves a payload out, and
+iteration reads `vals` in order.
 
 ## newSlots
 
@@ -60,7 +59,8 @@ fn insert<T>(s: modify Slots<T>, v: consume T) -> Handle<T>
 ```
 
 Puts `v` in the slab and returns a handle to it. Reuses a free slot when there
-is one, and the store releases the dead payload it held.
+is one: the first free position is the one after the live ones, where `v`
+lands.
 
 ## alive
 
@@ -87,12 +87,12 @@ does not outlive the test; neither copies.
 ## remove
 
 ```vyrn
-fn remove<T>(s: modify Slots<T>, h: Handle<T>) -> Bool
+fn remove<T>(s: modify Slots<T>, h: Handle<T>) -> Option<T>
 ```
 
-Releases the element `h` names: bumps the slot's generation, so every handle
-to it is dead, and returns the slot to the free list. Answers whether `h` was
-alive, so removing twice is a no-op.
+Takes the element `h` names out of `s`: bumps the slot's generation, so every
+handle to it is dead, and returns the slot to the free list. Answers the
+element, or `None` when `h` was not alive, so removing twice is a no-op.
 
 ## count
 
