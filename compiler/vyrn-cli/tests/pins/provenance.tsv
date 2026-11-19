@@ -2,7 +2,7 @@ function	provenance	unknown because	hand label	verdict
 std/arrays map	identity pointwise		identity pointwise	agrees
 std/arrays filter	subsequence		subsequence	agrees
 std/arrays sortWith	no core body		permutation	differs
-std/arrays sortBy	permutation		permutation	agrees
+std/arrays sortBy	unknown	a call may change it	permutation	differs
 std/bench sortedCopy	unknown	no order relates its indexes	permutation	differs
 std/graphql copyGqlErrs	identity pointwise		identity	differs
 std/graphql gqlStep	identity+fresh(end) pointwise		identity+fresh(end)	differs

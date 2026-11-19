@@ -876,7 +876,7 @@ impl Moves {
     /// How a builtin row that states `map` moves its receiver.
     fn of(map: ShapeMap) -> Moves {
         match map {
-            ShapeMap::Same => Moves::Keeps,
+            ShapeMap::Same | ShapeMap::Writes(_) => Moves::Keeps,
             ShapeMap::Pushes(_) | ShapeMap::Appends(_) => Moves::Grows,
             _ => Moves::Any,
         }
@@ -2183,7 +2183,7 @@ fn through_borrow<'p>(p: &'p Place, defs: &[Option<&'p Rhs>], uses: &[u32]) -> &
 fn grows(map: ShapeMap) -> bool {
     matches!(
         map,
-        ShapeMap::Same | ShapeMap::Pushes(_) | ShapeMap::Appends(_)
+        ShapeMap::Same | ShapeMap::Writes(_) | ShapeMap::Pushes(_) | ShapeMap::Appends(_)
     )
 }
 
@@ -3848,7 +3848,7 @@ impl<'a> Walk<'a> {
         let follows = |t: &Lin, x: Name| {
             let k = t.coef(Term::Len(x));
             match map {
-                ShapeMap::Same => true,
+                ShapeMap::Same | ShapeMap::Writes(_) => true,
                 ShapeMap::Pushes(_) | ShapeMap::Appends(_) => k >= 0,
                 ShapeMap::DropsLast | ShapeMap::SwapsOut(_) => k <= 0,
                 _ => k == 0,
@@ -3876,13 +3876,14 @@ impl<'a> Walk<'a> {
             | ShapeMap::Appends(_)
             | ShapeMap::Extends
             | ShapeMap::DropsLast
-            | ShapeMap::SwapsOut(_) => {
+            | ShapeMap::SwapsOut(_)
+            | ShapeMap::Writes(_) => {
                 let args: &[(Arg, Capability)] = match rhs {
                     Rhs::Call { args, .. } => args,
                     _ => &[],
                 };
                 let added = match map {
-                    ShapeMap::Pushes(j) => args.get(j).map(|(a, _)| a),
+                    ShapeMap::Pushes(j) | ShapeMap::Writes(j) => args.get(j).map(|(a, _)| a),
                     _ => None,
                 };
                 let theirs = match map {
@@ -5880,7 +5881,7 @@ impl<'a> Walk<'a> {
         let old = len(0)?;
         let (lo, hi) = match shape_map(callee, args) {
             ShapeMap::Unknown | ShapeMap::Extends => return None,
-            ShapeMap::Same => (old.clone(), old),
+            ShapeMap::Same | ShapeMap::Writes(_) => (old.clone(), old),
             ShapeMap::Pushes(_) => (old.plus(1)?, old.plus(1)?),
             ShapeMap::DropsLast | ShapeMap::SwapsOut(_) => (old.plus(-1)?, old),
             ShapeMap::Empties => (Lin::k(0), Lin::k(0)),

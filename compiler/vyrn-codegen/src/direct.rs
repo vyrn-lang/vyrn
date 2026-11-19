@@ -1816,6 +1816,19 @@ fn resuming_into(b: &mut Frame, at: u32, lo: u32, n: u32) {
         .ins(&Instruction::I32LtU);
 }
 
+/// Pushes an element [`Fn_::take_elem`] took: a scalar's value, an aggregate's address.
+fn give(b: &mut Frame, taken: Option<Place>) {
+    match taken {
+        Some(Place::Local(l)) => {
+            b.ins(&Instruction::LocalGet(l));
+        }
+        Some(p) => {
+            p.addr(b, 0);
+        }
+        None => {}
+    }
+}
+
 /// Pushes whether the branch whose status is in `st` still waits: its status is a frame.
 fn pending(b: &mut Frame, st: u32) {
     b.ins(&Instruction::LocalGet(st))
@@ -7727,26 +7740,8 @@ impl<'p> Fn_<'_, 'p> {
         if let Some(row) = row {
             self.bounds_check(m, b, &w, idx, &row);
         }
-        let elem = w.elem.clone();
         // Take the removed element before the last one overwrites it; they can be one address.
-        // A Unit element has no bytes to take, and the call row hands back nothing.
-        let taken = match self.cx.repr(&elem, line)? {
-            Repr::Unit => None,
-            Repr::Scalar(v) => {
-                let l = b.local(v);
-                self.elem_addr(b, &w, idx);
-                self.load_elem(b, &w, line)?;
-                b.ins(&Instruction::LocalSet(l));
-                Some(Place::Local(l))
-            }
-            Repr::Agg(el) => {
-                let off = b.alloc(el.size, el.align);
-                b.slot(off);
-                self.elem_addr(b, &w, idx);
-                b.copy(el.size);
-                Some(Place::Slot(off))
-            }
-        };
+        let taken = self.take_elem(b, &w, idx, line)?;
         let last = b.local(ValType::I64);
         b.ins(&Instruction::LocalGet(slot));
         b.ins(&Instruction::LocalGet(w.len));
@@ -7757,16 +7752,77 @@ impl<'p> Fn_<'_, 'p> {
         self.elem_addr(b, &w, idx);
         self.elem_addr(b, &w, last);
         b.copy(w.stride);
-        match taken {
-            Some(Place::Local(l)) => {
-                b.ins(&Instruction::LocalGet(l));
-            }
-            Some(p) => {
-                p.addr(b, 0);
-            }
-            None => {}
+        give(b, taken);
+        Ok(w.elem)
+    }
+
+    /// Emits `replace` on the array whose address is in local `slot`: stores `v` at the
+    /// index `index` names and hands back the element it displaced.
+    #[allow(clippy::too_many_arguments)]
+    fn replace_at(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        slot: u32,
+        aty: &Type,
+        row: Option<Check>,
+        index: &Val,
+        v: &Val,
+        line: usize,
+    ) -> Result<Type, String> {
+        b.ins(&Instruction::LocalGet(slot));
+        let w = self.walk(b, aty, line)?;
+        self.core_val(m, b, index, &Type::Int, line)?;
+        let idx = b.local(ValType::I64);
+        b.ins(&Instruction::LocalSet(idx));
+        if let Some(row) = row {
+            self.bounds_check(m, b, &w, idx, &row);
         }
-        Ok(elem)
+        let taken = self.take_elem(b, &w, idx, line)?;
+        match self.cx.repr(&w.elem, line)? {
+            Repr::Unit => {}
+            Repr::Scalar(_) => {
+                self.elem_addr(b, &w, idx);
+                self.core_val(m, b, v, &w.elem, line)?;
+                b.ins(&self.cx.store(&w.elem, 0));
+            }
+            Repr::Agg(el) => {
+                self.elem_addr(b, &w, idx);
+                self.core_val(m, b, v, &w.elem, line)?;
+                b.copy(el.size);
+            }
+        }
+        give(b, taken);
+        Ok(w.elem)
+    }
+
+    /// Copies element `idx` of `w` out before a store overwrites it: into a local for a
+    /// scalar, a slot for an aggregate. A `Unit` element has no bytes to take, and the call
+    /// row hands back nothing.
+    fn take_elem(
+        &mut self,
+        b: &mut Frame,
+        w: &Walk,
+        idx: u32,
+        line: usize,
+    ) -> Result<Option<Place>, String> {
+        Ok(match self.cx.repr(&w.elem, line)? {
+            Repr::Unit => None,
+            Repr::Scalar(v) => {
+                let l = b.local(v);
+                self.elem_addr(b, w, idx);
+                self.load_elem(b, w, line)?;
+                b.ins(&Instruction::LocalSet(l));
+                Some(Place::Local(l))
+            }
+            Repr::Agg(el) => {
+                let off = b.alloc(el.size, el.align);
+                b.slot(off);
+                self.elem_addr(b, w, idx);
+                b.copy(el.size);
+                Some(Place::Slot(off))
+            }
+        })
     }
 
     /// Encodes the value on the stack into an `Option`'s first payload word.
@@ -11988,7 +12044,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
         };
         match fork.form {
             Form::Both => {
-                let Some(decl) = self.cx.fields(&ty) else {
+                // Declaration order is argument order; `fields` is layout order.
+                let Type::Record(decl) = &*self.cx.resolved(&ty) else {
                     return unsupported("a fork whose value is no record", line);
                 };
                 let fields = decl.iter().map(|f| f.name.clone()).collect();
@@ -12933,6 +12990,15 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 )?;
                 let row = self.row(m, b, row);
                 self.swap_remove_at(m, b, slot, aty, row, i, line)
+            }
+            ("@replace", [(i, _), (v, _)]) => {
+                let row = core_check(
+                    &mut self.core_w,
+                    line,
+                    |g| matches!(g, Guard::Index(_, x) if x == i),
+                )?;
+                let row = self.row(m, b, row);
+                self.replace_at(m, b, slot, aty, row, i, v, line)
             }
             ("@remove", [(k, _)]) => self.map_remove(m, b, slot, aty, k, line),
             _ => unsupported(&format!("`{callee}` at this arity"), line),
@@ -15595,13 +15661,16 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let agg = match (callee, &*self.cx.resolved(&ty)) {
             ("@remove", Type::Map(..)) => false,
             ("@pop", Type::Array(_) | Type::SmallArray(..)) => true,
-            ("@swapRemove", Type::Array(e) | Type::SmallArray(e, _)) => {
+            (
+                "@swapRemove" | "@replace",
+                Type::Array(e) | Type::SmallArray(e, _) | Type::ArrayN(e, _),
+            ) => {
                 matches!(self.cx.repr(e, 0), Ok(Repr::Agg(_)))
             }
             _ => return None,
         };
-        (readable && self.core_args_readable(rest) && rest.len() == usize::from(callee != "@pop"))
-            .then_some(agg)
+        let arity = vyrn_frontend::prelude::signature(callee).map(|f| f.params.len());
+        (readable && self.core_args_readable(rest) && arity == Some(args.len())).then_some(agg)
     }
 
     /// The receiver and result of the rebuild before `ss[i]`, when `ss[i]` stores the result back

@@ -1,0 +1,11 @@
+export protocol Sized {
+    fn len(read self) -> Int64
+}
+
+export type Bag = { n: Int64 }
+
+impl Sized for Bag {
+    fn len(read self) -> Int64 {
+        return self.n
+    }
+}

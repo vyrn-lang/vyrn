@@ -96,13 +96,20 @@ impl Owned {
     /// type, whose release does not discharge it. A declared row wins;
     /// otherwise the resolved type answers, seeded by `Stream`.
     pub fn linear_kind(&self, ty: &Type) -> Option<Linear> {
-        self.linear_within(ty, None)
+        self.linear_within(ty, None, false)
+    }
+
+    /// Whether `ty` holds a must-use value anywhere, a record's fields
+    /// included: `drop` may release such a record, though it owes nothing.
+    pub fn holds_must_use(&self, ty: &Type) -> bool {
+        self.linear_within(ty, None, true).is_some()
     }
 
     /// [`Owned::linear_kind`] under the declared types `up` is walking, so a
-    /// self-referring type ends where it refers back. The walk allocates
-    /// nothing a type that holds no obligation needs.
-    fn linear_within(&self, ty: &Type, up: Option<&Walked<'_>>) -> Option<Linear> {
+    /// self-referring type ends where it refers back, and through record
+    /// fields where `fields` holds. The walk allocates nothing a type that
+    /// holds no obligation needs.
+    fn linear_within(&self, ty: &Type, up: Option<&Walked<'_>>, fields: bool) -> Option<Linear> {
         let here;
         let up = match ty {
             // A built-in type takes no impl, so only a declared name has a row.
@@ -118,12 +125,13 @@ impl Owned {
             }
             _ => up,
         };
-        // A holder answers what it holds, and its release releases that, so
-        // `drop` discharges each part. A type parameter answers `None`, so a
+        // A container answers what it holds, and its release releases that,
+        // so `drop` discharges each part. A record answers only its own row: a
+        // field never makes it must-use. A type parameter answers `None`, so a
         // generic body carries no obligation.
         let any = |ts: &mut dyn Iterator<Item = &Type>| {
             for t in ts {
-                if let Some(l) = self.linear_within(t, up) {
+                if let Some(l) = self.linear_within(t, up, fields) {
                     return Some(l);
                 }
             }
@@ -135,7 +143,7 @@ impl Owned {
                 any(&mut std::iter::once(&**e))
             }
             Type::Map(a, b) => any(&mut [&**a, &**b].into_iter()),
-            Type::Record(fs) => any(&mut fs.iter().map(|f| &f.ty)),
+            Type::Record(fs) if fields => any(&mut fs.iter().map(|f| &f.ty)),
             Type::Enum(vs) => any(&mut vs.iter().flat_map(|v| &v.payload)),
             _ => None,
         }
@@ -611,7 +619,7 @@ mod tests {
     /// A record field and an enum payload are holders like an array: each
     /// passes its part's obligation on, a self-referring one included.
     #[test]
-    fn a_record_or_an_enum_holding_a_must_use_value_is_must_use() {
+    fn an_enum_holding_a_must_use_value_is_must_use_and_a_record_is_not() {
         let src = "protocol MustUse {} \
                    type Txn = { id: Int64 } \
                    impl MustUse for Txn {} \
@@ -623,10 +631,10 @@ mod tests {
         let p = parse(lex(src).unwrap()).unwrap();
         let owned = Owned::new(&p);
         let txn = Some(Linear::Declared("Txn".into()));
-        for t in ["Pool", "Slot", "Node"] {
-            assert_eq!(owned.linear_kind(&Type::Named(t.into())), txn, "{t}");
+        assert_eq!(owned.linear_kind(&Type::Named("Slot".into())), txn);
+        for t in ["Pool", "Node", "Plain"] {
+            assert_eq!(owned.linear_kind(&Type::Named(t.into())), None, "{t}");
         }
-        assert_eq!(owned.linear_kind(&Type::Named("Plain".into())), None);
     }
 
     /// A depth bound in `owns_heap` would bring back a silent leak of every

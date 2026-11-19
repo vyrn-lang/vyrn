@@ -1,0 +1,7 @@
+a_body_is_checked_under_each_declaration_of_its_name.vyrn:2:0: type `Pair` defined twice
+a_body_is_checked_under_each_declaration_of_its_name.vyrn:5:14: type Pair has no field `b`
+a_body_is_checked_under_each_declaration_of_its_name.vyrn:9:12: return type mismatch: expected Int64, found String
+a_body_is_checked_under_each_declaration_of_its_name.vyrn:12:4: function `size` defined twice
+a_body_is_checked_under_each_declaration_of_its_name.vyrn:13:12: return type mismatch: expected Int64, found Bool
+a_body_is_checked_under_each_declaration_of_its_name.vyrn:17:9: `x` declared String but initializer is Int64
+a_body_is_checked_under_each_declaration_of_its_name.vyrn:18:27: record `Pair` has no field `a`

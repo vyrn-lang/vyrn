@@ -158,7 +158,7 @@ fn check(
         // Each typed refusal stands before the first of the checker's in its
         // file at a later line, so the list keeps the checker's own order.
         let record = record(program);
-        for d in lower_typed(program, refused, &record) {
+        for d in typed_under_each(program, &refused, &record) {
             let at = diags
                 .iter()
                 .position(|c| c.file == d.file && c.line > d.line)
@@ -261,6 +261,70 @@ fn for_editor(
         }
     }
     judged
+}
+
+/// [`lower_typed`] once per declaration of a function or type declared twice:
+/// the `k`th run keeps each such name's `k`th declaration, or its last, so a
+/// body whose meaning depends on which one wins is judged under each. A
+/// refusal two runs give is returned once, in the first run's order.
+fn typed_under_each(
+    program: &mut ast::Program,
+    refused: &HashSet<String>,
+    record: &checker::Recorded,
+) -> Vec<Diagnostic> {
+    let runs = declarations(&program.functions, |f| &f.name)
+        .into_values()
+        .chain(declarations(&program.type_decls, |t| &t.name).into_values())
+        .max()
+        .unwrap_or(1);
+    if runs == 1 {
+        return lower_typed(program, refused.clone(), record);
+    }
+    let fns = std::mem::take(&mut program.functions);
+    let types = std::mem::take(&mut program.type_decls);
+    let mut out: Vec<Diagnostic> = Vec::new();
+    for k in 0..runs {
+        program.functions = kth_of_each(&fns, k, |f| &f.name);
+        program.type_decls = kth_of_each(&types, k, |t| &t.name);
+        for d in lower_typed(program, refused.clone(), record) {
+            let same = |e: &Diagnostic| {
+                (&e.file, e.line, e.col, &e.message) == (&d.file, d.line, d.col, &d.message)
+            };
+            if !out.iter().any(same) {
+                out.push(d);
+            }
+        }
+    }
+    program.functions = fns;
+    program.type_decls = types;
+    out
+}
+
+/// How many declarations each name has.
+fn declarations<T>(
+    items: &[T],
+    name: impl Fn(&T) -> &String,
+) -> std::collections::HashMap<&String, usize> {
+    let mut n: std::collections::HashMap<&String, usize> = Default::default();
+    for x in items {
+        *n.entry(name(x)).or_default() += 1;
+    }
+    n
+}
+
+/// Each name's `k`th declaration, or its last, in source order.
+fn kth_of_each<T: Clone>(items: &[T], k: usize, name: impl Fn(&T) -> &String) -> Vec<T> {
+    let total = declarations(items, &name);
+    let mut seen: std::collections::HashMap<&String, usize> = Default::default();
+    let mut kept = Vec::new();
+    for x in items {
+        let j = seen.entry(name(x)).or_default();
+        if *j == k.min(total[name(x)] - 1) {
+            kept.push(x.clone());
+        }
+        *j += 1;
+    }
+    kept
 }
 
 /// Builds the core of every body the checker typed in a refused program, and

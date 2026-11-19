@@ -7050,6 +7050,21 @@ impl<'a> Builder<'a> {
         // buffer back through the result, so the receiver is taken by the
         // call.
         let rebuilds = prelude::rebuilds(name);
+        // `recv.name(..)` is the method and `name(..)` the function, where
+        // the module reaches both (`Checker::calls_method`).
+        let by_receiver = || {
+            matches!(
+                dest,
+                Some(Expr::Call {
+                    form: CallForm::Method | CallForm::Protocol(_),
+                    ..
+                })
+            ) && (self.program.spellings).reaches_method(
+                &self.program.protocols,
+                self.body.file.as_deref(),
+                name,
+            )
+        };
         // Who the callee is decides each argument position's capability.
         let mut kind = Callee::Reserved;
         let mut member = None;
@@ -7067,7 +7082,7 @@ impl<'a> Builder<'a> {
             // target that takes one otherwise (`Checker::reads_every_param`).
             kind = Callee::Value(n);
             vec![Capability::Read; args.len()]
-        } else if let Some((id, f)) = self.declared(name) {
+        } else if let Some((id, f)) = self.declared(name).filter(|_| !by_receiver()) {
             kind = Callee::Fn(id);
             f.params.iter().map(|p| p.capability).collect()
         } else if prelude::signature(name).is_some() {
@@ -8438,7 +8453,7 @@ fn typed(
         }
     }
     if as_written {
-        found.extend(crate::typed::drops(top, program, own.proto.types()));
+        found.extend(crate::typed::drops(top, program, &own.proto));
     }
     found.sort_by_key(|s| s.line);
     let refused = !found.is_empty() || !unshown.is_empty();
