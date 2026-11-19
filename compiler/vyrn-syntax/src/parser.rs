@@ -2247,7 +2247,7 @@ mod tests {
 
     #[test]
     fn the_format_grammar_writes_a_parser() {
-        let g = load(&text("syntax.syntax")).expect("syntax.syntax loads");
+        let g = load(&text("../../std/syntax.syntax")).expect("syntax.syntax loads");
         let written = parser(&g).expect("it lowers");
         assert!(
             written.contains("export fn parseFile(text: String)"),

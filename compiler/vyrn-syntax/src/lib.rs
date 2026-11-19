@@ -7,7 +7,7 @@
 //! that fails is an error at that element, not a backtrack. `@e` backtracks over a
 //! committed failure; `&e` and `!e` never commit. A refusal is
 //! `^Row(hole=source)@anchor`: it names a row and fills its holes, and the host
-//! renders the sentence. `compiler/vyrn-syntax/syntax.syntax` is the file format,
+//! renders the sentence. `std/syntax.syntax` is the file format,
 //! written in itself.
 //!
 //! Entry points: [`load`] reads a grammar, [`lexer`] writes its lexical rules as
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn the_loader_reads_the_format_grammar_and_vyrn() {
-        assert!(load(&text("syntax.syntax")).is_ok());
+        assert!(load(&text("../../std/syntax.syntax")).is_ok());
         assert!(load(&text("vyrn.syntax")).is_ok());
     }
 

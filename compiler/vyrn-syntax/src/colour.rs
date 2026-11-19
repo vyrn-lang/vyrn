@@ -27,7 +27,7 @@ pub struct Run {
 ///
 /// Never: the test `the_format_grammar_colours_each_part` loads it and finds `file`.
 pub fn format() -> (Grammar, RuleId) {
-    let g = crate::load(include_str!("../syntax.syntax")).expect("syntax.syntax loads");
+    let g = crate::load(include_str!("../../../std/syntax.syntax")).expect("syntax.syntax loads");
     let file = g.rule("file").expect("syntax.syntax has a rule file");
     (g, file)
 }
