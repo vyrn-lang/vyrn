@@ -536,7 +536,7 @@ pub fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<St
         let root = opts
             .std_root
             .as_deref()
-            .ok_or_else(|| "std library not available (no std root configured)".to_string())?;
+            .ok_or_else(crate::manifest::std_root_missing)?;
         return Ok(normalize(&with_ext(format!("{root}/{rest}"))));
     }
     if spec.starts_with("http://") {
