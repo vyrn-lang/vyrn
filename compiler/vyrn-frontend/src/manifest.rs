@@ -74,6 +74,18 @@ pub fn std_root() -> Option<String> {
     root_near_exe("VYRN_STD", "std")
 }
 
+/// The sentence for a `std/...` import when [`std_root`] found nothing: it names
+/// where the search looked, so a failure on a machine nobody can log into says
+/// which of the two places was wrong.
+pub fn std_root_missing() -> String {
+    let var = std::env::var("VYRN_STD").map_or("unset".to_string(), |v| format!("`{v}`"));
+    let exe = std::env::current_exe().map_or(
+        "an executable path the system did not give".to_string(),
+        |p| format!("`{}`", p.to_string_lossy().replace('\\', "/")),
+    );
+    format!("std library not available: VYRN_STD is {var}, and no std/ lies within five levels above {exe}")
+}
+
 /// The `web/` root holding the browser runtimes (`wasi-min.js`, `vyrn-rpc.js`,
 /// `vyrn-query.js`): `$VYRN_WEB`, or `web/` beside the executable's repo.
 pub fn web_root() -> Option<String> {
