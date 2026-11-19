@@ -1,1 +1,1 @@
-validated_records_do_not_join.vyrn:5:0: `if` branches have differing types: Up vs Down
+validated_records_do_not_join.vyrn:5:13: `if` branches have differing types: Up vs Down

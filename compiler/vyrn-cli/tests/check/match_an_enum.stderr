@@ -1,1 +1,1 @@
-match_an_enum.vyrn:1:0: `match` is missing variant `B`
+match_an_enum.vyrn:1:53: `match` is missing variant `B`

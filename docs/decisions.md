@@ -167,7 +167,7 @@ pull request.
 - A projection (a field, element or pattern binder of a place) borrows its root. It may be read, not stored or returned; the fix is `.copy()` or a take.
 - A read through a `lazy` field names no place: each read forces the field, and a part of the forced value is the reader's, as a part of a call's result is.
 - A refusal quotes what the reader wrote, never a compiler temporary (`@t1`): `vyrn_lower::rules::refusal` panics in a debug build on a sentence that does.
-- A refusal sits on the column where the reader spelled the name it refuses, and keeps column 0 where that spelling is on another line: a column never moves a refusal's line.
+- A refusal sits on the column where the reader spelled the name it refuses, else where the node it refuses starts (`ast::Id::start`, which the parser gives every node it builds and a desugar's node inherits from the construct it stands for), and keeps column 0 where neither is on its line: a column never moves a refusal's line. The start is its own slot, so `Id::col` means only a spelled name (decided 2026-11-19 by the user; it costs 8 bytes per expression).
 - A lend is refused, never tracked through stores. Tracking it would need an alias analysis.
 - `consume <place>` moves a value out of a place; only the taken path dies. No `take` keyword and no `.take()`: an element leaves with `swapRemove`, or with `xs.replace(i, v)`, which stores `v` in its place and answers it to the caller, who owns it (decided 2026-11-18 by the user).
 - A statement's value is released where the statement ends. A part read as a statement (`p.f`, `xs[i].f`) takes nothing: only `consume` moves a value out of a place.

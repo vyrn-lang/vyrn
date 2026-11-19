@@ -838,11 +838,13 @@ fn pin_diagnostics(
 ) {
     for d in diags.iter_mut() {
         // Lex and parse diagnostics carry their own span. A judgment that knows
-        // only where its name starts spans the token there.
+        // only where its name or keyword starts spans the token there.
         if d.col != 0 {
             if d.end_col == 0 && !matches!(d.stage, "lex" | "parse") {
-                let at = tok_info.iter().find(|t| t.line == d.line && t.col == d.col);
-                d.end_col = at.map_or(0, |t| t.end_col);
+                let name = tok_info.iter().find(|t| t.line == d.line && t.col == d.col);
+                let kw = (kw_cols.get(&d.line).into_iter().flat_map(|k| k.values()))
+                    .find(|(col, _)| *col == d.col);
+                d.end_col = name.map(|t| t.end_col).or(kw.map(|k| k.1)).unwrap_or(0);
             }
             continue;
         }
@@ -2444,10 +2446,22 @@ fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
     let memory = (analysis.memory.iter())
         .find(|m| m.name == b.name && m.line == b.line)
         .map(|m| format!("memory: {}", m.text));
-    let h = hover_of(
-        &local_detail(b, &analysis.spellings),
-        &[structure.as_deref(), memory.as_deref()],
-    );
+    let detail = local_detail(b, &analysis.spellings);
+    let h = hover_of(&detail, &[structure.as_deref(), memory.as_deref()]);
+    // A binding's detail is code even where it opens with no keyword
+    // (`items: Array<Item>`); sent as prose, the editor reads `<Item>` as HTML.
+    let doc = match h.signature {
+        Some(_) => h.doc,
+        None => [structure, memory]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(
+                "
+
+",
+            ),
+    };
     Resolution {
         name: b.name.clone(),
         kind: match b.kind {
@@ -2459,8 +2473,8 @@ fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
         target_end_col: b.end_col,
         target_file: None,
         hover: h.text,
-        signature: h.signature,
-        doc: h.doc,
+        signature: Some(h.signature.unwrap_or(detail)),
+        doc,
         definition: true,
     }
 }

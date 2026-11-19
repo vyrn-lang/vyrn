@@ -809,7 +809,7 @@ impl<'a> Build<'a> {
         let (line, col) = self.binder_pos();
         let name = self.ident();
         Binder {
-            id: Id::NEW,
+            id: Id::started((line, col)),
             name,
             line,
             col,
@@ -1230,7 +1230,7 @@ impl<'a> Build<'a> {
         let (self_line, self_col) = self.binder_pos();
         self.eat(&Tok::Vself);
         let mut params = vec![Param {
-            id: Id::NEW,
+            id: Id::started((self_line, self_col)),
             name: "self".to_string(),
             capability,
             ty: self_ty.clone(),
@@ -1245,7 +1245,7 @@ impl<'a> Build<'a> {
             let capability = self.capability();
             let ty = self.type_();
             params.push(Param {
-                id: Id::NEW,
+                id: Id::started((line, col)),
                 name: pname,
                 capability,
                 ty,
@@ -1534,7 +1534,7 @@ impl<'a> Build<'a> {
             let ty = b.type_();
             let clause = b.eat(&Tok::Where).then(|| b.expr());
             params.push(Param {
-                id: Id::NEW,
+                id: Id::started((line, col)),
                 name,
                 capability,
                 ty,
@@ -1843,6 +1843,7 @@ impl<'a> Build<'a> {
     // Statements.
 
     fn block(&mut self) -> Block {
+        let id = Id::started(self.binder_pos());
         self.eat(&Tok::LBrace);
         let mut stmts = Vec::new();
         loop {
@@ -1861,7 +1862,7 @@ impl<'a> Build<'a> {
                 }
             }
         }
-        Block { id: Id::NEW, stmts }
+        Block { id, stmts }
     }
 
     /// Top-level module state: `let [mut] name [: Type] = init`. The
@@ -1915,9 +1916,11 @@ impl<'a> Build<'a> {
         if !matches!(self.peek(), Tok::If) {
             return Some(self.block());
         }
-        let nested = self.if_stmt(self.line());
+        let at = self.binder_pos();
+        let mut nested = self.if_stmt(self.line());
+        nested.starts(at);
         Some(Block {
-            id: Id::NEW,
+            id: Id::started(at),
             stmts: vec![nested],
         })
     }
@@ -2006,7 +2009,15 @@ impl<'a> Build<'a> {
         self.spliced(stmts)
     }
 
+    /// A statement, starting at its first token.
     fn stmt(&mut self) -> Stmt {
+        let at = self.binder_pos();
+        let mut s = self.stmt_here();
+        s.starts(at);
+        s
+    }
+
+    fn stmt_here(&mut self) -> Stmt {
         let line = self.line();
         match self.peek() {
             Tok::Let => {
@@ -2227,6 +2238,7 @@ impl<'a> Build<'a> {
             let op = binop(self.peek());
             self.at += 1;
             let rhs = self.expr();
+            let at = lhs.start();
             lhs = match op {
                 Some(op) => Expr::Binary {
                     id: Id::NEW,
@@ -2237,6 +2249,7 @@ impl<'a> Build<'a> {
                 },
                 None => Self::nullish(lhs, rhs, line),
             };
+            lhs.starts(at);
         }
         self.at += 1;
         lhs
@@ -2264,7 +2277,15 @@ impl<'a> Build<'a> {
         }
     }
 
+    /// An operand, starting at its first token.
     fn unary(&mut self) -> Expr {
+        let at = self.binder_pos();
+        let mut e = self.unary_here();
+        e.starts(at);
+        e
+    }
+
+    fn unary_here(&mut self) -> Expr {
         let line = self.line();
         // `consume place`: the take. `await f(..)` marks a waiting call, and it marks
         // the call under any `?` after it: `await f(x)?` is `(await f(x))?`.
@@ -2309,8 +2330,10 @@ impl<'a> Build<'a> {
     /// Postfix `?`, `.field`, `.name(..)`, `::P.name(..)` and `[i]`, binding tighter than unary and
     /// binary operators.
     fn postfix(&mut self) -> Expr {
+        let at = self.binder_pos();
         let mut e = self.primary();
         loop {
+            e.starts(at);
             let line = match self.peek() {
                 Tok::Question | Tok::Dot | Tok::LBracket | Tok::ColonColon => self.line(),
                 _ => return e,
