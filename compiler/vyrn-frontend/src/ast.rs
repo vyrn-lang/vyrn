@@ -1643,7 +1643,9 @@ impl Spellings {
 
     /// Whether `recv.name(..)`, written in `home` (`None` the root), may
     /// dispatch to a method of one of `protocols` that declares `name` while a
-    /// function has the name too: `home` reaches the protocol's module. The
+    /// function has the name too: `home` reaches the protocol's module, and
+    /// every module reaches a prelude protocol `protocols` does not replace
+    /// ([`crate::prelude::protocols`]). The
     /// form picks the declaration, so `x.len()` is the method and `len(x)` the
     /// function; a module that reaches no such protocol, std included, calls
     /// the function either way, as in its own load.
@@ -1654,9 +1656,12 @@ impl Spellings {
         name: &str,
     ) -> bool {
         let home = home.unwrap_or(&self.root);
-        (protocols.iter())
-            .filter(|p| (p.methods.iter()).any(|m| m.name == name && m.result_cap.is_none()))
-            .any(|p| self.reaches(home, p.module.as_deref().unwrap_or(&self.root)))
+        let declares = |p: &&ProtocolDecl| {
+            (p.methods.iter()).any(|m| m.name == name && m.result_cap.is_none())
+        };
+        crate::prelude::protocols(protocols).any(|p| declares(&p))
+            || (protocols.iter().filter(declares))
+                .any(|p| self.reaches(home, p.module.as_deref().unwrap_or(&self.root)))
     }
 
     /// Whether module `from` is `to` or imports it, through any chain of

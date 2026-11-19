@@ -693,17 +693,14 @@ fn check_accum_inner(
         .collect();
     // Protocol registries: each method name to its protocol and
     // signature, and which (protocol, type key) pairs are implemented.
-    let mut protocol_methods: HashMap<String, Vec<(String, MethodSig)>> = HashMap::new();
-    for p in &program.protocols {
+    let mut protocol_methods: HashMap<&str, Vec<(&str, &MethodSig)>> = HashMap::new();
+    for p in crate::prelude::protocols(&program.protocols).chain(&program.protocols) {
         for m in &p.methods {
             // A projection requirement never dispatches as a method.
             if m.result_cap.is_some() {
                 continue;
             }
-            protocol_methods
-                .entry(m.name.clone())
-                .or_default()
-                .push((p.name.clone(), m.clone()));
+            (protocol_methods.entry(&m.name).or_default()).push((&p.name, m));
         }
     }
     // Projection names protocols declare, for refusing one on a bounded
@@ -715,12 +712,11 @@ fn check_accum_inner(
         .filter(|m| m.result_cap.is_some())
         .map(|m| m.name.clone())
         .collect();
-    // The program's own declaration of a prelude protocol's name replaces it.
-    let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> = (crate::prelude::protocols())
-        .iter()
-        .chain(&program.protocols)
-        .map(|p| (p.name.as_str(), p))
-        .collect();
+    let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> =
+        (crate::prelude::protocols(&program.protocols))
+            .chain(&program.protocols)
+            .map(|p| (p.name.as_str(), p))
+            .collect();
     for imp in &program.impls {
         let mark = out.len();
         // The impl binds exactly the associated types the protocol declares.
@@ -1698,7 +1694,7 @@ struct Cx<'a> {
     /// Function name to (type parameter to bounds).
     all_bounds: &'a HashMap<&'a str, &'a HashMap<String, Vec<String>>>,
     /// Method name to (protocol, signature).
-    protocol_methods: &'a HashMap<String, Vec<(String, MethodSig)>>,
+    protocol_methods: &'a HashMap<&'a str, Vec<(&'a str, &'a MethodSig)>>,
     /// The declared protocols, the prelude's included.
     protocols: &'a [crate::ast::ProtocolDecl],
     spellings: &'a crate::ast::Spellings,
@@ -2902,7 +2898,7 @@ impl<'a> Checker<'a> {
             _ if self
                 .protocol_methods
                 .values()
-                .any(|entries| entries.iter().any(|(p, _)| p == bound))
+                .any(|entries| entries.iter().any(|(p, _)| *p == bound))
                 || self.impls.iter().any(|i| i.protocol == bound) =>
             {
                 self.declares_an_impl(ty, &base, bound)
@@ -5131,7 +5127,7 @@ impl<'a> Checker<'a> {
         let mut candidates = self.protocol_methods.get(name).cloned().unwrap_or_default();
         let written = receiver_text(args.first());
         if let Some(p) = via {
-            candidates.retain(|(q, _)| q == p);
+            candidates.retain(|(q, _)| *q == p);
             if candidates.is_empty() {
                 let declared = self.protocols.iter().any(|d| d.name == p)
                     || crate::types::KNOWN_PROTOCOLS.iter().any(|(k, _)| *k == p);
@@ -5184,7 +5180,7 @@ impl<'a> Checker<'a> {
                                 first = bounded[0].0,
                                 protocols = bounded
                                     .iter()
-                                    .map(|(p, _)| p.as_str())
+                                    .map(|(p, _)| *p)
                                     .collect::<Vec<_>>()
                                     .join(", ")
                             ));
@@ -5201,7 +5197,7 @@ impl<'a> Checker<'a> {
                         first = matching[0].0,
                         protocols = matching
                             .iter()
-                            .map(|(p, _)| p.as_str())
+                            .map(|(p, _)| *p)
                             .collect::<Vec<_>>()
                             .join(", ")
                     ));
