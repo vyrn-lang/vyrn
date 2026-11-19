@@ -1,4 +1,4 @@
-/// The wire types: the validated records and scalars that cross the RPC boundary
+/// The wire types: the record and scalar refinement types that cross the RPC boundary
 /// and define the persisted-file shape. Pure data — no state, no behavior.
 
 /// A paste id: a short content-addressed base36 string.

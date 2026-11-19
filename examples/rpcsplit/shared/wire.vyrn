@@ -1,5 +1,5 @@
 /// Wire types for the split in-process RPC demo — a universal leaf
-/// module of pure validated types that both the store and the procedure module
+/// module of pure refinement types that both the store and the procedure module
 /// import. Reflection reaches every type below through the procedure module's
 /// reachable type closure, so `clientInProcess("./rpcsplit/server/api")` imports
 /// them from HERE, not from the module whose signature merely names them.

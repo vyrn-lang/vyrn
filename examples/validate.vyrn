@@ -1,4 +1,4 @@
-// Validated types.
+// Refinement types.
 
 type Age = Int64 where value >= 18
 type Port = Int64 where value >= 1 && value <= 65535

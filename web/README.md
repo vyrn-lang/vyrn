@@ -279,7 +279,7 @@ its RPC state — `vyrn-dom.js` for the DOM, `vyrn-rpc.js` for the transport.
 
 The browser runs the WASI shim, extern imports *and* exports, module state with
 a host-driven event loop, and typed RPC as a library (with `vyrn dev` + the two
-runtimes above): the full pipeline — validated types, protocols, schemas, regex DFAs, the
+runtimes above): the full pipeline — refinement types, protocols, schemas, regex DFAs, the
 arena runtime, host calls in both directions, stateful handlers driven by a host
 loop, and end-to-end typed client/server calls — runs in a browser today. What it
 does NOT have yet: `async`/`await`, promises/JSPI suspension, or

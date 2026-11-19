@@ -45,7 +45,7 @@ A file holds these top-level forms, in any order:
 |---|---|
 | `import ...` | Takes names from another module. |
 | `fn`, `gen fn`, `mut fn`, `extern fn`, `export extern fn` | Functions. |
-| `type` | A record, an enum, a validated type or an alias. |
+| `type` | A record, an enum, a refinement type or an alias. |
 | `protocol`, `impl` | Named method sets and their implementations. |
 | `contract` | The exports a module may have, read by generators. |
 | `let`, `let mut` | Module state. |
@@ -198,9 +198,9 @@ type Level = enum { Debug, Info, Warn }
 
 There is no null and no exception. `Option<T>` is `Some(T)` or `None`. `Result<T, E>` is `Ok(T)` or `Err(E)`. Both are ordinary enums that every program can name without an import. See [Failure](#failure) for `?`, `??` and `panic`.
 
-### Validated types
+### Refinement types
 
-A `where` clause makes a rule part of a type. `value` names the value being checked.
+A refinement type is a base type and a predicate over `value`, the value being checked, written after `where`. The compiler proves the predicate where the facts allow it, and checks it at each boundary where they do not.
 
 ```vyrn
 /// The port to listen on.
@@ -213,7 +213,7 @@ type User = {
 ```
 
 - A predicate uses comparisons, `&&`, `||`, arithmetic, `value.byteLength` and `=~`. On a record, a trailing `where` states a rule across fields, and a `where` on a field constrains that field.
-- `Port(n)` constructs. A constant that satisfies the rule is proven at compile time and costs nothing; a constant that breaks it is refused; a runtime value that breaks it traps. The compiler drops the check where the facts before it prove the rule, and a value of a validated integer type gives the compiler its rule's comparisons as facts: with `i: Idx` and `type Idx = Int64 where value >= 0 && value < 8`, `xs[i]` on an `Array<Int64, 8>` runs no index check.
+- `Port(n)` constructs. A constant that satisfies the rule is proven at compile time and costs nothing; a constant that breaks it is refused; a runtime value that breaks it traps. The compiler drops the check where the facts before it prove the rule, and a value of an integer refinement type gives the compiler its rule's comparisons as facts: with `i: Idx` and `type Idx = Int64 where value >= 0 && value < 8`, `xs[i]` on an `Array<Int64, 8>` runs no index check.
 - `Port?(n)` answers `Option<Port>`: `None` when the rule fails. Use it for input the program does not control.
 - Every boundary checks the rule without a call: a `let` annotation, an assignment, an argument, a return, a record field, an array element and a map insert.
 - A parameter may state a rule over its argument and the arguments before it: `fn at(b: Array<Int64>, i: Int64 where value >= 0 && value < b.length)`. A comparison's side is an integer literal, or `value` or an earlier `read` parameter: the integer itself, or its `.length`, `.byteLength` or integer field. So `skip: Array<UInt32> where value.length >= 256` states the parameter's own length. `&&` joins the comparisons, and only a `read` parameter carries a clause. Every call checks the clause and the body assumes it. The compiler drops the check where the caller's facts prove it; otherwise a failure traps at the call with ``validation failed for parameter `i` of `at` ``.
@@ -225,17 +225,17 @@ type User = {
 - A run of consecutive statements that store into (assign, push onto, or otherwise modify) the fields of one record with a trailing `where` is a group. The rule is checked once, after the group's last statement, with the trap of any boundary; the prover drops the check where it proves the rule, as when each column grows by one from equal lengths. Any other statement ends the group, so `c.a.push(1)` then `print(c.a.length)` checks `c` before the `print`. A group whose check fails on every run that reaches it is refused: after that push, `c.a` is longer than `c.b`.
 - Between a group's first store and its check, nothing reads the record whole. When the record is a `modify` parameter, the group also calls no function the program declares and no function value, and has no `?`, because the caller would see the record with the rule unchecked. A `?` or a trap inside the group leaves a record the function owns unobserved, so both are allowed there. A `return` statement ends the group, so the check runs before it.
 - An element of an array field the rule reads only as `.length` is assigned in place with no check: `c.xs[i] = v` keeps every length. A store into a field of module state, or into a field of a nested record with its own rule, is refused; rebuild the record.
-- A validated value decays to its base type, so a `Port` is usable as an `Int64`.
-- Branches of an `if` or arms of a `match` of different validated scalar types over one base join to their union. `if fast { Port(8080) } else { Age(30) }` is a `Port | Age`: an `Int64` where `Port`'s rule or `Age`'s holds. Each branch proved its own side, so the join adds no check.
+- A value of a refinement type decays to its base type, so a `Port` is usable as an `Int64`.
+- Branches of an `if` or arms of a `match` of different scalar refinement types over one base join to their union. `if fast { Port(8080) } else { Age(30) }` is a `Port | Age`: an `Int64` where `Port`'s rule or `Age`'s holds. Each branch proved its own side, so the join adds no check.
 - A union is written `Port | Age` in any type position: an annotation, a parameter, a return, a record field, a type argument and an alias (`type Open = Port | Age`). `|` binds loosest in a type, so `Option<Port | Age>` holds a union and `fn() -> Port | Age` returns one.
-- Each member is a validated scalar type, or a union of them, over one base. A record, an array, an enum, a type parameter, a generic validated type and a member over another base are refused, each with one sentence. A union lists each member once, in source order, and a union of unions flattens. A member equal to the base absorbs the rest, so `Port | Int64` is `Int64`, and a union of one member is that member. Validated records and arrays, and types over different bases, do not join.
-- A written union is a validated type whose rule is the `||` of its members' rules. Every boundary checks it, and a raw base value that satisfies no member traps with ``validation failed for `Port | Age` ``. A value of a member type, or of a union of its members, fits with no check, and a constant or an interpolation proven in one member costs nothing. A union decays to its base, and where a `Port` is required it is checked at the boundary, as an `Age` is.
+- Each member is a scalar refinement type, or a union of them, over one base. A record, an array, an enum, a type parameter, a generic refinement type and a member over another base are refused, each with one sentence. A union lists each member once, in source order, and a union of unions flattens. A member equal to the base absorbs the rest, so `Port | Int64` is `Int64`, and a union of one member is that member. Record and array refinement types, and types over different bases, do not join.
+- A written union is a refinement type whose rule is the `||` of its members' rules. Every boundary checks it, and a raw base value that satisfies no member traps with ``validation failed for `Port | Age` ``. A value of a member type, or of a union of its members, fits with no check, and a constant or an interpolation proven in one member costs nothing. A union decays to its base, and where a `Port` is required it is checked at the boundary, as an `Age` is.
 - A union has no name of its own, so it has no constructor and no `?` form. An alias of one is transparent: `Open` and `Port | Age` assign to each other. A `where` over a union is refused, as over any non-scalar base.
 - A join decays to its base in every pass after the checker. So where a join meets a written union the boundary check runs, and a `let mut` binding of a join holds its base.
-- An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a validated type, or a generic record applied to another argument (see Records). A record with one field is not distinct: it fits wherever a record with that one field is wanted.
-- A `String` type whose regular expression denotes a finite language is a finite string type. An interpolation whose holes are all finite types has a finite type too, and assigning it to a validated `String` type is proven by automaton containment at compile time, or refused with the key that escapes.
+- An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a refinement type, or a generic record applied to another argument (see Records). A record with one field is not distinct: it fits wherever a record with that one field is wanted.
+- A `String` type whose regular expression denotes a finite language is a finite string type. An interpolation whose holes are all finite types has a finite type too, and assigning it to a refinement type over `String` is proven by automaton containment at compile time, or refused with the key that escapes.
 
-`schemaOf<T>()` reads a validated type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type, and a union's as the `anyOf` of its members' schemas. `schemaOf` of a union is refused, because one `Schema` describes one declaration. Either is refused over a type parameter, because the answer is computed where the call is checked. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
+`schemaOf<T>()` reads a refinement type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type, and a union's as the `anyOf` of its members' schemas. `schemaOf` of a union is refused, because one `Schema` describes one declaration. Either is refused over a type parameter, because the answer is computed where the call is checked. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
 
 ### Proofs
 
@@ -252,7 +252,7 @@ fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo 
 }
 ```
 
-- The compiler proves `c` from the body, the parameters' clauses, the validated types of the names it reads and the result clauses of the functions the body calls. It reads nothing it inferred about another function, so the proof holds in every program that links the module. A comparison it cannot show is refused with the reason: ``` `prove` cannot show its comparison here: it needs `i < n`, and `i` is a parameter, so the function cannot know what its callers pass ```.
+- The compiler proves `c` from the body, the parameters' clauses, the refinement types of the names it reads and the result clauses of the functions the body calls. It reads nothing it inferred about another function, so the proof holds in every program that links the module. A comparison it cannot show is refused with the reason: ``` `prove` cannot show its comparison here: it needs `i < n`, and `i` is a parameter, so the function cannot know what its callers pass ```.
 - Every check after the call assumes `c`. So a `prove` splits a chain the prover cannot take in one step into steps it can: in `mid`, every check and the result clause are proved, and a binary search that calls `mid` runs no index check.
 - A sum or difference in `c` states a fact only where the compiler shows it stays within `-2^62..=2^62`. Elsewhere it may wrap, and the refusal says ``the sum `a + b` may wrap``.
 - The call runs nothing: the emitter erases it as it erases a lemma call (below). `prove` is no function value, because a call through a value proves nothing.
@@ -260,7 +260,7 @@ fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo 
 A project demands a proof of every check in a module by naming it in the `proved` key of `vyrn.json`: `{ "main": "main.vyrn", "proved": ["core/**", "scan.vyrn"] }`. Each entry is a glob relative to the manifest's directory: `*` and `?` match within one name, and `**` matches any number of directories.
 
 - A check that a body of such a module keeps is refused with its reason and the fix, if one exists: ``` the index check stays at run time, and this module is in `proved` (vyrn.json): it needs `i >= 0`, and `i` is a parameter, so the function cannot know what its callers pass; add `where value >= 0` to `i`, and each call checks it where the caller cannot show it ```.
-- The proof reads what a `prove` reads: the body, the clauses, the validated types and the declared result clauses of the callees. A fact the compiler infers about a callee does not count, so a callee's result needs its clause written: `-> Int64 where value < hi`.
+- The proof reads what a `prove` reads: the body, the clauses, the refinement types and the declared result clauses of the callees. A fact the compiler infers about a callee does not count, so a callee's result needs its clause written: `-> Int64 where value < hi`.
 - A parameter's clause is the module's boundary. A call from a module outside `proved` keeps its clause check at run time; a call inside one must prove it.
 
 The emitter erases a call whose result is `Unit` or unused when its callee, after elision, has an empty effect set, takes every parameter by `read`, is trap-free, is not recursive, runs only counter loops and calls only such functions. Such a call writes nothing, traps nowhere and ends, so the program prints the same without it. A lemma whose clause the compiler proves costs no call at run time; its arguments are still evaluated.
@@ -456,7 +456,7 @@ let text = match s {
 ```
 
 - A pattern is a variant name with one binder per payload. There are no wildcard arms, no nested patterns and no literal patterns; write an arm per variant, and bind an unused payload to `_`.
-- `match` is an expression, and its arms unify to one type, or to a union of validated types ([Validated types](#validated-types)). An arm that calls `panic` has type `Never` and fits any arm type.
+- `match` is an expression, and its arms unify to one type, or to a union of refinement types ([Refinement types](#refinement-types)). An arm that calls `panic` has type `Never` and fits any arm type.
 - In statement position an arm may be a block: `Wide(a, b) => { .. }`. A block arm yields no value.
 - `match consume s { .. }` moves the payloads out of `s`.
 
@@ -529,7 +529,7 @@ fn label<T: Show>(x: T) -> String {
 - Where two protocols the receiver implements, or two of its bounds, declare one method name, `x.m()` is refused as ambiguous. `x::P.m(args)` calls `m` as protocol `P` declares it, on receiver `x`: `P` is named as an impl head names it, declared or imported flat, and `x`'s type implements `P` by an impl or a bound. The form is allowed where `x.m()` is not ambiguous, and means the same call. `x::P` alone is no value.
 - `impl<T> P for Box<T>` is a generic impl, specialized per instantiation.
 - A protocol may declare an associated type, `type Output`, that each impl fixes: `type Output = Int64`. A method signature names it.
-- An impl for a validated scalar type is refused. Give the type a record shape instead.
+- An impl for a scalar refinement type is refused. Give the type a record shape instead.
 
 The compiler knows these protocol names, and a program implements them without declaring or importing them. The prelude declares `Show`, `Owned`, `MustUse`, `Hashable` and `Fallible`, so an impl of one is checked as an impl of any declared protocol is; a program's own declaration of the name replaces the prelude's. An impl of `Copy`, `Index` or `Iterate` is checked for each member's receiver and parameter capabilities only, because its members' types are the impl's own and `Index`'s members are each optional.
 
@@ -585,7 +585,7 @@ import type { User, Port } from "./user.schema.json"
 - An `impl` applies program-wide, wherever it is written.
 - `main` and `logging` are root-module only. Module state exists in every module and is private to it; `export let` is refused, so export accessor functions.
 
-`import type { .. } from "x.schema.json"` synthesizes validated types from a JSON Schema document. Bounds, lengths and patterns become `where` clauses, `required` decides `Option`, `$defs` entries are importable, and a string `enum` becomes a fieldless enum. A root `title` that is also a `$defs` key is refused. A schema keyword Vyrn cannot express is refused, never weakened.
+`import type { .. } from "x.schema.json"` synthesizes refinement types from a JSON Schema document. Bounds, lengths and patterns become `where` clauses, `required` decides `Option`, `$defs` entries are importable, and a string `enum` becomes a fieldless enum. A root `title` that is also a `$defs` key is refused. A schema keyword Vyrn cannot express is refused, never weakened.
 
 A remote specifier is `github:owner/repo@ref/path`, `gist:user/id[@rev]/file` or an `https://` URL. The first resolve pins it in `vyrn.lock` as specifier, immutable URL and SHA-256; every later load verifies the hash against the cache under `~/.vyrn/cache`. `--offline` never fetches. A remote module's relative imports stay inside its pinned base.
 
@@ -823,6 +823,6 @@ Each line is a program the compiler refuses, and the reason.
 - Two modules' exports of one name imported flat: a top-level name is program-wide.
 - An enum variant name declared twice.
 - A function or type name declared twice. Every body is still checked, under each declaration, so one run prints every error.
-- An `impl` of a protocol for a validated scalar type.
+- An `impl` of a protocol for a scalar refinement type.
 - `x.m()` where two protocols declare `m` for the receiver: name one, `x::P.m()`.
 - An extern signature with a type the host boundary cannot carry.
