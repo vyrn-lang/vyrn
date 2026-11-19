@@ -227,7 +227,11 @@ the whole program again.
 
 For a program that does not type-check, `lower_typed` still builds every
 function the type errors do not reach and adds the typed judgment's refusals,
-so one run reports both kinds. A generator's own program gets steps 1 and 2.
+so one run reports both kinds. A statement the checker refuses does not reach
+its body: the checker traps it (`checker::Recorded::trapped`), the core builds
+it as `St::Trap` and types the name it binds `Err`, and a statement that reads
+an `Err` name and cannot be built is a trap with no sentence. The bodies built
+there leave `lower_typed` only as its typed refusals. A generator's own program gets steps 1 and 2.
 The judgments run in its engine's compile (`direct::compile_gen_host`), which
 refuses the program the typed judgment refused, or else the program with a
 kernel must-use row, before it emits. The engine (`vyrn_lower::gen_engine`)

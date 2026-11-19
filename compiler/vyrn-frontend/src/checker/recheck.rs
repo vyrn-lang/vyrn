@@ -355,9 +355,11 @@ impl Checker<'_> {
             entries: vec![(body, e.serial)],
             ..r
         });
+        let trapped = (e.typed.trapped.iter()).map(|k| k.in_unit(unit)).collect();
         Some(Typed {
             record,
             reads,
+            trapped,
             ..e.typed.clone()
         })
     }
@@ -449,6 +451,7 @@ fn in_unit(r: &Recorded, unit: u32) -> Recorded {
         stored: r.stored.clone(),
         reads: r.reads.clone(),
         entries: Vec::new(),
+        trapped: r.trapped.iter().map(at).collect(),
     }
 }
 

@@ -302,9 +302,9 @@ fn twoPasses() -> Int64 {
     }
     return x
 }
-// A typed body that calls a refused generic function is not lowered either:
-// the build moves out every function that names a refused one. So once the
-// store rule is the judgment's, `callsRefused`'s line goes with it.
+// A body the checker refuses at a statement is still typed, the statement a
+// trap, so a body that calls it is judged too: `callsRefused`'s store line
+// prints beside `refusedGeneric`'s.
 fn refusedGeneric<T>(x: T) -> Int64 {
     let a = []
     return 0

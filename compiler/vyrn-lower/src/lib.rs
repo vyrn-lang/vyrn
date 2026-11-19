@@ -374,6 +374,10 @@ struct Walk<'a, 'r> {
     /// The scrutinee of each open `if let`, innermost last. An optional
     /// projection there expands after the scrutinee and before the blocks.
     scrutinees: Vec<NodeId>,
+    /// How many open statements the checker trapped
+    /// ([`checker::Recorded::trapped`]). The core builds none of their nodes,
+    /// so the walk reads none.
+    trapped: u32,
 }
 
 impl<'a, 'r> Walk<'a, 'r> {
@@ -393,6 +397,7 @@ impl<'a, 'r> Walk<'a, 'r> {
             open: Vec::new(),
             lines: Vec::new(),
             scrutinees: Vec::new(),
+            trapped: 0,
         }
     }
 
@@ -522,6 +527,10 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
 
     fn stmt(&mut self, s: &'a Stmt, _: &std::collections::HashSet<String>) {
         self.lines.push(s.line() as u32);
+        self.trapped += u32::from(self.recorded.trapped.contains(&s.id()));
+        if self.trapped > 0 {
+            return;
+        }
         if let Some((_, scrutinee, ..)) = match s {
             Stmt::Expr(e, _) => e.as_if_let(),
             _ => None,
@@ -531,7 +540,10 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
     }
 
     fn after_stmt(&mut self, s: &'a Stmt, _: &std::collections::HashSet<String>) {
+        let trapped = self.trapped > 0;
+        self.trapped -= u32::from(self.recorded.trapped.contains(&s.id()));
         match s {
+            _ if trapped => {}
             // The writing half of a projection: `a[i] = v` on a receiver with
             // a user `place atSet`, as the checker built and shared it.
             Stmt::Store { base, leaf, .. } => {
@@ -564,6 +576,9 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
     }
 
     fn expr(&mut self, e: &'a Expr, locals: &std::collections::HashSet<String>) -> bool {
+        if self.trapped > 0 {
+            return false;
+        }
         let key = e.id();
         let line = match e.line() {
             0 => self.lines.last().copied().unwrap_or(0),

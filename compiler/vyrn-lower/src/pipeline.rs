@@ -328,7 +328,9 @@ fn kth_of_each<T: Clone>(items: &[T], k: usize, name: impl Fn(&T) -> &String) ->
 }
 
 /// Builds the core of every body the checker typed in a refused program, and
-/// returns the typed judgment's refusals of those bodies.
+/// returns the typed judgment's refusals of those bodies. A statement the
+/// checker trapped is a trap in its core, so these bodies leave only as the
+/// refusals.
 ///
 /// A refused function, impl method or module-state binding leaves the build,
 /// and so does every function and binding that names or dispatches to one. A
