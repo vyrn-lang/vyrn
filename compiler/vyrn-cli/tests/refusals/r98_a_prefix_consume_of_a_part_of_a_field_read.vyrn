@@ -1,0 +1,12 @@
+// A field read is an alias of the field, so a take of its part would leave
+// the record that owns it to release that part a second time.
+type Group = { a: String }
+type Read = { g: Group }
+
+fn main() -> Int64 {
+    let r = Read { g: Group { a: "a".copy() } }
+    let g = r.g
+    let n = consume g.a
+    print(n)
+    return 0
+}
