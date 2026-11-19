@@ -249,8 +249,9 @@ impl BinderIndex<'_> for LocalIndex<'_> {
     }
 }
 
-/// Every binding the root module's functions and impl methods make, in source
-/// order. `types` is what the check decided, keyed by binder position.
+/// Every binding the root module's functions and impl methods make, and the
+/// `value` of each refinement, in source order. `types` is what the check
+/// decided, keyed by binder position.
 ///
 /// Projection bodies and `test` blocks are skipped: `symbols::fn_lines` does
 /// not scope a cursor to them.
@@ -276,6 +277,20 @@ pub(crate) fn local_index(
             index_block(b, &mut HashSet::new(), &mut v);
         }
     }
+    // A refinement's `value` has no binder token, so its row sits at column 0
+    // of the declaration's line, as a declaration's symbol does.
+    for (line, base) in refinements(program) {
+        out.push(LocalBinding {
+            name: "value".to_string(),
+            kind: LocalKind::Param,
+            ty: Some(base.clone()),
+            annotated: true,
+            line,
+            col: 0,
+            end_col: 0,
+            fn_line: line,
+        });
+    }
     // One row per position. An impl method `parse_accum` flattened into
     // `functions` is walked twice, and a refutable `let` binds the
     // same token as its `match` arm. The stable sort keeps the arm's row,
@@ -283,6 +298,15 @@ pub(crate) fn local_index(
     out.sort_by_key(|b| (b.fn_line, b.line, b.col));
     out.dedup_by_key(|b| (b.line, b.col));
     out
+}
+
+/// The declaration line and the type of `value` of each refinement the root
+/// module writes ([`TypeDecl::refined`]). A synthetic one (`User.age`) shares
+/// its record's line, so it is left out.
+pub(crate) fn refinements(program: &Program) -> impl Iterator<Item = (usize, &Type)> {
+    (program.type_decls.iter())
+        .filter(|t| t.module.is_none() && !crate::ast::is_synthetic(&t.name))
+        .filter_map(|t| Some((t.line, t.refined()?)))
 }
 
 /// Names the compiler owns: builtin functions, builtin type names and the sum

@@ -1421,8 +1421,10 @@ pub fn class_completions(
     )
 }
 
-/// Whether the string literal under the cursor is a direct argument of a call
-/// of [`Analysis::class_call`], bare or as the last segment of `ns.<call>`.
+/// Whether the string literal under the cursor lies in the arguments of a call
+/// of [`Analysis::class_call`], bare or as the last segment of `ns.<call>`, at
+/// any depth: a `.vyx` `:class` expression such as `pick(on, "p-2")` reaches
+/// the call as its argument.
 fn class_call_arg(analysis: &Analysis, source: &str, line: usize, col: usize) -> bool {
     let Ok(toks) = lexer::lex(source) else {
         return false;
@@ -1447,13 +1449,13 @@ fn class_call_arg(analysis: &Analysis, source: &str, line: usize, col: usize) ->
         i -= 1;
         match &toks[i].tok {
             Tok::RParen => depth += 1,
-            Tok::LParen => {
-                if depth == 0 {
-                    return i >= 1
-                        && matches!(&toks[i - 1].tok, Tok::Ident(c) if *c == analysis.class_call);
+            Tok::LParen if depth == 0 => {
+                if i >= 1 && matches!(&toks[i - 1].tok, Tok::Ident(c) if *c == analysis.class_call)
+                {
+                    return true;
                 }
-                depth -= 1;
             }
+            Tok::LParen => depth -= 1,
             _ => {}
         }
     }
@@ -1785,8 +1787,9 @@ fn decl_lines(program: &ast::Program) -> Vec<usize> {
     v
 }
 
-/// The subset of [`decl_lines`] that are function declarations (functions and
-/// impl methods). A protocol method has no body, so it holds no locals.
+/// The subset of [`decl_lines`] that hold locals: functions, impl methods and
+/// refinements, whose predicate binds `value`. A protocol method has no body,
+/// so it holds no locals.
 fn fn_lines(program: &ast::Program) -> Vec<usize> {
     let mut v: Vec<usize> = Vec::new();
     for f in &program.functions {
@@ -1797,6 +1800,7 @@ fn fn_lines(program: &ast::Program) -> Vec<usize> {
             v.push(m.line);
         }
     }
+    v.extend(checker::refinements(program).map(|(line, _)| line));
     v.sort_unstable();
     v
 }
@@ -3224,15 +3228,20 @@ fn dedup_refs(mut refs: Vec<RefRange>) -> Vec<RefRange> {
     refs
 }
 
-/// The specifier text when the 1-based `(line, col)` cursor is inside an
-/// import's source string: a plain specifier (`"./store"`) or a
-/// string argument of a generator import (`i18n("../strings")`). `None`
-/// elsewhere. An import can span lines, so the string belongs to an import when
-/// the greatest import-or-declaration line at or above it is an import.
-pub fn import_spec_at(source: &str, line: usize, col: usize) -> Option<String> {
+/// The specifier text and its 1-based column range on `line`, quotes
+/// excluded, when the 1-based `(line, col)` cursor is inside an import's
+/// source string: a plain specifier (`"./store"`) or a string argument of a
+/// generator import (`i18n("../strings")`). `None` elsewhere. An import can
+/// span lines, so the string belongs to an import when the greatest
+/// import-or-declaration line at or above it is an import.
+pub fn import_spec_at(
+    source: &str,
+    line: usize,
+    col: usize,
+) -> Option<(String, std::ops::Range<usize>)> {
     let toks = lexer::lex(source).ok()?;
     // The string-literal token whose span contains the cursor.
-    let (str_line, spec) = toks.iter().find_map(|t| {
+    let (str_line, spec, cols) = toks.iter().find_map(|t| {
         if t.line != line {
             return None;
         }
@@ -3240,7 +3249,7 @@ pub fn import_spec_at(source: &str, line: usize, col: usize) -> Option<String> {
             let start = t.col;
             let end = t.col + s.chars().count() + 2; // + the two quotes
             if col >= start && col <= end {
-                return Some((t.line, s.clone()));
+                return Some((t.line, s.clone(), start + 1..end - 1));
             }
         }
         None
@@ -3263,7 +3272,7 @@ pub fn import_spec_at(source: &str, line: usize, col: usize) -> Option<String> {
         .find(|(l, _)| *l <= str_line)
         .map(|(_, is_imp)| *is_imp)
         .unwrap_or(false);
-    is_import.then_some(spec)
+    is_import.then_some((spec, cols))
 }
 
 /// Resolves an identifier token to a [`SemKind`] and [`SemMods`] in

@@ -34,14 +34,14 @@ use lsp_types::{
     DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     Documentation, FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, InlayHint,
-    InlayHintKind, InlayHintLabel, InlayHintParams, InsertTextFormat, Location, MarkupContent,
-    MarkupKind, OneOf, Position, PrepareRenameResponse, PublishDiagnosticsParams, Range,
-    Registration, RegistrationParams, RelativePattern, RenameOptions, RenameParams, SemanticToken,
-    SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
+    InlayHintKind, InlayHintLabel, InlayHintParams, InsertTextFormat, Location, LocationLink,
+    MarkupContent, MarkupKind, OneOf, Position, PrepareRenameResponse, PublishDiagnosticsParams,
+    Range, Registration, RegistrationParams, RelativePattern, RenameOptions, RenameParams,
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 
 use vyrn_frontend::symbolmap::MappedSymbol;
@@ -979,7 +979,7 @@ fn import_path_definition(
     col: usize,
 ) -> Option<GotoDefinitionResponse> {
     let src = doc_text(server, uri)?;
-    let spec = vyrn_frontend::import_spec_at(&src, line, col)?;
+    let (spec, cols) = vyrn_frontend::import_spec_at(&src, line, col)?;
     if vyrn_frontend::loader::is_remote(&spec) {
         return None;
     }
@@ -987,19 +987,13 @@ fn import_path_definition(
     let (opts, _resolver, importer, _) = load_context(&server.session, uri, &overlays)?;
     let target = import_target_file(&spec, &importer, &opts)?;
     let url = Url::from_file_path(target.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
-    Some(GotoDefinitionResponse::Scalar(Location {
-        uri: url,
-        range: Range {
-            start: Position {
-                line: 0,
-                character: 0,
-            },
-            end: Position {
-                line: 0,
-                character: 0,
-            },
-        },
-    }))
+    // The origin is the whole path, so the editor underlines it as one link.
+    Some(GotoDefinitionResponse::Link(vec![LocationLink {
+        origin_selection_range: Some(lsp_range(&src, line, cols.start, cols.end)),
+        target_uri: url,
+        target_range: Range::default(),
+        target_selection_range: Range::default(),
+    }]))
 }
 
 /// The local file an import specifier names. A generator's directory argument
@@ -1082,7 +1076,32 @@ struct InputSpan<'a> {
     span_len: usize,
 }
 
-impl InputSpan<'_> {
+impl<'a> InputSpan<'a> {
+    /// The span of `region`, aligned with its first generated line in `synth`.
+    /// `None` when the input tail shares no prefix with that line.
+    fn of(
+        region: &'a vyrn_frontend::origin::Region,
+        synth: &'a Rc<AnalyzedSynth>,
+        input_line: &'a str,
+    ) -> Option<Self> {
+        let gen_line = (synth.gen_source.lines()).nth(region.gen_start_line.saturating_sub(1))?;
+        let (gcol, span_len) = align_expr_span(input_line, region.origin.col, gen_line)?;
+        Some(InputSpan {
+            region,
+            synth,
+            input_line,
+            gcol,
+            span_len,
+        })
+    }
+
+    /// Whether the input position lies in the span, its end included, so a
+    /// cursor after the last char maps.
+    fn holds(&self, line: usize, col: usize) -> bool {
+        let start = self.region.origin.col;
+        line == self.region.origin.line && (start..=start + self.span_len).contains(&col)
+    }
+
     /// Whether a generated range lies on the region's first line, inside the
     /// verbatim span. Only such a range maps back.
     fn within(&self, line: usize, col: usize, end_col: usize) -> bool {
@@ -1138,25 +1157,9 @@ fn input_back_map<T, K: Ord>(
         else {
             continue;
         };
-        let Some(gen_line) = synth
-            .gen_source
-            .lines()
-            .nth(region.gen_start_line.saturating_sub(1))
-        else {
-            continue;
-        };
-        let Some((gcol, span_len)) = align_expr_span(input_line, region.origin.col, gen_line)
-        else {
-            continue;
-        };
-        let span = InputSpan {
-            region: &region,
-            synth,
-            input_line,
-            gcol,
-            span_len,
-        };
-        step(&span, &mut out);
+        if let Some(span) = InputSpan::of(&region, synth, input_line) {
+            step(&span, &mut out);
+        }
     }
     out.sort_by_key(&key);
     out.dedup_by_key(|t| key(t));
@@ -1463,47 +1466,37 @@ struct InputFwd {
 }
 
 /// Map an input cursor into its analyzed generated module (forward
-/// origin mapping). A verbatim region maps column-exactly; a derived one (a `{#for}`
-/// head) maps to the region's start. Outside every region, a name on an import
-/// line maps to the import that kept it, and a component tag to the declaration
-/// of what its file provides. `None` anywhere else or when the owner cannot
-/// generate.
+/// origin mapping). The innermost region whose span holds the cursor
+/// ([`InputSpan::holds`]) maps it column-exactly. Outside every span, a name
+/// on an import line maps to the import that kept it, and a component tag to
+/// the declaration of what its file provides. `None` anywhere else or when the
+/// owner cannot generate.
 fn input_forward(server: &Server, input_uri: &Url, line: usize, col: usize) -> Option<InputFwd> {
     let input_path = uri_path(input_uri)?;
     let owner = server.input_owner.get(&input_path)?.clone();
     let owner_analysis = server.analyses.get(&owner)?;
     let regions = owner_analysis.origins.regions_for(&input_path);
-    let Some(region) = (regions.iter())
-        .filter(|r| r.origin.line == line && r.origin.col <= col)
-        .max_by_key(|r| r.origin.col)
-    else {
-        let synth = synth_for(server, &owner, &regions.first()?.gen_module)?;
-        let input_text = doc_text(server, input_uri)?;
-        let input_line = input_text.lines().nth(line.checked_sub(1)?)?;
-        return kept_import(synth, input_line, col)
-            .or_else(|| component_tag(server, &owner, input_uri, line, col));
-    };
-    let synth = synth_for(server, &owner, &region.gen_module)?;
-
     let input_text = doc_text(server, input_uri)?;
-    let input_line = input_text.lines().nth(line.saturating_sub(1))?;
-    let gen_line = synth
-        .gen_source
-        .lines()
-        .nth(region.gen_start_line.saturating_sub(1))
-        .unwrap_or("");
-    let (gline, gcol) = map_into_region(
-        input_line,
-        region.origin.col,
-        col,
-        gen_line,
-        region.gen_start_line,
-    );
-    Some(InputFwd {
-        synth,
-        line: gline,
-        col: gcol,
-    })
+    let input_line = input_text.lines().nth(line.checked_sub(1)?)?;
+    let starts = regions
+        .iter()
+        .filter(|r| r.origin.line == line && r.origin.col <= col);
+    let held = starts.filter_map(|r| {
+        let synth = synth_for(server, &owner, &r.gen_module)?;
+        let span = InputSpan::of(r, &synth, input_line)?;
+        let fwd = InputFwd {
+            line: r.gen_start_line,
+            col: span.gcol + (col - r.origin.col),
+            synth: synth.clone(),
+        };
+        span.holds(line, col).then_some((r.origin.col, fwd))
+    });
+    if let Some((_, fwd)) = held.max_by_key(|(start, _)| *start) {
+        return Some(fwd);
+    }
+    let synth = synth_for(server, &owner, &regions.first()?.gen_module)?;
+    kept_import(synth, input_line, col)
+        .or_else(|| component_tag(server, &owner, input_uri, line, col))
 }
 
 /// A name on an input's import line that the generated module dropped as a
@@ -1634,23 +1627,6 @@ fn owner_sig(owner_text: &str, owner_path: &str, overlays: &HashMap<String, Stri
         t.hash(&mut h);
     }
     h.finish()
-}
-
-/// Map an input cursor into a generated line, 1-based. `origin_col` is the
-/// region's input start column. Column-exact when the input expression is found
-/// in `gen_line`, else the line start.
-fn map_into_region(
-    input_line: &str,
-    origin_col: usize,
-    col: usize,
-    gen_line: &str,
-    gen_start_line: usize,
-) -> (usize, usize) {
-    let delta = col.saturating_sub(origin_col);
-    match align_expr_span(input_line, origin_col, gen_line) {
-        Some((gcol, _)) => (gen_start_line, gcol + delta),
-        None => (gen_start_line, 1),
-    }
 }
 
 /// A root path for a generated module in the owner's directory, so relative

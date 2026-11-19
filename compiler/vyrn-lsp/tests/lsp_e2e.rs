@@ -923,6 +923,25 @@ fn main() -> Int64 {
     );
 }
 
+/// A refinement's `value` holds the base type: its members complete and hover
+/// as a `String` binding's do.
+#[test]
+fn a_refined_value_completes_and_hovers_as_its_base() {
+    let mut client = spawn_client();
+    let uri = "file:///refined/title.vyrn";
+    let src = "export type Title = String where value.byteLength >= 1\n";
+    did_open(&mut client, uri, "vyrn", src);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    let (l, c) = pos_after(src, "value.");
+    let labels = completion_labels(&mut client, uri, l, c);
+    assert!(labels.iter().any(|x| x == "byteLength"), "{labels:?}");
+    let member = hover_value(&mut client, uri, l, c + 1).unwrap_or_default();
+    assert!(member.contains("byteLength: Int64"), "{member}");
+    let (l, c) = pos_after(src, "where va");
+    let value = hover_value(&mut client, uri, l, c).unwrap_or_default();
+    assert!(value.contains("value: String"), "{value}");
+}
+
 /// Inside a string literal whose expected type is a finite string type, the
 /// type's whole language is offered, not the top-level symbols.
 #[test]
@@ -1582,7 +1601,8 @@ fn open_shop(name: &str, text: &str) -> (LspClient, String) {
         ("comp/models.vyrn", SHOP_MODELS),
         ("comp/Row.vyx", SHOP_ROW),
         ("comp/Listing.vyx", SHOP_LISTING),
-    ];
+    ]
+    .map(|(path, t)| (path, if path.ends_with(name) { text } else { t }));
     let dir = input_scratch(SHOP_APP, &files);
     let mut client = spawn_client();
     did_open(
@@ -1648,6 +1668,17 @@ fn vyx_hover_on_a_for_name_shows_its_type() {
 fn vyx_hover_on_a_component_tag_shows_its_props() {
     let (mut client, uri) = open_shop("Listing.vyx", SHOP_LISTING);
     let (l, c) = pos_after(SHOP_LISTING, "<Ro");
+    let hover = hover_value(&mut client, &uri, l, c).unwrap_or_default();
+    assert!(hover.contains("fn row(item: Item) -> Html"), "{hover}");
+}
+
+/// A region holds a position only up to its end: on `{{ x }} <Row/>` the tag
+/// does not map through `x`'s region.
+#[test]
+fn vyx_hover_on_a_tag_after_an_interpolation_shows_its_props() {
+    let listing = SHOP_LISTING.replace("<ul>\n", "<ul>\n{{ items.length }} ");
+    let (mut client, uri) = open_shop("Listing.vyx", &listing);
+    let (l, c) = pos_after(&listing, "}} <Ro");
     let hover = hover_value(&mut client, &uri, l, c).unwrap_or_default();
     assert!(hover.contains("fn row(item: Item) -> Html"), "{hover}");
 }
@@ -1776,10 +1807,11 @@ const THEMED_APP: &str = "import { componentsThemed } from \"std/vyx\"\n\
 const THEMED_VYX: &str = "<script>\n\
     type TransKey = String where value =~ \"(home|about)\"\n\
     fn t(k: TransKey) -> String { return k }\n\
+    fn pick(c: String) -> String { return c.copy() }\n\
     props { x: String }\n\
     </script>\n\
     <template>\n\
-    <div class=\"flex p-4\"><span class=\"book-card\">{{ x }}</span><p class=\"bg-brand-500 md:hover:bg-brand-600\">{{ t(\"home\") }}</p></div>\n\
+    <div class=\"flex p-4\"><span class=\"book-card\">{{ x }}</span><p class=\"bg-brand-500 md:hover:bg-brand-600\">{{ t(\"home\") }}</p><b :class='pick(\"px-2\")'>{{ x }}</b></div>\n\
     </template>\n";
 
 fn themed_scratch() -> std::path::PathBuf {
@@ -1844,9 +1876,11 @@ fn definition_target(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> O
         "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }
     }));
     let resp = client.read_response(&id);
-    resp.pointer("/result/uri")
-        .and_then(|u| u.as_str())
-        .map(String::from)
+    (resp
+        .pointer("/result/uri")
+        .or_else(|| resp.pointer("/result/0/targetUri")))
+    .and_then(|u| u.as_str())
+    .map(String::from)
 }
 
 /// Utilities, a safelisted name and variants, filtered by the token under the
@@ -1897,6 +1931,17 @@ fn hover_on_class_shows_css_or_safelisted() {
     let (l, c) = pos_after(THEMED_VYX, "book-car");
     let v = hover_value(&mut client, &uri, l, c).expect("hover on safelisted class");
     assert!(v.contains("safelisted"), "safelisted note: {v}");
+}
+
+/// A string literal anywhere in a `:class` expression answers from the theme.
+#[test]
+fn class_literal_inside_a_class_expression_completes_and_hovers() {
+    let (mut client, uri) = open_themed();
+    let (l, c) = pos_after(THEMED_VYX, "pick(\"px-");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    assert!(labels.contains(&"px-2".to_string()), "{labels:?}");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on the nested class");
+    assert!(v.contains("padding"), "utility CSS rule: {v}");
 }
 
 /// The origin map's forward direction routes string-literal contexts too.
@@ -3285,6 +3330,39 @@ fn main() -> Int64 { return stored() + now() }
     );
 
     let _ = client.child.kill();
+}
+
+/// The link an import path answers spans the whole path, quotes excluded, so
+/// the editor underlines it as one link: a plain path, a `std/` path and a
+/// generator's argument.
+#[test]
+fn an_import_path_links_as_one_span() {
+    let app = "import { components } from \"std/vyx\"\n\
+        import { row } from components(\"./comp\")\n\
+        fn main() -> Int64 { return 0 }\n";
+    let row = "<template>\n<li>x</li>\n</template>\n";
+    let dir = input_scratch(app, &[("comp/Row.vyx", row)]);
+    let uri = file_uri(&dir.join("app.vyrn"));
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", app);
+    for (line, path) in [(1, "std/vyx"), (2, "./comp")] {
+        let (l, c) = at(app, line, path);
+        let id = serde_json::json!(format!("link{line}"));
+        client.send(&serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "textDocument/definition",
+            "params": { "textDocument": { "uri": uri }, "position": { "line": l, "character": c + 3 } }
+        }));
+        let resp = client.read_response(&id);
+        let origin = &resp["result"][0]["originSelectionRange"];
+        let len = path.len() as u32;
+        assert_eq!(
+            (&origin["start"]["character"], &origin["end"]["character"]),
+            (&serde_json::json!(c), &serde_json::json!(c + len)),
+            "{path}: {resp}"
+        );
+    }
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Both the binding and every `ns.` qualifier, never `type`. A theme
