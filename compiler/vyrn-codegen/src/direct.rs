@@ -13349,19 +13349,14 @@ impl<'a, 'p> Fn_<'a, 'p> {
         else {
             return unsupported("a core `if` row that is no `if`", 0);
         };
-        // A loop's exit. The pass makes up one `break` (`site: 0`) in the else arm of a
-        // two-way branch it also makes up at the loop's head, so this row is a
-        // conditional branch out of the loop. The reader's own `if c { break }` has the
-        // reader's site and is emitted as a plain two-way branch.
+        // A loop's exit. The pass makes up a two-way branch (`site: 0`) at the loop's
+        // head whose else arm is one `break`, so this row is a conditional branch out
+        // of the loop. The reader's own `if c { break }` has the reader's site and is
+        // emitted as a plain two-way branch, and so is a head whose `break` releases
+        // what another `break` took first.
         if *site == NodeId::NONE
             && then.is_empty()
-            && matches!(
-                els.as_slice(),
-                [St::Break {
-                    site: NodeId::NONE,
-                    ..
-                }]
-            )
+            && matches!(els.as_slice(), [St::Break { .. }])
             && !self.loops.is_empty()
         {
             self.core_val(m, b, cond, &Type::Bool, 0)?;

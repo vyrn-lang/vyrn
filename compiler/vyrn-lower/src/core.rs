@@ -3489,6 +3489,7 @@ impl<'a> Builder<'a> {
                 if let Some(Some(u)) = self.frame.walks.last().cloned() {
                     self.release_unreached(&u, out);
                 }
+                self.edge_drops(sid, 0, out)?;
                 self.drops_at(Exit::Break, sid, out)?;
                 out.push(St::Break {
                     site: sid,
@@ -3533,13 +3534,15 @@ impl<'a> Builder<'a> {
             } => {
                 let mut l = Vec::new();
                 let c = self.condition(cond, "while", *line, &mut l)?;
+                // The condition's exit is a `break` keyed by the loop's node,
+                // so the join after the loop states its drops (Rule N).
+                let mut stop = Vec::new();
+                self.edge_drops(sid, 0, &mut stop)?;
+                stop.push(St::Break { site: sid, line: 0 });
                 l.push(St::If {
                     cond: c,
                     then: Vec::new(),
-                    els: vec![St::Break {
-                        site: NodeId::NONE,
-                        line: 0,
-                    }],
+                    els: stop,
                     site: NodeId::NONE,
                 });
                 self.frame.loop_marks.push(self.body.names.len());

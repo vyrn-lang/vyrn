@@ -668,7 +668,9 @@ enum Taker {
 
 struct LoopCtx {
     entry: State,
+    /// Each `break`'s state, in walk order, and at the same index its node.
     breaks: Vec<State>,
+    break_sites: Vec<NodeId>,
     /// Every `continue`'s state, checked against the entry after the widen:
     /// a `continue` after the store that promotes a `Static` name is a back
     /// edge to the widened entry.
@@ -2769,12 +2771,13 @@ impl<'b> Kernel<'b> {
                 // `Held` or ends an alias, so there are at most twice as many
                 // walks as the body has names, plus one.
                 let (mut entry, mark) = (st.clone(), self.refusals.len());
-                let (mut a, ctx) = loop {
+                let (mut a, mut ctx) = loop {
                     self.refusals.truncate(mark);
                     let mut a = entry.clone();
                     self.loops.push(LoopCtx {
                         entry,
                         breaks: Vec::new(),
+                        break_sites: Vec::new(),
                         continues: Vec::new(),
                         bound_inside: Vec::new(),
                     });
@@ -2803,6 +2806,10 @@ impl<'b> Kernel<'b> {
                 if ctx.breaks.is_empty() {
                     st.ended = true;
                 } else {
+                    // Each `break` is an edge of the join after the loop; the
+                    // builder states its drops before the `break`.
+                    let sites = &ctx.break_sites;
+                    self.equalize(&mut ctx.breaks, &|i| (sites[i], 0));
                     *st = self.join(&ctx.breaks)?.settle(&ctx.entry);
                 }
             }
@@ -2811,11 +2818,9 @@ impl<'b> Kernel<'b> {
             St::Break { site, .. } => {
                 let inside = self.loops.last().expect("a loop").bound_inside.clone();
                 self.scope_end(st, &inside, End::Exit(Exit::Break, *site))?;
-                self.loops
-                    .last_mut()
-                    .expect("a loop")
-                    .breaks
-                    .push(st.clone());
+                let ctx = self.loops.last_mut().expect("a loop");
+                ctx.breaks.push(st.clone());
+                ctx.break_sites.push(*site);
                 st.ended = true;
             }
             St::Continue { site, .. } => {
@@ -2868,7 +2873,7 @@ impl<'b> Kernel<'b> {
     ) -> Result<(), Refusal> {
         let fork = Fork::new(st);
         let joined = walk(self, &fork).and_then(|(mut edges, site)| {
-            self.equalize(&mut edges, site);
+            self.equalize(&mut edges, &|i| (site, i as u32));
             self.join(&edges)
         });
         match joined {
@@ -2883,8 +2888,13 @@ impl<'b> Kernel<'b> {
         }
     }
 
-    fn equalize(&mut self, edges: &mut [State], site: NodeId) {
-        if self.mode != Mode::Place {
+    /// Rule N at a join: each live edge of `edges` releases what another
+    /// edge took and it still holds, as rows keyed by `key(i)`, the node and
+    /// edge number the builder states edge `i`'s drops at
+    /// ([`MissingKind::Edge`], [`MissingKind::EdgePlace`]).
+    fn equalize(&mut self, edges: &mut [State], key: &dyn Fn(usize) -> (NodeId, u32)) {
+        // One live edge agrees with itself.
+        if self.mode != Mode::Place || edges.iter().filter(|e| !e.ended).nth(1).is_none() {
             return;
         }
         let live: Vec<usize> = (0..edges.len()).filter(|i| !edges[*i].ended).collect();
@@ -2909,7 +2919,7 @@ impl<'b> Kernel<'b> {
                 }
             }
         }
-        if site == NodeId::NONE {
+        if (0..edges.len()).any(|i| key(i).0 == NodeId::NONE) {
             return;
         }
         for n in names {
@@ -2938,12 +2948,13 @@ impl<'b> Kernel<'b> {
                         continue;
                     }
                     // A row cannot spell a payload, so it releases the binder.
+                    let (site, edge) = key(*i);
                     let (name, kind) = match self.payload_binder(&edges[*i], n, h) {
-                        Some(b) => (b, MissingKind::Edge { edge: *i as u32 }),
+                        Some(b) => (b, MissingKind::Edge { edge }),
                         None => (
                             n,
                             MissingKind::EdgePlace {
-                                edge: *i as u32,
+                                edge,
                                 path: h.clone(),
                             },
                         ),
@@ -2967,13 +2978,14 @@ impl<'b> Kernel<'b> {
             }
             for i in held {
                 let holes = self.holes_owned(&edges[i], n);
+                let (site, edge) = key(i);
                 self.owe(
                     &mut edges[i],
                     Missing {
                         exit: Exit::Block,
                         site,
                         name: n,
-                        kind: MissingKind::Edge { edge: i as u32 },
+                        kind: MissingKind::Edge { edge },
                         holes,
                     },
                 );
