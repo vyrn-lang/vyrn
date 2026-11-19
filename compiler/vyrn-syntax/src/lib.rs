@@ -12,10 +12,12 @@
 //!
 //! Entry points: [`load`] reads a grammar, [`lexer`] writes its lexical rules as
 //! Rust, [`recognizer`] writes its syntactic rules, [`parser`] writes a whole grammar
-//! as a Vyrn module, and [`textmate`] and [`language_configuration`] write its editor
-//! files. `vyrn.syntax` beside this file is Vyrn's grammar, and the `syntaxgate` test
+//! as a Vyrn module, [`textmate`] and [`language_configuration`] write its editor
+//! files, and [`colour`] colours a text by the grammar for an editor with no TextMate
+//! engine. `vyrn.syntax` beside this file is Vyrn's grammar, and the `syntaxgate` test
 //! pins what the written recognizer says over the corpus.
 
+pub mod colour;
 mod gen;
 mod load;
 mod lower;
@@ -31,7 +33,7 @@ pub use gen::{bytes, lexer};
 pub use load::load;
 pub use parser::parser;
 pub use recognizer::recognizer;
-pub use textmate::{language_configuration, textmate, Naming};
+pub use textmate::{language_configuration, textmate, Naming, Scope};
 
 /// Why a grammar does not load or does not lower: a sentence at a 1-based line and
 /// column of its file.

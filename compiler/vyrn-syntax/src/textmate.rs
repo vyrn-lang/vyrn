@@ -14,14 +14,82 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{Builtin, Grammar, Refused, RuleId, E};
 
+/// A scope the writer gives a token, without the language's suffix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Doc,
+    Comment,
+    String,
+    Char,
+    Number,
+    CharClass,
+    Escape,
+    Keyword,
+    Operator,
+    Function,
+    TypeName,
+    Label,
+    Parameter,
+    SupportType,
+    SupportFunction,
+    Variable,
+}
+
+impl Scope {
+    /// The TextMate scope name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Scope::Doc => "comment.line.documentation",
+            Scope::Comment => "comment.line",
+            Scope::String => "string.quoted",
+            Scope::Char => "constant.character",
+            Scope::Number => "constant.numeric",
+            Scope::CharClass => "constant.other.character-class.regexp",
+            Scope::Escape => "constant.character.escape",
+            Scope::Keyword => "keyword.control",
+            Scope::Operator => "keyword.operator",
+            Scope::Function => "entity.name.function",
+            Scope::TypeName => "entity.name.type",
+            Scope::Label => "entity.name.label",
+            Scope::Parameter => "variable.parameter",
+            Scope::SupportType => "support.type",
+            Scope::SupportFunction => "support.function",
+            Scope::Variable => "variable.other",
+        }
+    }
+}
+
 /// The vocabulary: a rule of this name has this scope, and this text before its regex.
-const CLASSES: [(&str, &str, &str); 5] = [
-    ("doc", "comment.line.documentation", ""),
-    ("comment", "comment.line", ""),
-    ("string", "string.quoted", ""),
-    ("byte", "constant.character", ""),
-    ("number", "constant.numeric", "\\b"),
+const CLASSES: [(&str, Scope, &str); 7] = [
+    ("doc", Scope::Doc, ""),
+    ("comment", Scope::Comment, ""),
+    ("string", Scope::String, ""),
+    ("class", Scope::CharClass, ""),
+    ("builtin", Scope::SupportFunction, "\\b"),
+    ("byte", Scope::Char, ""),
+    ("number", Scope::Number, "\\b"),
 ];
+/// The rules whose scope only their callers place, so a regex cannot match them:
+/// [`crate::colour`] reads them, and a TextMate grammar takes them from [`Naming`].
+const PARTS: [(&str, Scope); 6] = [
+    ("head", Scope::Function),
+    ("ref", Scope::TypeName),
+    ("capture", Scope::Parameter),
+    ("label", Scope::Label),
+    ("escape", Scope::Escape),
+    ("any", Scope::Operator),
+];
+
+/// The scope of the rule named `rule`, by [`CLASSES`] and [`PARTS`].
+pub(crate) fn scope_of(rule: &str) -> Option<Scope> {
+    let class = CLASSES.iter().find(|c| c.0 == rule).map(|c| c.1);
+    class.or_else(|| PARTS.iter().find(|p| p.0 == rule).map(|p| p.1))
+}
+
+/// Whether the token `s` is a bracket or a separator, which have no operator scope.
+pub(crate) fn is_bracket_or_separator(s: &str) -> bool {
+    SEPARATORS.contains(&s) || PAIRS.iter().any(|p| p.0 == s || p.1 == s)
+}
 /// The bracket pairs and each one's scope word.
 const PAIRS: [(&str, &str, &str); 3] = [
     ("(", ")", "parens"),
@@ -33,11 +101,12 @@ const SEPARATORS: [&str; 4] = [",", ";", ":", "."];
 /// In a set of what may precede a word: anything may.
 const UNFIXED: &str = "";
 
-/// Naming conventions a grammar cannot state, each a regex and a scope without the
-/// language's suffix. `before_words` outrank the words and `after_words` yield to them.
-pub struct Naming<'a> {
-    pub before_words: &'a [(&'a str, &'a str)],
-    pub after_words: &'a [(&'a str, &'a str)],
+/// Naming conventions a grammar cannot state, each a regex and its scope.
+/// `before_words` outrank the words and `after_words` yield to them.
+#[derive(Default)]
+pub struct Naming {
+    pub before_words: Vec<(String, Scope)>,
+    pub after_words: Vec<(String, Scope)>,
 }
 
 type Set = BTreeSet<String>;
@@ -58,19 +127,21 @@ pub fn textmate(g: &Grammar, lang: &str, naming: &Naming) -> Result<String, Refu
     for (class, scope, lead) in CLASSES {
         if let Some(rule) = g.rule(class).map(|r| g.body(r)) {
             let at = |why| Refused::at(rule.line, 1, format!("rule `{class}`: {why}"));
-            pats.extend(w.class(&rule.body, scope, lead).map_err(at)?);
+            pats.extend(w.class(&rule.body, scope.name(), lead).map_err(at)?);
         }
     }
-    let rules = |w: &Writer, list: &[(&str, &str)]| -> Vec<String> {
-        list.iter().map(|(re, scope)| w.rule(scope, re)).collect()
+    let rules = |w: &Writer, list: &[(String, Scope)]| -> Vec<String> {
+        list.iter()
+            .map(|(re, scope)| w.rule(scope.name(), re))
+            .collect()
     };
-    pats.extend(rules(&w, naming.before_words));
+    pats.extend(rules(&w, &naming.before_words));
     for ((before, after), words) in words(g) {
         let words = Vec::from_iter(words).join("|");
         let re = format!("{before}\\b(?:{words})\\b{}", ahead_re(&after));
-        pats.push(w.rule("keyword.control", &re));
+        pats.push(w.rule(Scope::Keyword.name(), &re));
     }
-    pats.extend(rules(&w, naming.after_words));
+    pats.extend(rules(&w, &naming.after_words));
     pats.extend(w.tokens());
     let nested: Vec<String> = (w.nested.iter())
         .map(|(k, v)| format!("    {k:?}: {v}"))
@@ -226,20 +297,21 @@ impl Writer<'_> {
     }
 
     /// The patterns of a delimited rule's item, after `prefix`. Body text and an
-    /// alternative that refuses have none. A regular item is an escape.
+    /// alternative that refuses have none. Each alternative is read on its own, and a
+    /// regular one is an escape.
     fn items(&mut self, e: &E, prefix: &str) -> Result<Vec<String>, String> {
         if refuses(e) || (prefix.is_empty() && matches!(strip(e), E::Any | E::Class(..))) {
             return Ok(Vec::new());
         }
+        if let E::Alt(v) = strip(e) {
+            let each = v.iter().map(|x| self.items(x, prefix));
+            return Ok(each.collect::<Result<Vec<_>, _>>()?.concat());
+        }
         if let Ok(re) = self.re(e) {
             let re = format!("{prefix}{re}");
-            return Ok(vec![self.rule("constant.character.escape", &re)]);
+            return Ok(vec![self.rule(Scope::Escape.name(), &re)]);
         }
         match strip(e) {
-            E::Alt(v) => {
-                let each = v.iter().map(|x| self.items(x, prefix));
-                Ok(each.collect::<Result<Vec<_>, _>>()?.concat())
-            }
             E::Ref(r) if !self.path.contains(r) => {
                 self.path.push(*r);
                 let out = self.items(&self.g.body(*r).body, prefix);
@@ -332,7 +404,7 @@ impl Writer<'_> {
             let scope = match PAIRS.iter().find(|p| p.0 == s || p.1 == s) {
                 Some(p) => format!("punctuation.section.{}", p.2),
                 None if SEPARATORS.contains(&s) => "punctuation.separator".into(),
-                None => "keyword.operator".into(),
+                None => Scope::Operator.name().into(),
             };
             groups.entry(scope).or_default().push(esc(s));
         }
@@ -507,21 +579,22 @@ impl Words<'_> {
 mod tests {
     use std::path::Path;
 
-    use super::{language_configuration, textmate, Naming};
+    use super::{language_configuration, textmate, Naming, Scope};
 
     /// Vyrn's naming conventions. The server's semantic tokens colour these names by
     /// what each resolves to.
-    const VYRN: Naming = Naming {
-        before_words: &[("\\b[A-Z][A-Za-z0-9_]*\\b", "support.type")],
-        after_words: &[
-            ("(?<=\\bfn\\s)[a-z_][A-Za-z0-9_]*", "entity.name.function"),
-            (
-                "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\(|\")",
-                "entity.name.function",
-            ),
-            ("\\b[A-Za-z_][A-Za-z0-9_]*\\b", "variable.other"),
-        ],
-    };
+    fn vyrn() -> Naming {
+        let own =
+            |list: &[(&str, Scope)]| list.iter().map(|(re, s)| (re.to_string(), *s)).collect();
+        Naming {
+            before_words: own(&[("\\b[A-Z][A-Za-z0-9_]*\\b", Scope::SupportType)]),
+            after_words: own(&[
+                ("(?<=\\bfn\\s)[a-z_][A-Za-z0-9_]*", Scope::Function),
+                ("\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\(|\")", Scope::Function),
+                ("\\b[A-Za-z_][A-Za-z0-9_]*\\b", Scope::Variable),
+            ]),
+        }
+    }
 
     /// Fails when `name` under `editor/vscode/` differs from `fresh`.
     fn pin(name: &str, fresh: &str) {
@@ -542,13 +615,13 @@ mod tests {
         for (file, naming, grammar, configuration) in [
             (
                 "vyrn",
-                &VYRN,
+                vyrn(),
                 "vyrn.tmLanguage.json",
                 "language-configuration.json",
             ),
             (
                 "syntax",
-                &NONE,
+                crate::colour::naming(),
                 "syntax.tmLanguage.json",
                 "syntax-language-configuration.json",
             ),
@@ -558,16 +631,11 @@ mod tests {
             let g = crate::load(&text).expect("the grammar loads");
             pin(
                 grammar,
-                &textmate(&g, file, naming).expect("the grammar lowers"),
+                &textmate(&g, file, &naming).expect("the grammar lowers"),
             );
             pin(configuration, &language_configuration(&g));
         }
     }
-
-    const NONE: Naming = Naming {
-        before_words: &[],
-        after_words: &[],
-    };
 
     #[test]
     fn a_shape_the_writer_cannot_lower_has_its_sentence() {
@@ -590,7 +658,7 @@ mod tests {
         ] {
             let text = format!("syntax T\nexpect ^E\nA = 'a'\n{rule}\n");
             let g = crate::load(&text).expect("it loads");
-            let refused = textmate(&g, "t", &NONE)
+            let refused = textmate(&g, "t", &Naming::default())
                 .err()
                 .expect("it is refused")
                 .sentence;
@@ -601,7 +669,7 @@ mod tests {
     #[test]
     fn a_contextual_word_takes_its_neighbours_from_the_rule() {
         let g = crate::load("syntax T\nexpect ^E\nA = 'as' B / ':' 'lazy' 'xy'\nB = 'bc'\n");
-        let text = textmate(&g.expect("it loads"), "t", &NONE).expect("it lowers");
+        let text = textmate(&g.expect("it loads"), "t", &Naming::default()).expect("it lowers");
         assert!(text.contains(r#"\\b(?:as)\\b(?=\\s*(?:bc\\b))"#), "{text}");
         let lazy = r#"(?<=\\:|\\:\\s)\\b(?:lazy)\\b(?=\\s*(?:xy\\b))"#;
         assert!(text.contains(lazy), "{text}");

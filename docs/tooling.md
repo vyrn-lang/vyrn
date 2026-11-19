@@ -568,7 +568,10 @@ cargo test --manifest-path compiler/vyrn-lsp/Cargo.toml
 `vyrn.tmLanguage.json` and `language-configuration.json` are written from
 `vyrn.syntax` by `vyrn_syntax::textmate`, and `syntax.tmLanguage.json` and
 `syntax-language-configuration.json` from `syntax.syntax`, which colour a `.syntax`
-file. Do not edit them: a test in `vyrn-syntax` holds them, and `VYRN_PIN=write`
+file. A scope comes from a rule's name in `vyrn_syntax::textmate`; the head, reference,
+label, capture and operator regexes of a `.syntax` file come from
+`vyrn_syntax::colour::naming`, because a regex cannot see the context that places
+them. Do not edit them: a test in `vyrn-syntax` holds them, and `VYRN_PIN=write`
 rewrites them.
 
 CodeLenses: Run and Profile over `fn main`; Run test over each `test` block
