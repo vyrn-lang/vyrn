@@ -13,6 +13,9 @@ const KEY_SESSION = "vyrn.play.session.v1";
 const WELCOME = "__welcome";
 
 const makeGroup = (els) => Object.assign({ tabs: [], active: null }, els);
+// What play.wasm reads a file as, by its extension. It neither colours nor checks a file of any other.
+const kindOf = (name) => (/\.syntax$/.test(name) ? "syntax" : /\.(vyrn|vyx|von)$/.test(name) ? "vyrn" : "");
+const KIND_NAMES = { vyrn: "Vyrn", syntax: "Syntax", "": "Plain text" };
 const labelOf = (name) => (name === WELCOME ? "Welcome" : name.slice(name.lastIndexOf("/") + 1));
 
 function read(k, fallback) {
@@ -68,6 +71,7 @@ export function mountIde(root, core) {
   const gutter = $("[data-play-gutter]", root);
   const lncol = $("[data-play-lncol]", root);
   const crumbs = $("[data-play-crumbs]", root);
+  const kindEl = $("[data-play-kind]", root);
   const curline = $("[data-play-curline]", root);
   const minimap = $("[data-play-minimap]", root);
   const mmtext = $("[data-play-mmtext]", root);
@@ -133,7 +137,7 @@ export function mountIde(root, core) {
     const busy = runBtn.dataset.state === "busy";
     for (const g of groups()) {
       if (!g.runBtn) continue;
-      const want = !ready() || busy || !g.active || g.active === WELCOME;
+      const want = !ready() || busy || !g.active || kindOf(g.active) !== "vyrn";
       // Only on change: the observer below watches this button, so every write re-enters here.
       if (g.runBtn.disabled !== want) g.runBtn.disabled = want;
     }
@@ -147,7 +151,7 @@ export function mountIde(root, core) {
       paint();
       return;
     }
-    g.layer.innerHTML = highlight(g.input.value, spansOf(g.input.value));
+    g.layer.innerHTML = highlight(g.input.value, spansOf(g.input.value, kindOf(g.active)));
     scrollLayer(g.input, g.layer);
   }
 
@@ -190,6 +194,7 @@ export function mountIde(root, core) {
   function syncChrome() {
     if (scopeEl) scopeEl.textContent = isShared() ? "Shared project" : "Explorer";
     if (crumbs) crumbs.textContent = focusedG.active && focusedG.active !== WELCOME ? focusedG.active.split("/").join(" \u203a ") : "Welcome";
+    if (kindEl) kindEl.textContent = focusedG.active && focusedG.active !== WELCOME ? KIND_NAMES[kindOf(focusedG.active)] : "";
     renderFiles();
     persistSession();
   }
@@ -635,7 +640,12 @@ export function mountIde(root, core) {
       }
     }
     persistFiles();
-    for (const g of groups()) renderTabsG(g);
+    for (const g of groups()) {
+      renderTabsG(g);
+      paintG(g);
+    }
+    scheduleCheck();
+    updateRunState();
     syncChrome();
   }
   function inlineField(initial, selectTo, onDone) {
@@ -931,5 +941,5 @@ export function mountIde(root, core) {
     startCompiler();
   });
 
-  return { srcHost: () => focusedG.input, onPlayReady, shareHash };
+  return { srcHost: () => focusedG.input, kindOf: (textarea) => kindOf(groups().find((g) => g.input === textarea)?.active ?? ""), onPlayReady, shareHash };
 }

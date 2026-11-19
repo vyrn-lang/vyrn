@@ -1,6 +1,7 @@
 //! The Vyrn front end as a wasm module for the website's playground:
-//! [`play_tokens`] (highlighting with the compiler's classifier), [`play_check`]
-//! (diagnostics from the real loader) and [`play_compile`] (the bytes
+//! [`play_tokens`] (highlighting with the compiler's classifier, or a grammar's
+//! with `syntax.syntax`), [`play_check`] (diagnostics from the real loader, or the
+//! grammar loader's) and [`play_compile`] (the bytes
 //! `vyrn build --target wasm` writes). [`play_complete`], [`play_hover`] and
 //! [`play_signature`] answer the editor from the analysis `vyrn-lsp` serves,
 //! at a 1-based line and char column. `site/public/play-worker.js` runs the
@@ -8,8 +9,9 @@
 //! is embedded by `build.rs`; a relative import reports `module not found`.
 //!
 //! Calling convention: `input_ptr(n)` reserves `n` bytes to write; an entry
-//! point takes the length and returns the result length; `result_ptr()` says
-//! where the result is. The result is UTF-8 JSON, or from [`play_compile`] a
+//! point takes the length and returns the result length, and [`play_tokens`] and
+//! [`play_check`] take the tab's kind, `vyrn` or `syntax`, before the text;
+//! `result_ptr()` says where the result is. The result is UTF-8 JSON, or from [`play_compile`] a
 //! wasm module, told apart by the first byte (`\0asm` against `{`). A memory
 //! growth detaches `memory.buffer`, so the page re-reads both pointers after
 //! every call.
@@ -48,14 +50,52 @@ pub extern "C" fn result_ptr() -> *const u8 {
     RESULT.with(|r| r.borrow().as_ptr())
 }
 
+/// The coloured runs of a tab's text, read as its kind.
 #[no_mangle]
-pub extern "C" fn play_tokens(src_len: usize) -> usize {
-    with_input(src_len, |src| tokens_json(src).into_bytes())
+pub extern "C" fn play_tokens(kind_len: usize, src_len: usize) -> usize {
+    with_kind(kind_len, src_len, |kind, src| match kind {
+        Kind::Vyrn => tokens_json(src),
+        Kind::Syntax => grammar_tokens_json(src),
+    })
 }
 
+/// The diagnostics of a tab's text, read as its kind.
 #[no_mangle]
-pub extern "C" fn play_check(src_len: usize) -> usize {
-    with_input(src_len, |src| check_json(src).into_bytes())
+pub extern "C" fn play_check(kind_len: usize, src_len: usize) -> usize {
+    with_kind(kind_len, src_len, |kind, src| match kind {
+        Kind::Vyrn => check_json(src),
+        Kind::Syntax => grammar_check_json(src),
+    })
+}
+
+/// What a tab holds, by the name the page gives it: Vyrn source, or a grammar.
+#[derive(Clone, Copy)]
+enum Kind {
+    Vyrn,
+    Syntax,
+}
+
+impl Kind {
+    fn of(name: &str) -> Option<Kind> {
+        match name {
+            "vyrn" => Some(Kind::Vyrn),
+            "syntax" => Some(Kind::Syntax),
+            _ => None,
+        }
+    }
+}
+
+/// Reads the input as a kind of `kind_len` bytes and then a text of `src_len`, and
+/// publishes `f`'s answer. A kind this module does not read answers `{}`.
+fn with_kind(kind_len: usize, src_len: usize, f: impl FnOnce(Kind, &str) -> String) -> usize {
+    with_input(kind_len.saturating_add(src_len), |all| {
+        let kind = all.get(..kind_len).and_then(Kind::of);
+        match (kind, all.get(kind_len..)) {
+            (Some(kind), Some(src)) => f(kind, src),
+            _ => "{}".to_string(),
+        }
+        .into_bytes()
+    })
 }
 
 /// Compiles `input[..src_len]` to module bytes, or the JSON diagnostics of a
@@ -109,18 +149,45 @@ fn publish_json(json: String) -> usize {
 /// is what a JavaScript string index counts. Mid-keystroke the source is often not
 /// lexable; the page shows plain text for that frame.
 fn tokens_json(src: &str) -> String {
-    let runs = match code_runs(src) {
-        Ok(runs) => runs,
-        Err(d) => return format!("{{\"error\":{}}}", json_str(&d.message)),
-    };
+    match code_runs(src) {
+        Ok(runs) => spans_json(src, runs.iter().map(|r| (r.start, r.stop, r.class.css()))),
+        Err(d) => format!("{{\"error\":{}}}", json_str(&d.message)),
+    }
+}
+
+/// The coloured runs of a grammar, read by `syntax.syntax`. Past a refusal the text
+/// has no colour.
+fn grammar_tokens_json(src: &str) -> String {
+    let (format, file) = vyrn_syntax::colour::format();
+    let runs = vyrn_syntax::colour::runs(&format, file, src);
+    spans_json(src, runs.iter().map(|r| (r.start, r.stop, css(r.scope))))
+}
+
+/// The class of the site's token palette, in `site/public/css/05-code.css`, that
+/// paints `scope`.
+fn css(scope: vyrn_syntax::Scope) -> &'static str {
+    use vyrn_syntax::Scope as S;
+    match scope {
+        S::Keyword | S::SupportFunction => "k",
+        S::String | S::Char | S::CharClass => "s",
+        S::Number | S::Escape | S::Label => "n",
+        S::Doc | S::Comment => "c",
+        S::TypeName | S::SupportType => "t",
+        S::Function | S::Parameter | S::Variable => "f",
+        S::Operator => "i",
+    }
+}
+
+/// `[start, length, class]` for each byte range of `src`, in source order.
+fn spans_json<'a>(src: &str, runs: impl Iterator<Item = (usize, usize, &'a str)>) -> String {
     let (mut byte_at, mut u16_at) = (0, 0);
-    let mut spans = Vec::with_capacity(runs.len());
-    for run in runs {
-        u16_at += src[byte_at..run.start].encode_utf16().count();
-        let len = src[run.start..run.stop].encode_utf16().count();
-        spans.push(format!("[{u16_at},{len},\"{}\"]", run.class.css()));
+    let mut spans = Vec::new();
+    for (start, stop, class) in runs {
+        u16_at += src[byte_at..start].encode_utf16().count();
+        let len = src[start..stop].encode_utf16().count();
+        spans.push(format!("[{u16_at},{len},\"{class}\"]"));
         u16_at += len;
-        byte_at = run.stop;
+        byte_at = stop;
     }
     format!("{{\"spans\":[{}]}}", spans.join(","))
 }
@@ -397,6 +464,20 @@ fn check_json(src: &str) -> String {
     };
     all.extend(warnings);
     format!("{{\"diagnostics\":{}}}", diags_json(&all))
+}
+
+/// What `vyrn_syntax::load` refuses in a grammar, at its line and column.
+fn grammar_check_json(src: &str) -> String {
+    let diags: Vec<Diagnostic> = match vyrn_syntax::load(src) {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![Diagnostic::error(
+            e.line,
+            e.col,
+            "syntax",
+            e.sentence.replace('\n', " "),
+        )],
+    };
+    format!("{{\"diagnostics\":{}}}", diags_json(&diags))
 }
 
 /// The program as a wasm module from the direct backend, or the diagnostics of
@@ -842,6 +923,22 @@ mod tests {
     }
 
     #[test]
+    fn a_grammar_is_coloured_and_checked_as_a_grammar() {
+        let src = "syntax T\nexpect ^E\nA = 'a' / B\nB = [0-9]\n";
+        assert_eq!(grammar_check_json(src), "{\"diagnostics\":[]}");
+        let json = grammar_tokens_json(src);
+        assert!(
+            json.contains("[19,1,\"f\"]") && json.contains("[29,1,\"t\"]"),
+            "{json}"
+        );
+        let broken = grammar_check_json("syntax T\nexpect ^E\nA = 'a\n");
+        assert!(
+            broken.contains("\"line\":3") && broken.contains("\"col\":7"),
+            "{broken}"
+        );
+    }
+
+    #[test]
     fn an_interpolation_hole_is_painted_as_code() {
         assert_eq!(
             tokens_json(r#"x("a\{f(1)}b")"#),
@@ -852,7 +949,7 @@ mod tests {
     #[test]
     fn play_tokens_length_past_the_buffer_answers_instead_of_aborting() {
         input_ptr(4);
-        let n = play_tokens(usize::MAX);
+        let n = play_tokens(0, usize::MAX);
         let json = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(result_ptr(), n) })
             .into_owned();
         assert!(json.contains("exceeds the input buffer"), "{json}");

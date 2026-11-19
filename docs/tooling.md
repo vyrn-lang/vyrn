@@ -623,7 +623,10 @@ local is typed and no import is linked, so completion after a `.` analyses the
 line with a placeholder member name, and signature help on an open call
 analyses the line with the call closed. The editor underlines each diagnostic
 `play_check` returns, its own span or, without a column, its line's text, and
-shows its sentence on hover.
+shows its sentence on hover. `play_tokens` and `play_check` take the tab's kind
+with its text: a `.vyrn`, `.vyx` or `.von` tab is Vyrn, a `.syntax` tab is checked by
+`vyrn_syntax::load` and coloured by `vyrn_syntax::colour` reading it with
+`syntax.syntax`, and a tab of any other kind is neither. Run runs a Vyrn tab only.
 `site/public/play-worker.js` runs the compiled program with `web/wasi-min.js`.
 A `derive` generator runs in the page: the module calls its one import,
 `vyrn_play.run_generator`, and `site/public/play-wasm.js` instantiates the

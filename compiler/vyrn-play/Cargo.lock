@@ -98,6 +98,7 @@ dependencies = [
  "vyrn-frontend",
  "vyrn-genwasm",
  "vyrn-lower",
+ "vyrn-syntax",
 ]
 
 [[package]]
