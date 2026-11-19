@@ -34,14 +34,14 @@ use lsp_types::{
     DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     Documentation, FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, InlayHint,
-    InlayHintKind, InlayHintLabel, InlayHintParams, InsertTextFormat, Location, MarkupContent,
-    MarkupKind, OneOf, Position, PrepareRenameResponse, PublishDiagnosticsParams, Range,
-    Registration, RegistrationParams, RelativePattern, RenameOptions, RenameParams, SemanticToken,
-    SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
+    InlayHintKind, InlayHintLabel, InlayHintParams, InsertTextFormat, Location, LocationLink,
+    MarkupContent, MarkupKind, OneOf, Position, PrepareRenameResponse, PublishDiagnosticsParams,
+    Range, Registration, RegistrationParams, RelativePattern, RenameOptions, RenameParams,
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 
 use vyrn_frontend::symbolmap::MappedSymbol;
@@ -979,7 +979,7 @@ fn import_path_definition(
     col: usize,
 ) -> Option<GotoDefinitionResponse> {
     let src = doc_text(server, uri)?;
-    let spec = vyrn_frontend::import_spec_at(&src, line, col)?;
+    let (spec, cols) = vyrn_frontend::import_spec_at(&src, line, col)?;
     if vyrn_frontend::loader::is_remote(&spec) {
         return None;
     }
@@ -987,19 +987,13 @@ fn import_path_definition(
     let (opts, _resolver, importer, _) = load_context(&server.session, uri, &overlays)?;
     let target = import_target_file(&spec, &importer, &opts)?;
     let url = Url::from_file_path(target.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
-    Some(GotoDefinitionResponse::Scalar(Location {
-        uri: url,
-        range: Range {
-            start: Position {
-                line: 0,
-                character: 0,
-            },
-            end: Position {
-                line: 0,
-                character: 0,
-            },
-        },
-    }))
+    // The origin is the whole path, so the editor underlines it as one link.
+    Some(GotoDefinitionResponse::Link(vec![LocationLink {
+        origin_selection_range: Some(lsp_range(&src, line, cols.start, cols.end)),
+        target_uri: url,
+        target_range: Range::default(),
+        target_selection_range: Range::default(),
+    }]))
 }
 
 /// The local file an import specifier names. A generator's directory argument

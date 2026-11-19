@@ -1864,9 +1864,11 @@ fn definition_target(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> O
         "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }
     }));
     let resp = client.read_response(&id);
-    resp.pointer("/result/uri")
-        .and_then(|u| u.as_str())
-        .map(String::from)
+    (resp
+        .pointer("/result/uri")
+        .or_else(|| resp.pointer("/result/0/targetUri")))
+    .and_then(|u| u.as_str())
+    .map(String::from)
 }
 
 /// Utilities, a safelisted name and variants, filtered by the token under the
@@ -3316,6 +3318,39 @@ fn main() -> Int64 { return stored() + now() }
     );
 
     let _ = client.child.kill();
+}
+
+/// The link an import path answers spans the whole path, quotes excluded, so
+/// the editor underlines it as one link: a plain path, a `std/` path and a
+/// generator's argument.
+#[test]
+fn an_import_path_links_as_one_span() {
+    let app = "import { components } from \"std/vyx\"\n\
+        import { row } from components(\"./comp\")\n\
+        fn main() -> Int64 { return 0 }\n";
+    let row = "<template>\n<li>x</li>\n</template>\n";
+    let dir = input_scratch(app, &[("comp/Row.vyx", row)]);
+    let uri = file_uri(&dir.join("app.vyrn"));
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", app);
+    for (line, path) in [(1, "std/vyx"), (2, "./comp")] {
+        let (l, c) = at(app, line, path);
+        let id = serde_json::json!(format!("link{line}"));
+        client.send(&serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "textDocument/definition",
+            "params": { "textDocument": { "uri": uri }, "position": { "line": l, "character": c + 3 } }
+        }));
+        let resp = client.read_response(&id);
+        let origin = &resp["result"][0]["originSelectionRange"];
+        let len = path.len() as u32;
+        assert_eq!(
+            (&origin["start"]["character"], &origin["end"]["character"]),
+            (&serde_json::json!(c), &serde_json::json!(c + len)),
+            "{path}: {resp}"
+        );
+    }
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Both the binding and every `ns.` qualifier, never `type`. A theme

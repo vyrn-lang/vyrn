@@ -3216,15 +3216,20 @@ fn dedup_refs(mut refs: Vec<RefRange>) -> Vec<RefRange> {
     refs
 }
 
-/// The specifier text when the 1-based `(line, col)` cursor is inside an
-/// import's source string: a plain specifier (`"./store"`) or a
-/// string argument of a generator import (`i18n("../strings")`). `None`
-/// elsewhere. An import can span lines, so the string belongs to an import when
-/// the greatest import-or-declaration line at or above it is an import.
-pub fn import_spec_at(source: &str, line: usize, col: usize) -> Option<String> {
+/// The specifier text and its 1-based column range on `line`, quotes
+/// excluded, when the 1-based `(line, col)` cursor is inside an import's
+/// source string: a plain specifier (`"./store"`) or a string argument of a
+/// generator import (`i18n("../strings")`). `None` elsewhere. An import can
+/// span lines, so the string belongs to an import when the greatest
+/// import-or-declaration line at or above it is an import.
+pub fn import_spec_at(
+    source: &str,
+    line: usize,
+    col: usize,
+) -> Option<(String, std::ops::Range<usize>)> {
     let toks = lexer::lex(source).ok()?;
     // The string-literal token whose span contains the cursor.
-    let (str_line, spec) = toks.iter().find_map(|t| {
+    let (str_line, spec, cols) = toks.iter().find_map(|t| {
         if t.line != line {
             return None;
         }
@@ -3232,7 +3237,7 @@ pub fn import_spec_at(source: &str, line: usize, col: usize) -> Option<String> {
             let start = t.col;
             let end = t.col + s.chars().count() + 2; // + the two quotes
             if col >= start && col <= end {
-                return Some((t.line, s.clone()));
+                return Some((t.line, s.clone(), start + 1..end - 1));
             }
         }
         None
@@ -3255,7 +3260,7 @@ pub fn import_spec_at(source: &str, line: usize, col: usize) -> Option<String> {
         .find(|(l, _)| *l <= str_line)
         .map(|(_, is_imp)| *is_imp)
         .unwrap_or(false);
-    is_import.then_some(spec)
+    is_import.then_some((spec, cols))
 }
 
 /// Resolves an identifier token to a [`SemKind`] and [`SemMods`] in
