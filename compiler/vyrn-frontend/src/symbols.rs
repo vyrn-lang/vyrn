@@ -1421,8 +1421,10 @@ pub fn class_completions(
     )
 }
 
-/// Whether the string literal under the cursor is a direct argument of a call
-/// of [`Analysis::class_call`], bare or as the last segment of `ns.<call>`.
+/// Whether the string literal under the cursor lies in the arguments of a call
+/// of [`Analysis::class_call`], bare or as the last segment of `ns.<call>`, at
+/// any depth: a `.vyx` `:class` expression such as `pick(on, "p-2")` reaches
+/// the call as its argument.
 fn class_call_arg(analysis: &Analysis, source: &str, line: usize, col: usize) -> bool {
     let Ok(toks) = lexer::lex(source) else {
         return false;
@@ -1447,13 +1449,13 @@ fn class_call_arg(analysis: &Analysis, source: &str, line: usize, col: usize) ->
         i -= 1;
         match &toks[i].tok {
             Tok::RParen => depth += 1,
-            Tok::LParen => {
-                if depth == 0 {
-                    return i >= 1
-                        && matches!(&toks[i - 1].tok, Tok::Ident(c) if *c == analysis.class_call);
+            Tok::LParen if depth == 0 => {
+                if i >= 1 && matches!(&toks[i - 1].tok, Tok::Ident(c) if *c == analysis.class_call)
+                {
+                    return true;
                 }
-                depth -= 1;
             }
+            Tok::LParen => depth -= 1,
             _ => {}
         }
     }

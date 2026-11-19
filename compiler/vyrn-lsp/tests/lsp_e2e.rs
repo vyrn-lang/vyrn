@@ -1776,10 +1776,11 @@ const THEMED_APP: &str = "import { componentsThemed } from \"std/vyx\"\n\
 const THEMED_VYX: &str = "<script>\n\
     type TransKey = String where value =~ \"(home|about)\"\n\
     fn t(k: TransKey) -> String { return k }\n\
+    fn pick(c: String) -> String { return c.copy() }\n\
     props { x: String }\n\
     </script>\n\
     <template>\n\
-    <div class=\"flex p-4\"><span class=\"book-card\">{{ x }}</span><p class=\"bg-brand-500 md:hover:bg-brand-600\">{{ t(\"home\") }}</p></div>\n\
+    <div class=\"flex p-4\"><span class=\"book-card\">{{ x }}</span><p class=\"bg-brand-500 md:hover:bg-brand-600\">{{ t(\"home\") }}</p><b :class='pick(\"px-2\")'>{{ x }}</b></div>\n\
     </template>\n";
 
 fn themed_scratch() -> std::path::PathBuf {
@@ -1897,6 +1898,17 @@ fn hover_on_class_shows_css_or_safelisted() {
     let (l, c) = pos_after(THEMED_VYX, "book-car");
     let v = hover_value(&mut client, &uri, l, c).expect("hover on safelisted class");
     assert!(v.contains("safelisted"), "safelisted note: {v}");
+}
+
+/// A string literal anywhere in a `:class` expression answers from the theme.
+#[test]
+fn class_literal_inside_a_class_expression_completes_and_hovers() {
+    let (mut client, uri) = open_themed();
+    let (l, c) = pos_after(THEMED_VYX, "pick(\"px-");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    assert!(labels.contains(&"px-2".to_string()), "{labels:?}");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on the nested class");
+    assert!(v.contains("padding"), "utility CSS rule: {v}");
 }
 
 /// The origin map's forward direction routes string-literal contexts too.
