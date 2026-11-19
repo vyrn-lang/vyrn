@@ -3320,6 +3320,19 @@ fn class_definition(
     }))
 }
 
+/// `file` spelled from `root` with forward slashes, or whole when it lies
+/// outside it. Both sides are compared as the filesystem resolves them: a temp
+/// directory behind a symlink (macOS `/var`) or an 8.3 name (Windows) spells
+/// one directory two ways.
+fn relative_to(file: &std::path::Path, root: &std::path::Path) -> String {
+    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (file_real, root_real) = (real(file), real(root));
+    let rel = (file.strip_prefix(root).ok())
+        .or_else(|| file_real.strip_prefix(&root_real).ok())
+        .unwrap_or(file);
+    rel.to_string_lossy().replace('\\', "/")
+}
+
 /// The rules that define `class`, local first, as hover blocks with the source,
 /// the file relative to the app root and the line; capped.
 fn class_rule_blocks(server: &Server, uri: &Url, class: &str) -> String {
@@ -3332,9 +3345,7 @@ fn class_rule_blocks(server: &Server, uri: &Url, class: &str) -> String {
         if shown >= MAX_CSS_RULES || lines >= MAX_CSS_LINES {
             break;
         }
-        let rel = (r.file.strip_prefix(&root).unwrap_or(&r.file))
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel = relative_to(&r.file, &root);
         let text = r.text.trim();
         out.push_str(&format!(
             "\n\n```css\n{text}\n```\n— {} {rel}:{}",
