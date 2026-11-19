@@ -86,7 +86,7 @@ pub fn std_root_missing() -> String {
         "an executable path the system did not give".to_string(),
         |p| format!("`{}`", p.to_string_lossy().replace('\\', "/")),
     );
-    format!("std library not available: VYRN_STD is {var}, and no std/ lies within five levels above {exe}")
+    format!("std library not available: VYRN_STD is {var}, and no std/ holding runtime.vyrn lies above {exe}")
 }
 
 /// The `web/` root holding the browser runtimes (`wasi-min.js`, `vyrn-rpc.js`,
