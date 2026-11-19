@@ -1403,7 +1403,7 @@ examples/validation.vyrn	0	cbf29ce484222325	20	20	1cb1a4e20404d4d4
 examples/vlog.vyrn	0	cbf29ce484222325	20	18	e79fdeaa414d4c54
 examples/vondemo.vyrn	0	cbf29ce484222325	20	18	81be91848109219d
 examples/vyxcomp/models.vyrn	0	cbf29ce484222325	20	17	a63816c02c930a16
-examples/vyxdemo.vyrn	0	cbf29ce484222325	20	19	d308488de487ea75
+examples/vyxdemo.vyrn	0	cbf29ce484222325	20	18	f1f6f7af8755c4a0
 examples/waiting.vyrn	0	cbf29ce484222325	20	18	fa9c1050888d5b8f
 examples/wirekey.vyrn	0	cbf29ce484222325	20	16	97dc3efc6a1b3fed
 site/app/apidoc.vyrn	0	cbf29ce484222325	20	19	c6347d80a6be492f
@@ -1476,7 +1476,7 @@ std/fetch.vyrn	0	cbf29ce484222325	20	18	7d4ece66beaeb2f0
 std/graphql.vyrn	0	cbf29ce484222325	20	17	a7eac301fdcca43b
 std/hash.vyrn	0	cbf29ce484222325	20	19	7d00c4bc9c0ac6b4
 std/hints.vyrn	0	cbf29ce484222325	20	18	ff404a8bd2a62e4e
-std/html.vyrn	0	cbf29ce484222325	20	18	1afbb1136f293870
+std/html.vyrn	0	cbf29ce484222325	20	18	e0786c52d34e2d6e
 std/http.editor.vyrn	0	cbf29ce484222325	20	14	91f14c208f78343d
 std/http.vyrn	0	cbf29ce484222325	20	20	b3266d48365502ee
 std/i18n.vyrn	0	cbf29ce484222325	20	19	bb10293e87254e7f
@@ -1497,7 +1497,7 @@ std/random.vyrn	0	cbf29ce484222325	20	16	b8e97c8b736a86a6
 std/regex.vyrn	0	cbf29ce484222325	20	17	cfb07ec5985e7a67
 std/rpc.editor.vyrn	0	cbf29ce484222325	20	15	5308db71b62b6a5c
 std/rpc.vyrn	0	cbf29ce484222325	20	17	1fb054967659d958
-std/runtime.vyrn	0	cbf29ce484222325	20	18	0cc927f4a1d0d36e
+std/runtime.vyrn	0	cbf29ce484222325	20	14	8fe346e9e63ecc23
 std/scan.vyrn	0	cbf29ce484222325	20	16	fa2868ab13f061b1
 std/slots.vyrn	0	cbf29ce484222325	20	12	a359c895d32dc21a
 std/storage.vyrn	0	cbf29ce484222325	20	14	838ee66367094974
@@ -1514,8 +1514,8 @@ std/time.vyrn	0	cbf29ce484222325	20	18	15f55a62a1512d82
 std/tw.editor.vyrn	0	cbf29ce484222325	20	15	b2ab3f941e75c17c
 std/tw.vyrn	0	cbf29ce484222325	20	18	f2fad103d0167ca2
 std/ui.editor.vyrn	0	cbf29ce484222325	20	16	165d157576480128
-std/ui.vyrn	0	cbf29ce484222325	20	17	d5ce3b597c242cb1
+std/ui.vyrn	0	cbf29ce484222325	20	17	6c2b1d8fcbf49b72
 std/von.vyrn	0	cbf29ce484222325	20	18	d4a7b318a4c1ac9b
 std/vyx-hints.vyrn	0	cbf29ce484222325	20	16	4dbdc66a61b45f80
 std/vyx.editor.vyrn	0	cbf29ce484222325	20	16	f6b42596395b523d
-std/vyx.vyrn	0	cbf29ce484222325	20	16	fd55eb12632d37f6
+std/vyx.vyrn	0	cbf29ce484222325	20	18	c96e9f164a252641
