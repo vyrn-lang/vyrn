@@ -676,7 +676,22 @@ fn census() -> Vec<Row> {
             "`g` may not be consumed: it is read out of a place that owns it",
             Kernel::Its,
         ),
+        row(
+            "r99_a_dropped_must_use_method_call_result.vyrn",
+            "a must-use temporary fills only a position that takes it",
+            "`ts.replace(..)` is a `Txn` and is never disposed",
+            Kernel::Its,
+        ),
     ]
+}
+
+/// A must-use temporary's refusal sits where the call that made it starts.
+#[test]
+fn a_dropped_must_use_result_is_refused_at_its_call() {
+    let file = "r99_a_dropped_must_use_method_call_result.vyrn";
+    let (_, text) = refusal(file, false);
+    let (head, _) = split_head(&text);
+    assert!(head.ends_with(&format!("{file}:9:5")), "{text}");
 }
 
 fn dir() -> PathBuf {

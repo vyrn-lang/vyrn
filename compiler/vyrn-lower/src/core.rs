@@ -2393,6 +2393,32 @@ impl<'a> Builder<'a> {
         self.call(to, std::slice::from_ref(value), line, Some(ty), None, out)
     }
 
+    /// A must-use temporary `t` owes its disposal, so its refusal quotes `e`,
+    /// what made it, where `e` starts.
+    fn quote(&mut self, t: Name, e: &Expr) {
+        if self.body.names[t.index()].linear.is_none() {
+            return;
+        }
+        let summary = vyrn_frontend::checker::pred_summary;
+        let made = match e {
+            Expr::Call {
+                name, args, form, ..
+            } => {
+                let surface = prelude::method_surface(name).trim_start_matches('@');
+                let f = self.body.spelled(surface);
+                match (form.has_receiver(), args.first()) {
+                    (true, Some(r)) => format!("{}.{f}(..)", summary(r)),
+                    _ => format!("{f}(..)"),
+                }
+            }
+            _ => summary(e),
+        };
+        let (line, col) = e.start();
+        let info = &mut self.body.names[t.index()];
+        info.binder = Spelled::binder(line, col, &made);
+        info.path = Some(made);
+    }
+
     fn temp(&mut self, ty: Type, line: usize) -> Name {
         self.temps += 1;
         let owned = self.owns(&ty);
@@ -3819,6 +3845,7 @@ impl<'a> Builder<'a> {
                 if self.owns(&ty) || self.frame.owed.is_some() {
                     let owns = self.owns(&ty);
                     let t = self.temp(ty, e.line());
+                    self.quote(t, e);
                     self.bind(t, rhs, out);
                     if owns && self.discards(e) {
                         out.push(St::Drop(t, Site::Node(sid), 0, None));
@@ -5493,15 +5520,7 @@ impl<'a> Builder<'a> {
                     }
                     self.temp(ty, e.line())
                 };
-                // A must-use temporary owes its disposal, and the refusal
-                // quotes what made it.
-                if self.body.names[t.index()].linear.is_some() {
-                    let made = match e {
-                        Expr::Call { name, .. } => format!("{}(..)", self.body.spelled(name)),
-                        _ => vyrn_frontend::checker::pred_summary(e),
-                    };
-                    self.body.names[t.index()].path = Some(made);
-                }
+                self.quote(t, e);
                 self.record_fields(t, e);
                 self.bind(t, rhs, out);
                 self.hold(t);
