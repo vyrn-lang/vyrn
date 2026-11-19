@@ -48,36 +48,40 @@ fn json_kind(v: &Json) -> &'static str {
 }
 
 /// Returns a directory beside the executable's repo root: `$var` if it names
-/// one that exists, else `name/` found by walking up at most five levels. The
-/// bundled LSP (`<repo>/editor/vscode/server/`) and dev builds
-/// (`<repo>/compiler/target/<profile>/`) are within five levels of the root.
-fn root_near_exe(var: &str, name: &str) -> Option<String> {
+/// one that exists, else the nearest `name/` above the executable that holds
+/// `marker`.
+fn root_near_exe(var: &str, name: &str, marker: &str) -> Option<String> {
     if let Ok(p) = std::env::var(var) {
         if Path::new(&p).exists() {
             return Some(p.replace('\\', "/"));
         }
     }
-    let mut dir = std::env::current_exe().ok()?;
-    for _ in 0..5 {
-        dir = dir.parent()?.to_path_buf();
-        let cand = dir.join(name);
-        if cand.is_dir() {
-            return Some(cand.to_string_lossy().replace('\\', "/"));
-        }
-    }
-    None
+    root_above(&std::env::current_exe().ok()?, name, marker)
 }
 
-/// The std-library root: `$VYRN_STD`, or `std/` beside the executable's repo.
-/// `None` is an error only for a program that imports `std/...`.
+/// The nearest `<ancestor>/name` of `exe` that holds the file `marker`. The walk
+/// has no depth bound: Cargo's build-dir layout puts a test executable under
+/// `target/<profile>/build/<pkg>/<hash>/out/`, eight levels below the repo. The
+/// marker keeps a `name/` directory that is not the root from answering.
+fn root_above(exe: &Path, name: &str, marker: &str) -> Option<String> {
+    (exe.ancestors().skip(1))
+        .map(|dir| dir.join(name))
+        .find(|cand| cand.join(marker).is_file())
+        .map(|cand| cand.to_string_lossy().replace('\\', "/"))
+}
+
+/// The std-library root: `$VYRN_STD`, or the `std/` holding `runtime.vyrn`
+/// above the executable. `None` is an error only for a program that imports
+/// `std/...`.
 pub fn std_root() -> Option<String> {
-    root_near_exe("VYRN_STD", "std")
+    root_near_exe("VYRN_STD", "std", "runtime.vyrn")
 }
 
 /// The `web/` root holding the browser runtimes (`wasi-min.js`, `vyrn-rpc.js`,
-/// `vyrn-query.js`): `$VYRN_WEB`, or `web/` beside the executable's repo.
+/// `vyrn-query.js`): `$VYRN_WEB`, or the `web/` holding `wasi-min.js` above
+/// the executable.
 pub fn web_root() -> Option<String> {
-    root_near_exe("VYRN_WEB", "web")
+    root_near_exe("VYRN_WEB", "web", "wasi-min.js")
 }
 
 /// The project manifest, `vyrn.json`. Every field is optional; unknown keys are
@@ -736,6 +740,25 @@ mod tests {
         let inner = d.join("d0");
         std::fs::write(inner.join("vyrn.json"), "{}").unwrap();
         assert_eq!(app_root(&deep), inner, "the nearest wins");
+    }
+
+    /// The std root is found eight levels above the executable, where Cargo's
+    /// build-dir layout puts a test binary, and a `std/` without the marker is
+    /// passed over.
+    #[test]
+    fn the_std_root_is_found_at_any_depth_by_its_marker() {
+        let repo = tmp("stdwalk");
+        let out = repo.join("compiler/target/debug/build/vyrn-cli/0123abcd/out");
+        std::fs::create_dir_all(&out).unwrap();
+        let exe = out.join("columns-0123abcd");
+        let slash = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        assert_eq!(root_above(&exe, "std", "runtime.vyrn"), None, "no std/");
+        std::fs::create_dir_all(repo.join("std")).unwrap();
+        std::fs::create_dir_all(repo.join("compiler/target/std")).unwrap();
+        assert_eq!(root_above(&exe, "std", "runtime.vyrn"), None, "no marker");
+        std::fs::write(repo.join("std/runtime.vyrn"), "").unwrap();
+        let found = root_above(&exe, "std", "runtime.vyrn");
+        assert_eq!(found, Some(slash(&repo.join("std"))), "eight levels up");
     }
 
     /// A reader racing a writer on one cache entry reads a whole version. A
