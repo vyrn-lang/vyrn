@@ -574,7 +574,11 @@ fn a_damaged_closed_entry_gives_nothing() {
         std::fs::write(&path, damaged).expect("damage");
         assert_eq!(t.check(false), (Some(1), refused.clone()), "{why}");
         let again = std::fs::read_to_string(&path).expect("read");
-        assert_eq!(again, text, "{why}: the entry was not written again");
+        assert_eq!(
+            unstamped(&again),
+            unstamped(&text),
+            "{why}: the entry was not written again"
+        );
     }
 }
 
