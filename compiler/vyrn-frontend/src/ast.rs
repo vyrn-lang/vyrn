@@ -653,6 +653,14 @@ pub struct TypeDecl {
     pub line: usize,
 }
 
+impl TypeDecl {
+    /// The type `value` holds in the predicate: the base of a refinement of a
+    /// scalar. `None` for a declaration without a predicate or over a record.
+    pub fn refined(&self) -> Option<&Type> {
+        (self.predicate.is_some() && self.base.is_scalar()).then_some(&self.base)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Field {
     pub name: String,

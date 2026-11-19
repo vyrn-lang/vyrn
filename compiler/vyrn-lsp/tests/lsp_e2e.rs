@@ -923,6 +923,25 @@ fn main() -> Int64 {
     );
 }
 
+/// A refinement's `value` holds the base type: its members complete and hover
+/// as a `String` binding's do.
+#[test]
+fn a_refined_value_completes_and_hovers_as_its_base() {
+    let mut client = spawn_client();
+    let uri = "file:///refined/title.vyrn";
+    let src = "export type Title = String where value.byteLength >= 1\n";
+    did_open(&mut client, uri, "vyrn", src);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    let (l, c) = pos_after(src, "value.");
+    let labels = completion_labels(&mut client, uri, l, c);
+    assert!(labels.iter().any(|x| x == "byteLength"), "{labels:?}");
+    let member = hover_value(&mut client, uri, l, c + 1).unwrap_or_default();
+    assert!(member.contains("byteLength: Int64"), "{member}");
+    let (l, c) = pos_after(src, "where va");
+    let value = hover_value(&mut client, uri, l, c).unwrap_or_default();
+    assert!(value.contains("value: String"), "{value}");
+}
+
 /// Inside a string literal whose expected type is a finite string type, the
 /// type's whole language is offered, not the top-level symbols.
 #[test]

@@ -1787,8 +1787,9 @@ fn decl_lines(program: &ast::Program) -> Vec<usize> {
     v
 }
 
-/// The subset of [`decl_lines`] that are function declarations (functions and
-/// impl methods). A protocol method has no body, so it holds no locals.
+/// The subset of [`decl_lines`] that hold locals: functions, impl methods and
+/// refinements, whose predicate binds `value`. A protocol method has no body,
+/// so it holds no locals.
 fn fn_lines(program: &ast::Program) -> Vec<usize> {
     let mut v: Vec<usize> = Vec::new();
     for f in &program.functions {
@@ -1799,6 +1800,7 @@ fn fn_lines(program: &ast::Program) -> Vec<usize> {
             v.push(m.line);
         }
     }
+    v.extend(checker::refinements(program).map(|(line, _)| line));
     v.sort_unstable();
     v
 }
