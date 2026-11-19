@@ -2194,7 +2194,7 @@ impl<'a> Builder<'a> {
         }
         // The binder borrows the yielded place (`-> read Option<T>`); read it
         // through [`Builder::place`] for [`Builder::inlined`]'s reason.
-        if let Pattern::Variant(_, binds) = pattern {
+        if let Pattern::Variant(_, binds, _) = pattern {
             if let Some(bind) = binds.first() {
                 if !is_place_read(&p.place) {
                     return gap_d("a projection whose yield is not a place", name, line);
@@ -4871,7 +4871,7 @@ impl<'a> Builder<'a> {
     /// Which tag a pattern tests for, in the scrutinee's variant list. `??`'s
     /// pair names a tag: 1 succeeds and 0 fails, for every sum.
     fn arm_test(&self, p: &Pattern, rt: &Type, line: usize) -> Result<Test, Gap> {
-        let Pattern::Variant(v, _) = p else {
+        let Pattern::Variant(v, ..) = p else {
             return Ok(match p {
                 Pattern::Other => Test::Else,
                 _ => Test::Tag(u64::from(matches!(p, Pattern::Success(_)))),
@@ -4965,7 +4965,7 @@ impl<'a> Builder<'a> {
                 }
                 _ => return gap("a `??` pattern on a scrutinee with no two tags", line),
             },
-            Pattern::Variant(v, names) => match rt {
+            Pattern::Variant(v, names, _) => match rt {
                 Type::Enum(variants) => {
                     let Some(var) = variants.iter().find(|x| x.name == *v) else {
                         return gap("a variant the enum does not have", line);

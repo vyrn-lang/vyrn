@@ -2096,7 +2096,7 @@ impl<'a> Checker<'a> {
             return Ok(None);
         }
         self.refuse_chained_projection(&args[0], scope, line)?;
-        if !matches!(pattern, crate::ast::Pattern::Variant(v, _) if v == "Some") {
+        if !matches!(pattern, crate::ast::Pattern::Variant(v, ..) if v == "Some") {
             return Err(cerr!(line, OptionalPlaceTested, name));
         }
         let subst =
@@ -4506,6 +4506,41 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
+    /// The refusal of a pattern naming `vname`, which is no variant of `sty`,
+    /// at `at` where the pattern is spelled. A variant of `sty` written
+    /// `vname` in a module that does not import `sty` needs that import.
+    fn not_a_variant(
+        &self,
+        vname: &str,
+        sty: &Type,
+        evs: &[EnumVariant],
+        line: usize,
+        at: (usize, usize),
+    ) -> Diagnostic {
+        let (line, col) = match at {
+            (l, c) if c > 0 => (l, c),
+            _ => (line, 0),
+        };
+        let sp = self.spellings;
+        let hidden = (evs.iter()).find_map(|v| sp.decls.get(&v.name).filter(|(w, _)| w == vname));
+        let enum_name = match sty {
+            Type::App(n, _) | Type::Named(n) => Some(n),
+            _ => None,
+        };
+        let d = match (hidden, enum_name) {
+            (Some((_, m)), Some(n)) => {
+                let here = self.frame.borrow().here.clone();
+                let module = sp.import_path(here.as_ref().unwrap_or(&sp.root), m);
+                cerr!(line, VariantNotImported, vname, ty = sp.written(n), module)
+            }
+            _ => cerr!(line, NotAVariant, vname = DeclName(vname), sty),
+        };
+        match col {
+            0 => d,
+            c => d.at(c, c + vname.chars().count()),
+        }
+    }
+
     /// Checks a `match` over a sum: every arm a valid variant pattern, its
     /// bindings matching the payloads. Exhaustiveness is the core's rule,
     /// stated where it builds the switch.
@@ -4538,8 +4573,8 @@ impl<'a> Checker<'a> {
                 }
                 continue;
             }
-            let (vname, bind) = match &arm.pattern {
-                Pattern::Variant(n, b) => (n.clone(), b.clone()),
+            let (vname, bind, at) = match &arm.pattern {
+                Pattern::Variant(n, b, at) => (n.clone(), b.clone(), at.start()),
                 // The `??` desugar's patterns name a tag of an
                 // `Option` or `Result`: variant 1 succeeds, variant 0 fails.
                 // Another enum has no success side as a pattern.
@@ -4556,6 +4591,7 @@ impl<'a> Checker<'a> {
                         } else {
                             vec![b.clone()]
                         },
+                        (0, 0),
                     )
                 }
                 Pattern::Success(_) | Pattern::Failure(_) => {
@@ -4563,10 +4599,9 @@ impl<'a> Checker<'a> {
                 }
                 Pattern::Other => unreachable!("the default arm is checked above the match"),
             };
-            let ev = evs
-                .iter()
-                .find(|v| v.name == vname)
-                .ok_or_else(|| cerr!(line, NotAVariant, vname = DeclName(&vname), sty))?;
+            let Some(ev) = evs.iter().find(|v| v.name == vname) else {
+                return Err(self.not_a_variant(&vname, sty, evs, line, at));
+            };
             if ev.payload.len() != bind.len() {
                 return Err(cerr!(
                     line,

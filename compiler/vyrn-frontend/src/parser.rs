@@ -1981,7 +1981,7 @@ impl<'a> Build<'a> {
                 scrutinee: Box::new(scrut.clone()),
                 arms: vec![
                     MatchArm {
-                        pattern: Pattern::Variant(variant.clone(), arm_binds),
+                        pattern: Pattern::Variant(variant.clone(), arm_binds, Id::NEW),
                         body: ArmBody::Expr(Expr::var(b.name.clone(), line)),
                     },
                     MatchArm {
@@ -2895,6 +2895,7 @@ impl<'a> Build<'a> {
                             pattern: Pattern::Variant(
                                 "Valid".to_string(),
                                 vec![Binder::synthetic("@v")],
+                                Id::NEW,
                             ),
                             body: ArmBody::Expr(call("Loaded", vec![var("@v")])),
                         },
@@ -2902,6 +2903,7 @@ impl<'a> Build<'a> {
                             pattern: Pattern::Variant(
                                 "Invalid".to_string(),
                                 vec![Binder::synthetic("@i")],
+                                Id::NEW,
                             ),
                             body: ArmBody::Expr(call("Corrupt", vec![var("@i")])),
                         },
@@ -2914,11 +2916,19 @@ impl<'a> Build<'a> {
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Variant("Ok".into(), vec![Binder::synthetic("@t")]),
+                            pattern: Pattern::Variant(
+                                "Ok".into(),
+                                vec![Binder::synthetic("@t")],
+                                Id::NEW,
+                            ),
                             body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
-                            pattern: Pattern::Variant("Err".into(), vec![Binder::synthetic("@e")]),
+                            pattern: Pattern::Variant(
+                                "Err".into(),
+                                vec![Binder::synthetic("@e")],
+                                Id::NEW,
+                            ),
                             body: ArmBody::Expr(var("Missing")),
                         },
                     ],
@@ -2936,6 +2946,7 @@ impl<'a> Build<'a> {
                             pattern: Pattern::Variant(
                                 "Valid".to_string(),
                                 vec![Binder::synthetic("@v")],
+                                Id::NEW,
                             ),
                             body: ArmBody::Expr(var("@v")),
                         },
@@ -2943,6 +2954,7 @@ impl<'a> Build<'a> {
                             pattern: Pattern::Variant(
                                 "Invalid".to_string(),
                                 vec![Binder::synthetic("@i")],
+                                Id::NEW,
                             ),
                             body: ArmBody::Expr(default.clone()),
                         },
@@ -2955,11 +2967,19 @@ impl<'a> Build<'a> {
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Variant("Ok".into(), vec![Binder::synthetic("@t")]),
+                            pattern: Pattern::Variant(
+                                "Ok".into(),
+                                vec![Binder::synthetic("@t")],
+                                Id::NEW,
+                            ),
                             body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
-                            pattern: Pattern::Variant("Err".into(), vec![Binder::synthetic("@e")]),
+                            pattern: Pattern::Variant(
+                                "Err".into(),
+                                vec![Binder::synthetic("@e")],
+                                Id::NEW,
+                            ),
                             body: ArmBody::Expr(default),
                         },
                     ],
@@ -3024,6 +3044,7 @@ impl<'a> Build<'a> {
     /// Every identifier is a variant name, `Some`, `None`, `Ok` and `Err` included.
     /// `ns.Color.Red`: the loader checks `ns` and reduces the path to the variant name.
     fn pattern(&mut self) -> Pattern {
+        let at = Id::started(self.binder_pos());
         let mut name = self.ident();
         while self.eat(&Tok::Dot) {
             name = format!("{name}.{}", self.ident());
@@ -3032,7 +3053,7 @@ impl<'a> Build<'a> {
             true => self.binders_to_paren(),
             false => Vec::new(),
         };
-        Pattern::Variant(name, binds)
+        Pattern::Variant(name, binds, at)
     }
 }
 
@@ -3346,7 +3367,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         };
         assert_eq!(arms.len(), 2);
         assert!(
-            matches!(&arms[0].pattern, Pattern::Variant(v, b) if v == "Circle" && b.len() == 1 && b[0].name == "r")
+            matches!(&arms[0].pattern, Pattern::Variant(v, b, _) if v == "Circle" && b.len() == 1 && b[0].name == "r")
         );
         assert!(matches!(&arms[1].pattern, Pattern::Other));
         // The trap is an ordinary `panic`: the wording has one source and the loader
@@ -3402,7 +3423,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
         let src = "fn main() -> Int64 {                    if let Some(v) = f() { return v } else { return 0 } }";
         let p = parse_src(src);
         let (pat, _, _, els) = if_let(&p.functions[0].block().stmts[0]);
-        assert!(matches!(pat, Pattern::Variant(v, _) if v == "Some"));
+        assert!(matches!(pat, Pattern::Variant(v, ..) if v == "Some"));
         assert!(matches!(els.stmts[0], Stmt::Return { .. }));
     }
 

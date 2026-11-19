@@ -682,16 +682,31 @@ fn census() -> Vec<Row> {
             "`ts.replace(..)` is a `Txn` and is never disposed",
             Kernel::Its,
         ),
+        row(
+            "r100_a_variant_of_an_enum_the_module_does_not_import.vyrn",
+            "a pattern names a variant of an enum the module imports",
+            "`First` is a variant of `Race`, which this module does not import: add \
+             `import { Race } from \"std/task\"`",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 
-/// A must-use temporary's refusal sits where the call that made it starts.
+/// A refusal sits where the source spells what it refuses: a must-use
+/// temporary at the call that made it, a variant at its pattern.
 #[test]
-fn a_dropped_must_use_result_is_refused_at_its_call() {
-    let file = "r99_a_dropped_must_use_method_call_result.vyrn";
-    let (_, text) = refusal(file, false);
-    let (head, _) = split_head(&text);
-    assert!(head.ends_with(&format!("{file}:9:5")), "{text}");
+fn a_refusal_sits_where_its_subject_is_spelled() {
+    for (file, at) in [
+        ("r99_a_dropped_must_use_method_call_result.vyrn", "9:5"),
+        (
+            "r100_a_variant_of_an_enum_the_module_does_not_import.vyrn",
+            "7:9",
+        ),
+    ] {
+        let (_, text) = refusal(file, false);
+        let (head, _) = split_head(&text);
+        assert!(head.ends_with(&format!("{file}:{at}")), "{text}");
+    }
 }
 
 fn dir() -> PathBuf {

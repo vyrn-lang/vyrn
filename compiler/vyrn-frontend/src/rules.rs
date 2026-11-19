@@ -428,6 +428,9 @@ rules! {
         "`??` works on an Option or a Result, not on {sty}: \
         `match` names the variant to fall back on";
     NotAVariant { vname, sty } "`{vname}` is not a variant of {sty}";
+    VariantNotImported { vname, ty, module }
+        "`{vname}` is a variant of `{ty}`, which this module does not import: \
+        add `import {{ {ty} }} from \"{module}\"`";
     PatternArity { vname, want, got }
         "variant `{vname}` has {want} payload(s), but the pattern binds {got}";
     IfNeedsElse {}

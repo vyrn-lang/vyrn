@@ -1680,6 +1680,12 @@ impl Spellings {
         false
     }
 
+    /// The path module `from` wrote to import module `m`, else `m`'s key.
+    pub fn import_path<'a>(&'a self, from: &str, m: &'a str) -> &'a str {
+        let path = self.paths.get(&(from.to_string(), m.to_string()));
+        path.map_or(m, String::as_str)
+    }
+
     /// The name the declaration `linked` was written as.
     pub fn written<'a>(&'a self, linked: &'a str) -> &'a str {
         self.decls.get(linked).map_or(linked, |(w, _)| w)
@@ -1731,8 +1737,7 @@ impl<'a> Speech<'a> {
         let from = self.from.as_ref().unwrap_or(&self.table.root);
         match self.table.decls.get(linked) {
             Some((_, m)) if m != from && self.qualified.iter().any(|q| q == linked) => {
-                let path = self.table.paths.get(&(from.clone(), m.clone()));
-                format!("{written} from \"{}\"", path.unwrap_or(m))
+                format!("{written} from \"{}\"", self.table.import_path(from, m))
             }
             _ => written.to_string(),
         }
@@ -2098,8 +2103,8 @@ pub struct MatchArm {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     /// `Circle(r)`, `Empty`, `Some(x)`, `None`, `Ok(x)`, `Err(e)`. The scrutinee
-    /// decides what the name means.
-    Variant(String, Vec<Binder>),
+    /// decides what the name means. The slot starts where the name is spelled.
+    Variant(String, Vec<Binder>, Id),
     /// The tag-1 arm: `Some` or `Ok`. The parser's `??` desugar has no types to
     /// choose with, so it builds this and `??` inherits `match`'s drops,
     /// ownership and validation.
@@ -2128,7 +2133,7 @@ impl Pattern {
     pub fn binders(&self) -> &[Binder] {
         match self {
             Pattern::Success(b) | Pattern::Failure(b) => std::slice::from_ref(b),
-            Pattern::Variant(_, binds) => binds,
+            Pattern::Variant(_, binds, _) => binds,
             Pattern::Other => &[],
         }
     }
@@ -2136,7 +2141,7 @@ impl Pattern {
     pub fn binders_mut(&mut self) -> Vec<&mut Binder> {
         match self {
             Pattern::Success(b) | Pattern::Failure(b) => vec![b],
-            Pattern::Variant(_, binds) => binds.iter_mut().collect(),
+            Pattern::Variant(_, binds, _) => binds.iter_mut().collect(),
             Pattern::Other => Vec::new(),
         }
     }
@@ -2596,6 +2601,9 @@ impl Numbering {
             } => {
                 self.expr(scrutinee);
                 for a in arms {
+                    if let Pattern::Variant(_, _, at) = &mut a.pattern {
+                        self.leaf(at);
+                    }
                     self.binders(a.pattern.binders_mut());
                     match &mut a.body {
                         ArmBody::Expr(x) => self.expr(x),
