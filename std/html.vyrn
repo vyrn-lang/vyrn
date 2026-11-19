@@ -684,3 +684,21 @@ export fn document(title: String, head: Array<Html>, body: Html) -> String {
     out = out + "\n</body>\n</html>\n"
     return out
 }
+
+/// `node` with `a` after its attributes. A non-element node returns unchanged.
+export fn withAttr(node: consume Html, a: consume Attr) -> Html {
+    // `consume node`: the binders take the payloads, so the rebuilt node is
+    // owned, as in `keyed`.
+    return match consume node {
+        El(tag, attrs, kids) => El(tag, pushed(attrs, a), kids),
+        Empty => Empty,
+        Text(s) => Text(s),
+        Raw(s) => Raw(s),
+    }
+}
+
+fn pushed(attrs: consume Array<Attr>, a: consume Attr) -> Array<Attr> {
+    let mut out = attrs
+    out.push(a)
+    return out
+}

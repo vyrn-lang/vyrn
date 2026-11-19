@@ -426,7 +426,7 @@ policy.
 | `artifacts` | named entry plus target (`native`, `wasi`, `browser`); `main`, `server` and `client` are sugar for entries |
 | `roles` | directory to module contract, for example `"routes": "std/ui:Page"` |
 | `hints` | per-rule severity for the hint libraries (`std/hints`, `std/vyx-hints`) |
-| `stylesheets` | globs naming the app's own CSS, whose rules the editor's hover on a safelisted class shows |
+| `stylesheets` | globs naming the app's own CSS that no layout links, whose classes the editor offers and whose rules it shows |
 | `inputs` | globs naming the generator inputs the editor sends the language server, beside the `.vyx` files the VS Code extension sends |
 | `proved` | globs naming the modules where every check must be proved (language.md, Proofs); `vyrn check`, `build`, `run`, `why` and the editor read it, and no flag replaces it |
 
@@ -523,7 +523,7 @@ one warning that names the search. Completion and go-to-definition in the
 input's own grammar come from the `gen fn vyrnComplete*` and
 `vyrnDefinition*` in the claiming generator module's editor companion
 (`loader::call_generator`), `std/vyx.editor`'s for `.vyx`; anywhere else the
-cursor maps through `OriginMaps` into the generated module. There a name on an
+cursor maps through `OriginMaps` into the generated module. In a static `class` or a string literal of a `:class`, completion offers the classes `vyrn_frontend::classes` reads, each with its source: the component's own style block (local), the stylesheets the app's layouts link with `stylesheet "..."`, mapped to the files under the manifest's `public` directory, and the files the `stylesheets` globs name (global); the theme's alphabet follows. Hover shows each rule that defines the class with its file and line, local first, and definition jumps to the first. There a name on an
 import line the module dropped as a repeat maps to the import that kept it, and
 a component tag to the declaration of the view its file provides, so its hover
 shows the props. The module is analysed as a file beside its root, with each

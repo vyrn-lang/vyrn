@@ -9,13 +9,38 @@
 ///   import { components } from "std/vyx"
 ///   import { itemRow, cart } from components("./components")
 ///
-/// A `.vyx` file has two sections:
+/// A `.vyx` file has three sections:
 ///   <script>   -- optional: a `props { name: Type, ... }` block (the view fn's
 ///                parameters), `import` lines (copied as written, so a
 ///                relative path resolves beside the `.vyx`; a name a sibling
 ///                already imports from the same path is dropped), and plain
 ///                `fn`/`let`/`type` helpers (module-private).
 ///   <template> -- exactly one root element, compiled to the view fn body.
+///   <style>    -- optional, last: CSS scoped to the component. A component with a
+///                block stamps `data-v-<id>` on every element its template writes,
+///                where `id` is 8 hex digits of the FNV-1a hash of the file's
+///                `appPath`. The last compound of each selector gains
+///                `[data-v-<id>]` before its pseudo-classes, so `.row:hover`
+///                becomes `.row[data-v-<id>]:hover`. A child component's root also
+///                carries its caller's id, so a caller styles that root and
+///                nothing inside it. `:global(s)` is written as `s` and opts out
+///                of the scope from where it stands. The rules inside `@media` and
+///                `@supports` are scoped; every other at-rule, `@keyframes` among
+///                them, is copied as written. A CSS syntax error is a refusal at
+///                its line and column. Only in a component with a block, the
+///                compiler warns of a class the template names that no source
+///                defines (the block, a sheet a layout links, a `stylesheets`
+///                glob), unless the module is themed, and of a rule whose class
+///                the template never names, unless a `:class` builds classes at
+///                run time (`vyrn_frontend::classes`).
+///
+/// Every written module exports `vyxCss() -> Array<String>`: one chunk of scoped
+/// rules per component with a block, in directory order, then the chunks of each
+/// components module its scripts import by name. `std/ui`'s router serves the
+/// chunks of every page, layout and error page it routes, each once, at
+/// `/vyx.css` from `route` (the `routes()` mount tree holds pages only), and links that sheet first in every document's head when it holds a
+/// rule. A component only a client program reaches is outside the server's
+/// router: serve its `vyxCss()` from the server by hand.
 ///
 /// Template grammar (Vue-flavored):
 ///   {{ expr }}                  -> text((expr).toString())     (escaped)
@@ -83,7 +108,8 @@
 /// diagnostic.
 
 // `vyxSlice` stays private: it slices a byte array, so `substring` does not fit.
-import { joinWith, lines, trim, fromBytesOr } from "std/strings"
+import { joinWith, lines, trim, fromBytesOr, toHex } from "std/strings"
+import { fnv1aStr } from "std/hash"
 import { includes } from "std/arrays"
 // `components` checks its emitted surface against the `Component` contract.
 // `Html` is imported only for that contract; the generated module's
@@ -96,6 +122,7 @@ import { Json, JsonField, emit } from "std/json"
 import { contains, endsWith, startsWith } from "std/strpred"
 import { report, reportHere, Severity } from "std/diag"
 import { join, arm, ifChain, ifChainOr } from "std/code"
+import { Symbol, symbol, strField, symbolMapFn } from "std/symbolmap"
 import { catalogue } from "std/i18n"
 import { syntax } from "std/syntax"
 // Each by a namespace: a written module's names, such as `Row`, are program-wide.
@@ -395,18 +422,19 @@ fn vyxScanQuote(ba: Array<UInt8>, q: Int64, e: Int64) -> Int64 {
     return i + 1
 }
 
-/// One `.vyx` finding: an error at `line` of `file`, column 1 because the
-/// scanner tracks lines only, or at the generator call when `file` is `None`.
-type VyxErr = { file: Option<String>, line: Int64, message: String }
+/// One `.vyx` finding: an error at `line` and `col` of `file`, or at the
+/// generator call when `file` is `None`. A finding the scanner places by line
+/// alone sits at column 1.
+type VyxErr = { file: Option<String>, line: Int64, col: Int64, message: String }
 
 /// A finding at `line` of `file`.
 fn vyxErr(file: String, line: Int64, message: String) -> VyxErr {
-    return VyxErr { file: Some(file.copy()), line: line, message: message.copy() }
+    return VyxErr { file: Some(file.copy()), line: line, col: 1, message: message.copy() }
 }
 
 /// A finding at the generator call.
 fn vyxErrHere(message: String) -> VyxErr {
-    return VyxErr { file: None, line: 0, message: message.copy() }
+    return VyxErr { file: None, line: 0, col: 1, message: message.copy() }
 }
 
 /// `a`, then `b`.
@@ -423,7 +451,7 @@ gen fn vyxReports(errs: Array<VyxErr>) -> Code {
     let mut out = vyrn""
     for e in errs {
         out = out + match e.file {
-            Some(f) => report(Error, f, e.line, 1, e.message),
+            Some(f) => report(Error, f, e.line, e.col, e.message),
             None => reportHere(Error, e.message),
         }
     }
@@ -447,6 +475,9 @@ fn vyxSay(row: vx.Row) -> String {
     return match row {
         AttrName => say.tAttrName__En(),
         AttrUnquoted => say.tAttrUnquoted__En(),
+        CssNested => say.tCssNested__En(),
+        CssStray => say.tCssStray__En(),
+        CssUnclosed => say.tCssUnclosed__En(),
         ElemUnclosed(tag) => say.tElemUnclosed__En(tag),
         ElseIfOrphan => say.tElseIfOrphan__En(),
         ElseOrphan => say.tElseOrphan__En(),
@@ -459,6 +490,8 @@ fn vyxSay(row: vx.Row) -> String {
         NoTemplate => say.tNoTemplate__En(),
         ScriptUnclosed => say.tScriptUnclosed__En(),
         StrayClose(tag) => say.tStrayClose__En(tag),
+        StyleStray => say.tStyleStray__En(),
+        StyleUnclosed => say.tStyleUnclosed__En(),
         TagMismatch(tag, close) => say.tTagMismatch__En(tag, close),
         TagUnclosed => say.tTagUnclosed__En(),
         TemplateUnclosed => say.tTemplateUnclosed__En(),
@@ -474,12 +507,28 @@ fn vyxRow(file: String, line: Int64, row: vx.Row) -> VyxErr {
     return vyxErr(file, line, vyxSay(row))
 }
 
+/// The column a parse fault at `line` and `col` of `ba` shows at: its own in the
+/// style block of `o`, column 1 before it, where the template's faults are placed by
+/// line alone.
+fn vyxFaultCol(o: vx.VyxOutline, ba: Array<UInt8>, line: Int64, col: Int64) -> Int64 {
+    if let Some(st) = o.style {
+        if line >= vyxLineAt(ba, st.start) {
+            return col
+        }
+    }
+    return 1
+}
+/// A finding at `line` and `col` of `file`.
+fn vyxErrAt(file: String, line: Int64, col: Int64, message: String) -> VyxErr {
+    return VyxErr { file: Some(file.copy()), line: line, col: col, message: message.copy() }
+}
+
 /// The sections of the `.vyx` text `source`. The rule refuses nothing, so the empty
 /// outline is the arm no text reaches.
 export to "./vyx.editor" fn vyxOutlineOf(source: String) -> vx.VyxOutline {
     return match vx.parseVyxOutline(source) {
         Ok(outline) => outline,
-        Err(errors) => vx.VyxOutline { script: None, template: None, start: 0, end: 0 },
+        Err(errors) => vx.VyxOutline { script: None, template: None, style: None, start: 0, end: 0 },
     }
 }
 
@@ -628,8 +677,9 @@ type VyxGroup = { nodes: Array<VyxFlow>, errs: Array<VyxErr> }
 
 type VyxOne = { node: VyxFlow, errs: Array<VyxErr> }
 
-/// Text and the bytes its positions read.
-type VyxSource = { path: String, bytes: Array<UInt8> }
+/// Text and the bytes its positions read, with the scope attribute its elements
+/// carry: `data-v-<id>` when the component has a style block, `""` without one.
+type VyxSource = { path: String, bytes: Array<UInt8>, scope: String }
 
 /// The text a run `raw` renders: each whitespace run collapsed to one space, one space
 /// for a same-line whitespace run, and `""`, no node, for one that holds a line break.
@@ -1090,7 +1140,8 @@ fn vyxHelperText(sc: VyxScript) -> String {
 }
 
 /// One parsed `.vyx` component. `src` holds the file its positions are in, spelled
-/// as the generator read it.
+/// as the generator read it. `css` is the scoped rules of its style block as one
+/// chunk, `""` without a block.
 type VyxComp = {
     name: String,
     fnName: String,
@@ -1098,6 +1149,8 @@ type VyxComp = {
     script: VyxScript,
     root: VyxFlow,
     takesChildren: Bool,
+    css: String,
+    classes: Array<VyxClassUse>,
     errs: Array<VyxErr>,
 }
 
@@ -1213,7 +1266,7 @@ export gen fn vyxParseTemplate(source: String) -> VyxTemplate {
 /// The nodes of the template of `file`, read from `source`, or the first fault a
 /// compile would raise in them.
 gen fn vyxTemplateOf(file: consume vx.VyxFile, source: String) -> VyxTemplate {
-    let grouped = vyxGroupFile(file, VyxSource { path: "", bytes: bytes(source) })
+    let grouped = vyxGroupFile(file, VyxSource { path: "", bytes: bytes(source), scope: "" })
     if grouped.errs.length > 0 {
         return VyxTemplate { nodes: [], err: grouped.errs[0].message.copy() }
     }
@@ -1231,10 +1284,63 @@ fn vyxSectionFault(o: vx.VyxOutline, source: String, srcPath: String) -> Array<V
             return [vyxRow(srcPath, vyxLineAt(ba, s.start), ScriptUnclosed)]
         }
     }
-    return match o.template {
+    let template: Array<VyxErr> = match o.template {
         None => [vyxRow(srcPath, 0, NoTemplate)],
         Some(t) => if vyxTemplateUnclosed(o) { [vyxRow(srcPath, vyxLineAt(ba, t.start), TemplateUnclosed)] } else { [] },
     }
+    if template.length > 0 {
+        return template
+    }
+    if let Some(st) = o.style {
+        if vyxStyleUnclosed(st) {
+            return [vyxRow(srcPath, vyxLineAt(ba, st.start), StyleUnclosed)]
+        }
+    }
+    let stray = vyxStrayStyle(o, ba)
+    if stray >= 0 {
+        return [vyxRow(srcPath, vyxLineAt(ba, stray), StyleStray)]
+    }
+    return []
+}
+
+/// Whether the style block `st` opens and never closes.
+fn vyxStyleUnclosed(st: vx.VyxStylePart) -> Bool {
+    return match st.close {
+        Some(c) => false,
+        None => true,
+    }
+}
+
+/// The offset of the first `<style>` of `o`'s text that is no section's: neither
+/// the style block nor inside the script or the template. A style block with a
+/// `<script>` after it stands there too, because the block comes last. -1 for none.
+fn vyxStrayStyle(o: vx.VyxOutline, ba: Array<UInt8>) -> Int64 {
+    let own = match o.style {
+        Some(st) => st.start,
+        None => 0 - 1,
+    }
+    if let Some(st) = o.style {
+        if vyxFind(ba, bytes("<script>"), st.end) >= 0 {
+            return st.start
+        }
+    }
+    let needle = bytes("<style>")
+    let mut at = vyxFind(ba, needle, 0)
+    while at >= 0 {
+        let inScript = match o.script {
+            Some(sc) => at >= sc.start && at < sc.end,
+            None => false,
+        }
+        let inTemplate = match o.template {
+            Some(t) => at >= t.start && at < t.end,
+            None => false,
+        }
+        if at != own && inScript == false && inTemplate == false {
+            return at
+        }
+        at = vyxFind(ba, needle, at + 1)
+    }
+    return 0 - 1
 }
 
 /// Compiles one `.vyx` source into a `VyxComp`; component calls are resolved
@@ -1274,16 +1380,15 @@ gen fn vyxCompileAt(source: String, compName: String, srcPath: String, kw: Strin
         }
     }
 
-    let src = VyxSource { path: srcPath.copy(), bytes: ba.copy() }
-    let grouped = match vx.parseVyxFile(source) {
-        Ok(file) => vyxGroupFile(file, src),
-        Err(errors) => VyxGroup { nodes: [], errs: [vyxRow(srcPath, errors[0].line, errors[0].row)] },
+    let read = match vx.parseVyxFile(source) {
+        Ok(file) => vyxReadFile(file, ba, srcPath),
+        Err(errors) => VyxRead { grouped: VyxGroup { nodes: [], errs: [vyxErrAt(srcPath, errors[0].line, vyxFaultCol(outline, ba, errors[0].line, errors[0].col), vyxSay(errors[0].row))] }, src: VyxSource { path: srcPath.copy(), bytes: [], scope: "" }, css: "", classes: [] },
     }
-    if grouped.errs.length > 0 {
-        return vyxCompErr(compName, fnName, srcPath, grouped.errs)
+    if read.grouped.errs.length > 0 {
+        return vyxCompErr(compName, fnName, srcPath, read.grouped.errs)
     }
     // Exactly one root element; only whitespace-only text is exempt.
-    let roots = vyxElementRoots(consume grouped.nodes)
+    let roots = vyxElementRoots(consume read.grouped.nodes)
     if roots.length == 0 {
         return vyxCompErr(compName, fnName, srcPath, [vyxRow(srcPath, 0, NoElement)])
     }
@@ -1311,7 +1416,7 @@ gen fn vyxCompileAt(source: String, compName: String, srcPath: String, kw: Strin
     }
     // The node itself, not `[root]`: an array literal would take the root.
     let takesChildren = vyxNodeUsesChildren(root)
-    return VyxComp { name: compName.copy(), fnName: fnName, src: src, script: script, root: root, takesChildren: takesChildren, errs: [] }
+    return VyxComp { name: compName.copy(), fnName: fnName, src: read.src.copy(), script: script, root: root, takesChildren: takesChildren, css: read.css.copy(), classes: read.classes.copy(), errs: [] }
 }
 
 /// The control flow of `file`, once each element closed under its own name. A close
@@ -1331,6 +1436,300 @@ gen fn vyxGroupFile(file: vx.VyxFile, src: VyxSource) -> VyxGroup {
     return VyxGroup { nodes: [], errs: [vyxRow(src.path, 0, NoTemplate)] }
 }
 
+/// A component's tree read from its file: the grouped template, the source its
+/// positions read with the component's scope, and its scoped rules.
+type VyxRead = { grouped: VyxGroup, src: VyxSource, css: String, classes: Array<VyxClassUse> }
+
+/// One row of a component's class map ([`vyxClassMap`]): `name` at `line` and
+/// `col` of `file`, of the `kind` the row names.
+type VyxClassUse = { name: String, file: String, line: Int64, col: Int64, kind: String }
+
+/// Reads the parsed `file` of the `.vyx` at `srcPath`, whose bytes are `ba`. A
+/// component with a style block gets the scope `data-v-<id>`, where `id` is 8 hex
+/// digits of the FNV-1a hash of the file's path from the project root, so every
+/// importer and both engines agree on it.
+gen fn vyxReadFile(file: vx.VyxFile, ba: Array<UInt8>, srcPath: String) -> VyxRead {
+    let mut scope = ""
+    let mut css = ""
+    let mut classes: Array<VyxClassUse> = []
+    if let Some(st) = file.style {
+        let key = appPath(srcPath)
+        scope = "data-v-" + vyxSlice(bytes(toHex(fnv1aStr(key))), 0, 8)
+        css = "/* " + key + " */\n" + vyxScopeItems(st.body.items, ba, scope)
+        classes.push(VyxClassUse { name: "<style>", file: srcPath.copy(), line: vyxLineAt(ba, st.start), col: 1, kind: "class-block" })
+        if let Some(t) = file.template {
+            vyxClassUses(t.body.nodes, ba, srcPath, classes)
+        }
+    }
+    let src = VyxSource { path: srcPath.copy(), bytes: ba.copy(), scope: scope }
+    return VyxRead { grouped: vyxGroupFile(file, src), src: src, css: css, classes: classes }
+}
+
+/// Appends to `out` each class the elements of `nodes` name, read from `ba`, at its
+/// place in `path`: a `.<class>` row for each word of a static `class` and of a
+/// `:class` that is one string literal, and a `:class` row for any other `:class`,
+/// whose classes are built at run time. `vyrn_frontend::classes` warns from them.
+fn vyxClassUses(nodes: Array<vx.VyxNode>, ba: Array<UInt8>, path: String, out: modify Array<VyxClassUse>) {
+    for n in nodes {
+        if let VyxNodeVyxElem(e) = n {
+            for a in e.attrs {
+                if a.name.text == "class" && vyxEvt(a) == false {
+                    let v = vyxAttrValue(ba, a)
+                    let vb = bytes(v.text)
+                    let literal = vb.length >= 2 && vb[0] == '"' && vyxFind(vb, [vb[0]], 1) == vb.length - 1
+                    if vyxDyn(a) == false {
+                        vyxClassWords(v, 0, vb.length, path, out)
+                    } else if literal {
+                        vyxClassWords(v, 1, vb.length - 1, path, out)
+                    } else {
+                        out.push(VyxClassUse { name: ":class", file: path.copy(), line: v.line, col: v.col, kind: "class-dynamic" })
+                    }
+                }
+            }
+            if let Some(kids) = e.body {
+                vyxClassUses(kids.nodes, ba, path, out)
+            }
+        }
+    }
+}
+
+/// Appends a `.<class>` row to `out` for each whitespace-separated word of the
+/// bytes `[from, to)` of the value `v`.
+fn vyxClassWords(v: VyxSpan, from: Int64, to: Int64, path: String, out: modify Array<VyxClassUse>) {
+    let vb = bytes(v.text)
+    let mut i = from
+    while i < to {
+        while i < to && vyxIsWs(vb[i]) {
+            i = i + 1
+        }
+        let start = i
+        while i < to && vyxIsWs(vb[i]) == false {
+            i = i + 1
+        }
+        if i > start {
+            let word = vyxSlice(vb, start, i)
+            out.push(VyxClassUse { name: "." + word, file: path.copy(), line: v.line, col: v.col + start, kind: "class" })
+        }
+    }
+}
+
+/// The top-level rules `items`, each scoped by `scope`, one per line.
+fn vyxScopeItems(items: Array<vx.VyxCssItem>, ba: Array<UInt8>, scope: String) -> String {
+    let mut out = ""
+    for it in items {
+        out = out + match it {
+            VyxCssItemVyxCssRule(r) => vyxScopeRule(r, scope),
+            VyxCssItemVyxCssAt(a) => vyxScopeAt(a, ba, scope),
+        } + "\n"
+    }
+    return out
+}
+
+/// The rule `r` with its selector scoped and its declarations as written.
+fn vyxScopeRule(r: vx.VyxCssRule, scope: String) -> String {
+    return vyxScopeSelector(r.selector.text, scope) + " {" + r.decls.text + "}"
+}
+
+/// The at-rule `a`. The rules inside `@media` and `@supports` are scoped; any other
+/// at-rule, `@keyframes` among them, is copied as written, so its names stay global.
+fn vyxScopeAt(a: vx.VyxCssAt, ba: Array<UInt8>, scope: String) -> String {
+    let scoped = a.name.text == "media" || a.name.text == "supports"
+    if let Some(b) = a.block {
+        if scoped {
+            let prelude = match a.prelude {
+                Some(p) => p.text.copy(),
+                None => "",
+            }
+            let mut inner = ""
+            for it in b.items {
+                inner = inner + match it {
+                    VyxCssInnerVyxCssRule(r) => vyxScopeRule(r, scope),
+                    VyxCssInnerVyxCssAt(x) => vyxScopeAt(x, ba, scope),
+                    VyxCssInnerVyxCssDecl(d) => d.text.text + ";",
+                } + "\n"
+            }
+            return "@" + a.name.text + prelude + "{\n" + inner + "}"
+        }
+    }
+    return vyxSlice(ba, a.start, a.end)
+}
+
+/// The selector list `sel` with `[scope]` on the last compound of each selector,
+/// before its first pseudo-class or pseudo-element. In a selector holding
+/// `:global(...)`, the compound before the first one takes the attribute, and each
+/// `:global(x)` becomes `x`; a selector that starts with one stays global.
+fn vyxScopeSelector(sel: String, scope: String) -> String {
+    let ba = bytes(sel)
+    let mut out: Array<String> = []
+    let mut from = 0
+    let mut i = 0
+    while i <= ba.length {
+        if i == ba.length || (ba[i] == ',' && vyxCssDepth(ba, i) == 0) {
+            out.push(vyxScopeOne(trim(vyxSlice(ba, from, i)), scope))
+            from = i + 1
+        }
+        i = i + 1
+    }
+    return joinWith(out, ", ")
+}
+
+/// One complex selector `sel`, scoped as [`vyxScopeSelector`] says.
+fn vyxScopeOne(sel: String, scope: String) -> String {
+    let ba = bytes(sel)
+    let g = vyxGlobalAt(ba, 0)
+    let headEnd = if g >= 0 { g } else { ba.length }
+    let head = vyxSlice(ba, 0, headEnd)
+    let core = trim(head)
+    let tail = vyxUnwrapGlobals(vyxSlice(ba, headEnd, ba.length))
+    if core.byteLength == 0 {
+        return tail
+    }
+    let cb = bytes(core)
+    // The last compound starts after the last combinator outside brackets.
+    let mut start = 0
+    let mut k = 0
+    while k < cb.length {
+        let c = cb[k]
+        if (c == ' ' || c == '>' || c == '+' || c == '~' || c == '\t' || c == '\n') && vyxCssDepth(cb, k) == 0 {
+            start = k + 1
+        }
+        k = k + 1
+    }
+    let mut at = cb.length
+    let mut j = cb.length - 1
+    while j >= start {
+        if cb[j] == ':' && vyxCssDepth(cb, j) == 0 {
+            at = j
+        }
+        j = j - 1
+    }
+    // `sel` starts with no whitespace, so the gap before a `:global` follows `core`.
+    let gap = vyxSlice(ba, core.byteLength, headEnd)
+    return vyxSlice(cb, 0, at) + "[" + scope + "]" + vyxSlice(cb, at, cb.length) + gap + tail
+}
+
+/// How many brackets, parentheses and quotes enclose byte `at` of `ba`.
+fn vyxCssDepth(ba: Array<UInt8>, at: Int64) -> Int64 {
+    let mut depth = 0
+    let mut quote: UInt8 = 0
+    let mut i = 0
+    while i < at {
+        let c = ba[i]
+        if quote != 0 {
+            if c == '\\' {
+                i = i + 1
+            } else if c == quote {
+                quote = 0
+                depth = depth - 1
+            }
+        } else if c == '"' || c == '\'' {
+            quote = c
+            depth = depth + 1
+        } else if c == '(' || c == '[' {
+            depth = depth + 1
+        } else if c == ')' || c == ']' {
+            depth = depth - 1
+        }
+        i = i + 1
+    }
+    return depth
+}
+
+/// The offset of the first `:global(` of `ba` at or after `from`, outside brackets,
+/// or -1.
+fn vyxGlobalAt(ba: Array<UInt8>, from: Int64) -> Int64 {
+    let mut at = vyxFind(ba, bytes(":global("), from)
+    while at >= 0 && vyxCssDepth(ba, at) != 0 {
+        at = vyxFind(ba, bytes(":global("), at + 1)
+    }
+    return at
+}
+
+/// `s` with each `:global(x)` written as `x`.
+fn vyxUnwrapGlobals(s: String) -> String {
+    let ba = bytes(s)
+    let mut out = ""
+    let mut from = 0
+    let mut g = vyxGlobalAt(ba, 0)
+    while g >= 0 {
+        let open = g + 8
+        let mut close = open
+        while close < ba.length && (ba[close] != ')' || vyxCssDepth(ba, close) != 1 + vyxCssDepth(ba, g)) {
+            close = close + 1
+        }
+        out = out + vyxSlice(ba, from, g) + vyxSlice(ba, open, close)
+        from = if close < ba.length { close + 1 } else { close }
+        g = vyxGlobalAt(ba, from)
+    }
+    return out + vyxSlice(ba, from, ba.length)
+}
+
+/// A components module whose `vyxCss` a module imports: the import `imp` of the
+/// script at `path`.
+type VyxCssPull = { path: String, imp: VyxImport }
+
+/// The components modules the scripts of `comps` import by name, each once, in
+/// source order.
+fn vyxCssPulls(comps: Array<VyxComp>) -> Array<VyxCssPull> {
+    let mut out: Array<VyxCssPull> = []
+    let mut specs: Array<String> = []
+    for c in comps {
+        for imp in c.script.imports {
+            let call = imp.spec.startsWith("components(") || imp.spec.startsWith("componentsThemed(")
+            if call && imp.ns == false && includes(specs, imp.spec) == false {
+                specs.push(imp.spec.copy())
+                out.push(VyxCssPull { path: c.src.path.copy(), imp: imp.copy() })
+            }
+        }
+    }
+    return out
+}
+
+/// `import { vyxCss as vyxCss<k> } from <spec>` for each of `pulls`, the spec copied
+/// as `vyxCopyTail` writes it.
+gen fn vyxCssImports(pulls: Array<VyxCssPull>) -> Code {
+    let mut out: Array<Code> = []
+    let mut k = 0
+    for p in pulls {
+        let semi = if p.imp.span.text.endsWith(";") { 1 } else { 0 }
+        let spec = vyxCopyTail(p.path, p.imp, p.imp.span.text.byteLength - p.imp.spec.byteLength - semi)
+        out.push(vyrn"import { vyxCss as \{name("vyxCss" + k.toString())} } from \{spec}")
+        k = k + 1
+    }
+    return join(out, vyrn"\n")
+}
+
+/// `export fn vyxCss() -> Array<String>`: the scoped rules of each component of
+/// `comps` that has a style block, one chunk each in source order, then the chunks
+/// of each of `pulls`. `std/ui`'s router serves every chunk its pages reach, each
+/// once, at `/vyx.css`.
+gen fn vyxEmitCss(comps: Array<VyxComp>, pulls: Array<VyxCssPull>) -> Code {
+    let mut own: Array<Code> = []
+    for c in comps {
+        if c.css != "" {
+            own.push(vyrn"\{c.css}")
+        }
+    }
+    let mut more: Array<Code> = []
+    let mut k = 0
+    while k < pulls.length {
+        more.push(vyrn"""
+            for chunk in \{name("vyxCss" + k.toString())}() {
+                out.push(chunk)
+            }
+            """)
+        k = k + 1
+    }
+    let list = join(own, vyrn", ")
+    let pulled = join(more, vyrn"\n")
+    return vyrn"""
+        export fn vyxCss() -> Array<String> {
+            let mut out: Array<String> = [\{list}]
+            \{pulled}
+            return out
+        }
+        """
+}
 /// The top-level nodes except whitespace-only text. Every one counts toward
 /// the one-root rule, so a stray word is a diagnostic, not dropped content.
 fn vyxElementRoots(nodes: consume Array<VyxFlow>) -> Array<VyxFlow> {
@@ -1366,7 +1765,7 @@ fn vyxRootLine(roots: Array<VyxFlow>) -> Int64 {
 }
 
 fn vyxCompErr(name: String, fnName: String, srcPath: String, errs: Array<VyxErr>) -> VyxComp {
-    return VyxComp { name: name.copy(), fnName: fnName.copy(), src: VyxSource { path: srcPath.copy(), bytes: [] }, script: vyxNoScript([], []), root: VNText(""), takesChildren: false, errs: errs.copy() }
+    return VyxComp { name: name.copy(), fnName: fnName.copy(), src: VyxSource { path: srcPath.copy(), bytes: [], scope: "" }, script: vyxNoScript([], []), root: VNText(""), takesChildren: false, css: "", classes: [], errs: errs.copy() }
 }
 
 /// `s`, copied from `src` where it stands, one line at a time: a copy maps its first
@@ -1501,7 +1900,7 @@ gen fn vyxEmitComp(tag: String, attrs: Array<vx.VyxAttr>, kids: Array<VyxFlow>, 
         let kacc = name("k" + path)
         let body = vyxEmitChildren(kids, "k" + path, path, reg, src, errs, imports)
         args.push(vyrn"\{kacc}")
-        let call = vyxCompCall(acc, comp.fnName, args)
+        let call = vyxCompCall(acc, comp.fnName, args, src.scope)
         return vyrn"""
             let mut \{kacc}: Array<Html> = []
             \{body}
@@ -1511,17 +1910,26 @@ gen fn vyxEmitComp(tag: String, attrs: Array<vx.VyxAttr>, kids: Array<VyxFlow>, 
     if hasKids {
         errs.push(vyxErr(src.path, line, "`<\{tag}>` is given children, and its `<template>` has no `<slot/>` to put them in"))
     }
-    return vyxCompCall(acc, comp.fnName, args)
+    return vyxCompCall(acc, comp.fnName, args, src.scope)
 }
 
 /// `<acc>.push(<view>(<args>))`, each argument on its own line, so an error
-/// a column cannot place still finds its attribute by the line.
-gen fn vyxCompCall(acc: String, view: String, args: Array<Code>) -> Code {
+/// a column cannot place still finds its attribute by the line. A non-empty
+/// `scope` is the caller's attribute, added to the view's root, so the caller's
+/// rules reach that root and nothing inside it.
+gen fn vyxCompCall(acc: String, view: String, args: Array<Code>, scope: String) -> Code {
     let mut lines: Array<Code> = []
     for a in args {
         lines.push(a + vyrn",")
     }
     let list = join(lines, vyrn"\n")
+    if scope != "" {
+        return vyrn"""
+            \{name(acc)}.push(withAttr(\{name(view)}(
+                \{list}
+            ), A(\{scope}, "")))
+            """
+    }
     return vyrn"""
         \{name(acc)}.push(\{name(view)}(
             \{list}
@@ -1678,6 +2086,7 @@ gen fn vyxEmitFor(v: String, it: VyxSpan, key: VyxSpan, body: Array<VyxFlow>, li
 /// from `clsBase`; static attributes stay inline in the list it returns.
 gen fn vyxEmitAttrs(attrs: Array<vx.VyxAttr>, reg: VyxRegistry, src: VyxSource, clsBase: String, pre: modify Array<Code>, errs: modify Array<VyxErr>) -> Code {
     let mut parts: Array<Code> = []
+
     let mut ai = 0
     for a in attrs {
         let slot = name(clsBase + "_a" + ai.toString())
@@ -1696,7 +2105,8 @@ gen fn vyxEmitAttrs(attrs: Array<vx.VyxAttr>, reg: VyxRegistry, src: VyxSource, 
             pre.push(at(vyrn"let \{slot}: Attr = Cls((\{vyxCopy(src.path, v)}).copy())", src.path, v.line, v.col))
             parts.push(vyrn"\{slot}")
         } else if n == "class" {
-            parts.push(vyrn"Cls(\{v.text})")
+            // At the value, so the editor maps a class token into the call.
+            parts.push(at(vyrn"Cls(\{v.text})", src.path, v.line, v.col))
         } else if dyn {
             pre.push(at(vyrn"let \{slot}: Attr = A(\{n}, (\{vyxCopy(src.path, v)}).copy())", src.path, v.line, v.col))
             parts.push(vyrn"\{slot}")
@@ -1704,6 +2114,9 @@ gen fn vyxEmitAttrs(attrs: Array<vx.VyxAttr>, reg: VyxRegistry, src: VyxSource, 
             parts.push(vyrn"A(\{n}, \{v.text})")
         }
         ai = ai + 1
+    }
+    if src.scope != "" {
+        parts.push(vyrn"A(\{src.scope}, \"\")")
     }
     return join(parts, vyrn", ")
 }
@@ -2026,7 +2439,7 @@ gen fn vyxBuildModule(comps: consume Array<VyxComp>, themed: Bool, theme: String
     if errs.length > 0 {
         return vyrn""
     }
-    let mut top: Array<Code> = [vyrn"import { el, text, keyed, empty, Html, Attr } from \"std/html\""]
+    let mut top: Array<Code> = [vyrn"import { el, text, keyed, empty, withAttr, Html, Attr } from \"std/html\""]
     if themed {
         // `theme` is a String hole, so it is a string literal; no injection is
         // possible.
@@ -2034,6 +2447,8 @@ gen fn vyxBuildModule(comps: consume Array<VyxComp>, themed: Bool, theme: String
         top.push(vyrn"import * as vyxTheme from tw(\{theme})")
     }
     top.push(vyxCopyImports(reg.comps, skip))
+    let pulls = vyxCssPulls(reg.comps)
+    top.push(vyxCssImports(pulls))
     // The views are built before they are joined: a provider tag's import is
     // found while its view is emitted, and must reach the import block.
     let mut views: Array<Code> = []
@@ -2046,7 +2461,28 @@ gen fn vyxBuildModule(comps: consume Array<VyxComp>, themed: Bool, theme: String
         top.push(vyxHelperBlock(c, page))
     }
     top.push(join(views, vyrn"\n"))
+    top.push(vyxEmitCss(reg.comps, pulls))
+    top.push(vyxClassMap(reg.comps, themed))
     return join(top, vyrn"\n")
+}
+
+/// The symbol map of the classes the components of `comps` with a style block
+/// name ([`vyxClassUses`]), empty when none has one. A `themed` module adds a
+/// `vyxTheme` row: its classes are the theme's, which the compiler checks.
+gen fn vyxClassMap(comps: Array<VyxComp>, themed: Bool) -> Code {
+    let mut rows: Array<Symbol> = []
+    for c in comps {
+        for r in c.classes {
+            rows.push(symbol(r.name, Origin { file: r.file.copy(), line: r.line, col: r.col, name: "" }, [strField("kind", r.kind)]))
+        }
+    }
+    if rows.length == 0 {
+        return vyrn""
+    }
+    if themed {
+        rows.push(symbol("vyxTheme", Origin { file: "", line: 0, col: 0, name: "" }, [strField("kind", "class-theme")]))
+    }
+    return symbolMapFn("vyxClasses(" + comps[0].src.path + ")", rows)
 }
 
 fn vyxImportedNames(comps: Array<VyxComp>) -> Array<String> {

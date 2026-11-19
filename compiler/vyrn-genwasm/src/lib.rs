@@ -218,6 +218,10 @@ fn serve(
         &inputs.aliased,
         path,
     )?;
+    if mode == MODE_APP_PATH {
+        let rel = vyrn_frontend::gen::app_path(&inputs.project, &resolved)?;
+        return Ok(Served::Bytes(0, rel.into_bytes()));
+    }
     if mode == MODE_LIST || mode == MODE_LIST_KINDS {
         return match inputs.resolver.list_kinds(&resolved) {
             Ok(mut names) => {
@@ -890,6 +894,9 @@ const MODE_CODE_AT: i32 = 5;
 /// `syntaxParser`: a read, whose bytes the host thread writes a parser from.
 #[cfg(feature = "host")]
 const MODE_SYNTAX: i32 = 7;
+/// Not a read: `appPath` asks for an input's path from the project root.
+#[cfg(feature = "host")]
+const MODE_APP_PATH: i32 = 8;
 
 /// One unit of a structured host result. Encoder and decoder walk the same
 /// static type, so the variant is not a tag the decoder consults: a `nextInt`

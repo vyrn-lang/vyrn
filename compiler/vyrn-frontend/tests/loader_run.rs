@@ -1773,6 +1773,28 @@ fn main() -> Int64 { return shape().byteLength }"#;
         assert_eq!(gen_run_count(), before + 2, "input changed: re-run");
     }
 
+    #[test]
+    fn app_path_spells_an_input_from_the_project_whatever_the_importer() {
+        let gen = "export gen fn placed(dir: String) -> Code { \
+                       let p = appPath(dir + \"/n.txt\") \
+                       return vyrn\"export fn at() -> String { return \\{p} }\" }";
+        let deep = "import { placed } from \"../gen\" \
+                    import { at } from placed(\"../data\") \
+                    export fn deep() -> String { return at() }";
+        let root = "import { placed } from \"./gen\" \
+                    import { at } from placed(\"./data\") \
+                    import { deep } from \"./sub/deep\" \
+                    fn main() -> Int64 { \
+                        if at() == \"data/n.txt\" && deep() == \"data/n.txt\" { return 1 } \
+                        return 0 }";
+        let r = CachingResolver::new(&[
+            ("gen.vyrn", gen),
+            ("sub/deep.vyrn", deep),
+            ("data/n.txt", "n"),
+        ]);
+        assert_eq!(run_with(root, &r).unwrap(), 1);
+    }
+
     /// A generator that COUNTS the entries of a listed directory: the site's
     /// `repo.vyrn` in miniature. `-1` when the directory is not there at all.
     const COUNTER: &str = "export gen fn count(dir: String) -> Code { \

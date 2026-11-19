@@ -339,6 +339,7 @@ pub const RESERVED: &[&str] = &[
     "stringOf",
     "listDir",
     "listDirKinds",
+    "appPath",
     "lineAt",
     "colAt",
     "moduleInterface",

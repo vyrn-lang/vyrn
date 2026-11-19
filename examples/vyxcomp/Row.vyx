@@ -20,3 +20,15 @@ fn qtyClass(q: Int64) -> String {
     <input class="q" @input="setQty(item.name)"/>
 </li>
 </template>
+
+<style>
+.row { display: flex; gap: 0.5rem; align-items: baseline; }
+.name { font-weight: 600; }
+.hot { color: #b3261e; }
+.cool, .some { color: #49454f; }
+.one:hover { text-decoration: underline; }
+.rm, .q { margin-left: auto; }
+@media (max-width: 30rem) {
+    .row { flex-direction: column; }
+}
+</style>

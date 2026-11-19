@@ -1,6 +1,9 @@
 {
   "attrName": "an attribute name is expected here — a name is letters, digits, `_` or `-`, optionally led by `@` or `:`",
   "attrUnquoted": "an attribute value is not quoted — write `name=\"value\"`",
+  "cssNested": "a rule's block holds declarations, and this `\\{` opens a block inside one — write the inner rule on its own",
+  "cssStray": "this text belongs to no rule — a rule is a selector and a `\\{ … \\}` block, and an at-rule starts with `@`",
+  "cssUnclosed": "this `\\{` is never closed — add the matching `\\}`",
   "elemUnclosed": "`<{$tag}>` is never closed — add `</{$tag}>`",
   "elseIfOrphan": "this `v-else-if` follows no `v-if` — the two must be siblings, with nothing between them",
   "elseOrphan": "this `v-else` follows no `v-if` — the two must be siblings, with nothing between them",
@@ -13,6 +16,8 @@
   "noTemplate": "this component has no `<template>` section — a component's view is the one element inside it",
   "scriptUnclosed": "the `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`",
   "strayClose": "`</{$tag}>` closes no element — the text after it would be lost",
+  "styleStray": "a `<style>` block stands outside its place — a `.vyx` holds one, last, after `<template>` and `<script>`",
+  "styleUnclosed": "the `<style>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</style>`",
   "tagMismatch": "`<{$tag}>` is closed by `</{$close}>` — a tag closes under its own name",
   "tagUnclosed": "a tag is not closed — the `<` opened here has no matching `>`",
   "templateUnclosed": "the `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`",

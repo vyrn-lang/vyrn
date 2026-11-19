@@ -138,7 +138,7 @@ pub fn roles_for_project(
     } else {
         declared
     };
-    let manifest = format!("{}/vyrn.json", opts.alias_base);
+    let manifest = format!("{}/vyrn.json", opts.alias_base.as_deref().unwrap_or(""));
     for role in roles.iter_mut().filter(|r| r.except.is_none()) {
         // A manifest role's module resolves against the manifest; a
         // discovered one's file names itself.

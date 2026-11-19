@@ -46,9 +46,10 @@ use lsp_types::{
 
 use vyrn_frontend::symbolmap::MappedSymbol;
 use vyrn_frontend::{
-    analyze_judged, class_completions, class_token_hover, member_completions, member_context,
-    references, resolve, scope_completions, string_context, string_literal_completions, Analysis,
-    Completion, LocalKind, RefRange, SemKind, SemMods, SymbolKind,
+    analyze_judged, class_completions, class_site, class_token_hover, member_completions,
+    member_context, references, resolve, scope_completions, string_context,
+    string_literal_completions, Analysis, Completion, LocalKind, RefRange, SemKind, SemMods,
+    SymbolKind,
 };
 
 /// Whether the client asked for what each line costs ([`cost`]): its `costHints`
@@ -360,8 +361,8 @@ struct Server {
     /// Per owner root, its generated modules and their analyses, which input
     /// requests reuse. `RefCell` because request handlers hold `&Server`.
     synth_cache: RefCell<HashMap<Url, OwnerSynth>>,
-    /// Per app root, its stylesheets for a safelisted-class hover. Re-read only
-    /// when the signature of the files the manifest's globs name moves.
+    /// Per app root, its global stylesheets for a class token. Re-read only
+    /// when the signature of the files its layouts and globs name moves.
     css_cache: RefCell<HashMap<std::path::PathBuf, CssIndex>>,
     /// Per app root, its roles and the contracts they resolve to.
     contract_cache: RefCell<HashMap<std::path::PathBuf, contracts::ContractIndex>>,
@@ -380,13 +381,13 @@ struct Server {
 /// The id of the one request the server sends: the file-watcher registration.
 const WATCH_REQUEST: &str = "vyrn/watchFiles";
 
-/// One app root's stylesheets, with the signature they were read at.
+/// One app root's global stylesheets, with the signature they were read at.
 struct CssIndex {
     sig: u64,
     /// The clock before the files were read.
     read_at: std::time::SystemTime,
-    /// `(absolute path, file text)` in discovery order (declared order first).
-    files: Vec<(std::path::PathBuf, String)>,
+    /// In [`vyrn_frontend::classes::app_sheet_paths`] order.
+    sheets: Vec<vyrn_frontend::classes::Sheet>,
 }
 
 /// One owner root's cached generation and per-module analyses.
@@ -848,32 +849,22 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     // A resolved name, else a class token, whose hover is not fenced.
     let ordinary = if is_vyrn_uri(uri) {
         lookup(server, uri).and_then(|(analysis, _)| match resolve(analysis, line, col) {
-            Some(r) => Some(Ok(fence_signature(&r))),
+            Some(r) => Some(fence_signature(&r)),
             None => (server.docs.get(uri))
-                .and_then(|src| class_token_hover(analysis, src, line, col))
-                .map(Err),
+                .and_then(|src| class_hover(server, uri, analysis, src, line, col)),
         })
     } else {
         input_forward(server, uri, line, col).and_then(|fwd| {
             let a = &fwd.synth.analysis;
             match resolve(a, fwd.line, fwd.col) {
-                Some(r) => Some(Ok(fence_signature(&r))),
-                None => class_token_hover(a, &fwd.synth.gen_source, fwd.line, fwd.col).map(Err),
+                Some(r) => Some(fence_signature(&r)),
+                None => class_hover(server, uri, a, &fwd.synth.gen_source, fwd.line, fwd.col),
             }
         })
     };
-    let (ordinary, safelisted) = match ordinary {
-        Some(Ok(hover)) => (Some(hover), None),
-        Some(Err(class)) => (Some(class.text), class.safelisted),
-        None => (None, None),
-    };
     let value = match (ordinary, note) {
         (Some(o), Some(n)) => format!("{o}\n\n---\n\n{n}"),
-        // A safelisted class has no `std/tw` rule; append the app's own rules.
-        (Some(o), None) => match safelisted {
-            Some(class) => with_app_css(server, uri, o, &class),
-            None => o,
-        },
+        (Some(o), None) => o,
         (None, Some(n)) => n,
         (None, None) => return None,
     };
@@ -903,13 +894,21 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     }
     let (r, home_uri) = if is_vyrn_uri(uri) {
         let (analysis, u) = lookup(server, uri)?;
+        let src = doc_text(server, uri).unwrap_or_default();
+        if let Some(loc) = class_definition(server, uri, analysis, &src, line, col) {
+            return Some(loc);
+        }
         (resolve(analysis, line, col)?, Some(u))
     } else {
         if let Some(loc) = input_definition(server, uri, line, col) {
             return Some(loc);
         }
         let fwd = input_forward(server, uri, line, col)?;
-        (resolve(&fwd.synth.analysis, fwd.line, fwd.col)?, None)
+        let (a, gen) = (&fwd.synth.analysis, &fwd.synth.gen_source);
+        if let Some(loc) = class_definition(server, uri, a, gen, fwd.line, fwd.col) {
+            return Some(loc);
+        }
+        (resolve(a, fwd.line, fwd.col)?, None)
     };
     // A built-in method resolves for hover but has no declaration.
     if !r.definition {
@@ -1209,7 +1208,7 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     // In a string literal: the class alphabet for a sequence type (`Tw`), else
     // the language of a finite string type (`t("` -> every key).
     if string_context(&raw, line, col) {
-        if let Some(cls) = class_completions(analysis, &raw, line, col) {
+        if let Some(cls) = class_items(server, uri, analysis, &raw, line, col) {
             return Some(class_completion_response(&raw, line, col, cls));
         }
         let items = string_literal_completions(analysis, &raw, line, col)
@@ -1257,8 +1256,8 @@ fn input_completion(
     };
     let gen = &fwd.synth.gen_source;
     if string_context(gen, fwd.line, fwd.col) {
-        // A class token: the alphabet of the `cls(..)` call it maps into.
-        if let Some(cls) = class_completions(&fwd.synth.analysis, gen, fwd.line, fwd.col) {
+        // A class token: the classes the sources define, then the theme's.
+        if let Some(cls) = class_items(server, uri, &fwd.synth.analysis, gen, fwd.line, fwd.col) {
             return Some(class_completion_response(&raw, line, col, cls));
         }
         let items = string_literal_completions(&fwd.synth.analysis, gen, fwd.line, fwd.col)
@@ -3211,95 +3210,179 @@ fn line_utf16_len(source: &str, line_idx: usize) -> u32 {
         .map(|l| l.chars().map(char::len_utf16).sum::<usize>() as u32)
         .unwrap_or(0)
 }
-// A safelisted class has no `std/tw` rule, so its hover appends the app's own
-// matching CSS rules verbatim. A textual heuristic: no parser, no cascade.
+// A class token's hover, completion and definition read the rules of
+// `vyrn_frontend::classes`: the component's own block, then the app's sheets.
 
 /// The most matched rules per hover.
 const MAX_CSS_RULES: usize = 3;
 /// Stop appending rules once the shown CSS reaches this many lines.
 const MAX_CSS_LINES: usize = 40;
-/// The most stylesheets one manifest's globs name.
-const MAX_STYLESHEETS: usize = 64;
 
-/// `hover` with the app's CSS rules for the safelisted `class` appended.
-fn with_app_css(server: &Server, uri: &Url, hover: String, class: &str) -> String {
+/// Every rule the document `uri` can name a class of: its own style block when
+/// it is a `.vyx`, then its app's stylesheets.
+fn class_rules(server: &Server, uri: &Url) -> Vec<vyrn_frontend::classes::Rule> {
     let Some(path) = uri_path(uri) else {
-        return hover;
+        return Vec::new();
     };
-    let file = std::path::PathBuf::from(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    // The real spelling, because the key folds case.
+    let spelled = vyrn_frontend::manifest::real_path(&path).unwrap_or(path);
+    let file = std::path::PathBuf::from(spelled.replace('/', std::path::MAIN_SEPARATOR_STR));
     let Some(dir) = file.parent() else {
-        return hover;
+        return Vec::new();
     };
+    let mut sheets: Vec<vyrn_frontend::classes::Sheet> = (doc_text(server, uri).as_deref())
+        .and_then(|text| vyrn_frontend::classes::local_sheet(&file, text))
+        .into_iter()
+        .collect();
     let root = vyrn_frontend::manifest::app_root(dir);
-    let rules = app_css_rules(server, &root, class);
-    if rules.is_empty() {
-        return hover;
-    }
-    let mut out = hover;
-    for (rel, line, rule) in rules {
-        out.push_str(&format!("\n\n```css\n{rule}\n```\n— {rel}:{line}"));
-    }
-    out
+    sheets.extend(stylesheets_in(&mut server.css_cache.borrow_mut(), &root));
+    vyrn_frontend::classes::rules(&sheets)
 }
 
-/// The app's own rules matching `class`, as `(path relative to the app root,
-/// 1-based line, rule text)`, in stylesheet then file order, capped.
-fn app_css_rules(
+/// The hover of the class token at `line`, `col` of `src`, the text `analysis`
+/// read for the document `uri`: the theme's answer for it, then each rule that
+/// defines it. `None` off a class site, or for a class nothing answers.
+fn class_hover(
     server: &Server,
-    root: &std::path::Path,
-    class: &str,
-) -> Vec<(String, usize, String)> {
-    let mut out = Vec::new();
-    let mut lines = 0usize;
-    for (path, text) in app_stylesheets(server, root) {
-        for (line, rule) in css_rules_for_class(&text, class) {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            lines += rule.lines().count();
-            out.push((rel, line, rule));
-            if out.len() >= MAX_CSS_RULES || lines >= MAX_CSS_LINES {
-                return out;
-            }
+    uri: &Url,
+    analysis: &vyrn_frontend::Analysis,
+    src: &str,
+    line: usize,
+    col: usize,
+) -> Option<String> {
+    let token = class_site(analysis, src, line, col).filter(|t| !t.is_empty())?;
+    let theme = class_token_hover(analysis, src, line, col);
+    let rules = class_rule_blocks(server, uri, &token);
+    if theme.is_none() && rules.is_empty() {
+        return None;
+    }
+    Some(theme.unwrap_or_else(|| format!("**`{token}`**")) + &rules)
+}
+
+/// The classes a class site at `line`, `col` of `src` offers: each class of
+/// [`class_rules`], once, labelled with its source and file, then the theme's
+/// alphabet. `None` off a class site.
+fn class_items(
+    server: &Server,
+    uri: &Url,
+    analysis: &vyrn_frontend::Analysis,
+    src: &str,
+    line: usize,
+    col: usize,
+) -> Option<Vec<vyrn_frontend::Completion>> {
+    class_site(analysis, src, line, col)?;
+    let mut out: Vec<vyrn_frontend::Completion> = Vec::new();
+    for r in class_rules(server, uri) {
+        if out.iter().any(|c| c.label == r.class) {
+            continue;
         }
+        let file = r.file.file_name().unwrap_or_default().to_string_lossy();
+        out.push(vyrn_frontend::Completion {
+            detail: format!("{} — {file}:{}", r.source.label(), r.line),
+            doc: Some(format!("```css\n{}\n```", r.text.trim())),
+            label: r.class,
+            kind: vyrn_frontend::SymbolKind::Variant,
+        });
+    }
+    let theme: Vec<vyrn_frontend::Completion> = (class_completions(analysis, src, line, col)
+        .unwrap_or_default()
+        .into_iter())
+    .filter(|t| !out.iter().any(|c| c.label == t.label))
+    .collect();
+    out.extend(theme);
+    Some(out)
+}
+
+/// The first rule, local first, that defines the class token at `line`, `col`
+/// of `src`, as a location.
+fn class_definition(
+    server: &Server,
+    uri: &Url,
+    analysis: &vyrn_frontend::Analysis,
+    src: &str,
+    line: usize,
+    col: usize,
+) -> Option<GotoDefinitionResponse> {
+    let token = class_site(analysis, src, line, col)?;
+    let rule = class_rules(server, uri)
+        .into_iter()
+        .find(|r| r.class == token)?;
+    let target = Url::from_file_path(&rule.file).ok()?;
+    let text = doc_text(server, &target).unwrap_or_default();
+    Some(GotoDefinitionResponse::Scalar(Location {
+        range: lsp_range(
+            &text,
+            rule.line,
+            rule.col,
+            rule.col + 1 + token.chars().count(),
+        ),
+        uri: target,
+    }))
+}
+
+/// `file` spelled from `root` with forward slashes, or whole when it lies
+/// outside it. Both sides are compared as the filesystem resolves them: a temp
+/// directory behind a symlink (macOS `/var`) or an 8.3 name (Windows) spells
+/// one directory two ways.
+fn relative_to(file: &std::path::Path, root: &std::path::Path) -> String {
+    let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (file_real, root_real) = (real(file), real(root));
+    let rel = (file.strip_prefix(root).ok())
+        .or_else(|| file_real.strip_prefix(&root_real).ok())
+        .unwrap_or(file);
+    rel.to_string_lossy().replace('\\', "/")
+}
+
+/// The rules that define `class`, local first, as hover blocks with the source,
+/// the file relative to the app root and the line; capped.
+fn class_rule_blocks(server: &Server, uri: &Url, class: &str) -> String {
+    let root = (uri_path(uri).map(std::path::PathBuf::from))
+        .and_then(|f| f.parent().map(vyrn_frontend::manifest::app_root))
+        .unwrap_or_default();
+    let mut out = String::new();
+    let (mut shown, mut lines) = (0usize, 0usize);
+    for r in class_rules(server, uri).iter().filter(|r| r.class == class) {
+        if shown >= MAX_CSS_RULES || lines >= MAX_CSS_LINES {
+            break;
+        }
+        let rel = relative_to(&r.file, &root);
+        let text = r.text.trim();
+        out.push_str(&format!(
+            "\n\n```css\n{text}\n```\n— {} {rel}:{}",
+            r.source.label(),
+            r.line
+        ));
+        shown += 1;
+        lines += text.lines().count();
     }
     out
 }
 
-/// The app's stylesheets (path, text), cached per root (see [`stylesheets_in`]).
-fn app_stylesheets(server: &Server, root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
-    stylesheets_in(&mut server.css_cache.borrow_mut(), root)
-}
-
-/// The files the globs of the manifest at `root` name, from `cache` while
-/// [`css_sig`] holds and every mtime lies [`vyrn_frontend::manifest::MTIME_SLACK`]
-/// before the last read: a write inside that window can keep its length and
-/// show the mtime the read saw.
+/// The global stylesheets of the app at `root` ([`vyrn_frontend::classes::app_sheet_paths`]),
+/// from `cache` while [`css_sig`] holds and every mtime lies
+/// [`vyrn_frontend::manifest::MTIME_SLACK`] before the last read: a write inside
+/// that window can keep its length and show the mtime the read saw.
 fn stylesheets_in(
     cache: &mut HashMap<std::path::PathBuf, CssIndex>,
     root: &std::path::Path,
-) -> Vec<(std::path::PathBuf, String)> {
+) -> Vec<vyrn_frontend::classes::Sheet> {
     let read_at = std::time::SystemTime::now();
-    let paths = app_stylesheet_paths(root);
-    let (sig, newest) = css_sig(paths.iter().map(|p| p.as_path()));
+    let paths = vyrn_frontend::classes::app_sheet_paths(root);
+    let (sig, newest) = css_sig(paths.iter().map(|(p, _)| p.as_path()));
     let settled = |idx: &&CssIndex| {
         idx.sig == sig && newest + vyrn_frontend::manifest::MTIME_SLACK < idx.read_at
     };
     if let Some(idx) = cache.get(root).filter(settled) {
-        return idx.files.clone();
+        return idx.sheets.clone();
     }
-    let files: Vec<(std::path::PathBuf, String)> = (paths.into_iter())
-        .filter_map(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t)))
-        .collect();
+    let sheets = vyrn_frontend::classes::read_sheets(paths);
     let index = CssIndex {
         sig,
         read_at,
-        files: files.clone(),
+        sheets: sheets.clone(),
     };
     cache.insert(root.to_path_buf(), index);
-    files
+    sheets
 }
 
 /// A change signature for a set of stylesheets from `stat` alone: each file's
@@ -3322,169 +3405,6 @@ fn css_sig<'a>(files: impl Iterator<Item = &'a std::path::Path>) -> (u64, std::t
     (h.finish(), newest)
 }
 
-/// The files the `stylesheets` globs of the manifest at `root` name, in glob
-/// then path order, deduplicated, at most [`MAX_STYLESHEETS`]. Empty without
-/// the key: the editor guesses no app's layout.
-fn app_stylesheet_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let globs = match manifest_of(root) {
-        Ok(Some(m)) => m.stylesheets,
-        _ => Vec::new(),
-    };
-    let mut out = Vec::new();
-    for g in &globs {
-        let segs: Vec<&str> = g
-            .split('/')
-            .filter(|s| !s.is_empty() && *s != ".")
-            .collect();
-        glob_files(root, &segs, &mut out);
-    }
-    out
-}
-
-/// Appends the files under `dir` whose relative path matches the glob
-/// segments `segs`: `**` is any number of directories, `*` and `?` match
-/// within one name. Symbolic links are not followed, so the walk ends on any
-/// tree; it stops at [`MAX_STYLESHEETS`].
-fn glob_files(dir: &std::path::Path, segs: &[&str], out: &mut Vec<std::path::PathBuf>) {
-    let Some((first, rest)) = segs.split_first() else {
-        return;
-    };
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<(std::path::PathBuf, std::fs::FileType)> = (rd.flatten())
-        .filter_map(|e| Some((e.path(), e.file_type().ok()?)))
-        .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    if *first == "**" {
-        glob_files(dir, rest, out);
-    }
-    for (path, kind) in entries {
-        if out.len() >= MAX_STYLESHEETS {
-            return;
-        }
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-        if *first == "**" {
-            if kind.is_dir() {
-                glob_files(&path, segs, out);
-            }
-        } else if name
-            .is_some_and(|n| vyrn_frontend::manifest::glob_name(first.as_bytes(), n.as_bytes()))
-        {
-            if rest.is_empty() {
-                if kind.is_file() && !out.contains(&path) {
-                    out.push(path);
-                }
-            } else if kind.is_dir() {
-                glob_files(&path, rest, out);
-            }
-        }
-    }
-}
-
-/// Every rule block in `css` whose selector names `class` as a whole token, as
-/// `(1-based line, verbatim block)`, in file order. A brace- and comment-aware
-/// scan; at-rule bodies are searched, but the at-rule is not shown.
-fn css_rules_for_class(css: &str, class: &str) -> Vec<(usize, String)> {
-    let mut out = Vec::new();
-    collect_css_rules(css, 0, class, &mut out);
-    out
-}
-
-/// Scan the top level of `css`, a file or an at-rule body starting at byte
-/// `base` of the file, for matching rule blocks.
-fn collect_css_rules(css: &str, base: usize, class: &str, out: &mut Vec<(usize, String)>) {
-    let b = css.as_bytes();
-    let mut i = 0usize;
-    let mut sel_start = 0usize;
-    while i < b.len() {
-        // A comment after selector text keeps it (`.plang /* x */ {`); a
-        // comment standing alone resets the scan, so its words never leak.
-        if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
-            let started = !css[sel_start..i].trim().is_empty();
-            match css[i + 2..].find("*/") {
-                Some(rel) => i += 2 + rel + 2,
-                None => return,
-            }
-            if !started {
-                sel_start = i;
-            }
-            continue;
-        }
-        if b[i] == b'{' {
-            let selector = css[sel_start..i].trim();
-            let Some(close) = matching_brace(css, i) else {
-                return;
-            };
-            if selector.starts_with('@') {
-                collect_css_rules(&css[i + 1..close], base + i + 1, class, out);
-            } else if selector_has_class(selector, class) {
-                let lead = css[sel_start..].len() - css[sel_start..].trim_start().len();
-                let start = sel_start + lead;
-                out.push((
-                    line_of(css, base + start),
-                    css[start..=close].trim().to_string(),
-                ));
-            }
-            i = close + 1;
-            sel_start = i;
-            continue;
-        }
-        if b[i] == b'}' {
-            i += 1;
-            sel_start = i;
-            continue;
-        }
-        i += 1;
-    }
-}
-
-/// Byte index of the `}` closing the `{` at `open`, comment-aware.
-fn matching_brace(css: &str, open: usize) -> Option<usize> {
-    let b = css.as_bytes();
-    let mut depth = 0i32;
-    let mut i = open;
-    while i < b.len() {
-        if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
-            i += 2 + css[i + 2..].find("*/")? + 2;
-            continue;
-        }
-        match b[i] {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Whether `selector` has `.class` not followed by a class-name character:
-/// `.plang` matches `.plang:hover`, not `.plang-x`.
-fn selector_has_class(selector: &str, class: &str) -> bool {
-    let needle = format!(".{class}");
-    let mut from = 0usize;
-    while let Some(rel) = selector[from..].find(&needle) {
-        let at = from + rel;
-        let after = selector[at + needle.len()..].chars().next();
-        if !matches!(after, Some(c) if c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            return true;
-        }
-        from = at + needle.len();
-    }
-    false
-}
-
-/// 1-based line number of byte offset `at` in `css`.
-fn line_of(css: &str, at: usize) -> usize {
-    css[..at.min(css.len())].matches('\n').count() + 1
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -3503,12 +3423,18 @@ mod tests {
         std::fs::write(&css, ".a { color: red }").unwrap();
         let mtime = std::fs::metadata(&css).unwrap().modified().unwrap();
         let mut cache = HashMap::new();
-        assert_eq!(stylesheets_in(&mut cache, &root)[0].1, ".a { color: red }");
+        assert_eq!(
+            stylesheets_in(&mut cache, &root)[0].text,
+            ".a { color: red }"
+        );
         std::fs::write(&css, ".a { color: tan }").unwrap();
         let file = std::fs::File::options().write(true).open(&css).unwrap();
         file.set_modified(mtime).unwrap();
         drop(file);
-        assert_eq!(stylesheets_in(&mut cache, &root)[0].1, ".a { color: tan }");
+        assert_eq!(
+            stylesheets_in(&mut cache, &root)[0].text,
+            ".a { color: tan }"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
     use super::*;
@@ -3636,17 +3562,5 @@ mod tests {
         assert_eq!(encoded.data.len(), 1);
         assert_eq!(encoded.data[0].delta_start, 8);
         assert_eq!(encoded.data[0].length, 5);
-    }
-
-    #[test]
-    fn a_selector_before_an_inline_comment_still_matches_its_class() {
-        let css = ".plang /* legacy */ { color: red }\n.other { color: blue }\n";
-        let rules = css_rules_for_class(css, "plang");
-        assert_eq!(rules.len(), 1, "{rules:?}");
-        assert_eq!(rules[0].0, 1);
-        assert!(rules[0].1.contains("color: red"), "{}", rules[0].1);
-        // A comment standing alone must not leak into the next selector.
-        let spaced = ".a { x: 1 }\n/* .plang mention */\n.b { y: 2 }\n";
-        assert!(css_rules_for_class(spaced, "plang").is_empty());
     }
 }
