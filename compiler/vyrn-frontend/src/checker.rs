@@ -452,8 +452,9 @@ use crate::types::INT32;
 
 /// Returns the diagnostics, every `derive` site, the refused set, the root's
 /// bindings and the record. The refused set holds the functions and module
-/// state the diagnostics all belong to, so every other body is typed; it is
-/// `None` when a refusal stands anywhere else.
+/// state the diagnostics all belong to, except a body whose refusals its
+/// trapped statements state ([`Recorded::trapped`]), so every other body is
+/// typed; it is `None` when a refusal stands anywhere else.
 pub fn check_accum_with_sites(program: &Program) -> (Appended, Binders, Recorded) {
     let (out, binders, _, derived, refused, made) = check_accum_inner(program, true, 0, &[]);
     ((out, derived, refused), binders, made.unwrap_or_default())
@@ -1143,10 +1144,11 @@ fn check_accum_inner(
             checker.store(SourceBody::Fn(i), Text::Fn(f), &mut t);
             t
         });
-        if !t.diags.is_empty() {
+        // A body whose refusals its trapped statements state is still typed.
+        if !t.diags.is_empty() && t.trapped.is_empty() {
             refused.insert(f.name.clone());
-            in_bodies += t.diags.len();
         }
+        in_bodies += t.diags.len();
         out.extend(checker.absorb(t));
     }
     drop(typing);
@@ -1158,6 +1160,7 @@ fn check_accum_inner(
         check_places(&checker, program, &mut out);
         let (tests, benches) = (&program.tests, &program.benches);
         let (in_test, in_bench) = (&checker.in_test, &checker.in_bench);
+        let before = out.len();
         check_named_blocks(&checker, tests, "test", in_test, SourceBody::Test, &mut out);
         check_named_blocks(
             &checker,
@@ -1167,6 +1170,7 @@ fn check_accum_inner(
             SourceBody::Bench,
             &mut out,
         );
+        in_bodies += out.len() - before;
         checker.reader.set(None);
     }
 
@@ -1214,6 +1218,7 @@ fn check_accum_inner(
     let record = acc.record.map(|r| Recorded {
         stored: effects.clone(),
         reads,
+        trapped: acc.trapped.into_iter().collect(),
         ..r
     });
     (out, binders, effects, derived, typed, record)
@@ -1239,6 +1244,8 @@ struct Typed {
     uses: Uses,
     stored: StoredFnEffects,
     derive: Vec<crate::gen::Site>,
+    /// The statements this accumulation trapped ([`Recorded::trapped`]).
+    trapped: Vec<NodeId>,
 }
 
 impl Typed {
@@ -1266,6 +1273,7 @@ impl Typed {
         }
         self.stored.extend(t.stored);
         self.derive.extend(t.derive);
+        self.trapped.extend(t.trapped);
     }
 }
 
@@ -1625,6 +1633,10 @@ pub struct Recorded {
     /// with the entry's serial. A serial names one record of one body, so a
     /// reader keyed by it may reuse what it derived from that record.
     pub entries: Vec<(SourceBody, u64)>,
+    /// Each statement whose refusal the checker states, the innermost that
+    /// states it. The core builds it as a trap and binds its name `Err`, so
+    /// the typed judgment judges the rest of the body.
+    pub trapped: HashSet<NodeId>,
 }
 
 impl Recorded {
@@ -1641,6 +1653,7 @@ impl Recorded {
         self.stored.extend(tail.stored);
         self.reads.extend(tail.reads);
         self.entries.extend(tail.entries);
+        self.trapped.extend(tail.trapped);
     }
 }
 
@@ -3257,27 +3270,39 @@ impl<'a> Checker<'a> {
     /// reads `pending_subst` for the access site's own node.
     fn record_desugar(&self, scope: &Scope, run: impl FnOnce(&Self, &mut Scope)) {
         let mark = self.errors.borrow().len();
-        let stored = {
-            let s = &self.acc.borrow().stored;
-            (s.sources.len(), s.arg_sources.len(), s.dispatched.len())
+        let (stored, trapped) = {
+            let acc = self.acc.borrow();
+            let s = &acc.stored;
+            let at = (s.sources.len(), s.arg_sources.len(), s.dispatched.len());
+            (at, acc.trapped.len())
         };
         let saved = self.pending_subst.take();
         let mut sc = scope.clone();
         run(self, &mut sc);
         *self.pending_subst.borrow_mut() = saved;
         self.errors.borrow_mut().truncate(mark);
-        let s = &mut self.acc.borrow_mut().stored;
+        let acc = &mut *self.acc.borrow_mut();
+        acc.trapped.truncate(trapped);
+        let s = &mut acc.stored;
         s.sources.truncate(stored.0);
         s.arg_sources.truncate(stored.1);
         s.dispatched.truncate(stored.2);
     }
 
+    /// Types each statement of `block`. A statement that states a refusal no
+    /// statement inside it states is trapped ([`Recorded::trapped`]).
     fn block(&self, block: &Block, ret: &Type, scope: &mut Scope) {
         scope.push(HashMap::new());
         for stmt in &block.stmts {
+            let said = self.errors.borrow().len();
+            let inner = self.acc.borrow().trapped.len();
             if let Err(msg) = self.unit(|| self.stmt(stmt, ret, scope)) {
                 self.errors.borrow_mut().extend(msg);
                 self.recover_binding(stmt, scope);
+            }
+            let mut acc = self.acc.borrow_mut();
+            if self.errors.borrow().len() > said && acc.trapped.len() == inner {
+                acc.trapped.push(stmt.id());
             }
         }
         scope.pop();

@@ -486,6 +486,27 @@ pub(crate) fn returns(ss: &[St]) -> bool {
     })
 }
 
+vyrn_frontend::body_scope_descent!(ReturnVisit, return_block, return_stmt, return_expr);
+
+/// Whether `s` holds a `return` of its own frame, outside any lambda.
+fn holds_return(s: &Stmt) -> bool {
+    struct Seen(bool);
+    impl ReturnVisit<'_> for Seen {
+        const SCOPED: bool = false;
+
+        fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
+            self.0 |= matches!(s, Stmt::Return { .. });
+        }
+
+        fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+            !matches!(e, Expr::Lambda { .. })
+        }
+    }
+    let mut seen = Seen(false);
+    return_stmt(s, &mut Default::default(), &mut seen);
+    seen.0
+}
+
 /// The refusal of a frame that can end without the value it owes, which
 /// `said` states from the type owed.
 fn falls_through(body: &mut Body, owes: &Type, said: impl FnOnce(String) -> Said) {
@@ -2753,15 +2774,28 @@ impl<'a> Builder<'a> {
         // Per open group: the record name, its type and the line of its last
         // statement.
         let mut open: Vec<(Name, String, usize)> = Vec::new();
-        for s in ss {
+        for (i, s) in ss.iter().enumerate() {
             let (scope, at) = (self.frame.scope.len(), out.len());
-            if let Err(g) = self.stmt(s, out) {
+            // A statement the checker refused, or one that reads a name typed
+            // `Err` (a use of a refused binding), states nothing, and the
+            // rows after it are judged. The last of a list that may return ends
+            // it, so the frame does not fall through.
+            let ends = i + 1 == ss.len() && holds_return(s);
+            if self.own.record.trapped.contains(&s.id()) {
+                self.refused_stmt(s, out, scope, at, ends);
+            } else if let Err(g) = self.stmt(s, out) {
                 // The checker typed an unknown name or a shrink of a fixed
                 // array `Err` and went on, so a gap may come before the
                 // builder meets it.
-                let (mut named, mut shrunk) = (Vec::new(), Vec::new());
+                let (mut named, mut shrunk, mut poisoned) = (Vec::new(), Vec::new(), false);
                 vyrn_frontend::ast::exprs_one(s, &mut |e, locals| {
                     let local = matches!(e, Expr::Var { name, .. } if locals.contains(name));
+                    if let Expr::Var { name, .. } | Expr::Call { name, .. } = e {
+                        poisoned |= !locals.contains(name)
+                            && self
+                                .lookup(name)
+                                .is_some_and(|n| self.body.names[n.index()].ty == Type::Err);
+                    }
                     let typed = self.types.get(&e.id());
                     if !local && matches!(typed, None | Some(Type::Err)) {
                         named.extend(self.unknown_of(e));
@@ -2773,28 +2807,17 @@ impl<'a> Builder<'a> {
                         }
                     }
                 });
-                self.body.refused.extend(named);
                 shrunk.retain(|s| !self.body.mistyped.contains(s));
-                self.body.mistyped.extend(shrunk);
-                if self.body.refused.is_empty() && self.body.mistyped.is_empty() {
-                    return Err(g);
-                }
-                // The body is refused: the statements go, and a name one
-                // binds is poisoned. The trap stands for them, so a `return`
-                // among them is not read as falling through ([`returns`]).
-                out.truncate(at);
-                out.push(St::Trap);
-                self.frame.scope.truncate(scope);
-                if let Stmt::Let {
-                    name,
-                    line,
-                    mutable,
-                    ..
-                } = s
-                {
-                    let n = self.name(name, Type::Err, false, *line);
-                    self.body.names[n.index()].mutable = *mutable;
-                    self.frame.scope.push((name.clone(), n));
+                if poisoned && named.is_empty() && shrunk.is_empty() {
+                    self.refused_stmt(s, out, scope, at, ends);
+                } else {
+                    self.body.refused.extend(named);
+                    self.body.mistyped.extend(shrunk);
+                    if self.body.refused.is_empty() && self.body.mistyped.is_empty() {
+                        return Err(g);
+                    }
+                    // The body is refused, so nothing after its trap is judged.
+                    self.refused_stmt(s, out, scope, at, true);
                 }
             }
             let members = self.grouped_in(&out[at..]);
@@ -2823,6 +2846,29 @@ impl<'a> Builder<'a> {
                 .map(|(c, to, line)| rule_check(to, c, line)),
         );
         Ok(())
+    }
+
+    /// Drops the rows refused statement `s` built from `at` and the names it
+    /// bound from `scope`; a name it binds is typed `Err`. Where `ends`, a
+    /// trap stands for it, so a `return` in it is not read as falling through
+    /// ([`returns`]), and nothing after it runs ([`cut`]).
+    fn refused_stmt(&mut self, s: &Stmt, out: &mut Vec<St>, scope: usize, at: usize, ends: bool) {
+        out.truncate(at);
+        if ends {
+            out.push(St::Trap);
+        }
+        self.frame.scope.truncate(scope);
+        if let Stmt::Let {
+            name,
+            line,
+            mutable,
+            ..
+        } = s
+        {
+            let n = self.name(name, Type::Err, false, *line);
+            self.body.names[n.index()].mutable = *mutable;
+            self.frame.scope.push((name.clone(), n));
+        }
     }
 
     /// The record names `rows` store into a field of as a group member
@@ -9093,10 +9139,13 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // The lint re-checks the types, which fails two kinds of program by
     // design: a generator host (its generator helpers use `lex`, `render`
     // and `Token`, which an ordinary check types `<type error>`), and one the
-    // typed judgment refused (an unknown name typed `<type error>`, never
-    // emitted).
+    // checker or the typed judgment refused (a name a refused statement binds,
+    // or an unknown name, typed `<type error>`, never emitted).
     debug_assert!(
-        program.host.gen || !r.typed.is_empty() || crate::lint(&lowered).is_empty(),
+        program.host.gen
+            || !r.typed.is_empty()
+            || !own.record.trapped.is_empty()
+            || crate::lint(&lowered).is_empty(),
         "the lowered form failed its own lint:
   {}",
         crate::lint(&lowered).join(

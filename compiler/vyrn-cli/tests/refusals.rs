@@ -2952,3 +2952,61 @@ fn a_std_impl_method_of_a_renamed_type_reads_its_row() {
 {err}"
     );
 }
+
+/// What `vyrn check` prints to standard error for `src`, saved as `main.vyrn`.
+fn refused_src(tag: &str, src: &str) -> String {
+    let dir = common::scratch(tag);
+    std::fs::write(dir.join("main.vyrn"), src).expect("write main.vyrn");
+    let out = vyrn()
+        .current_dir(&*dir)
+        .args(["check", "main.vyrn"])
+        .output()
+        .expect("vyrn check");
+    assert!(!out.status.success(), "accepted");
+    String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n")
+}
+
+#[test]
+fn a_checker_refusal_hides_no_typed_refusal_before_it() {
+    let src = "fn f(s: String) -> Int64 {\n    return 1\n}\n\nfn main() -> Int64 {\n    \
+               print(f(3))\n    print(g(3))\n    return 0\n}\n";
+    assert_eq!(
+        refused_src("trap-b8", src),
+        "main.vyrn:6:11: `f` argument 1 expects String, found Int64\n\
+         main.vyrn:7:11: call to unknown function `g`\n"
+    );
+}
+
+#[test]
+fn a_protocol_refusal_hides_no_typed_refusal_of_its_body() {
+    let src = "protocol Sized {\n    fn len(read self) -> Int64\n}\n\n\
+               fn f(s: String) -> Int64 {\n    return 1\n}\n\nfn main() -> Int64 {\n    \
+               print(f(3))\n    print(\"abcd\".len())\n    return 0\n}\n";
+    assert_eq!(
+        refused_src("trap-base6", src),
+        "main.vyrn:10:11: `f` argument 1 expects String, found Int64\n\
+         main.vyrn:11:18: String does not implement protocol `Sized` (needed for `.len(..)`)\n"
+    );
+}
+
+#[test]
+fn a_use_of_a_refused_binding_states_nothing() {
+    let src = "fn f(s: String) -> Int64 {\n    return 1\n}\n\nfn main() -> Int64 {\n    \
+               let x = g(3)\n    print(x + 1)\n    let y = f(x)\n    let h = x(y)\n    \
+               print(h)\n    print(f(4))\n    return 0\n}\n";
+    assert_eq!(
+        refused_src("trap-err-uses", src),
+        "main.vyrn:6:13: call to unknown function `g`\n\
+         main.vyrn:11:11: `f` argument 1 expects String, found Int64\n"
+    );
+}
+
+#[test]
+fn a_statement_after_a_refused_one_is_judged() {
+    let src = "fn main() -> Int64 {\n    print(g(1))\n    let x = 1\n    x = 2\n    return x\n}\n";
+    assert_eq!(
+        refused_src("trap-after", src),
+        "main.vyrn:2:11: call to unknown function `g`\n\
+         main.vyrn:4:0: cannot assign to `x` (declared without `mut`)\n"
+    );
+}
