@@ -701,7 +701,7 @@ compiler/vyrn-cli/tests/check/row_int_out_of_range.vyrn	1	f320d1dea597a917	0	0	c
 compiler/vyrn-cli/tests/check/row_interpolation_trailing.vyrn	1	ab9f31e9a35d00df	20	20	dfac9d23d76f6c06
 compiler/vyrn-cli/tests/check/row_lambda_not_here.vyrn	1	3bdcd559878d733d	20	20	e33388989c4d0909
 compiler/vyrn-cli/tests/check/row_lazy_anonymous.vyrn	1	a73648948ce25a86	20	20	28b244ba19b5c5b6
-compiler/vyrn-cli/tests/check/row_lazy_where.vyrn	1	b12d55371ae92acc	20	20	36e828cca197100c
+compiler/vyrn-cli/tests/check/row_lazy_where.vyrn	1	88d8b97c92948b59	20	20	076ba3edb6a0124f
 compiler/vyrn-cli/tests/check/row_needs_field.vyrn	1	a2d3087c2b049ded	20	20	14993d82dd77c0d5
 compiler/vyrn-cli/tests/check/row_nesting_too_deep.vyrn	1	e764a911f82f8d86	20	20	f8e8d67bf2168142
 compiler/vyrn-cli/tests/check/row_nul_in_string.vyrn	1	09bff29913e44554	0	0	cbf29ce484222325

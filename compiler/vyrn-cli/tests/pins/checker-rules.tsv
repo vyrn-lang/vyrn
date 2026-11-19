@@ -9,7 +9,7 @@ checker-rules.vyrn:53:0: cannot mutate a field of `p` (declared without `mut`)
 checker-rules.vyrn:58:0: cannot mutate a field of `Span` in place (its `where` invariant could be broken mid-update); rebuild it: `spanState = Span { .. }`
 checker-rules.vyrn:63:0: `n` is not a record, so it has no field `f`
 checker-rules.vyrn:68:0: record `p` has no field `zz`
-checker-rules.vyrn:74:13: field `age` is Age (validated); assign an already-constructed `Age` value, e.g. `Age(..)`
+checker-rules.vyrn:74:13: field `age` is Age (a refinement type); assign an already-constructed `Age` value, e.g. `Age(..)`
 checker-rules.vyrn:79:11: field `a` is Int64 but assigned String
 checker-rules.vyrn:83:0: index-assignment to unknown variable `zz`
 checker-rules.vyrn:88:0: cannot store into `a` (declared without `mut`)
@@ -42,7 +42,7 @@ checker-rules.vyrn:219:13: shift amount 64 is out of range for a 64-bit value (v
 checker-rules.vyrn:224:15: String has no `length`: use `byteLength` for bytes or `charCount()` for Unicode scalars
 checker-rules.vyrn:229:15: type P has no field `zz`
 checker-rules.vyrn:234:15: cannot access field `f` on non-record type Int64
-checker-rules.vyrn:238:13: `P?(..)` is only for validated/nominal scalar types
+checker-rules.vyrn:238:13: `P?(..)` is only for scalar refinement types and nominal scalar types
 checker-rules.vyrn:242:13: unknown type `Zz`
 checker-rules.vyrn:246:13: `Age?` takes 1 argument, got 2
 checker-rules.vyrn:250:13: `Age` is built from Int64, but the argument is String
