@@ -48,11 +48,13 @@ export function mountPlay(root, opts = {}) {
 
   let play = null;
   let checkTimer = null;
+  let ide = null;
+  const kindOf = (textarea) => (ide ? ide.kindOf(textarea) : "vyrn");
 
-  function spansOf(src) {
-    if (!play) return [];
+  function spansOf(src, kind) {
+    if (!play || !kind) return [];
     try {
-      return play.tokens(src).spans || [];
+      return play.tokens(src, kind).spans || [];
     } catch (err) {
       return [];
     }
@@ -60,7 +62,7 @@ export function mountPlay(root, opts = {}) {
 
   function paint() {
     const src = input.value;
-    layer.innerHTML = highlight(src, spansOf(src));
+    layer.innerHTML = highlight(src, spansOf(src, kindOf(input)));
     syncScroll();
   }
 
@@ -84,12 +86,13 @@ export function mountPlay(root, opts = {}) {
 
   function recheck() {
     if (!play) return;
-    if (!srcHost().value.trim()) {
+    const kind = kindOf(srcHost());
+    if (!srcHost().value.trim() || !kind) {
       showDiags(null);
       return;
     }
     try {
-      showDiags(play.check(srcHost().value).diagnostics);
+      showDiags(play.check(srcHost().value, kind).diagnostics);
     } catch (err) {
       showDiags([
         {
@@ -119,7 +122,7 @@ export function mountPlay(root, opts = {}) {
   }
 
   function run() {
-    if (!play) return;
+    if (!play || kindOf(srcHost()) !== "vyrn") return;
     showDiags(null);
     runBtn.disabled = true;
     setLabel(runBtn, "Running", "busy");
@@ -203,7 +206,7 @@ export function mountPlay(root, opts = {}) {
     });
   }
 
-  const ide = mountIde(root, { input, layer, editor, runBtn, stdin, examples, diagPane, paint, scheduleCheck, spansOf, ready: () => play !== null, startCompiler, api: () => play });
+  ide = mountIde(root, { input, layer, editor, runBtn, stdin, examples, diagPane, paint, scheduleCheck, spansOf, ready: () => play !== null, startCompiler, api: () => play });
   const srcHost = ide ? ide.srcHost : () => input;
 
   if (shareBtn) {

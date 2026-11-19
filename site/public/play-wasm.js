@@ -222,13 +222,13 @@ function api(instance) {
   }
 
   return {
-    tokens(src) {
-      const [n] = put([src]);
-      return take(wasm.play_tokens(n));
+    tokens(src, kind) {
+      const [k, n] = put([kind, src]);
+      return take(wasm.play_tokens(k, n));
     },
-    check(src) {
-      const [n] = put([src]);
-      return take(wasm.play_check(n));
+    check(src, kind) {
+      const [k, n] = put([kind, src]);
+      return take(wasm.play_check(k, n));
     },
     complete(src, line, col) {
       const [n] = put([src]);

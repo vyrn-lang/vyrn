@@ -26,6 +26,16 @@ test("the landing page's cards are coloured by the highlighter", () => {
 test("the playground colours every card line as the landing page does", () => {
   for (const html of lines) {
     const src = unescape(html.replace(/<[^>]*>/g, ""));
-    assert.equal(highlight(src, play.tokens(src).spans).replace(/\n$/, ""), html, src);
+    assert.equal(highlight(src, play.tokens(src, "vyrn").spans).replace(/\n$/, ""), html, src);
   }
+});
+
+test("a grammar tab is coloured and checked as a grammar, and a tab of no known kind is neither", async () => {
+  const grammar = (await read("examples/syntaxjson.syntax")).toString("utf8");
+  assert.deepEqual(play.check(grammar, "syntax").diagnostics, []);
+  const html = highlight(grammar, play.tokens(grammar, "syntax").spans);
+  assert.ok(html.includes('<span class="f">Obj</span>') && html.includes('<span class="t">Member</span>'), html);
+  const [refused] = play.check(grammar.replace("'true'", "'true"), "syntax").diagnostics;
+  assert.equal(refused.stage, "syntax");
+  assert.deepEqual(play.tokens(grammar, "text"), {});
 });

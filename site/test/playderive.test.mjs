@@ -32,7 +32,7 @@ fn main() -> Int64 {
 
 test("derive runs its generator in the page and the program prints what it wrote", async () => {
   const play = await instantiatePlay(bytes);
-  assert.deepEqual(play.check(src).diagnostics, []);
+  assert.deepEqual(play.check(src, "vyrn").diagnostics, []);
   const answer = play.compile(src);
   assert.ok(answer.module, JSON.stringify(answer));
   const { exitCode, stdout } = await runVyrn(answer.module, {});
@@ -69,7 +69,7 @@ fn main() -> Int64 {
 
 test("a derive generator that returns Code runs its imports in the compiler", async () => {
   const play = await instantiatePlay(bytes);
-  assert.deepEqual(play.check(code).diagnostics, []);
+  assert.deepEqual(play.check(code, "vyrn").diagnostics, []);
   const answer = play.compile(code);
   assert.ok(answer.module, JSON.stringify(answer));
   const { exitCode, stdout } = await runVyrn(answer.module, {});

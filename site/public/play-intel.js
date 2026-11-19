@@ -118,7 +118,7 @@ function place(el, x, y, lh, above) {
 
 function codeHtml(api, src) {
   try {
-    return highlight(src, api.tokens(src).spans || []).replace(/\n$/, "");
+    return highlight(src, api.tokens(src, "vyrn").spans || []).replace(/\n$/, "");
   } catch (err) {
     report(err);
     return escapeHtml(src);

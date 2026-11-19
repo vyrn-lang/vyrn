@@ -86,14 +86,14 @@ test("the hover box shows each name of the buffer that resolves, a builtin funct
 });
 
 test("a refused call marks from its callee's name and hovers there", () => {
-  const [d] = play.check(PUSHED).diagnostics;
+  const [d] = play.check(PUSHED, "vyrn").diagnostics;
   assert.deepEqual([d.line, d.col], [4, 8]);
   assert.equal(markOf(d, "    xs.push(3)  ")[0], 8);
   assert.match(hoverHtml(play, PUSHED, 4, 9, [d]), /^<div class="diag error">.*needs an Array/);
 });
 
 test("a diagnostic without a column marks its line's text and hovers there", () => {
-  const [at] = play.check(PUSHED).diagnostics;
+  const [at] = play.check(PUSHED, "vyrn").diagnostics;
   const d = { ...at, col: 0, endCol: 0 };
   assert.deepEqual(markOf(d, "    xs.push(3)  "), [5, 15]);
   assert.equal(markOf(d, "   "), null);

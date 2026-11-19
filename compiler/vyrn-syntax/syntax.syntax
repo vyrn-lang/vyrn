@@ -4,30 +4,30 @@ syntax Syntax
 
 expect ^SyntaxExpected(token=token)
 
-file = (blank / comment / def)* (eof / ^SyntaxStray)
+file = (blank / comment ('\n' / eof) / def)* (eof / ^SyntaxStray)
 blank = [ \t\r]* '\n'
-comment = '//' (!'\n' .)* ('\n' / eof)
-def = !ws (directive / rule) [ \t\r]* comment? ('\n' / eof)
+comment = '//' (!'\n' .)*
+def = !ws (directive / rule) [ \t\r]* (comment ('\n' / eof))? ('\n' / eof)
 
 directive = 'syntax' gap name
           / ('keyword' / 'token') gap name gap string
           / 'nest' gap digit+ gap throw
           / 'expect' gap throw
           / 'row' gap name ('(' name (',' sp name)* ')')?
-rule = ('nest' gap)? name sp '=' sp alt (sp 'fail' sp throw)?
+rule = ('nest' gap)? head sp '=' sp alt (sp 'fail' sp throw)?
 
 // Inside a definition, a newline is a space when the next line is indented.
 gap = [ \t]+
-sp = ([ \t] / '\r'? '\n' &[ \t] / '//' (!'\n' .)* &('\r'? '\n' [ \t]))*
+sp = ([ \t] / '\r'? '\n' &[ \t] / comment &('\r'? '\n' [ \t]))*
 alt = seq (sp '/' sp seq)*
 seq = prefix (@(sp !('/' / stop) prefix))* / &(sp ('/' / ')'))
 stop = ('until' / 'sep' / 'recover' / 'fail') ![A-Za-z0-9_]
-prefix = ('&' / '!' / '@')* (name ':')? suffix
+prefix = ('&' / '!' / '@')* (capture ':')? suffix
 suffix = primary ('*' / '+' / '?')*
 primary = '(' sp alt? sp ')'
         / string
         / class
-        / '.'
+        / any
         / throw
         / '~' throw
         / ('+' / '-') name '(' sp alt sp ')'
@@ -37,10 +37,21 @@ primary = '(' sp alt? sp ')'
         / 'list' gap prefix sp 'sep' sp prefix sp 'until' sp prefix
         / 'climb' gap prefix sp '{' (sp level)* sp '}'
         / 'embed' '(' sp alt sp ',' sp name (sp ',' sp ('wrap' / 'trailing') sp '=' sp throw)* sp ')'
-        / !stop name
+        / builtin
+        / !stop ref
 level = ('left' / 'right') (gap string)+ ';'?
-throw = '^' name ('(' hole (',' sp hole)* ')')? ('@' (name / '(' name ',' sp name ')'))? '!'?
+throw = label ('(' hole (',' sp hole)* ')')? ('@' (name / '(' name ',' sp name ')'))? '!'?
 hole = name '=' (string / '.:?' / '.' / name)
 name = [A-Za-z_] [A-Za-z0-9_.]*
-string = '\'' ('\\' . / !'\'' .)* '\''
-class = '[' ('\\' . / !']' .)* ']'
+string = '\'' (!'\'' (escape / .))* '\''
+class = '[' (!']' (escape / .))* ']'
+
+// The part a name or a mark plays, by which a .syntax file is coloured.
+head = name
+ref = name
+capture = name
+label = '^' name
+escape = '\\' .
+any = '.'
+builtin = ('eof' / 'nonl' / 'alpha' / 'alnum' / 'digit' / 'hex' / 'ws' / 'reserved' / 'punct')
+          ![A-Za-z0-9_.]

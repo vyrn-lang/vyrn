@@ -95,7 +95,7 @@ fn examples() -> Array<Example> {
             <span data-play-lncol>Ln 1, Col 1</span>
             <span>Spaces: 2</span>
             <span>UTF-8</span>
-            <span>Vyrn</span>
+            <span data-play-kind>Vyrn</span>
             <span>Shift+F10 Run</span>
         </div>
     </div>
