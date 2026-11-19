@@ -30,7 +30,7 @@ attribute:
 - `--help` is a question about argv, not a value in the record: ask it with
   `wantsHelp(argv)` before parsing.
 
-A field is `Bool`, `Int64`, `String`, a validated type over `Int64` or
+A field is `Bool`, `Int64`, `String`, a refinement type over `Int64` or
 `String`, an `Option` of those, or one `Array<String>` for the positionals.
 Anything else fails the generation with a sentence naming the field.
 
