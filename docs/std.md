@@ -129,9 +129,9 @@ Each of these is a library of `gen fn`s. The compiler knows none of their domain
 
 | Module | Provides |
 |---|---|
-| `std/html` | The view tree (`el`, `text`, `cls`, `attr`, `on`, `keyed`, `empty`), `toHtmlString`, `document`, and `diff`, which yields the `PatchOp` list `web/vyrn-dom.js` applies. Text is escaped; a bad tag or attribute name is refused. |
-| `std/vyx` | `components(dir)` compiles `.vyx` single-file components (a `<script>` of Vyrn and a `<template>`) into view functions. `std/vyx.syntax` states the format and `std/vyx.errors` its sentences. `vyxParseTemplate` gives a generator the parsed `<template>`. |
-| `std/ui` | `pages(dir)` turns a routes directory into `route(req) -> Response` with a typed URL helper per route. A page module exports what the `Page` contract allows: `head`, `data` (`Query` or `Lazy`), `Params`. |
+| `std/html` | The view tree (`el`, `text`, `cls`, `attr`, `on`, `keyed`, `withAttr`, `empty`), `toHtmlString`, `document`, and `diff`, which yields the `PatchOp` list `web/vyrn-dom.js` applies. Text is escaped; a bad tag or attribute name is refused. |
+| `std/vyx` | `components(dir)` compiles `.vyx` single-file components (a `<script>` of Vyrn, a `<template>` and a scoped `<style>`) into view functions, and `vyxCss()` into their scoped rules. `std/vyx.syntax` states the format and `std/vyx.errors` its sentences. `vyxParseTemplate` gives a generator the parsed `<template>`. |
+| `std/ui` | `pages(dir)` turns a routes directory into `route(req) -> Response` with a typed URL helper per route, and serves its `.vyx` modules' scoped rules at `/vyx.css`. A page module exports what the `Page` contract allows: `head`, `data` (`Query` or `Lazy`), `Params`. |
 | `std/tw` | `tw("theme.json")` generates the utility stylesheet and the `Tw` class type, so a misspelled class is a compile error. |
 | `std/icons` | `icons(collection, names)` generates one function per glyph from an Iconify collection pinned in the lock. A misspelled glyph fails the build with the nearest name. |
 | `std/i18n` | `i18n(dir)` reads every `<locale>.json`, checks that the locales agree, compiles each message, Unicode MessageFormat 2 read by `std/i18n.syntax`, to a function, and exports `Locale`, `TransKey` (a finite string type) and `t`. |

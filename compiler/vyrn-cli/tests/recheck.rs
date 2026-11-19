@@ -116,7 +116,7 @@ fn linker(path: &str, e: &Edit, session: &Arc<Session>) -> (LoadOptions, Overlai
     let dir = Path::new(path).parent().expect("a file has a directory");
     if let Some(m) = vyrn_frontend::manifest::find(dir).expect("the manifest parses") {
         opts.aliases = m.dependencies.into_iter().collect();
-        opts.alias_base = m.dir.clone();
+        opts.alias_base = Some(m.dir.clone());
         opts.audience = m.audience;
         opts.artifacts = m.artifacts;
         resolver.project = Some(m.dir);

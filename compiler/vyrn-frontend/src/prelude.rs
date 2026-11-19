@@ -1238,6 +1238,12 @@ fn table() -> Vec<Builtin> {
             .route("runtime$listDirKindsV")
             .gen_route("runtime$listDirKindsGenV")
             .effect(FsList),
+        // An input path as the project root spells it, so an output keyed by
+        // a path does not depend on the importer's spelling.
+        b("appPath")
+            .sig(row("appPath", &[], &[("p", Read, Str)], Str, &[]))
+            .gen_route("runtime$appPathGenV")
+            .effect(GenOnly),
         b("moduleInterface")
             .sig(row(
                 "moduleInterface",

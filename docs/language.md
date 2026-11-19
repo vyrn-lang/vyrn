@@ -632,6 +632,7 @@ import { squareOf } from squares()
 - Only a `gen fn`, a test, a bench or the `from` of an import calls a `gen fn`, because no run reaches one. A lambda inside one of them counts as inside it.
 - A generator is comptime-pure, and so is everything it calls: no `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, clock, entropy, logging sink or wait. A call to one is refused, naming it. So a generator gives the same answer on every machine.
 - A generator may read with `readFile`, `listDir` and `listDirKinds`, limited to the paths its caller passed.
+- `appPath(p)` answers an input path, limited like a read, as the project root spells it: the directory of `vyrn.json`, or without one the entry file's directory. Two importers that spell one input differently get one answer. A path outside the project stops the generation.
 - `moduleInterface(path)` reflects a module's exported functions and types as a `ModuleInterface` record. `moduleCode(path)` answers the same record inside a `ModuleCode`, with each type a generator writes paired with itself as `Code`. `contractOf(Name)` reflects a contract. All three work only during generation.
 - A `TypeInfo`'s `shape` is its declaration as an array of `TypeNode`s, node 0 the root: record fields, enum variants and their payloads, arrays, `Option`, `Result`, `Map`, and each `where` as source. A declared name is a `named` leaf, found in `ModuleInterface.types`.
 - `lex(src)` runs the compiler's lexer over text. `std/scan` is a comment- and string-aware cursor for other languages.

@@ -1,1 +1,20 @@
-<section class="panel"><h2 class="title">Inventory</h2><div class="sepwrap"><hr class="sep"/></div><ul class="listing"><li class="row" data-key="1"><span class="name">Widget</span><em class="hot">lots (9)</em><button class="rm" data-on-click="removeRow" data-arg-click="1">remove</button><input class="q" data-on-input="setQty" data-arg-input="Widget"></li><li class="row" data-key="2"><span class="name">Gadget</span><em class="one">last one</em><button class="rm" data-on-click="removeRow" data-arg-click="2">remove</button><input class="q" data-on-input="setQty" data-arg-input="Gadget"></li><li class="row" data-key="3"><span class="name">Gizmo</span><em class="some">3 left</em><button class="rm" data-on-click="removeRow" data-arg-click="3">remove</button><input class="q" data-on-input="setQty" data-arg-input="Gizmo"></li></ul></section>
+<style>
+/* examples/vyxcomp/Panel.vyx */
+.panel[data-v-8c3f0d8f] { border: 1px solid #cac4d0; padding: 1rem; }
+.title[data-v-8c3f0d8f] { margin: 0; }
+.panel[data-v-8c3f0d8f] hr { border: 0; border-top: 1px dashed #cac4d0; }
+@keyframes vyxcompFade { from { opacity: 0; } to { opacity: 1; } }
+.sepwrap[data-v-8c3f0d8f] { animation: vyxcompFade 0.2s; }
+
+/* examples/vyxcomp/Row.vyx */
+.row[data-v-5f903c28] { display: flex; gap: 0.5rem; align-items: baseline; }
+.name[data-v-5f903c28] { font-weight: 600; }
+.hot[data-v-5f903c28] { color: #b3261e; }
+.cool[data-v-5f903c28], .some[data-v-5f903c28] { color: #49454f; }
+.one[data-v-5f903c28]:hover { text-decoration: underline; }
+.rm[data-v-5f903c28], .q[data-v-5f903c28] { margin-left: auto; }
+@media (max-width: 30rem) {
+.row[data-v-5f903c28] { flex-direction: column; }
+}
+</style>
+<section class="panel" data-v-8c3f0d8f=""><h2 class="title" data-v-8c3f0d8f="">Inventory</h2><div class="sepwrap" data-v-8c3f0d8f=""><hr class="sep"/></div><ul class="listing"><li class="row" data-v-5f903c28="" data-key="1"><span class="name" data-v-5f903c28="">Widget</span><em class="hot" data-v-5f903c28="">lots (9)</em><button class="rm" data-on-click="removeRow" data-arg-click="1" data-v-5f903c28="">remove</button><input class="q" data-on-input="setQty" data-arg-input="Widget" data-v-5f903c28=""></li><li class="row" data-v-5f903c28="" data-key="2"><span class="name" data-v-5f903c28="">Gadget</span><em class="one" data-v-5f903c28="">last one</em><button class="rm" data-on-click="removeRow" data-arg-click="2" data-v-5f903c28="">remove</button><input class="q" data-on-input="setQty" data-arg-input="Gadget" data-v-5f903c28=""></li><li class="row" data-v-5f903c28="" data-key="3"><span class="name" data-v-5f903c28="">Gizmo</span><em class="some" data-v-5f903c28="">3 left</em><button class="rm" data-on-click="removeRow" data-arg-click="3" data-v-5f903c28="">remove</button><input class="q" data-on-input="setQty" data-arg-input="Gizmo" data-v-5f903c28=""></li></ul></section>

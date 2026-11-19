@@ -16,3 +16,11 @@ fn sepMarkup() -> Markup {
     <slot/>
 </section>
 </template>
+
+<style>
+.panel { border: 1px solid #cac4d0; padding: 1rem; }
+.title { margin: 0; }
+.panel :global(hr) { border: 0; border-top: 1px dashed #cac4d0; }
+@keyframes vyxcompFade { from { opacity: 0; } to { opacity: 1; } }
+.sepwrap { animation: vyxcompFade 0.2s; }
+</style>

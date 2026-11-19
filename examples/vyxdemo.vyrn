@@ -1,9 +1,10 @@
 // Single-file `.vyx` components.
 import { components } from "std/vyx"
-import { row, listing, panel } from components("./vyxcomp")
+import { row, listing, panel, vyxCss } from components("./vyxcomp")
 import { toHtmlString, Html } from "std/html"
 import { Item } from "./vyxcomp/models"
 import { contains } from "std/strpred"
+import { joinWith } from "std/strings"
 
 fn demo() -> Html {
     let items: Array<Item> = [
@@ -15,16 +16,17 @@ fn demo() -> Html {
 }
 
 fn main() -> Int64 {
+    print("<style>\n\{joinWith(vyxCss(), "\n")}</style>")
     print(toHtmlString(demo()))
     return 0
 }
 
 test "the compiled components render the expected SSR string" {
     let html = toHtmlString(demo())
-    assert(html.contains("<section class=\"panel\">"))
-    assert(html.contains("<h2 class=\"title\">Inventory</h2>"))
+    assert(html.contains("<section class=\"panel\" data-v-8c3f0d8f=\"\">"))
+    assert(html.contains("<h2 class=\"title\" data-v-8c3f0d8f=\"\">Inventory</h2>"))
     assert(html.contains("<hr class=\"sep\"/>"))
-    assert(html.contains("<li class=\"row\" data-key=\"1\">"))
+    assert(html.contains("<ul class=\"listing\"><li class=\"row\" data-v-5f903c28=\"\" data-key=\"1\">"))
     assert(html.contains("data-key=\"2\""))
     assert(html.contains("data-key=\"3\""))
     assert(html.contains("lots (9)"))
@@ -32,5 +34,15 @@ test "the compiled components render the expected SSR string" {
     assert(html.contains("3 left"))
     assert(html.contains("data-on-click=\"removeRow\" data-arg-click=\"1\""))
     assert(html.contains("data-on-input=\"setQty\""))
-    assert(html.contains("<em class=\"hot\">"))
+    assert(html.contains("<em class=\"hot\" data-v-5f903c28=\"\">"))
+}
+
+test "each block is scoped to its component and served in source order" {
+    let css = joinWith(vyxCss(), "\n")
+    assert(css.contains(".panel[data-v-8c3f0d8f] hr {"))
+    assert(css.contains("@keyframes vyxcompFade { from"))
+    assert(css.contains(".cool[data-v-5f903c28], .some[data-v-5f903c28] {"))
+    assert(css.contains(".one[data-v-5f903c28]:hover {"))
+    assert(css.contains("@media (max-width: 30rem) {\n.row[data-v-5f903c28] {"))
+    assert(vyxCss().length == 2)
 }

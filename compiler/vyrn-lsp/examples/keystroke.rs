@@ -95,7 +95,7 @@ fn probe(path: &str, runs: usize) {
     let dir = std::path::Path::new(&path).parent().unwrap();
     if let Ok(Some(m)) = vyrn_frontend::manifest::find(dir) {
         opts.aliases = m.dependencies.into_iter().collect();
-        opts.alias_base = m.dir.clone();
+        opts.alias_base = Some(m.dir.clone());
         opts.audience = m.audience;
         opts.artifacts = m.artifacts;
         resolver.0 = Some(m.dir);

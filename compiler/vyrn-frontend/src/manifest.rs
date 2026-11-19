@@ -122,7 +122,7 @@ impl Manifest {
     /// `proved` modules. Every host that loads a project calls it.
     pub fn load_options(&self, opts: &mut crate::loader::LoadOptions) {
         opts.aliases = self.dependencies.iter().cloned().collect();
-        opts.alias_base = self.dir.clone();
+        opts.alias_base = Some(self.dir.clone());
         opts.audience = self.audience.clone();
         opts.artifacts = self.artifacts.clone();
         opts.proved = self.proved.clone();
@@ -215,8 +215,7 @@ pub fn find(start: &Path) -> Result<Option<Manifest>, String> {
         .map_err(|e| format!("cannot read {}: {e}", candidate.display()))?;
     let doc = crate::schema::parse_json(&text)
         .map_err(|e| format!("{} is not valid JSON: {e}", candidate.display()))?;
-    let slash_dir = dir.to_string_lossy().replace('\\', "/");
-    from_doc(doc, slash_dir).map(Some)
+    from_doc(doc, dos_to_slash(&dir.to_string_lossy())).map(Some)
 }
 
 /// Returns the project root for the directory `start`: the directory of the

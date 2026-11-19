@@ -3588,8 +3588,7 @@ const STYLED_VYX: &str = "<script>\n\
     <div class=\"book-card\"><span class=\"no-style\">{{ x }}</span><p class=\"bg-brand-500\">{{ x }}</p></div>\n\
     </template>\n";
 
-/// Links the app's stylesheet, which the editor does not read: the
-/// manifest's `stylesheets` key names it.
+/// Links the app's stylesheet, which the editor reads as a global source.
 const STYLED_LAYOUT: &str = "<script>\nhead {\n    stylesheet \"/app.css\"\n}\n</script>\n\
     <template>\n<div><slot/></div>\n</template>\n";
 
@@ -3674,15 +3673,18 @@ fn safelisted_hover_shows_the_apps_own_css() {
     let _ = client.child.kill();
 }
 
-/// Without a `stylesheets` key the editor reads no CSS of the app's.
+/// Without a `stylesheets` key the sheet a layout links is still read, and a
+/// file neither names stays unread.
 #[test]
-fn safelisted_hover_without_the_key_shows_no_css() {
+fn a_sheet_a_layout_links_hovers_without_the_key() {
     let dir = styled_scratch();
     std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"s\" }").unwrap();
     let (mut client, uri) = open_styled_in(dir);
     let (l, c) = pos_after(STYLED_VYX, "book-car");
     let v = hover_value(&mut client, &uri, l, c).expect("hover on safelisted class");
-    assert_eq!(v, "**`book-card`** — safelisted (app-styled)", "{v}");
+    assert!(v.contains("li.list .book-card"), "{v}");
+    assert!(v.contains("— global public/app.css:3"), "{v}");
+    assert!(!v.contains("DECOYRULE"), "{v}");
     let _ = client.child.kill();
 }
 
@@ -6414,4 +6416,146 @@ fn diagnostics_carry_the_version_of_the_text_they_describe() {
     );
     drop(client);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Class intelligence from every source: the component's own block, a sheet a
+// layout links, a manifest glob, and the theme's alphabet.
+const CLS_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { widget } from components(\"./comp\")\n\
+    fn main() -> Int64 { return 0 }\n";
+
+const CLS_VYX: &str = "<template>\n\
+    <div class=\"own  from-link from-glob\"><b :class='\"own\"'>x</b></div>\n\
+    </template>\n\
+    <style>\n\
+    .own { color: red; }\n\
+    </style>\n";
+
+/// An app whose component `comp/Widget.vyx` is `vyx` and whose root imports it
+/// through `app`, with a sheet its layout links and a sheet its manifest globs.
+fn classes_scratch(app: &str, vyx: &str, theme: Option<&str>) -> (LspClient, String) {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_classes_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["comp", "css", "public", "routes"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    std::fs::write(
+        dir.join("vyrn.json"),
+        "{ \"name\": \"c\", \"stylesheets\": [\"css/*.css\"] }",
+    )
+    .unwrap();
+    std::fs::write(dir.join("css/globbed.css"), ".from-glob { a: b; }\n").unwrap();
+    std::fs::write(dir.join("public/linked.css"), "\n.from-link { a: b; }\n").unwrap();
+    std::fs::write(
+        dir.join("routes/layout.vyx"),
+        "<script>\nhead {\n    stylesheet \"/linked.css\"\n}\n</script>\n<template>\n<div><slot/></div>\n</template>\n",
+    )
+    .unwrap();
+    if let Some(t) = theme {
+        std::fs::write(dir.join("theme.json"), t).unwrap();
+    }
+    std::fs::write(dir.join("comp/Widget.vyx"), vyx).unwrap();
+    std::fs::write(dir.join("app.vyrn"), app).unwrap();
+    let mut client = spawn_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    did_open(&mut client, &app_uri, "vyrn", app);
+    let _ = read_diags_for(&mut client, "Widget.vyx");
+    let uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &uri, "vyx", vyx);
+    (client, uri)
+}
+
+/// The detail of the item `label` among `items`, and its index.
+fn offered(items: &[(String, String)], label: &str) -> (usize, String) {
+    let i = items
+        .iter()
+        .position(|(l, _)| l == label)
+        .unwrap_or_else(|| panic!("{label} not offered: {items:?}"));
+    (i, items[i].1.clone())
+}
+
+#[test]
+fn a_class_completes_from_the_components_own_block() {
+    let (mut client, uri) = classes_scratch(CLS_APP, CLS_VYX, None);
+    let (l, c) = pos_after(CLS_VYX, "own ");
+    let items = completion_details(&mut client, &uri, l, c);
+    let (own, detail) = offered(&items, "own");
+    assert_eq!(detail, "local — Widget.vyx:5", "{items:?}");
+    assert!(
+        own < offered(&items, "from-link").0,
+        "local first: {items:?}"
+    );
+    let (l, c) = pos_after(CLS_VYX, ":class='\"o");
+    assert_eq!(
+        offered(&completion_details(&mut client, &uri, l, c), "own").1,
+        "local — Widget.vyx:5"
+    );
+    let _ = client.child.kill();
+}
+
+#[test]
+fn a_class_completes_from_a_sheet_a_layout_links() {
+    let (mut client, uri) = classes_scratch(CLS_APP, CLS_VYX, None);
+    let (l, c) = pos_after(CLS_VYX, "own ");
+    let items = completion_details(&mut client, &uri, l, c);
+    let (link, detail) = offered(&items, "from-link");
+    assert_eq!(detail, "global — linked.css:2", "{items:?}");
+    assert!(
+        link < offered(&items, "from-glob").0,
+        "a linked sheet before a glob: {items:?}"
+    );
+    let _ = client.child.kill();
+}
+
+#[test]
+fn a_class_completes_from_a_stylesheets_glob() {
+    let (mut client, uri) = classes_scratch(CLS_APP, CLS_VYX, None);
+    let (l, c) = pos_after(CLS_VYX, "own ");
+    let items = completion_details(&mut client, &uri, l, c);
+    assert_eq!(
+        offered(&items, "from-glob").1,
+        "global — globbed.css:1",
+        "{items:?}"
+    );
+    let _ = client.child.kill();
+}
+
+#[test]
+fn a_class_completes_from_the_theme_after_the_sheets() {
+    let app = "import { componentsThemed } from \"std/vyx\"\n\
+        import { widget } from componentsThemed(\"./comp\", \"./theme.json\")\n\
+        fn main() -> Int64 { return 0 }\n";
+    let vyx = "<template>\n<div class=\"own  p-2\">x</div>\n</template>\n<style>\n.own { color: red; }\n</style>\n";
+    let theme = "{ \"spacing\": { \"2\": \"0.5rem\" }, \"safelist\": [\"own\"] }";
+    let (mut client, uri) = classes_scratch(app, vyx, Some(theme));
+    let (l, c) = pos_after(vyx, "own ");
+    let items = completion_details(&mut client, &uri, l, c);
+    let (own, detail) = offered(&items, "own");
+    assert_eq!(detail, "local — Widget.vyx:5", "{items:?}");
+    let (p2, _) = offered(&items, "p-2");
+    assert!(own < p2, "the sheets before the theme: {items:?}");
+    assert_eq!(
+        items.iter().filter(|(l, _)| l == "own").count(),
+        1,
+        "{items:?}"
+    );
+    let _ = client.child.kill();
+}
+
+#[test]
+fn a_class_hovers_with_each_rule_and_jumps_to_the_first() {
+    let (mut client, uri) = classes_scratch(CLS_APP, CLS_VYX, None);
+    let (l, c) = pos_after(CLS_VYX, "class=\"ow");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on a local class");
+    assert!(v.contains(".own { color: red; }"), "{v}");
+    assert!(v.contains("— local comp/Widget.vyx:5"), "{v}");
+    let target = definition_target(&mut client, &uri, l, c).expect("a local rule");
+    assert!(target.ends_with("comp/Widget.vyx"), "{target}");
+    let (l, c) = pos_after(CLS_VYX, "from-li");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on a linked class");
+    assert!(v.contains("— global public/linked.css:2"), "{v}");
+    let target = definition_target(&mut client, &uri, l, c).expect("a linked rule");
+    assert!(target.ends_with("public/linked.css"), "{target}");
+    let _ = client.child.kill();
 }

@@ -598,14 +598,9 @@ pub fn input_definition(
     )?
     .ok()?;
     let dir = claim.importer.rsplit_once('/').map_or("", |(d, _)| d);
-    let project = if opts.alias_base.is_empty() {
-        dir
-    } else {
-        opts.alias_base.as_str()
-    };
     let ctx = crate::origin::Context {
         importer_dir: dir,
-        project,
+        project: crate::loader::project_dir(opts, &claim.importer),
     };
     crate::origin::anchor(out.trim(), &ctx).ok()
 }
