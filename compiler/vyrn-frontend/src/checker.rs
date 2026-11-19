@@ -553,6 +553,9 @@ fn check_accum_inner(
             continue;
         }
         if types.contains_key(t.name.as_str()) {
+            // Each body is judged under each declaration
+            // (`vyrn_lower::pipeline`).
+            in_bodies += 1;
             out.push(cerr!(t.line, TypeDefinedTwice, name).in_file(t.module.clone()));
             continue;
         }
@@ -622,7 +625,11 @@ fn check_accum_inner(
     let mut fn_decls: HashMap<&str, DeclId> = HashMap::new();
     for (i, f) in program.functions.iter().enumerate() {
         let name = &f.name;
-        let refused = if RESERVED.contains(&name.as_str()) {
+        // A refused declaration still leaves every other body to the typed
+        // judgment: a name declared twice is judged under each declaration
+        // (`vyrn_lower::pipeline`), and any other refused name leaves with
+        // the bodies that name it.
+        let rule = if RESERVED.contains(&name.as_str()) {
             rule!(ReservedName, name)
         } else if variants.contains_key(name) {
             rule!(FunctionIsVariant, name)
@@ -634,9 +641,13 @@ fn check_accum_inner(
             fn_decls.insert(name, DeclId::nth(DeclKind::Fn, i));
             continue;
         };
+        if !fn_decls.contains_key(name.as_str()) {
+            refused.insert(name.clone());
+        }
+        in_bodies += 1;
         let (col, end_col) = f.name_span();
         out.push(
-            cerr!(f.line; refused)
+            cerr!(f.line; rule)
                 .at(col, end_col)
                 .in_file(f.module.clone()),
         );

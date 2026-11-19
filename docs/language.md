@@ -822,6 +822,7 @@ Each line is a program the compiler refuses, and the reason.
 - A module-state initializer that calls a function of its own module or reads later state.
 - Two modules' exports of one name imported flat: a top-level name is program-wide.
 - An enum variant name declared twice.
+- A function or type name declared twice. Every body is still checked, under each declaration, so one run prints every error.
 - An `impl` of a protocol for a validated scalar type.
 - `x.m()` where two protocols declare `m` for the receiver: name one, `x::P.m()`.
 - An extern signature with a type the host boundary cannot carry.
