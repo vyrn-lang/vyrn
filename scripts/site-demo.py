@@ -18,7 +18,7 @@ deletes, against the binary it is pointed at:
   2. the files it wrote                  walked, not typed: no command, no
                                          invented output
   3. `vyrn run`                          the scaffold runs with no argument
-  4. one edit                            a validated type and a `test` block,
+  4. one edit                            a refinement type and a `test` block,
                                          written into `src/main.vyrn`
   5. `vyrn test src/main.vyrn`           the edit's own check
   6. `vyrn build src/main.vyrn -o demo`  a native binary

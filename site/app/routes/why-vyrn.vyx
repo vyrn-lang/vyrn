@@ -70,8 +70,8 @@ fn capabilities() -> Array<Capability> {
         </section>
 
         <section class="band" id="rules">
-            <h2>Validated types</h2>
-            <p>A validated type carries its <code>where</code> clause everywhere it goes. The compiler refuses what it can prove invalid and erases the check where it can prove valid. Everywhere else it emits the check, which means every boundary a value arrives at. <a href="/play.html">The playground runs one</a>.</p>
+            <h2>Refinement types</h2>
+            <p>A refinement type carries its <code>where</code> clause everywhere it goes. The compiler refuses what it can prove invalid and erases the check where it can prove valid. Everywhere else it emits the check, which means every boundary a value arrives at. <a href="/play.html">The playground runs one</a>.</p>
         </section>
 
         <section class="band" id="ownership">
