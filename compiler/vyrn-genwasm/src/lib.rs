@@ -250,12 +250,13 @@ fn serve(
             }
         };
     }
+    let grammar = (mode == MODE_SYNTAX).then(|| resolved.clone());
     match inputs.resolver.read(&resolved) {
         Ok(content) => {
             let bytes = content.into_bytes();
             reads.push((resolved, Some(bytes.clone())));
-            if mode == MODE_SYNTAX {
-                return syntax_parser(inputs, path, Some(&bytes));
+            if let Some(key) = grammar {
+                return syntax_parser(inputs, path, key, Some(&bytes));
             }
             // Recorded before the NUL rule rejects it: the cache must notice
             // when the file changes.
@@ -273,8 +274,8 @@ fn serve(
                 // would lose the remedy.
                 return Err(why);
             }
-            if mode == MODE_SYNTAX {
-                return syntax_parser(inputs, path, None);
+            if let Some(key) = grammar {
+                return syntax_parser(inputs, path, key, None);
             }
             Ok(Served::Bytes(1, Vec::new()))
         }
@@ -286,10 +287,11 @@ fn serve(
 fn syntax_parser(
     inputs: &GenInputs<'_>,
     path: &str,
+    key: String,
     bytes: Option<&[u8]>,
 ) -> Result<Served, String> {
     vyrn_frontend::gen::syntax_parser_span(&inputs.module, path, bytes)
-        .map(|span| Served::Span(Box::new(span)))
+        .map(|span| Served::Parser(key, Box::new(span)))
 }
 
 /// Runs generator `fn_name` without wasmtime, for the playground, where the
@@ -954,6 +956,8 @@ pub struct Arena {
     ropes: Vec<Arc<Rope>>,
     /// A `Code` generator's result, set once by the wrapper's `result` call.
     result: Option<Arc<Rope>>,
+    /// [`Written::grammars`].
+    grammars: Vec<String>,
 }
 
 impl Arena {
@@ -1076,8 +1080,12 @@ impl Arena {
     /// What the generator wrote: the value its wrapper handed to `result`.
     pub fn written(&mut self) -> Result<Written, String> {
         let code = self.result.take();
-        code.map(|code| Written::code(&code))
-            .ok_or_else(|| "the generator handed over no result".into())
+        let grammars = std::mem::take(&mut self.grammars);
+        code.map(|code| Written {
+            grammars,
+            ..Written::code(&code)
+        })
+        .ok_or_else(|| "the generator handed over no result".into())
     }
 }
 
@@ -1217,7 +1225,8 @@ struct Caps {
 enum Served {
     Bytes(i32, Vec<u8>),
     Copy(String, Vec<u8>),
-    Span(Box<Span>),
+    /// A grammar's parser or its report, and the grammar's key.
+    Parser(String, Box<Span>),
     /// Encoded on the guest thread, so one [`encode`] call serves all three
     /// structured builtins.
     Lit(Box<Expr>),
@@ -1273,7 +1282,7 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                     streams.stash = bytes;
                     Ok((status as i64) << 32 | len)
                 }
-                Ok(Ok(Served::Lit(_) | Served::Copy(..) | Served::Span(_))) => {
+                Ok(Ok(Served::Lit(_) | Served::Copy(..) | Served::Parser(..))) => {
                     Err(Error::msg("read answered with a literal"))
                 }
                 // A scoping violation traps.
@@ -1365,7 +1374,10 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                 .send((path, MODE_SYNTAX))
                 .map_err(|_| Error::msg("generator host is gone"))?;
             match caps.resp.recv() {
-                Ok(Ok(Served::Span(span))) => Ok(streams.code.leaf(*span)),
+                Ok(Ok(Served::Parser(key, span))) => {
+                    streams.code.grammars.push(key);
+                    Ok(streams.code.leaf(*span))
+                }
                 Ok(Ok(_)) => Err(Error::msg("syntaxParser answered with no span")),
                 Ok(Err(msg)) => Err(Error::new(Denied(msg))),
                 Err(_) => Err(Error::msg("generator host is gone")),
@@ -1439,7 +1451,7 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                         .map_err(|_| Error::msg("generator host is gone"))?;
                     let lit = match caps.resp.recv() {
                         Ok(Ok(Served::Lit(lit))) => lit,
-                        Ok(Ok(Served::Bytes(..) | Served::Copy(..) | Served::Span(_))) => {
+                        Ok(Ok(Served::Bytes(..) | Served::Copy(..) | Served::Parser(..))) => {
                             return Err(Error::msg("module reflection answered with bytes"))
                         }
                         // A scoping violation traps.

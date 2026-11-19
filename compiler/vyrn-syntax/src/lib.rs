@@ -236,6 +236,11 @@ impl Grammar {
         self.by_name.get(name).copied()
     }
 
+    /// Returns the first rule no other rule reads, where a text of the grammar starts.
+    pub fn start(&self) -> Option<RuleId> {
+        parser::start_rules(self).ok()?.first().copied()
+    }
+
     /// Returns the name of rule `id`.
     pub fn rule_name(&self, id: RuleId) -> &str {
         &self.rules[id.0 as usize].name

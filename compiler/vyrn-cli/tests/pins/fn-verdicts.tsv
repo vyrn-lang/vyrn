@@ -1841,6 +1841,7 @@ site/app/apidoc.vyrn	sigEnd	no, it keeps an index check	no, it is not trap-free
 site/app/apidoc.vyrn	trimTail	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
 site/app/apidoc.vyrn	declAt	no, it keeps an index check	no, its effect set is alloc, trap
 site/app/apidoc.vyrn	exportsOf	no, it calls `declAt`, which is not trap-free	no, its effect set is alloc, trap
+site/app/apidoc.vyrn	statesLanguage	yes	no, `toks` is Array<Token>, not an integer, Bool or a read array of one
 site/app/apidoc.vyrn	testNames	yes	no, its effect set is alloc
 site/app/apidoc.vyrn	headerDoc	yes	no, its effect set is alloc
 site/app/apidoc.vyrn	tickHtml	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
@@ -2407,6 +2408,18 @@ std/fetch.vyrn	fetchField	yes	no, its effect set is alloc
 std/fetch.vyrn	fetchFieldAt	no, it keeps an index check	no, its effect set is alloc
 std/fetch.vyrn	fetchUnpack	no, it calls `fetchFieldAt`, which is not trap-free	no, its effect set is alloc
 std/fetch.vyrn	fetchResponse	no, it keeps an index check	no, its effect set is alloc
+std/grammar.editor.vyrn	grammarLines	no, it calls `lines`, which is not trap-free	no, its effect set is alloc, fs-read, trap
+std/grammar.editor.vyrn	grammarItem	yes	no, its effect set is alloc
+std/grammar.editor.vyrn	vyrnCheckGrammar	yes	no, its effect set is gen-only
+std/grammar.editor.vyrn	vyrnDefinitionGrammar	no, it calls `grammarLines`, which is not trap-free	no, its effect set is alloc, fs-read, trap
+std/grammar.editor.vyrn	vyrnHoverGrammar	no, it keeps an index check	no, its effect set is alloc, fs-read, trap
+std/grammar.editor.vyrn	vyrnCompleteGrammar	no, it calls `grammarHead`, which is not trap-free	no, its effect set is alloc, fs-read, trap
+std/grammar.vyrn	grammarIsName	yes	yes, packed UInt8
+std/grammar.vyrn	grammarHead	no, it keeps a slice check	no, its effect set is alloc
+std/grammar.vyrn	grammarWordStart	yes	no, its effect set is alloc
+std/grammar.vyrn	grammarWordAt	no, it keeps an index check	no, its effect set is alloc
+std/grammar.vyrn	grammarLineOf	no, it calls `grammarHead`, which is not trap-free	no, its effect set is alloc
+std/grammar.vyrn	grammarTarget	no, it calls `grammarWordAt`, which is not trap-free	no, its effect set is alloc
 std/graphql.vyrn	gqlSlice	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlIsWs	yes	yes, packed UInt8
 std/graphql.vyrn	gqlStripBang	yes	no, its effect set is alloc

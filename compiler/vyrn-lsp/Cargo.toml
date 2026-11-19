@@ -20,6 +20,9 @@ vyrn-lower = { path = "../vyrn-lower" }
 # The generation engine, the only one: a build without it could not open a
 # file that uses a `gen fn`.
 vyrn-genwasm = { path = "../vyrn-genwasm" }
+# Colours a document by the grammar its language module states. Already beneath
+# `vyrn-frontend`, so it adds no dependency to the resolve.
+vyrn-syntax = { path = "../vyrn-syntax" }
 lsp-server = "0.7"
 lsp-types = "0.95"
 serde = "1"

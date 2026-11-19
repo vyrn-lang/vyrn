@@ -1,0 +1,98 @@
+/// The language of a `.syntax` file: the file format, `std/syntax.syntax`, which
+/// the toolchain's `**/*.syntax` row of the languages map names.
+///
+/// The editor reads a grammar file through this module and its companion,
+/// `std/grammar.editor.vyrn`, to which it exports how a grammar file names its
+/// rules: a definition starts in column 0, and its head is the name that opens
+/// the line, after an optional `nest`.
+
+import { syntax } from "std/syntax"
+import { startsWith } from "std/strpred"
+import * as format from syntax("./syntax.syntax")
+
+/// Whether `b` continues a rule name.
+fn grammarIsName(b: UInt8) -> Bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '.'
+}
+
+/// The rule the definition line `l` names, or "" for any other line.
+export to "./grammar.editor" fn grammarHead(l: String) -> String {
+    let b = bytes(l)
+    let mut s = 0
+    if l.startsWith("nest ") {
+        s = 5
+    }
+    let mut e = s
+    while e < b.length && grammarIsName(b[e]) {
+        e = e + 1
+    }
+    let mut k = e
+    while k < b.length && b[k] == ' ' {
+        k = k + 1
+    }
+    if e == s || k >= b.length || b[k] != '=' {
+        return ""
+    }
+    return stringFromBytes(bytes(l, s, e)) ?? ""
+}
+
+/// The 1-based column where the name around 1-based `col` of `l` starts.
+export to "./grammar.editor" fn grammarWordStart(l: String, col: Int64) -> Int64 {
+    let b = bytes(l)
+    let mut s = col - 1
+    if s > b.length {
+        s = b.length
+    }
+    while s > 0 && grammarIsName(b[s - 1]) {
+        s = s - 1
+    }
+    return s + 1
+}
+
+/// The name around 1-based `col` of `l`, or "".
+fn grammarWordAt(l: String, col: Int64) -> String {
+    let b = bytes(l)
+    let s = grammarWordStart(l, col) - 1
+    let mut e = s
+    while e < b.length && grammarIsName(b[e]) {
+        e = e + 1
+    }
+    return stringFromBytes(bytes(l, s, e)) ?? ""
+}
+
+/// The 1-based line that defines rule `name` in `ls`, or 0.
+fn grammarLineOf(ls: Array<String>, name: String) -> Int64 {
+    let mut i = 0
+    while i < ls.length {
+        if name.byteLength > 0 && grammarHead(ls[i]) == name {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+/// The rule a reference at 1-based `line` and `col` of `ls` names, by the line
+/// that defines it, or 0.
+export to "./grammar.editor" fn grammarTarget(ls: Array<String>, line: Int64, col: Int64) -> Int64 {
+    if line < 1 || line > ls.length {
+        return 0
+    }
+    return grammarLineOf(ls, grammarWordAt(ls[line - 1], col))
+}
+
+test "a head is the name that opens a definition line" {
+    assertEq(grammarHead("Item = Let / Fn"), "Item")
+    assertEq(grammarHead("nest Block = '{'"), "Block")
+    assertEq(grammarHead("nest 16 ^TooDeep(max='16')"), "")
+    assertEq(grammarHead("keyword Let 'let'"), "")
+    assertEq(grammarHead("  / Lambda"), "")
+}
+
+test "a reference finds the line of its rule" {
+    let ls: Array<String> = ["file = def*", "def = name", "name = [a-z]+"]
+    assertEq(grammarTarget(ls, 2, 8), 3)
+    assertEq(grammarTarget(ls, 2, 1), 2)
+    assertEq(grammarTarget(ls, 1, 12), 0)
+    assertEq(grammarTarget(ls, 9, 1), 0)
+}

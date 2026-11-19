@@ -12,6 +12,8 @@
 - [std/diag](std/diag.md) — A generator reports a diagnostic, anchored in a file it read.
 - [std/fallible](std/fallible.md) — `Fallible`: the protocol `?` resolves through for a type that is not
 - [std/fetch](std/fetch.md) — Outbound HTTP: `fetch` sends a request and waits for its response while the
+- [std/grammar](std/grammar.md) — The language of a `.syntax` file: the file format, `std/syntax.syntax`, which
+- [std/grammar.editor](std/grammar.editor.md) — Editor support for the `.syntax` files `std/grammar` reads.
 - [std/graphql](std/graphql.md) — The contract as a GraphQL SDL document, built on
 - [std/hash](std/hash.md) — Non-cryptographic byte hashing, and SHA-1 for the
 - [std/hints](std/hints.md) — Policy for checking libraries: per-project rule levels and per-line waivers.

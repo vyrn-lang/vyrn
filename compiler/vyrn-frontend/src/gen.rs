@@ -103,12 +103,14 @@ pub struct Report {
 }
 
 /// What a generator wrote: the module's text, its span table and its reports,
-/// each sorted by offset.
+/// each sorted by offset, and the key of each grammar whose parser `syntaxParser`
+/// wrote into it, in call order.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Written {
     pub source: String,
     pub spans: Vec<SpanRow>,
     pub reports: Vec<Report>,
+    pub grammars: Vec<String>,
 }
 
 impl Written {

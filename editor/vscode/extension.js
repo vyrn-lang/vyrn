@@ -88,7 +88,7 @@ function activate(context) {
   const clientOptions = {
     // `.vyrn` sources, plus `.vyx`, the generator inputs this extension ships a
     // grammar for. The server registers the other inputs a project's
-    // `vyrn.json` lists under `inputs`.
+    // `vyrn.json` lists under `inputs`, and the files its languages map names.
     documentSelector: [
       { scheme: "file", language: "vyrn" },
       { scheme: "file", language: "vyx" },

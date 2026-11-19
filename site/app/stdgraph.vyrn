@@ -258,13 +258,16 @@ export fn usedByModule(m: String) -> Array<String> {
 
 test "every module is a row, and every row carries its own search text" {
     let rows = searchRows()
-    assertEq(rows.length, apiModules().length)
+    let mods = apiModules()
+    assertEq(rows.length, mods.length)
+    let mut i = 0
     for r in rows {
         assert(r.name.byteLength > 0)
-        assert(r.count > 0)
+        assert(r.count > 0 || mods[i].language)
         assertEq(r.exports.length, r.count)
         assertEq(r.q, toLower(r.q))
         assert(r.q.byteLength > r.name.byteLength)
+        i = i + 1
     }
 }
 

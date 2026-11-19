@@ -8,7 +8,7 @@
   "icon": "icons/vyrn.png",
   "engines": { "vscode": "^1.70.0" },
   "categories": ["Programming Languages"],
-  "activationEvents": ["onLanguage:vyrn", "onLanguage:vyx"],
+  "activationEvents": ["onLanguage:vyrn", "onLanguage:vyx", "onLanguage:syntax"],
   "main": "./extension.js",
   "scripts": {
     "package": "npx --yes @vscode/vsce@3.9.2 package --allow-missing-repository --no-update-package-json"
