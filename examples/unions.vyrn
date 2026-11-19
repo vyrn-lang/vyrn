@@ -1,4 +1,4 @@
-// A union of validated types written in source: the base, where one member's rule holds.
+// A union of refinement types written in source: the base, where one member's rule holds.
 
 type Port = Int64 where value >= 1 && value <= 65535
 type Age = Int64 where value >= 18 && value <= 150

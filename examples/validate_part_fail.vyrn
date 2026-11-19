@@ -1,4 +1,4 @@
-// A validated record literal that fails its `where` clause as a part of a
+// A literal of a record refinement type that fails its `where` clause as a part of a
 // heap array traps with the same words as a bound one.
 
 type Tag = { name: String, n: Int64 } where n > 0

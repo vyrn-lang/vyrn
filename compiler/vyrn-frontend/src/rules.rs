@@ -339,7 +339,7 @@ rules! {
     EnumEmpty { name } "enum `{name}` has no variants";
     AliasWhere { noun } "a `{noun}` alias cannot have a `where` clause";
     UnionMember { m }
-        "`{m}` cannot be a member of a union: each member is a validated scalar type, or a union of them";
+        "`{m}` cannot be a member of a union: each member is a scalar refinement type, or a union of them";
     UnionBases { a, ab, b, bb }
         "a union's members share one base, but `{a}` is over `{ab}` and `{b}` over `{bb}`";
     RecordWhere {} "a record type cannot have a `where` clause";
@@ -503,7 +503,7 @@ rules! {
         fix "rename the local to call the function `{name}`";
     TestOnly { name }
         "`{name}` is only available inside a `test` block: in ordinary \
-        code, use a validated type or return a `Result` to signal failure";
+        code, use a refinement type or return a `Result` to signal failure";
     TakesTwo { name, got } "`{name}` takes 2 arguments, got {got}";
     AssertEqOperands { a, b } "`assertEq` needs two equal, equatable values, found {a} and {b}";
     BlackBoxOutsideBench {}
@@ -890,7 +890,7 @@ rules! {
         has no name to attach the refinement to";
     LazyWhere {}
         "a `lazy` field may not carry an inline `where`: name the \
-        validated type and defer that (`field: lazy Body`)";
+        refinement type and defer that (`field: lazy Body`)";
     FreeFnCapability { name }
         "`fn {name}` cannot return a capability: a projection's result \
         is a place inside its receiver, and a free function has none. \
@@ -1336,7 +1336,7 @@ rules! {
         "String has no `length`: use `byteLength` for bytes or `charCount()` for Unicode \
         scalars";
     FieldOnNonRecord { field, other } "cannot access field `{field}` on non-record type {other}";
-    TryConstructNotScalar { name } "`{name}?(..)` is only for validated/nominal scalar types";
+    TryConstructNotScalar { name } "`{name}?(..)` is only for scalar refinement types and nominal scalar types";
     UnionConstruct { name } "`{name}` is a union, which has no constructor: construct one of its members";
     TryConstructArity { name, got } "`{name}?` takes 1 argument, got {got}";
     ConstructArity { name, got } "`{name}` construction takes 1 argument, got {got}";
@@ -1389,7 +1389,7 @@ rules! {
         method and an `nth` projection, `fn nth(read self, ..) -> read T`), found {t}";
     NotRecordNoField { name, field } "`{name}` is not a record, so it has no field `{field}`";
     FieldValidated { field, fty }
-        "field `{field}` is {fty} (validated); assign an already-constructed `{fty}` value, \
+        "field `{field}` is {fty} (a refinement type); assign an already-constructed `{fty}` value, \
         e.g. `{fty}(..)`";
     FieldMismatch { field, fty, vty } "field `{field}` is {fty} but assigned {vty}";
     MapStoreKey { name, key, k } "`{name}` is keyed by {key}, but the key here is {k}";

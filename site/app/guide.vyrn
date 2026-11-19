@@ -230,7 +230,7 @@ export fn chapters() -> Array<Chapter> {
                     "A <code>String</code> is UTF-8 bytes. <code>byteLength</code> is a field and counts bytes; <code>charCount()</code> walks the string and counts characters. The two agree on ASCII and disagree everywhere else, and the names say which one you asked for.",
                     "<a href=\"/docs/std/strings.html\">std/strings</a> has the rest: split, join, trim, case, search, pad.",
                 ], ["text"]),
-                section("validated", "Validated types", [
+                section("validated", "Refinement types", [
                     "A <code>where</code> clause is part of the type. <code>Age(30)</code> is proven while the file compiles, so no check is emitted. <code>Age(5)</code> is refused by the compiler, in the same way a type error is refused.",
                     "Input from outside the program is not a constant, so it gets the total form. <code>Age?(n)</code> answers <code>Option&lt;Age&gt;</code>: <code>Some</code> when the rule holds, <code>None</code> when it does not. Nothing traps, and you cannot forget a check you never wrote.",
                     "The rule is readable by the compiler as well as by you. <a href=\"/guide/generators.html#reflection\">Chapter 10</a> turns the same declaration into a JSON Schema document.",
@@ -290,7 +290,7 @@ export fn chapters() -> Array<Chapter> {
                 ], ["arrays"]),
                 section("maps", "Map", [
                     "<code>Map&lt;String, V&gt;</code> keeps insertion order. <code>m[k]</code> answers <code>Option&lt;V&gt;</code>, <code>m[k] = v</code> inserts or updates, and an update keeps the key where it was.",
-                    "On the wire a map is a JSON object, and its schema is <code>additionalProperties</code>. A validated value type re-runs its rule on every insert.",
+                    "On the wire a map is a JSON object, and its schema is <code>additionalProperties</code>. A value type that is a refinement type re-runs its rule on every insert.",
                 ], ["maps"]),
             ],
         },
@@ -357,7 +357,7 @@ export fn chapters() -> Array<Chapter> {
                     "This page is built the same way. A generator reads <code>std/</code> and writes the <a href=\"/docs.html\">reference pages</a>.",
                 ], ["genuse"]),
                 section("reflection", "Reflection", [
-                    "<code>schemaOf<T>()</code> reads a validated type's own declaration. It answers with the name, the base type, the documentation line and every bound the <code>where</code> clause implies. <code>jsonSchema<T>()</code> writes the JSON Schema document from the same facts.",
+                    "<code>schemaOf<T>()</code> reads a refinement type's own declaration. It answers with the name, the base type, the documentation line and every bound the <code>where</code> clause implies. <code>jsonSchema<T>()</code> writes the JSON Schema document from the same facts.",
                     "This is not runtime reflection. Vyrn erases types before the program runs; the compiler computes the answer from the declaration.",
                 ], ["schema"]),
             ],
@@ -392,7 +392,7 @@ export fn chapters() -> Array<Chapter> {
                     "<code>flag</code> asks whether a token is present. <code>opt</code> reads <code>--name=value</code> and <code>--name value</code>, and answers <code>Option&lt;String&gt;</code>. <code>positionals</code> returns what is left, and <code>rest</code> returns what follows <code>--</code>.",
                 ], ["cliargs"]),
                 section("cli", "std/cli", [
-                    "<a href=\"/docs/std/cli.html\">std/cli</a> goes further. Declare a record whose fields are the options, and give each field a validated type with its own documentation line. <code>cli(\"./module\")</code> reflects it into a parser and a help text, so no flag name is written twice.",
+                    "<a href=\"/docs/std/cli.html\">std/cli</a> goes further. Declare a record whose fields are the options, and give each field a refinement type with its own documentation line. <code>cli(\"./module\")</code> reflects it into a parser and a help text, so no flag name is written twice.",
                     "A parse answers <code>Valid</code> or <code>Invalid</code> with the issues attached to their fields, so a program reports every problem at once instead of the first one.",
                 ], []),
             ],

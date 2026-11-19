@@ -3071,7 +3071,7 @@ impl<'a> Builder<'a> {
         self.frame.held = held;
         r?;
         match self.frame.owed.take() {
-            Some((to, line)) => gap_d("a check of a validated record no binding took", &to, line),
+            Some((to, line)) => gap_d("an unbound check of a record refinement type", &to, line),
             None => Ok(()),
         }
     }

@@ -1,8 +1,8 @@
-/// The wire types: the validated records and scalars that cross the RPC
+/// The wire types: the record and scalar refinement types that cross the RPC
 /// boundary. Pure data, no state, no behavior — and universal, so the pages, the
 /// browser client and the procedure module all name the same declarations.
 ///
-/// The validated types are the point: `fromJson` runs every `where` clause on
+/// The refinement types are the point: `fromJson` runs every `where` clause on
 /// the server, so a bad `age` on the wire comes back as structured 422 issues —
 /// no hand-written validation anywhere.
 

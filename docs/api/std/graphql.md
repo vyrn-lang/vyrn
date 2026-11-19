@@ -13,8 +13,8 @@ Mapping rules:
     non-`Option` field is non-null (`!`).
   - `Int64` and the sized ints => `Int`, `Float64`/`Float32` => `Float`,
     `String` => `String`, `Bool` => `Boolean`.
-  - a validated scalar (`BookId = Int64 where value >= 0`) becomes a named
-    `scalar` whose description carries its base and constraint.
+  - a scalar refinement type (`BookId = Int64 where value >= 0`) becomes a
+    named `scalar` whose description carries its base and constraint.
   - `Map<String, V>` becomes `scalar JSON`; a named map alias its own `scalar`.
   - a payload enum (including `Result<A, B>`) becomes an object with one
     nullable field per variant (nullary => `Boolean`, one payload => its type,

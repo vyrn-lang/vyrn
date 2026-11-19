@@ -1,4 +1,4 @@
-// Refused on purpose: a protocol impl for a validated scalar.
+// Refused on purpose: a protocol impl for a scalar refinement type.
 
 type Age = Int64 where value >= 18
 

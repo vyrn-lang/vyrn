@@ -28,7 +28,7 @@
 /// - `--help` is a question about argv, not a value in the record: ask it with
 ///   `wantsHelp(argv)` before parsing.
 ///
-/// A field is `Bool`, `Int64`, `String`, a validated type over `Int64` or
+/// A field is `Bool`, `Int64`, `String`, a refinement type over `Int64` or
 /// `String`, an `Option` of those, or one `Array<String>` for the positionals.
 /// Anything else fails the generation with a sentence naming the field.
 ///
@@ -299,7 +299,7 @@ fn cliBytes(n: Int64) -> String {
     return n.toString() + " bytes"
 }
 
-/// The rule a validated type states, in its own words: `1 to 65535`, `at least
+/// The rule a refinement type states, in its own words: `1 to 65535`, `at least
 /// 1`, `at most 32 bytes long`, or `""` when the predicate is not a bound.
 fn cliBoundsText(lo: Option<Int64>, hi: Option<Int64>, lengths: Bool) -> String {
     if let Some(a) = lo {
@@ -368,7 +368,7 @@ gen fn cliPlansOf(t: TypeInfo, iface: ModuleInterface) -> Array<CliPlan> {
             let base = cliBaseOf(inner, iface)
             if base == "" {
                 panic(
-                    "std/cli: field `" + f.name + "` of `" + t.name + "` has type `" + node.spelling + "`, which a command line cannot spell. M1 understands Bool, Int64, String, a validated type over Int64 or String, an Option of those, and one Array<String> for the positionals.",
+                    "std/cli: field `" + f.name + "` of `" + t.name + "` has type `" + node.spelling + "`, which a command line cannot spell. M1 understands Bool, Int64, String, a refinement type over Int64 or String, an Option of those, and one Array<String> for the positionals.",
                 )
             }
             if base == "Bool" && optional {
@@ -551,7 +551,7 @@ gen fn cliStore(p: CliPlan, value: Name) -> Code {
 }
 
 /// The `Port?(n)` hop (the type's own check, which is also the program's), or
-/// the plain assignment when the field's type is not a named validated one.
+/// the plain assignment when the field's type is not a named refinement type.
 gen fn cliEmitAccept(p: CliPlan, value: Name) -> Code {
     if p.named == "" {
         return cliStore(p, value)

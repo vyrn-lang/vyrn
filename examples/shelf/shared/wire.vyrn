@@ -1,4 +1,4 @@
-/// The shelf wire types: the validated records and scalars that cross the RPC
+/// The shelf wire types: the record and scalar refinement types that cross the RPC
 /// boundary, in their own leaf module. Pure data — no state, no behavior. The
 /// store types its `books` from these; the procedure module under `server/api`
 /// names the ones its signatures use.

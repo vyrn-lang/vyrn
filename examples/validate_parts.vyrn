@@ -1,4 +1,4 @@
-// A validated record literal written as a part of its parent is built in the
+// A literal of a record refinement type written as a part of its parent is built in the
 // parent's storage and checked there, as a bound one is.
 
 type Span = { lo: Int64, hi: Int64 } where lo < hi

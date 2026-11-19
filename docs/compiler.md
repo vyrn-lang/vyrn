@@ -285,7 +285,7 @@ disequality `d != 0` the state holds. A fact may name the length of
 a record name's array field, and a `where` rule's `a.length == b.length` makes
 one term of both (`facts::Term::Col`), except inside a group of stores into
 the record's fields, where each field has its own term until the row that
-checks the rule (`check::Guard::Rule`). A name of a validated integer type
+checks the rule (`check::Guard::Rule`). A name of an integer refinement type
 carries its rule's comparisons (`elide::Walk::premises`), and a construction of
 one from a name is a check row (`check::Guard::Scalar`). A record fact
 (`elide::RecordFacts`) is a linear fact over the fields of every record
@@ -328,7 +328,7 @@ direct call rows of bodies that may run enter starts with the facts every such r
 arguments (`World::summaries` lists the candidates, `elide::entered` drops a
 function any row spells by name). A refusal reads the demanded walk
 (`elide::demanded`): the same walk over the body, its parameters' clauses, its
-names' validated types and the declared result clauses of its direct callees
+names' refinement types and the declared result clauses of its direct callees
 (`elide::Summaries::declared`), and no inferred summary or entry fact, which
 the judgment memo does not key. The typed judgment states and walks its own
 copy of a body with a group or a `prove` call by it. `typed::groups` refuses
@@ -391,12 +391,12 @@ The kernel knows no surface syntax. It judges core bodies.
 - Typed (`typed.rs`). The `vyrn check` rules over the core rows: a store
   into a place not declared `mut`, a store group that leaves a `where` rule
   unchecked, an exit outside a loop, a `drop` that releases nothing, and the
-  rules the builder met at its construct. A value of a validated type is
+  rules the builder met at its construct. A value of a refinement type is
   produced only by that type's constructor, a name already of that type, or
   a literal the checker proved; the census `tests/typed.rs` walks each store
-  into a validated place and judges its producer. `vyrn_frontend::validate`
-  says which types carry a rule; a sized integer is judged by width and
-  signedness.
+  into a place of a refinement type and judges its producer.
+  `vyrn_frontend::validate` says which types carry a rule; a sized integer is
+  judged by width and signedness.
 
 The fact judgment (`vyrn_lower::fact_flow`) follows the three. It judges
 which arrays are sorted, and by which order, and writes only refusals into
@@ -765,7 +765,7 @@ run as their own gate:
   type its node produces.
 - `effects.rs`: the effect judgment agrees with the floor and the audience
   pass, or the disagreement is on the ratchet.
-- `typed.rs`: every store into a validated place has a legal producer.
+- `typed.rs`: every store into a place of a refinement type has a legal producer.
 - `fnverdicts.rs`: each function's trap-free and kernel verdicts, against
   `tests/pins/fn-verdicts.tsv`.
 - `given.rs`: every load that gives std bodies their stored rows, checked

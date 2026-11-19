@@ -1,4 +1,4 @@
-// A validated record literal that fails its `where` clause as a field of a
+// A literal of a record refinement type that fails its `where` clause as a field of a
 // record inside an array literal traps with the same words as a bound one.
 
 type Span = { lo: Int64, hi: Int64 } where lo < hi
