@@ -5457,8 +5457,16 @@ impl<'a> Checker<'a> {
                     (*inner).clone(),
                     Box::new(move |e| Type::SmallArray(Box::new(e), n)),
                 ),
-                Type::Err => return Ok(Type::Err),
-                other => return Err(cerr!(line, PushReceiver, other)),
+                other => {
+                    // A receiver built from a refused value (`[x]`, `x` typed
+                    // `Err`) was refused where it was built.
+                    let mut err = false;
+                    crate::types::walk_type(&other, &mut |t| err |= matches!(t, Type::Err));
+                    if err {
+                        return Ok(Type::Err);
+                    }
+                    return Err(cerr!(line, PushReceiver, other));
+                }
             };
             let v = self.expr(&args[1], scope, Some(&elem), fn_ret)?;
             if !self.coercible(&v, &elem) {
@@ -7247,7 +7255,7 @@ fn check_comptime_purity<'a>(
             if !facts.contains_key(cur) {
                 let row = match &f.body {
                     Body::Written(body) => cx.row(f, body),
-                    Body::Given(_) => (program.fenced.get(&f.name).cloned())
+                    Body::Given(_) => (program.given.fenced(&f.name).cloned())
                         .unwrap_or_else(|| panic!("the given `{}` has no stored row", f.name)),
                 };
                 facts.insert(cur.to_string(), row);

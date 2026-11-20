@@ -130,12 +130,22 @@ pub struct Manifest {
     pub inputs: Vec<String>,
     /// The `proved` key: the modules where every check must be proved.
     pub proved: Proved,
-    /// The `languages` key: a glob relative to `dir`, and the module that reads
-    /// the files it names, as an import specifier resolved against `dir`.
-    pub languages: Vec<(String, String)>,
+    /// The `languages` key, in order: the last entry whose glob names a file
+    /// decides which module reads it.
+    pub languages: Vec<Language>,
 }
 
-/// The toolchain's own languages, which a project's `languages` entries merge over.
+/// One `languages` entry: the files a glob relative to the manifest's
+/// directory names, and the module that reads them, an import specifier
+/// resolved against that directory. `None` leaves the files to no module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Language {
+    pub files: String,
+    pub module: Option<String>,
+}
+
+/// The toolchain's own languages: entries before a project's, so a project's
+/// entry over the same file wins. Their globs match anywhere.
 const DEFAULT_LANGUAGES: [(&str, &str); 1] = [("**/*.syntax", "std/grammar")];
 
 /// Returns the globs of the toolchain's own languages, which match anywhere.
@@ -143,31 +153,64 @@ pub fn default_language_globs() -> impl Iterator<Item = &'static str> {
     DEFAULT_LANGUAGES.iter().map(|(g, _)| *g)
 }
 
-/// Returns the module that reads the file at slash path `path`, as the importer
-/// it resolves against and its import specifier: the one entry of `m` whose glob
-/// names it, against `m`'s `vyrn.json`, else the default whose glob does, against
-/// the file, else `None`.
-///
-/// # Errors
-///
-/// Two entries of `m` that name the file, as a sentence naming both.
-pub fn language_of(m: Option<&Manifest>, path: &str) -> Result<Option<(String, String)>, String> {
+/// Returns what reads the file at slash path `path`: the importer a module
+/// resolves against and the module's specifier, `None` for an entry that
+/// leaves the file to no module. The last entry of `m` whose glob names the
+/// file decides, against `m`'s `vyrn.json`, else the default whose glob does,
+/// against the file. `None` where no entry names the file.
+pub fn language_of(m: Option<&Manifest>, path: &str) -> Option<(String, Option<String>)> {
     let path = path.replace('\\', "/");
-    let own: Vec<(&Manifest, &(String, String))> = m.map_or(Vec::new(), |m| {
-        let rel = crate::audience::relative_to(&path, &m.dir);
-        (m.languages.iter())
-            .filter(|(g, _)| rel.as_deref().is_some_and(|r| glob_path(g, r)))
-            .map(|e| (m, e))
-            .collect()
+    let own = m.and_then(|m| {
+        let rel = crate::audience::relative_to(&path, &m.dir)?;
+        let last = m.languages.iter().rfind(|l| glob_path(&l.files, &rel))?;
+        Some((format!("{}/vyrn.json", m.dir), last.module.clone()))
     });
-    match own[..] {
-        [(m, (_, module))] => Ok(Some((format!("{}/vyrn.json", m.dir), module.clone()))),
-        [(_, (a, _)), (_, (b, _)), ..] => Err(format!(
-            "`languages` entries `{a}` and `{b}` both name {path}; one module reads a file"
-        )),
-        [] => Ok((DEFAULT_LANGUAGES.iter())
+    own.or_else(|| {
+        (DEFAULT_LANGUAGES.iter())
             .find(|(g, _)| glob_path(g, &path))
-            .map(|(_, module)| (path.clone(), module.to_string()))),
+            .map(|(_, module)| (path.clone(), Some(module.to_string())))
+    })
+}
+
+impl Manifest {
+    /// Warns, at the manifest, of each `languages` entry that reads no file
+    /// of the project because entries after it take every file it matches,
+    /// naming both by index and glob. An entry that matches no file earns no
+    /// warning. The walk skips what [`glob_files`] skips.
+    pub fn language_warnings(&self) -> Vec<crate::diagnostics::Diagnostic> {
+        let dir = Path::new(&self.dir);
+        let named = |i: usize| format!("languages[{i}] ({})", self.languages[i].files);
+        let mut out = Vec::new();
+        for (i, entry) in self.languages.iter().enumerate() {
+            let mut files = Vec::new();
+            glob_files(dir, &glob_segs(&entry.files), usize::MAX, &mut files);
+            // The entry that reads each file: the last whose glob names it.
+            let rel = |f: &PathBuf| {
+                Some(
+                    f.strip_prefix(dir)
+                        .ok()?
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                )
+            };
+            let mut takers: Vec<usize> = (files.iter().filter_map(rel))
+                .filter_map(|f| self.languages.iter().rposition(|l| glob_path(&l.files, &f)))
+                .collect();
+            takers.sort_unstable();
+            takers.dedup();
+            if takers.is_empty() || takers.contains(&i) {
+                continue;
+            }
+            let by: Vec<String> = takers.into_iter().map(named).collect();
+            let message = format!(
+                "{} reads no file: every file it matches is taken by {} below it",
+                named(i),
+                by.join(" and ")
+            );
+            let d = crate::diagnostics::Diagnostic::warning(1, 0, "load", message);
+            out.push(d.in_file(Some(format!("{}/vyrn.json", self.dir))));
+        }
+        out
     }
 }
 
@@ -218,11 +261,6 @@ impl Proved {
 /// against one name ([`glob_name`]): a `**` segment matches any number of
 /// directories. Each step consumes a segment of the glob or of the path.
 pub fn glob_path(glob: &str, path: &str) -> bool {
-    fn segs(s: &str) -> Vec<&str> {
-        s.split('/')
-            .filter(|x| !x.is_empty() && *x != ".")
-            .collect()
-    }
     fn go(g: &[&str], p: &[&str]) -> bool {
         match g.split_first() {
             None => p.is_empty(),
@@ -232,7 +270,7 @@ pub fn glob_path(glob: &str, path: &str) -> bool {
                 .is_some_and(|(n, pr)| glob_name(first.as_bytes(), n.as_bytes()) && go(rest, pr)),
         }
     }
-    go(&segs(glob), &segs(path))
+    go(&glob_segs(glob), &glob_segs(path))
 }
 
 /// Whether the name `s` matches the one-segment glob `p` (`*`, `?`, literals).
@@ -278,6 +316,96 @@ pub fn find(start: &Path) -> Result<Option<Manifest>, String> {
 /// `vyrn why --contract` and the build name one root.
 pub fn app_root(start: &Path) -> PathBuf {
     nearest_manifest_dir(start).unwrap_or_else(|| start.to_path_buf())
+}
+
+/// Appends the files under `dir` whose relative path matches the glob segments
+/// `segs`: `**` is any number of directories, `*` and `?` match within one name.
+/// A directory whose name starts with `.`, `target` and `node_modules` hold no
+/// source and are not entered; symbolic links are not followed, so the walk ends
+/// on any tree. It stops at `cap` files.
+pub fn glob_files(dir: &Path, segs: &[&str], cap: usize, out: &mut Vec<PathBuf>) {
+    let Some((first, rest)) = segs.split_first() else {
+        return;
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<(PathBuf, std::fs::FileType)> = (rd.flatten())
+        .filter_map(|e| Some((e.path(), e.file_type().ok()?)))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    if *first == "**" {
+        glob_files(dir, rest, cap, out);
+    }
+    for (path, kind) in entries {
+        if out.len() >= cap {
+            return;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if kind.is_dir() && (name.starts_with('.') || name == "target" || name == "node_modules") {
+            continue;
+        }
+        if *first == "**" {
+            if kind.is_dir() {
+                glob_files(&path, segs, cap, out);
+            }
+        } else if glob_name(first.as_bytes(), name.as_bytes()) {
+            if rest.is_empty() {
+                if kind.is_file() && !out.contains(&path) {
+                    out.push(path);
+                }
+            } else if kind.is_dir() {
+                glob_files(&path, rest, cap, out);
+            }
+        }
+    }
+}
+
+/// The segments of a slash glob, without empty and `.` ones.
+pub fn glob_segs(glob: &str) -> Vec<&str> {
+    (glob.split('/'))
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect()
+}
+
+/// Reads the `languages` key of a manifest in `slash_dir`: an array of
+/// `{ "files": glob, "module": specifier or null }`, in order. A relative
+/// module is a file of the project, which must exist; any other specifier
+/// resolves as an import does.
+fn languages(key: Option<&Json>, slash_dir: &str) -> Result<Vec<Language>, String> {
+    let Some(key) = key else {
+        return Ok(Vec::new());
+    };
+    let shape =
+        "`languages` must be an array of { \"files\": glob, \"module\": specifier or null }";
+    let Json::Arr(items) = key else {
+        return Err(format!("{shape}, found {}", json_kind(key)));
+    };
+    let entry = |i: usize, v: &Json| -> Result<Language, String> {
+        let at = format!("`languages[{i}]`");
+        let Some(Json::Str(files)) = v.get("files") else {
+            return Err(format!("{shape}; {at} has no string `files`"));
+        };
+        let module = match v.get("module") {
+            Some(Json::Str(m)) => Some(m.clone()),
+            Some(Json::Null) => None,
+            _ => return Err(format!("{shape}; {at} has no string or null `module`")),
+        };
+        let relative = |m: &&String| m.starts_with("./") || m.starts_with("../");
+        if let Some(m) = module.as_ref().filter(relative) {
+            let file = format!("{}/{m}.vyrn", slash_dir.trim_end_matches('/'));
+            if !Path::new(&file).is_file() {
+                return Err(format!("{at} ({files}): no module {m}.vyrn"));
+            }
+        }
+        let files = files.clone();
+        Ok(Language { files, module })
+    };
+    (items.iter().enumerate())
+        .map(|(i, v)| entry(i, v))
+        .collect()
 }
 
 /// Builds a [`Manifest`] from a parsed document rooted at `slash_dir`: the
@@ -343,18 +471,7 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
     let proved = str_list("proved")?;
     // A relative module is a file of the project, which must exist; any other
     // specifier resolves as an import does.
-    let languages = (str_map("languages", "globs to modules")?.into_iter())
-        .map(|(glob, module)| {
-            if !module.starts_with("./") && !module.starts_with("../") {
-                return Ok((glob, module));
-            }
-            let file = format!("{}/{module}.vyrn", slash_dir.trim_end_matches('/'));
-            match std::path::Path::new(&file).is_file() {
-                true => Ok((glob, module)),
-                false => Err(format!("`languages.{glob}`: no module {module}.vyrn")),
-            }
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let languages = languages(doc.get("languages"), &slash_dir)?;
     // An unknown tool name is refused where it is written: a typo that declared
     // nothing would leave the build on PATH, a silent fallback.
     let toolchain = str_map("toolchain", "names to version strings")?;
@@ -1179,30 +1296,66 @@ mod tests {
         }
     }
 
-    /// A file's module is the one project entry naming it, else the default; a
-    /// missing module and two entries over one file are refused.
+    /// The last entry naming a file reads it, a project's after the defaults;
+    /// a null module leaves the file to none; a missing module is refused.
     #[test]
-    fn the_languages_map_names_one_module_per_file() {
+    fn the_last_languages_entry_naming_a_file_reads_it() {
         let d = tmp("languages");
         std::fs::write(d.join("calc.vyrn"), "").unwrap();
         let read = |json: &str| {
             std::fs::write(d.join("vyrn.json"), json).unwrap();
             find(&d)
         };
-        let m = read(r#"{"languages":{"*.calc":"./calc","**/*.syntax":"./calc"}}"#);
+        let m = read(
+            r#"{"languages":[{"files":"*.calc","module":"std/x"},{"files":"*.calc","module":"./calc"},
+                {"files":"**/*.syntax","module":"./calc"},{"files":"off/*.syntax","module":null}]}"#,
+        );
         let m = m.unwrap().unwrap();
         let file = |name: &str| format!("{}/{name}", m.dir);
-        let calc = Some((file("vyrn.json"), "./calc".to_string()));
-        assert_eq!(language_of(Some(&m), &file("a.calc")), Ok(calc.clone()));
-        assert_eq!(language_of(Some(&m), &file("x/a.syntax")), Ok(calc));
-        let std = Some((file("x/a.syntax"), "std/grammar".to_string()));
-        assert_eq!(language_of(None, &file("x/a.syntax")), Ok(std));
-        assert_eq!(language_of(Some(&m), &file("a.txt")), Ok(None));
-        let m = read(r#"{"languages":{"*.calc":"./calc","a.*":"std/x"}}"#);
-        let e = language_of(Some(&m.unwrap().unwrap()), &file("a.calc")).unwrap_err();
-        assert!(e.contains("`*.calc` and `a.*` both name"), "{e}");
-        let e = read(r#"{"languages":{"*.calc":"./none"}}"#).err().unwrap();
-        assert_eq!(e, "`languages.*.calc`: no module ./none.vyrn");
+        let calc = Some((file("vyrn.json"), Some("./calc".to_string())));
+        assert_eq!(language_of(Some(&m), &file("a.calc")), calc);
+        assert_eq!(language_of(Some(&m), &file("x/a.syntax")), calc);
+        let off = Some((file("vyrn.json"), None));
+        assert_eq!(language_of(Some(&m), &file("off/a.syntax")), off);
+        let std = Some((file("x/a.syntax"), Some("std/grammar".to_string())));
+        assert_eq!(language_of(None, &file("x/a.syntax")), std);
+        assert_eq!(language_of(Some(&m), &file("a.txt")), None);
+        let e = read(r#"{"languages":[{"files":"*.calc","module":"./none"}]}"#)
+            .err()
+            .unwrap();
+        assert_eq!(e, "`languages[0]` (*.calc): no module ./none.vyrn");
+        let e = read(r#"{"languages":{"*.calc":"./calc"}}"#).err().unwrap();
+        assert!(e.starts_with("`languages` must be an array of"), "{e}");
+    }
+
+    /// An entry every file of which a later entry takes reads nothing, and
+    /// says so naming both; an entry that keeps one file, or matches none,
+    /// does not.
+    #[test]
+    fn a_languages_entry_a_later_one_shadows_is_a_warning() {
+        let d = tmp("shadow");
+        std::fs::create_dir_all(d.join("config/data")).unwrap();
+        std::fs::write(d.join("config/data/a.json"), "").unwrap();
+        let entries = r#"[{"files":"none/*.json","module":"std/x"},{"files":"config/data/*.json","module":"std/x"},{"files":"config/**/*.json","module":"std/y"}]"#;
+        std::fs::write(d.join("vyrn.json"), format!(r#"{{"languages":{entries}}}"#)).unwrap();
+        let m = find(&d).unwrap().unwrap();
+        let said: Vec<String> = m
+            .language_warnings()
+            .into_iter()
+            .map(|w| w.message)
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "languages[1] (config/data/*.json) reads no file: every file it matches is \
+              taken by languages[2] (config/**/*.json) below it"
+            ]
+        );
+        std::fs::write(d.join("config/b.json"), "").unwrap();
+        std::fs::write(d.join("config/data/c.txt"), "").unwrap();
+        let entries = r#"[{"files":"config/**/*","module":"std/x"},{"files":"config/**/*.json","module":"std/y"}]"#;
+        std::fs::write(d.join("vyrn.json"), format!(r#"{{"languages":{entries}}}"#)).unwrap();
+        assert!(find(&d).unwrap().unwrap().language_warnings().is_empty());
     }
 
     /// A present but mistyped map is refused, not read as no dependencies.

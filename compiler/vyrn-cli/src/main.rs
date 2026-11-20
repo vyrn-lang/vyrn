@@ -831,6 +831,8 @@ impl Project {
         self.save_lock().map_err(|_| SEE_TERMINAL.to_string())?;
         let root_key = dos_to_slash(root);
         let t = result.map_err(|diags| print_diagnostics(&diags, &root_key, &self.opts, ""))?;
+        let manifest = self.manifest.iter().flat_map(|m| m.language_warnings());
+        let warnings: Vec<Diagnostic> = manifest.chain(warnings).collect();
         if !warnings.is_empty() {
             let text = print_diagnostics(&warnings, &root_key, &self.opts, "warning: ");
             if self.flags.deny_warnings {

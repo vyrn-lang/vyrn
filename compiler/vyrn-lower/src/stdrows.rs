@@ -50,12 +50,14 @@ pub struct Given {
     /// By linked name: the row of each function of the program whose module's
     /// entry holds one, the given functions and a std module's impl methods.
     rows: HashMap<String, Stored>,
-    /// What the generation fence reads of each given function, by linked
-    /// name; empty for a program with no written gen fn, whose fence reads
-    /// no given body.
-    pub(crate) fenced: BTreeMap<String, Fenced>,
     /// The function values the given bodies store and pass.
     pub(crate) sources: Vec<StoredSource>,
+}
+
+impl vyrn_frontend::ast::GivenRows for Given {
+    fn fenced(&self, name: &str) -> Option<&Fenced> {
+        Some(&self.rows.get(name)?.fenced)
+    }
 }
 
 impl Given {
@@ -132,27 +134,17 @@ impl Given {
             }
         }
         once_each(&mut out.sources);
-        if program
-            .functions
-            .iter()
-            .any(|f| f.is_gen && matches!(f.body, Body::Written(_)))
-        {
-            for f in &given {
-                let s = &out.rows[&f.name];
-                out.fenced.insert(f.name.clone(), s.fenced.clone());
-            }
-        }
         Ok(out)
     }
 
     /// The rows `program` carries ([`Program::given`]); none for a program no
     /// load gave a body.
     pub(crate) fn of(program: &Program) -> Arc<Given> {
-        let rows = program
-            .given
-            .0
-            .clone()
-            .and_then(|r| r.downcast::<Given>().ok());
+        let rows = program.given.0.clone().and_then(|r| {
+            (r as Arc<dyn std::any::Any + Send + Sync>)
+                .downcast::<Given>()
+                .ok()
+        });
         rows.unwrap_or_default()
     }
 

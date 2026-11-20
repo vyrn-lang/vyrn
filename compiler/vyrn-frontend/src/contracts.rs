@@ -190,7 +190,7 @@ pub fn discovered_roles(
         };
         let (program, _) = crate::parser::parse_accum(tokens);
         for claim in crate::audience::claims(path, &program, opts) {
-            let Some(gen_module) = claim.module else {
+            let Some(gen_module) = claim.module().map(str::to_string) else {
                 continue;
             };
             let Some((contract, gen_file)) =

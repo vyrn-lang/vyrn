@@ -23,7 +23,7 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
     Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{RegisterCapability, Request as _};
+use lsp_types::request::{RegisterCapability, Request as _, UnregisterCapability};
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CompletionItem, CompletionItemKind, CompletionOptions,
@@ -33,17 +33,18 @@ use lsp_types::{
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
     DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     Documentation, FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
-    Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, InlayHint,
-    InlayHintKind, InlayHintLabel, InlayHintParams, InsertTextFormat, Location, LocationLink,
-    MarkupContent, MarkupKind, OneOf, Position, PrepareRenameResponse, PublishDiagnosticsParams,
-    Range, Registration, RegistrationParams, RelativePattern, RenameOptions, RenameParams,
-    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
+    Hover, HoverContents, HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel,
+    InlayHintParams, InsertTextFormat, Location, LocationLink, MarkupContent, MarkupKind, OneOf,
+    Position, PrepareRenameResponse, PublishDiagnosticsParams, Range, Registration,
+    RegistrationParams, RelativePattern, RenameOptions, RenameParams, SemanticToken,
+    SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 
+use vyrn_frontend::audience::ClaimKind;
 use vyrn_frontend::symbolmap::MappedSymbol;
 use vyrn_frontend::{
     analyze_judged, class_completions, class_site, class_token_hover, member_completions,
@@ -324,6 +325,9 @@ fn main() {
                 register_documents(&connection, &server, "vyrn/languages", defaults);
                 for folder in folders {
                     register_inputs(&connection, &mut server, &folder);
+                    for dir in module_dirs(&folder) {
+                        register_inputs(&connection, &mut server, &dir);
+                    }
                 }
                 main_loop(&connection, &mut server);
             }
@@ -418,10 +422,12 @@ fn handle_initialize(
     connection: &Connection,
 ) -> Result<(Vec<String>, serde_json::Value, Vec<std::path::PathBuf>), ()> {
     let (id, params) = connection.initialize_start().map_err(|_| ())?;
+    // Each field is read on its own: a client that omits a field the protocol
+    // requires elsewhere, as a partial semanticTokens capability, must not lose
+    // its workspace folders.
     let caps = params.get("capabilities").cloned().unwrap_or_default();
-    let params: InitializeParams = serde_json::from_value(params).unwrap_or_default();
-    let off = (params.initialization_options.as_ref()).and_then(|o| o.get("costHints")?.as_bool());
-    let _ = COST_HINTS.set(off.unwrap_or(true));
+    let off = params.pointer("/initializationOptions/costHints");
+    let _ = COST_HINTS.set(off.and_then(|o| o.as_bool()).unwrap_or(true));
 
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -465,20 +471,17 @@ fn handle_initialize(
     };
     let value = serde_json::to_value(result).unwrap();
     connection.initialize_finish(id, value).map_err(|_| ())?;
-    #[allow(deprecated)]
-    let folders = match params.workspace_folders {
-        Some(fs) => fs.into_iter().map(|f| f.uri).collect(),
-        None => params.root_uri.into_iter().collect::<Vec<_>>(),
+    let folders = match params.get("workspaceFolders").and_then(|f| f.as_array()) {
+        Some(fs) => fs.iter().filter_map(|f| f.get("uri")).collect(),
+        None => params.get("rootUri").into_iter().collect::<Vec<_>>(),
     };
-    let dirs: Vec<std::path::PathBuf> = (folders.iter())
-        .filter_map(|u| u.to_file_path().ok())
+    let dirs: Vec<std::path::PathBuf> = (folders.into_iter())
+        .filter_map(|u| Url::parse(u.as_str()?).ok()?.to_file_path().ok())
         .collect();
-    let events =
-        (params.capabilities.workspace.as_ref()).and_then(|w| w.did_change_watched_files.as_ref());
     // A base outside the workspace needs a relative pattern.
-    if !events.is_some_and(|e| {
-        e.dynamic_registration == Some(true) && e.relative_pattern_support == Some(true)
-    }) {
+    let event = |k: &str| caps.pointer(&format!("/workspace/didChangeWatchedFiles/{k}"));
+    let yes = Some(&serde_json::Value::Bool(true));
+    if event("dynamicRegistration") != yes || event("relativePatternSupport") != yes {
         return Ok((Vec::new(), caps, dirs));
     }
     let roots: Vec<String> = (dirs.iter())
@@ -537,30 +540,91 @@ const INPUT_METHODS: [(&str, &str); 11] = [
     ("textDocument/semanticTokens", "semanticTokens"),
 ];
 
-/// Asks the client to send the documents the `inputs` and `languages` globs of
-/// the manifest governing `dir` name, and to send this server their requests,
-/// once per manifest.
+/// Asks the client to send the documents the `inputs` globs and the
+/// `languages` entries with a module of the manifest governing `dir` name, and
+/// to send this server their requests, once per manifest. Publishes the
+/// manifest's warnings on its `vyrn.json`.
 fn register_inputs(connection: &Connection, server: &mut Server, dir: &std::path::Path) {
     let Ok(Some(m)) = manifest_of(dir) else {
         return;
     };
-    let globs = m.inputs.iter().chain(m.languages.iter().map(|(g, _)| g));
-    let globs: Vec<&String> = globs.collect();
+    let read = (m.languages.iter()).filter_map(|l| l.module.as_ref().map(|_| &l.files));
+    let globs: Vec<&String> = m.inputs.iter().chain(read).collect();
     if globs.is_empty() || !server.inputs_registered.insert(m.dir.clone()) {
         return;
     }
+    publish_manifest(connection, &m.dir, &m.language_warnings());
     let Ok(base) = Url::from_directory_path(&m.dir) else {
         return;
     };
     let selector = (globs.into_iter())
         .map(|g| serde_json::json!({ "pattern": { "baseUri": base, "pattern": g } }))
         .collect();
-    register_documents(
-        connection,
-        server,
-        &format!("vyrn/inputs:{}", m.dir),
-        selector,
-    );
+    register_documents(connection, server, &inputs_id(&m.dir), selector);
+}
+
+/// Publishes `diags` on the `vyrn.json` in slash directory `dir`; none clears
+/// what was published there.
+fn publish_manifest(
+    connection: &Connection,
+    dir: &str,
+    diags: &[vyrn_frontend::diagnostics::Diagnostic],
+) {
+    let file = std::path::Path::new(dir).join("vyrn.json");
+    let Ok(uri) = Url::from_file_path(&file) else {
+        return;
+    };
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    publish(connection, &uri, None, &text, diags);
+}
+
+/// The request id under which [`register_inputs`] asks for the globs of the
+/// manifest in slash directory `dir`; each registration's id extends it.
+fn inputs_id(dir: &str) -> String {
+    format!("vyrn/inputs:{dir}")
+}
+
+/// The directories under `folder` that hold a `vyrn.json`: every module root,
+/// found by the walk [`collect_sources`] makes.
+fn module_dirs(folder: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    collect_sources(folder, None, 0, usize::MAX, &["json"], &mut files);
+    (files.iter())
+        .filter(|f| f.file_name() == Some("vyrn.json".as_ref()))
+        .filter_map(|f| f.parent().map(|d| d.to_path_buf()))
+        .collect()
+}
+
+/// Drops what [`register_inputs`] asked of the client for the manifest in
+/// `dir`, then asks again for the manifest now governing `dir`: the client sent
+/// that `dir/vyrn.json` was created, changed or deleted.
+fn reregister_inputs(connection: &Connection, server: &mut Server, dir: &std::path::Path) {
+    let key = vyrn_frontend::manifest::dos_to_slash(&dir.to_string_lossy());
+    if server.inputs_registered.remove(&key) {
+        let id = inputs_id(&key);
+        let unregisterations: Vec<serde_json::Value> = (served_methods(server))
+            .map(|method| serde_json::json!({ "id": format!("{id}:{method}"), "method": method }))
+            .collect();
+        let request = Request::new(
+            format!("vyrn/drop-inputs:{key}").into(),
+            UnregisterCapability::METHOD.to_string(),
+            serde_json::json!({ "unregisterations": unregisterations }),
+        );
+        let _ = connection.sender.send(Message::Request(request));
+        publish_manifest(connection, &key, &[]);
+    }
+    register_inputs(connection, server, dir);
+}
+
+/// The [`INPUT_METHODS`] the client registers dynamically: the only ones a
+/// registration asks for.
+fn served_methods(server: &Server) -> impl Iterator<Item = &'static str> + '_ {
+    (INPUT_METHODS.iter())
+        .filter(|(_, cap)| {
+            let at = format!("/textDocument/{cap}/dynamicRegistration");
+            server.client_caps.pointer(&at) == Some(&serde_json::Value::Bool(true))
+        })
+        .map(|(method, _)| *method)
 }
 
 /// Asks the client, under request `id`, to send the documents `selector` names
@@ -572,14 +636,9 @@ fn register_documents(
     id: &str,
     selector: Vec<serde_json::Value>,
 ) {
-    let dynamic = |cap: &str| {
-        let at = format!("/textDocument/{cap}/dynamicRegistration");
-        server.client_caps.pointer(&at) == Some(&serde_json::Value::Bool(true))
-    };
-    let registrations: Vec<serde_json::Value> = (INPUT_METHODS.iter())
-        .filter(|(_, cap)| dynamic(cap))
-        .map(|(method, _)| {
-            let mut options = match *method {
+    let registrations: Vec<serde_json::Value> = (served_methods(server))
+        .map(|method| {
+            let mut options = match method {
                 "textDocument/didChange" => serde_json::json!({ "syncKind": 1 }),
                 "textDocument/completion" => serde_json::json!({ "triggerCharacters": TRIGGERS }),
                 "textDocument/rename" => serde_json::json!({ "prepareProvider": true }),
@@ -697,7 +756,7 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
     // Owner discovery for a generator input also runs here, in case a request precedes
     // the open's discovery. It publishes no diagnostics; didOpen does.
     if let Some(uri) = request_uri(&req) {
-        if !is_vyrn_uri(&uri) && matches!(language_claim(&uri), Ok(None)) {
+        if !is_vyrn_uri(&uri) && matches!(language_claim(&uri), Ok(None)) && !left_plain(&uri) {
             ensure_input_owner(server, &uri);
             dbg_log(&format!(
                 "  input owner for {} => {:?} (ownerless={})",
@@ -1347,7 +1406,7 @@ fn generator_completion(
             ConstVal::Int(line as i64),
             ConstVal::Int(col as i64),
         ];
-        let (module, engine) = (claim.module.as_deref()?, engine());
+        let (module, engine) = (claim.module()?, engine());
         let out = vyrn_frontend::loader::call_generator(
             &importer,
             module,
@@ -2821,7 +2880,10 @@ fn companion_lists(
         &resolver,
         Some(&*engine()),
     );
-    (answers.iter()).any(|(c, names)| names.lines().any(|n| n == c.generator))
+    (answers.iter()).any(|(c, names)| match &c.kind {
+        ClaimKind::Generator { generator, .. } => names.lines().any(|n| n == generator),
+        ClaimKind::Language { .. } => false,
+    })
 }
 
 /// Every generated symbol standing for a declaration in `path`, from every root
@@ -3021,12 +3083,26 @@ fn language_claim(uri: &Url) -> Result<Option<vyrn_frontend::audience::Claim>, S
     };
     let m = manifest_of(file.parent().unwrap_or(&file))?;
     let file = file.to_string_lossy().replace('\\', "/");
-    vyrn_frontend::audience::language_claim(m.as_ref(), &file)
+    Ok(vyrn_frontend::audience::language_claim(m.as_ref(), &file))
+}
+
+/// Whether the manifest's languages leave the document `uri` to no module
+/// (`"module": null`): plain text, for which the server serves nothing.
+fn left_plain(uri: &Url) -> bool {
+    let Ok(file) = uri.to_file_path() else {
+        return false;
+    };
+    let Ok(m) = manifest_of(file.parent().unwrap_or(&file)) else {
+        return false;
+    };
+    let file = file.to_string_lossy().replace('\\', "/");
+    let named = vyrn_frontend::manifest::language_of(m.as_ref(), &file);
+    matches!(named, Some((_, None)))
 }
 
 /// Publishes what a language document's companion refuses
-/// ([`vyrn_frontend::audience::input_check`]), or the manifest's refusal of two
-/// languages over it.
+/// ([`vyrn_frontend::audience::input_check`]), or why its manifest cannot be
+/// read.
 fn check_language(connection: &Connection, server: &Server, uri: &Url, claim: Result<(), String>) {
     let text = doc_text(server, uri).unwrap_or_default();
     let diags = match (claim, input_claim(server, uri)) {
@@ -3062,7 +3138,7 @@ fn language_runs(server: &Server, uri: &Url) -> Option<Vec<vyrn_syntax::colour::
     let (root, claim, _) = input_claim(server, uri)?;
     let overlays = overlays_of(server);
     let (opts, resolver, _, _) = load_context(&server.session, &root, &overlays)?;
-    let module = claim.module.as_deref()?;
+    let module = claim.module()?;
     let engine = engine();
     let grammar = vyrn_frontend::loader::grammar_of(
         &claim.importer,
@@ -3219,6 +3295,8 @@ fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
         reanalyze_root(connection, server, uri);
     } else if let Some(claim) = language_claim(uri).map(|c| c.map(|_| ())).transpose() {
         check_language(connection, server, uri, claim);
+    } else if left_plain(uri) {
+        // Plain text: nothing is served.
     } else if let Some(owner) = uri_path(uri)
         .and_then(|p| server.input_owner.get(&p))
         .cloned()
@@ -3286,6 +3364,11 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             for change in params.changes {
                 if let Ok(p) = change.uri.to_file_path() {
                     server.session.changed(&p.to_string_lossy());
+                    if p.file_name() == Some("vyrn.json".as_ref()) {
+                        if let Some(dir) = p.parent() {
+                            reregister_inputs(connection, server, dir);
+                        }
+                    }
                 }
             }
         }

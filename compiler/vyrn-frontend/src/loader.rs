@@ -1799,7 +1799,7 @@ fn load_modules(
     fn visit(
         key: &str,
         source: Option<&str>,
-        generated: Option<&Generated>,
+        generated: Option<(&Generated, (usize, usize))>,
         opts: &LoadOptions,
         resolver: &dyn ModuleResolver,
         engine: Option<&crate::gen::GenEngine>,
@@ -1836,6 +1836,8 @@ fn load_modules(
         let is_root = key == root_key;
         let hash = text_hash(&text);
 
+        // The generator call's line and column in the importer.
+        let (generated, call) = (generated.map(|(g, _)| g), generated.map(|(_, at)| at));
         let written = generated.map(|g| &g.written);
         // A generated module's errors show where its span table says, and its
         // reports are diagnostics at the generator's severity.
@@ -1851,7 +1853,7 @@ fn load_modules(
             let mut errors: Vec<Diagnostic> = Vec::new();
             for r in &g.reports {
                 let gen_line = 1 + text[..r.offset].matches('\n').count();
-                let Some(d) = crate::origin::report(key, gen_line, &r.line, &ctx) else {
+                let Some(d) = crate::origin::report(key, gen_line, &r.line, &ctx, call) else {
                     continue;
                 };
                 let seen = |list: &[Diagnostic]| {
@@ -1916,7 +1918,6 @@ fn load_modules(
                     orders: Default::default(),
                     prove: None,
                     proved: Default::default(),
-                    fenced: Default::default(),
                     given: Default::default(),
                     session: Default::default(),
                     lazy: None,
@@ -2117,7 +2118,7 @@ fn load_modules(
                     visit(
                         &gen_key,
                         Some(&g.written.source),
-                        Some(&g),
+                        Some((&g, imp.source_at)),
                         opts,
                         resolver,
                         engine,
@@ -6080,12 +6081,12 @@ fn link(
                         visible.insert(name.clone());
                     }
                     None => {
-                        errors.push(load_error(
-                            &m.key,
-                            root_key,
-                            imp.line,
-                            rule!(TargetLacks, target = spoken(&m.key, target, opts), name),
-                        ));
+                        // The name as written: a prefixed module's import
+                        // names carry its prefix (`task$First`).
+                        let (target, name) = (spoken(&m.key, target, opts), unprefixed(name));
+                        let rule = rule!(TargetLacks, target, name);
+                        let d = Diagnostic::refusal(imp.line, imp_name.col, "load", rule);
+                        errors.push(in_module(d, &m.key, root_key));
                     }
                 }
             }

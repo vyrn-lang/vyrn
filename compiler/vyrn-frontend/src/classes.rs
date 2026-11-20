@@ -87,7 +87,7 @@ pub fn app_sheet_paths(root: &Path) -> Vec<(PathBuf, Source)> {
     };
     let mut out: Vec<(PathBuf, Source)> = Vec::new();
     let mut layouts = Vec::new();
-    glob_files(root, &["**", "layout.vyx"], &mut layouts);
+    crate::manifest::glob_files(root, &["**", "layout.vyx"], MAX_STYLESHEETS, &mut layouts);
     for layout in layouts {
         let Ok(text) = std::fs::read_to_string(&layout) else {
             continue;
@@ -101,10 +101,8 @@ pub fn app_sheet_paths(root: &Path) -> Vec<(PathBuf, Source)> {
     }
     let mut globbed = Vec::new();
     for g in &manifest.stylesheets {
-        let segs: Vec<&str> = (g.split('/'))
-            .filter(|s| !s.is_empty() && *s != ".")
-            .collect();
-        glob_files(root, &segs, &mut globbed);
+        let segs = crate::manifest::glob_segs(g);
+        crate::manifest::glob_files(root, &segs, MAX_STYLESHEETS, &mut globbed);
     }
     for file in globbed {
         if !out.iter().any(|(f, _)| *f == file) {
@@ -139,51 +137,6 @@ pub fn read_sheets(paths: Vec<(PathBuf, Source)>) -> Vec<Sheet> {
             })
         })
         .collect()
-}
-
-/// Appends the files under `dir` whose relative path matches the glob segments
-/// `segs`: `**` is any number of directories, `*` and `?` match within one name.
-/// A directory whose name starts with `.`, `target` and `node_modules` hold no
-/// source and are not entered; symbolic links are not followed, so the walk ends
-/// on any tree. It stops at [`MAX_STYLESHEETS`] files.
-fn glob_files(dir: &Path, segs: &[&str], out: &mut Vec<PathBuf>) {
-    let Some((first, rest)) = segs.split_first() else {
-        return;
-    };
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<(PathBuf, std::fs::FileType)> = (rd.flatten())
-        .filter_map(|e| Some((e.path(), e.file_type().ok()?)))
-        .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    if *first == "**" {
-        glob_files(dir, rest, out);
-    }
-    for (path, kind) in entries {
-        if out.len() >= MAX_STYLESHEETS {
-            return;
-        }
-        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        if kind.is_dir() && (name.starts_with('.') || name == "target" || name == "node_modules") {
-            continue;
-        }
-        if *first == "**" {
-            if kind.is_dir() {
-                glob_files(&path, segs, out);
-            }
-        } else if crate::manifest::glob_name(first.as_bytes(), name.as_bytes()) {
-            if rest.is_empty() {
-                if kind.is_file() && !out.contains(&path) {
-                    out.push(path);
-                }
-            } else if kind.is_dir() {
-                glob_files(&path, rest, out);
-            }
-        }
-    }
 }
 
 /// Every class each sheet's rules name, in sheet order, then file order.

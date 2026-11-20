@@ -2,17 +2,17 @@ what vyrn check prints
 checker-rules.vyrn:26:9: `a` declared Int64 but initializer is String
 checker-rules.vyrn:30:9: cannot bind `u` to a Unit value
 checker-rules.vyrn:34:0: assignment to unknown variable `zz`
-checker-rules.vyrn:39:0: cannot assign to `x` (declared without `mut`)
+checker-rules.vyrn:39:5: cannot assign to `x` (declared without `mut`)
 checker-rules.vyrn:44:5: `x` is Int64 but assigned String
 checker-rules.vyrn:48:0: assignment to field of unknown variable `zz`
-checker-rules.vyrn:53:0: cannot mutate a field of `p` (declared without `mut`)
-checker-rules.vyrn:58:0: cannot mutate a field of `Span` in place (its `where` invariant could be broken mid-update); rebuild it: `spanState = Span { .. }`
+checker-rules.vyrn:53:5: cannot mutate a field of `p` (declared without `mut`)
+checker-rules.vyrn:58:5: cannot mutate a field of `Span` in place (its `where` invariant could be broken mid-update); rebuild it: `spanState = Span { .. }`
 checker-rules.vyrn:63:0: `n` is not a record, so it has no field `f`
 checker-rules.vyrn:68:0: record `p` has no field `zz`
 checker-rules.vyrn:74:13: field `age` is Age (a refinement type); assign an already-constructed `Age` value, e.g. `Age(..)`
 checker-rules.vyrn:79:11: field `a` is Int64 but assigned String
 checker-rules.vyrn:83:0: index-assignment to unknown variable `zz`
-checker-rules.vyrn:88:0: cannot store into `a` (declared without `mut`)
+checker-rules.vyrn:88:5: cannot store into `a` (declared without `mut`)
 checker-rules.vyrn:93:7: `m` is keyed by String, but the key here is Int64
 checker-rules.vyrn:98:14: `m` holds values of type Int64 but the stored value is String
 checker-rules.vyrn:103:0: `n[i] = ..` needs an Array, a Map, or a type whose impl declares the `atSet` projection (`fn atSet(modify self, ..) -> modify T`), found Int64
@@ -50,15 +50,15 @@ checker-rules.vyrn:262:13: this array literal has 513 elements, past the limit o
   note: a literal is lowered element by element into one call frame, so its length is a compile-time cost on both backends
   note: a table this long belongs in a file the program reads, not in the program
 checker-rules.vyrn:266:35: this literal has 3 elements but the slot is SmallArray<_, 2>
-checker-rules.vyrn:299:0: cannot assign to `x` (declared without `mut`)
+checker-rules.vyrn:299:5: cannot assign to `x` (declared without `mut`)
 checker-rules.vyrn:300:8: `if` condition must be Bool, found Int64
-checker-rules.vyrn:314:0: cannot assign to `x` (declared without `mut`)
-checker-rules.vyrn:326:0: cannot mutate a field of `h` (declared without `mut`)
-checker-rules.vyrn:331:0: cannot store into `k` (declared without `mut`)
+checker-rules.vyrn:314:5: cannot assign to `x` (declared without `mut`)
+checker-rules.vyrn:326:5: cannot mutate a field of `h` (declared without `mut`)
+checker-rules.vyrn:331:5: cannot store into `k` (declared without `mut`)
 checker-rules.vyrn:336:0: cannot mutate a field of `h` (declared without `mut`)
-checker-rules.vyrn:340:0: cannot store into `untyped` (declared without `mut`)
-checker-rules.vyrn:346:0: cannot assign to `x` (declared without `mut`)
-checker-rules.vyrn:352:0: cannot assign to `x` (declared without `mut`)
+checker-rules.vyrn:340:5: cannot store into `untyped` (declared without `mut`)
+checker-rules.vyrn:346:5: cannot assign to `x` (declared without `mut`)
+checker-rules.vyrn:352:5: cannot assign to `x` (declared without `mut`)
 checker-rules.vyrn:352:5: `x` is Int64 but assigned String
 checker-rules.vyrn:360:0: `break` outside a loop
 checker-rules.vyrn:368:0: cannot `drop` `x`: its type `T` is a type parameter, so this body cannot know whether the rule below holds for the instance; a plain record would be released here where `drop` on it directly is refused. Release the value where its concrete type is known, or `consume` the heap field and `drop` that
@@ -76,7 +76,7 @@ checker-rules.vyrn:432:9: `a` declared Int64 but initializer is String
 checker-rules.vyrn:440:9: cannot bind `u` to a Unit value
 checker-rules.vyrn:445:12: return type mismatch: expected Int64, found T
 checker-rules.vyrn:451:12: return type mismatch: expected Unit, found Int64
-checker-rules.vyrn:458:0: cannot assign to `x` (declared without `mut`)
+checker-rules.vyrn:458:9: cannot assign to `x` (declared without `mut`)
 checker-rules.vyrn:459:16: return type mismatch: expected String, found Int64
 checker-rules.vyrn:467:15: field `a` is Int64 but assigned String
 checker-rules.vyrn:468:0: record `ps[0]` has no field `zz`
@@ -109,7 +109,7 @@ checker-rules.vyrn:559:13: `Age` construction takes 1 argument, got 2
 checker-rules.vyrn:567:13: `Age` is built from Int64, but the argument is String
 checker-rules.vyrn:578:0: cannot `pop` from `xs` (declared without `mut`)
 checker-rules.vyrn:583:0: cannot `swapRemove` from `xs` (declared without `mut`)
-checker-rules.vyrn:588:0: cannot `remove` from `m` (declared without `mut`)
+checker-rules.vyrn:588:5: cannot `remove` from `m` (declared without `mut`)
 checker-rules.vyrn:592:13: unknown variable `zz`
 checker-rules.vyrn:599:13: duplicate `B` arm
 checker-rules.vyrn:603:13: `match` is missing variant `B`
@@ -134,12 +134,12 @@ checker-rules.vyrn:703:17: `float64Bits` argument 1 expects Float64, found Int64
 checker-rules.vyrn:705:14: `declaredOne` expects 1 argument(s), got 2
 checker-rules.vyrn:710:4: function `fallsThrough` must return Int64 on all paths
 checker-rules.vyrn:716:33: this lambda must return Int64 on all paths
-checker-rules.vyrn:729:0: `pop` is not available on Array<Int64, 2>, a fixed-size array (it cannot shrink); use a growable `Array<T>`
-checker-rules.vyrn:734:0: `swapRemove` needs an `Array<T>`, found String
-checker-rules.vyrn:739:0: `pop` needs an `Array<T>`, found T
-checker-rules.vyrn:745:0: `pop` needs an `Array<T>`, found Map<String, Int64>
-checker-rules.vyrn:753:0: `pop` is not available on Array<Int64, 2>, a fixed-size array (it cannot shrink); use a growable `Array<T>`
-checker-rules.vyrn:757:0: `pop` is not available on Array<Int64, 2>, a fixed-size array (it cannot shrink); use a growable `Array<T>`
+checker-rules.vyrn:729:13: `pop` is not available on Array<Int64, 2>, a fixed-size array (it cannot shrink); use a growable `Array<T>`
+checker-rules.vyrn:734:13: `swapRemove` needs an `Array<T>`, found String
+checker-rules.vyrn:739:13: `pop` needs an `Array<T>`, found T
+checker-rules.vyrn:745:17: `pop` needs an `Array<T>`, found Map<String, Int64>
+checker-rules.vyrn:753:15: `pop` is not available on Array<Int64, 2>, a fixed-size array (it cannot shrink); use a growable `Array<T>`
+checker-rules.vyrn:757:19: `pop` is not available on Array<Int64, 2>, a fixed-size array (it cannot shrink); use a growable `Array<T>`
 checker-rules.vyrn:775:24: this lambda takes 2 parameter(s), but `applyTo` argument 2 expects 1
 checker-rules.vyrn:779:24: this lambda returns String, but `applyTo` expects it to return Int64
 checker-rules.vyrn:784:24: `g` is a 2-argument function value, but `applyTo` argument 2 expects 1
@@ -153,7 +153,7 @@ checker-rules.vyrn:818:33: `addPair` takes 2 argument(s), but the expected funct
 checker-rules.vyrn:822:33: `byteCount` expects a String argument, but `fn(Int64) -> Int64` will pass it Int64
 checker-rules.vyrn:826:33: `boolOf` returns Bool, but the expected function type `fn(Int64) -> Int64` returns Int64
 checker-rules.vyrn:834:28: `byteCount` expects a String argument, but `passThrough` will pass it U
-checker-rules.vyrn:843:0: cannot assign to `k` (declared without `mut`)
+checker-rules.vyrn:843:5: cannot assign to `k` (declared without `mut`)
 checker-rules.vyrn:853:8: `impl Weighed for Rod` does not match protocol `Weighed`: it declares `fn weight(self) -> Int64`, this provides `fn weight(self) -> Bool`
 checker-rules.vyrn:839:20: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
 checker-rules.vyrn:172:13: integer literal 9223372036854775808 exceeds Int64's maximum (9223372036854775807); only `UInt64` can hold it: annotate the binding (`let x: UInt64 = ...`)

@@ -159,8 +159,8 @@ export fn features() -> Array<Feature> {
         Feature {
             name: "Snippets",
             what: TrustedMarkup("Eleven, for the shapes with a body to fill in: <code>fn</code>, <code>main</code>, record and enum <code>type</code>, <code>protocol</code>, <code>impl</code>, <code>match</code>, <code>import</code>, the <code>logging</code> block, <code>test</code> and <code>bench</code>."),
-            path: "editor/vscode/snippets/vyrn.json",
-            symbol: "vyrn.json",
+            path: "editor/vscode/snippets/vyrn.code-snippets",
+            symbol: "vyrn.code-snippets",
         },
         Feature {
             name: "Run it from the file",

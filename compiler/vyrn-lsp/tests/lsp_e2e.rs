@@ -6677,8 +6677,9 @@ fn a_project_language_file_is_coloured_and_refused_through_its_grammar() {
     let message = first
         .and_then(|d| d.pointer("/message"))
         .and_then(|m| m.as_str());
-    let said = "a ledger line cannot hold `x` here\n";
-    assert!(message.is_some_and(|m| m.starts_with(said)), "{diags}");
+    // The report sits at the user's line, so it carries no note.
+    let said = "a ledger line cannot hold `x` here";
+    assert_eq!(message, Some(said), "{diags}");
     let grammar = std::fs::read_to_string(dir.join("calc.syntax")).unwrap();
     let grammar = grammar.replace("'pay'", "'give'");
     std::fs::write(dir.join("calc.syntax"), &grammar).unwrap();
@@ -6697,6 +6698,81 @@ fn a_project_language_file_is_coloured_and_refused_through_its_grammar() {
     );
     let _ = client.child.kill();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every `vyrn.json` under a workspace folder is a module root: with the folder
+/// one level above `dsl/`, the server asks for `dsl/*.calc` at initialize, so a
+/// `.calc` file opened first is coloured and refused. A client whose
+/// `semanticTokens` capability omits required fields keeps its folders. A
+/// deleted manifest withdraws its globs.
+#[test]
+fn every_module_under_a_workspace_folder_registers_its_languages() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let ws = std::env::temp_dir().join(format!("vyrn_lsp_modules_{}_{n}", std::process::id()));
+    let dir = ws.join("dsl");
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(dir.join("calc.errors")).unwrap();
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/dsl");
+    for name in [
+        "vyrn.json",
+        "calc.vyrn",
+        "calc.syntax",
+        "calc.errors/en.json",
+    ] {
+        std::fs::copy(example.join(name), dir.join(name)).unwrap();
+    }
+    let broken = "pay rent 1200
+pay power x
+";
+    std::fs::write(dir.join("orders.calc"), broken).unwrap();
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let dynamic = serde_json::json!({ "dynamicRegistration": true });
+    let caps = serde_json::json!({ "textDocument": {
+        "synchronization": dynamic, "semanticTokens": dynamic
+    } });
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": caps, "processId": null, "workspaceFolders": [
+            { "uri": file_uri(&ws), "name": "w" }
+        ] }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    let register = loop {
+        let r = client.read_notification("client/registerCapability");
+        if r["id"] != "vyrn/languages" {
+            break r;
+        }
+    };
+    let filter = &register["params"]["registrations"][0]["registerOptions"]["documentSelector"][0];
+    assert_eq!(filter["pattern"]["pattern"], "*.calc", "{register}");
+    let base = filter["pattern"]["baseUri"].as_str().unwrap();
+    assert!(base.trim_end_matches('/').ends_with("/dsl"), "{base}");
+    let uri = file_uri(&dir.join("orders.calc"));
+    did_open(&mut client, &uri, "plaintext", broken);
+    let diags = read_diags_for(&mut client, "orders.calc");
+    let at = diags.pointer("/params/diagnostics/0/range/start");
+    let want = serde_json::json!({ "line": 1, "character": 10 });
+    assert_eq!(at, Some(&want), "{diags}");
+    let id = serde_json::json!(2);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/semanticTokens/full",
+        "params": { "textDocument": { "uri": uri } }
+    }));
+    let tokens = client.read_response(&id);
+    let data = tokens.pointer("/result/data").and_then(|d| d.as_array());
+    assert!(data.is_some_and(|d| !d.is_empty()), "{tokens}");
+    std::fs::remove_file(dir.join("vyrn.json")).unwrap();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles",
+        "params": { "changes": [{ "uri": file_uri(&dir.join("vyrn.json")), "type": 3 }] }
+    }));
+    let drop = client.read_notification("client/unregisterCapability");
+    let gone = drop["params"]["unregisterations"].as_array().map(Vec::len);
+    assert_eq!(gone, Some(4), "{drop}");
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&ws);
 }
 
 /// A language module's companion replaces the default check: `calc.editor.vyrn`

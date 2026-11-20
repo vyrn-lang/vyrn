@@ -571,7 +571,6 @@ fn build(
         orders: Default::default(),
         prove: None,
         proved: Default::default(),
-        fenced: Default::default(),
         given: Default::default(),
         session: Default::default(),
         lazy: None,
@@ -1335,10 +1334,15 @@ impl<'a> Build<'a> {
             self.eat(&Tok::Type);
             self.eat(&Tok::LBrace);
             self.list_to(&Tok::RBrace, |b| {
+                let col = b.col();
                 let original = b.ident();
                 // `as` is contextual: only between an import name and its `,` or `}`.
                 let alias = b.eat_word("as").then(|| b.ident());
-                names.push(ImportName { original, alias });
+                names.push(ImportName {
+                    original,
+                    alias,
+                    col,
+                });
             });
         }
         self.at += 1;
@@ -2170,7 +2174,6 @@ impl<'a> Build<'a> {
             };
             let value = self.expr();
             self.eat_semi();
-            let id = if base.is_empty() { id } else { Id::NEW };
             return Stmt::Store {
                 id,
                 name,
@@ -2183,10 +2186,11 @@ impl<'a> Build<'a> {
         self.eat_semi();
         if let Expr::Call { name, args, .. } = &e {
             if crate::prelude::rebuilds(name) {
+                // Each write-back sits at the receiver's root, as `r = ..` does.
                 match args.first() {
-                    Some(Expr::Var { name: recv, .. }) => {
+                    Some(Expr::Var { name: recv, id, .. }) => {
                         return Stmt::Assign {
-                            id: Id::NEW,
+                            id: Id::at(id.col()),
                             name: recv.clone(),
                             value: e,
                             line,
@@ -2196,20 +2200,21 @@ impl<'a> Build<'a> {
                     Some(Expr::Field {
                         expr: base, field, ..
                     }) => {
-                        let Expr::Var { name: recv, .. } = base.as_ref() else {
+                        let Expr::Var { name: recv, id, .. } = base.as_ref() else {
                             unreachable!("PushNoPlace refused this statement")
                         };
-                        return Stmt::store(recv.clone(), Step::Field(field.clone()), e, line);
+                        let (recv, at) = (recv.clone(), (line, id.col()));
+                        return Stmt::store(recv, Step::Field(field.clone()), e, at);
                     }
                     // Writes back as an element store; the index is evaluated
                     // on both the read and the store.
                     Some(Expr::Call { args: iargs, .. }) => {
-                        let Expr::Var { name: recv, .. } = &iargs[0] else {
+                        let Expr::Var { name: recv, id, .. } = &iargs[0] else {
                             unreachable!("PushNoPlace refused this statement")
                         };
-                        let recv = recv.clone();
+                        let (recv, at) = (recv.clone(), (line, id.col()));
                         let index = iargs[1].clone();
-                        return Stmt::store(recv, Step::Index(index), e, line);
+                        return Stmt::store(recv, Step::Index(index), e, at);
                     }
                     _ => unreachable!("PushNoPlace refused this statement"),
                 }
@@ -3640,10 +3645,10 @@ test \"t\" {{ assert(c(1) == 1) }}"
              fn main() -> Int64 { return 0 }",
         );
         let imp = &p.imports[0];
-        assert_eq!(
-            imp.names,
-            vec![ImportName::bare("t"), ImportName::bare("TransKey")]
-        );
+        let names: Vec<(&str, usize)> = (imp.names.iter())
+            .map(|n| (n.original.as_str(), n.col))
+            .collect();
+        assert_eq!(names, [("t", 10), ("TransKey", 13)]);
         match &imp.source {
             ImportSource::Generator { name, args, .. } => {
                 assert_eq!(name, "i18n");
@@ -3667,9 +3672,13 @@ test \"t\" {{ assert(c(1) == 1) }}"
             vec![
                 ImportName {
                     original: "getUser".into(),
-                    alias: Some("fetchUser".into())
+                    alias: Some("fetchUser".into()),
+                    col: 10,
                 },
-                ImportName::bare("User"),
+                ImportName {
+                    col: 32,
+                    ..ImportName::bare("User")
+                },
             ]
         );
         assert_eq!(p.imports[0].names[0].local(), "fetchUser");

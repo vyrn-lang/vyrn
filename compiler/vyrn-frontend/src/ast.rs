@@ -287,7 +287,22 @@ pub fn unplaced(x: &impl std::fmt::Debug) -> String {
 /// from the program's module hashes, so every two compare equal and print
 /// alike, as [`crate::session::SessionRef`]s do.
 #[derive(Clone, Default)]
-pub struct GivenRef(pub Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
+pub struct GivenRef(pub Option<std::sync::Arc<dyn GivenRows>>);
+
+/// What the frontend reads of the stored rows: the generation fence's row of
+/// a given function. `vyrn_lower::stdrows::Given` implements it.
+pub trait GivenRows: std::any::Any + Send + Sync {
+    /// The fence row of the given function linked as `name`.
+    fn fenced(&self, name: &str) -> Option<&crate::checker::Fenced>;
+}
+
+impl GivenRef {
+    /// The fence row of the given function linked as `name`; `None` for a
+    /// program no load gave a body.
+    pub fn fenced(&self, name: &str) -> Option<&crate::checker::Fenced> {
+        self.0.as_deref()?.fenced(name)
+    }
+}
 
 impl std::fmt::Debug for GivenRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -366,13 +381,9 @@ pub struct Program {
     /// The session of the host that analyses this program. The loader stamps
     /// the load's; a parsed program has none.
     pub session: crate::session::SessionRef,
-    /// What the generation fence reads of each [`Body::Given`] function, by
-    /// linked name: its module's stored row (`vyrn_lower::stdrows`), written
-    /// before the check. Empty for a program with no given body.
-    pub fenced: std::sync::Arc<std::collections::BTreeMap<String, crate::checker::Fenced>>,
     /// The stored rows of the [`Body::Given`] functions, read before the
     /// check, which every analysis of the program and of a host's program
-    /// built from it reads.
+    /// built from it reads; the generation fence reads a given body's row here.
     pub given: GivenRef,
     /// The modules whose unreached functions the load dropped: every `std/`
     /// module but the root. `None` where the load dropped nothing, as a
@@ -576,6 +587,9 @@ pub struct GlobalDecl {
 pub struct ImportName {
     pub original: String,
     pub alias: Option<String>,
+    /// The 1-based column `original` is spelled at; 0 for a name no source
+    /// spells.
+    pub col: usize,
 }
 
 impl ImportName {
@@ -583,6 +597,7 @@ impl ImportName {
         ImportName {
             original: name.into(),
             alias: None,
+            col: 0,
         }
     }
     /// Returns the name this binding has in the importing module: the alias if
@@ -2307,15 +2322,21 @@ impl Stmt {
         }
     }
 
-    /// Returns the store `name <leaf> = value` at `line`, with no id yet.
-    pub fn store(name: impl Into<String>, leaf: Step, value: Expr, line: usize) -> Self {
+    /// Returns the store `name <leaf> = value` at `line`, with `name` spelled
+    /// at column `col` and no node id yet.
+    pub fn store(
+        name: impl Into<String>,
+        leaf: Step,
+        value: Expr,
+        (line, col): (usize, usize),
+    ) -> Self {
         Stmt::Store {
             name: name.into(),
             base: Vec::new(),
             leaf,
             value,
             line,
-            id: Id::NEW,
+            id: Id::at(col),
         }
     }
 
