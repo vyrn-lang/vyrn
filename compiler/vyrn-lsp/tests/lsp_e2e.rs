@@ -1217,6 +1217,22 @@ fn file_uri(path: &std::path::Path) -> String {
     }
 }
 
+/// The URI VS Code sends for `path`: on Windows the drive letter is lower case
+/// and its colon is escaped (`file:///n%3A/...`).
+fn client_uri(path: &std::path::Path) -> String {
+    let uri = file_uri(path);
+    match uri.strip_prefix("file:///").map(str::as_bytes) {
+        Some([d, b':', ..]) if d.is_ascii_alphabetic() => {
+            format!(
+                "file:///{}%3A{}",
+                (*d as char).to_ascii_lowercase(),
+                &uri[10..]
+            )
+        }
+        _ => uri,
+    }
+}
+
 const VYX_APP: &str = "import { components } from \"std/vyx\"\n\
     import { widget } from components(\"./comp\")\n\
     fn main() -> Int64 { return 0 }\n";
@@ -6830,5 +6846,54 @@ fn a_language_companion_checks_past_the_grammar_and_hovers() {
     let said = "a ledger line cannot hold `x` here";
     assert!(message.is_some_and(|m| m.starts_with(said)), "{diags}");
     let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A language file opened under the URI VS Code sends, with the drive letter in
+/// lower case and its colon escaped, is claimed by its manifest's module as the
+/// same file under `N:` is: the companion's refusal arrives at its line.
+#[test]
+fn a_language_file_under_the_client_spelling_of_its_drive_is_claimed() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_dsld_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("calc.errors")).unwrap();
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/dsl");
+    for name in [
+        "vyrn.json",
+        "calc.vyrn",
+        "calc.editor.vyrn",
+        "calc.syntax",
+        "calc.errors/en.json",
+        "orders.calc",
+    ] {
+        std::fs::copy(example.join(name), dir.join(name)).unwrap();
+    }
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null, "workspaceFolders": [
+            { "uri": file_uri(&dir), "name": "w" }
+        ] }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    let uri = client_uri(&dir.join("orders.calc"));
+    did_open(
+        &mut client,
+        &uri,
+        "plaintext",
+        "pay rent 1200\npay taxes 5\n",
+    );
+    let diags = read_diags_for(&mut client, "orders.calc");
+    let message = diags
+        .pointer("/params/diagnostics/0/message")
+        .and_then(|m| m.as_str());
+    let said = "the ledger knows no account `taxes`";
+    assert!(
+        message.is_some_and(|m| m.starts_with(said)),
+        "{uri} {diags}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

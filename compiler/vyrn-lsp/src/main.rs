@@ -131,11 +131,7 @@ fn load_context(
     String,
     Option<String>,
 )> {
-    let path = uri
-        .to_file_path()
-        .ok()?
-        .to_string_lossy()
-        .replace('\\', "/");
+    let path = file_path(uri)?.to_string_lossy().replace('\\', "/");
     let mut opts = vyrn_frontend::loader::LoadOptions {
         std_root: std_root(),
         session: Some(session.clone()),
@@ -476,7 +472,7 @@ fn handle_initialize(
         None => params.get("rootUri").into_iter().collect::<Vec<_>>(),
     };
     let dirs: Vec<std::path::PathBuf> = (folders.into_iter())
-        .filter_map(|u| Url::parse(u.as_str()?).ok()?.to_file_path().ok())
+        .filter_map(|u| file_path(&Url::parse(u.as_str()?).ok()?))
         .collect();
     // A base outside the workspace needs a relative pattern.
     let event = |k: &str| caps.pointer(&format!("/workspace/didChangeWatchedFiles/{k}"));
@@ -2611,15 +2607,28 @@ fn is_vyrn_uri(uri: &Url) -> bool {
     uri.path().ends_with(".vyrn")
 }
 
+/// Returns the file a `file:` URI names, with a Windows drive letter in upper
+/// case. VS Code sends `file:///n%3A/...`; the manifests and the loader spell the
+/// drive `N:`, and a path compared against them must agree byte for byte.
+fn file_path(uri: &Url) -> Option<std::path::PathBuf> {
+    let p = uri.to_file_path().ok()?;
+    let s = p.to_string_lossy();
+    let b = s.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_lowercase() {
+        return Some(std::path::PathBuf::from(format!(
+            "{}{}",
+            s[..1].to_ascii_uppercase(),
+            &s[1..]
+        )));
+    }
+    Some(p)
+}
+
 /// The normalized slash path of `uri`, or `None` for a non-file URI. The client
 /// sends `file:///n%3A/...` where the loader has `N:/...`, so every path key
 /// goes through `norm_path_key`.
 fn uri_path(uri: &Url) -> Option<String> {
-    let p = uri
-        .to_file_path()
-        .ok()?
-        .to_string_lossy()
-        .replace('\\', "/");
+    let p = file_path(uri)?.to_string_lossy().replace('\\', "/");
     Some(vyrn_frontend::origin::OriginMaps::norm_path_key(&p))
 }
 
@@ -3049,7 +3058,7 @@ fn input_claim(
     uri: &Url,
 ) -> Option<(Url, vyrn_frontend::audience::Claim, String)> {
     let path = uri_path(uri)?;
-    let file = (uri.to_file_path().ok()?.to_string_lossy()).replace('\\', "/");
+    let file = (file_path(uri)?.to_string_lossy()).replace('\\', "/");
     if let Ok(Some(claim)) = language_claim(uri) {
         let root = Url::from_file_path(claim.importer.replace('/', std::path::MAIN_SEPARATOR_STR));
         return Some((root.ok()?, claim, file));
@@ -3078,7 +3087,7 @@ fn input_claim(
 /// manifest ([`vyrn_frontend::audience::language_claim`]); `Ok(None)` for a
 /// document no language reads.
 fn language_claim(uri: &Url) -> Result<Option<vyrn_frontend::audience::Claim>, String> {
-    let Some(file) = uri.to_file_path().ok() else {
+    let Some(file) = file_path(uri) else {
         return Ok(None);
     };
     let m = manifest_of(file.parent().unwrap_or(&file))?;
@@ -3089,7 +3098,7 @@ fn language_claim(uri: &Url) -> Result<Option<vyrn_frontend::audience::Claim>, S
 /// Whether the manifest's languages leave the document `uri` to no module
 /// (`"module": null`): plain text, for which the server serves nothing.
 fn left_plain(uri: &Url) -> bool {
-    let Ok(file) = uri.to_file_path() else {
+    let Some(file) = file_path(uri) else {
         return false;
     };
     let Ok(m) = manifest_of(file.parent().unwrap_or(&file)) else {
@@ -3340,9 +3349,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             if !is_vyrn_uri(&uri) {
                 generator_completion(server, &uri, &text, 1, 1);
             }
-            if let Some(dir) =
-                (uri.to_file_path().ok()).and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            {
+            if let Some(dir) = file_path(&uri).and_then(|p| p.parent().map(|d| d.to_path_buf())) {
                 register_inputs(connection, server, &dir);
             }
             return Owed::Analyze(uri);
@@ -3362,7 +3369,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
     } else if DidChangeWatchedFiles::METHOD == notif.method {
         if let Ok(params) = serde_json::from_value::<DidChangeWatchedFilesParams>(notif.params) {
             for change in params.changes {
-                if let Ok(p) = change.uri.to_file_path() {
+                if let Some(p) = file_path(&change.uri) {
                     server.session.changed(&p.to_string_lossy());
                     if p.file_name() == Some("vyrn.json".as_ref()) {
                         if let Some(dir) = p.parent() {
