@@ -1,0 +1,5 @@
+{
+  "name": "dsl",
+  "main": "main.vyrn",
+  "languages": { "*.calc": "./calc" }
+}

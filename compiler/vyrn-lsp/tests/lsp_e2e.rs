@@ -6624,3 +6624,77 @@ fn a_grammar_file_is_served_through_its_language_module() {
     assert!(data.is_some_and(|d| d.len() >= 5 * 8), "{tokens}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A project's own language file, `examples/dsl/orders.calc`, is read by the
+/// module its `vyrn.json` names: colour from the grammar, a broken line refused
+/// in the catalogue's sentence by the written parser's `reportLedger`, and an
+/// edit of the grammar reads the open document again.
+#[test]
+fn a_project_language_file_is_coloured_and_refused_through_its_grammar() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_dsl_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("calc.errors")).unwrap();
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/dsl");
+    for name in [
+        "vyrn.json",
+        "calc.vyrn",
+        "calc.syntax",
+        "calc.errors/en.json",
+        "orders.calc",
+    ] {
+        std::fs::copy(example.join(name), dir.join(name)).unwrap();
+    }
+    let uri = file_uri(&dir.join("orders.calc"));
+    let mut client = spawn_client();
+    let orders = std::fs::read_to_string(dir.join("orders.calc")).unwrap();
+    did_open(&mut client, &uri, "calc", &orders);
+    let diags = read_diags_for(&mut client, "orders.calc");
+    let none = diags.pointer("/params/diagnostics");
+    assert_eq!(none, Some(&serde_json::json!([])), "{diags}");
+    let id = serde_json::json!(2);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/semanticTokens/full",
+        "params": { "textDocument": { "uri": uri } }
+    }));
+    let tokens = client.read_response(&id);
+    // A comment, then a keyword, and a number on each of the three lines.
+    let data = tokens.pointer("/result/data").and_then(|d| d.as_array());
+    assert_eq!(data.map(Vec::len), Some(5 * 7), "{tokens}");
+    let broken = "pay rent 1200\npay power x\n";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": { "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": broken }] }
+    }));
+    let diags = read_diags_for(&mut client, "orders.calc");
+    let first = diags.pointer("/params/diagnostics/0");
+    let at = first.and_then(|d| d.pointer("/range/start"));
+    assert_eq!(
+        at,
+        Some(&serde_json::json!({ "line": 1, "character": 10 })),
+        "{diags}"
+    );
+    let message = first
+        .and_then(|d| d.pointer("/message"))
+        .and_then(|m| m.as_str());
+    let said = "a ledger line cannot hold `x` here\n";
+    assert!(message.is_some_and(|m| m.starts_with(said)), "{diags}");
+    let grammar = std::fs::read_to_string(dir.join("calc.syntax")).unwrap();
+    let grammar = grammar.replace("'pay'", "'give'");
+    std::fs::write(dir.join("calc.syntax"), &grammar).unwrap();
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("calc.syntax")),
+        "syntax",
+        &grammar,
+    );
+    let diags = read_diags_for(&mut client, "orders.calc");
+    let at = diags.pointer("/params/diagnostics/0/range/start");
+    assert_eq!(
+        at,
+        Some(&serde_json::json!({ "line": 0, "character": 0 })),
+        "{diags}"
+    );
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
