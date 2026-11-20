@@ -533,7 +533,13 @@ states (`loader::grammar_of`); `vyrnHover*` gives its hover, `vyrnComplete*` and
 over that grammar, mapped onto the legend. A change to any open document reads
 every other open language document again, so a grammar edit reaches them. The server registers the
 map's globs with the client, the defaults at start and a project's beside its
-`inputs`; `std/grammar.editor` serves `.syntax` files. In a static `class` or a string literal of a `:class`, completion offers the classes `vyrn_frontend::classes` reads, each with its source: the component's own style block (local), the stylesheets the app's layouts link with `stylesheet "..."`, mapped to the files under the manifest's `public` directory, and the files the `stylesheets` globs name (global); the theme's alphabet follows. Hover shows each rule that defines the class with its file and line, local first, and definition jumps to the first. There a name on an
+`inputs`; `std/grammar.editor` serves `.syntax` files. Every `vyrn.json` under a
+workspace folder is a module root, found at start by the walk owner discovery
+makes, and its globs are registered relative to its directory. An event that
+creates, changes or deletes a `vyrn.json` withdraws that module's globs and
+registers the manifest then governing its directory. The extension starts the
+server in a workspace that holds a `vyrn.json`, so a `.calc` file opened first is
+served. In a static `class` or a string literal of a `:class`, completion offers the classes `vyrn_frontend::classes` reads, each with its source: the component's own style block (local), the stylesheets the app's layouts link with `stylesheet "..."`, mapped to the files under the manifest's `public` directory, and the files the `stylesheets` globs name (global); the theme's alphabet follows. Hover shows each rule that defines the class with its file and line, local first, and definition jumps to the first. There a name on an
 import line the module dropped as a repeat maps to the import that kept it, and
 a component tag to the declaration of the view its file provides, so its hover
 shows the props. The module is analysed as a file beside its root, with each
