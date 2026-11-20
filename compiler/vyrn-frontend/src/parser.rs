@@ -571,7 +571,6 @@ fn build(
         orders: Default::default(),
         prove: None,
         proved: Default::default(),
-        fenced: Default::default(),
         given: Default::default(),
         session: Default::default(),
         lazy: None,

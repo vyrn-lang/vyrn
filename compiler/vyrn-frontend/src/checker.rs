@@ -7255,7 +7255,7 @@ fn check_comptime_purity<'a>(
             if !facts.contains_key(cur) {
                 let row = match &f.body {
                     Body::Written(body) => cx.row(f, body),
-                    Body::Given(_) => (program.fenced.get(&f.name).cloned())
+                    Body::Given(_) => (program.given.fenced(&f.name).cloned())
                         .unwrap_or_else(|| panic!("the given `{}` has no stored row", f.name)),
                 };
                 facts.insert(cur.to_string(), row);

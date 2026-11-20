@@ -112,7 +112,6 @@ fn check(
     if let Some((_, opts, resolver)) = linker {
         match crate::stdrows::Given::read(program, opts, resolver, engine) {
             Ok(mut given) => {
-                program.fenced = Arc::new(std::mem::take(&mut given.fenced));
                 sources = std::mem::take(&mut given.sources);
                 if vyrn_frontend::movecheck::emitting() {
                     given.sources.clone_from(&sources);
