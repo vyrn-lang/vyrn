@@ -1302,6 +1302,12 @@ fn table() -> Vec<Builtin> {
             .effect(GenOnly)
             .takes(&[1], takes_one)
             .typed(vec![Str], code(), None),
+        // The reports of a grammar's refusals, as a module over its parser.
+        b("syntaxReporter")
+            .spec(Spec::Host)
+            .effect(GenOnly)
+            .takes(&[1], takes_one)
+            .typed(vec![Str], code(), None),
         b("render")
             .spec(Spec::Host)
             .effect(GenOnly)

@@ -61,6 +61,9 @@ const CODE_IMPORTS = {
   concat: [],
   result: [],
   render: [],
+  read: [0],
+  syntaxParser: [0],
+  syntaxReporter: [0],
 };
 
 // Runs one code import in the compiler; answers its i64 result and the text
@@ -161,7 +164,7 @@ function runGenerator(wasm, { module: bytes, argv, atoms }) {
     gen[name] = (...args) => {
       const sent = args.map((a, i) => (strings.includes(i) && a !== 0 ? cstr(a >>> 0) : a));
       const { value, text } = codeCall(wasm, name, sent);
-      if (name === "render") stash = text;
+      if (name === "render" || name === "read") stash = text;
       return value;
     };
   }
@@ -226,9 +229,9 @@ function api(instance) {
       const [k, n] = put([kind, src]);
       return take(wasm.play_tokens(k, n));
     },
-    check(src, kind) {
-      const [k, n] = put([kind, src]);
-      return take(wasm.play_check(k, n));
+    check(src, kind, project) {
+      const [k, n, p] = put([kind, src, JSON.stringify(project || {})]);
+      return take(wasm.play_check(k, n, p));
     },
     complete(src, line, col) {
       const [n] = put([src]);
@@ -242,9 +245,9 @@ function api(instance) {
       const [n] = put([src]);
       return take(wasm.play_signature(n, line, col));
     },
-    compile(src) {
-      const [n] = put([src]);
-      const len = wasm.play_compile(n);
+    compile(src, project) {
+      const [n, p] = put([src, JSON.stringify(project || {})]);
+      const len = wasm.play_compile(n, p);
       const first = new Uint8Array(wasm.memory.buffer, wasm.result_ptr(), 1)[0];
       return first === 0x00 ? { module: takeBytes(len) } : take(len);
     },

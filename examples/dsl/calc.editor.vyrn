@@ -1,0 +1,82 @@
+/// Editor support for the `*.calc` ledgers `calc` reads: a refusal of an account
+/// the ledger does not know, after the grammar's own, and the hover of an account.
+///
+/// No program links this module. The editor finds it beside `calc.vyrn`.
+
+import { syntax, syntaxReport } from "std/syntax"
+import { report, Severity } from "std/diag"
+import { isAccount } from "./calc"
+import * as ledger from syntax("./calc.syntax")
+import * as reported from syntaxReport("./calc.syntax")
+
+/// A 1-based line and column.
+type Place = { line: Int64, col: Int64 }
+
+/// The place of byte `at` of `text`.
+gen fn placeOf(text: String, at: Int64) -> Place {
+    let mut line = 1
+    let mut col = 1
+    let mut i = 0
+    while i < at {
+        if text[i] == '\n' {
+            line = line + 1
+            col = 1
+        } else {
+            col = col + 1
+        }
+        i = i + 1
+    }
+    return Place { line: line, col: col }
+}
+
+/// What the ledger at `path` refuses: the grammar's refusals, else each account
+/// no ledger may pay.
+export gen fn vyrnCheckCalc(root: String, path: String) -> Code {
+    let text = readFile(path) ?? ""
+    return match ledger.parseLedger(text) {
+        Ok(l) => unknownAccounts(path, text, l),
+        Err(errors) => reported.reportLedger(path),
+    }
+}
+
+gen fn unknownAccounts(path: String, text: String, l: ledger.Ledger) -> Code {
+    let mut out = vyrn""
+    for x in l.lines {
+        let name = x.account.text.text
+        if !isAccount(name) {
+            let at = placeOf(text, x.account.start)
+            out = out + report(Error, path, at.line, at.col, "the ledger knows no account `\{name}`")
+        }
+    }
+    return out
+}
+
+/// The hover of the account at 1-based `line` and `col` of the ledger at `path`:
+/// what the ledger pays it, or "" elsewhere.
+export gen fn vyrnHoverCalc(root: String, path: String, line: Int64, col: Int64) -> String {
+    let text = readFile(path) ?? ""
+    return match ledger.parseLedger(text) {
+        Ok(l) => accountHover(text, l, line, col),
+        Err(errors) => "",
+    }
+}
+
+gen fn accountHover(text: String, l: ledger.Ledger, line: Int64, col: Int64) -> String {
+    let mut name = ""
+    for x in l.lines {
+        let at = placeOf(text, x.account.start)
+        if at.line == line && col >= at.col && col < at.col + x.account.end - x.account.start {
+            name = x.account.text.text.copy()
+        }
+    }
+    if name.byteLength == 0 {
+        return ""
+    }
+    let mut paid = 0
+    for x in l.lines {
+        if x.account.text.text == name {
+            paid = paid + (parse(x.amount.text.text) ?? 0)
+        }
+    }
+    return "account `\{name}`: the ledger pays it \{paid.toString()}"
+}

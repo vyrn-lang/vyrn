@@ -3227,6 +3227,18 @@ fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
     } else {
         discover_input_owner(connection, server, uri);
     }
+    // The change may be to a grammar, or to a module that states one: every
+    // other open language document is read again, in path order.
+    let mut others: Vec<Url> = (server.docs.keys())
+        .filter(|d| *d != uri && !is_vyrn_uri(d))
+        .cloned()
+        .collect();
+    others.sort();
+    for d in others {
+        if let Ok(Some(_)) = language_claim(&d) {
+            check_language(connection, server, &d, Ok(()));
+        }
+    }
 }
 
 /// Apply a notification to the server state and return the analysis it owes.

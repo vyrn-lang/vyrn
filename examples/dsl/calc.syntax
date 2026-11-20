@@ -1,0 +1,16 @@
+// The ledger language of examples/dsl: each line pays an account an amount.
+syntax Calc
+
+expect ^Expected(found=found)
+
+trivia = ([ \t\r\n] / comment)*
+comment = '//' (!'\n' .)*
+token = name / number
+
+Ledger = lines:Line*
+Line = 'pay' account:Name amount:Amount
+Name = text:name
+Amount = text:number
+
+name = [a-z]+
+number = [0-9]+

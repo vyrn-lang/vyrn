@@ -3516,15 +3516,35 @@ pub fn call_generator(
             found?
         }
     };
+    Some(run_gen_fn(
+        importer, &module, &name, args, cache, opts, resolver, engine,
+    ))
+}
+
+/// Runs the `gen fn` `name` of the module at resolver key `module` on `args`, as
+/// [`call_generator`] runs what it finds: a function of the module, or one a
+/// module written by one of its generator imports exports, such as a written
+/// `syntaxReport` module's `report<Start>` ([`vyrn_syntax::Grammar::report_fn`]).
+#[allow(clippy::too_many_arguments)]
+pub fn run_gen_fn(
+    importer: &str,
+    module: &str,
+    name: &str,
+    args: &[crate::consteval::ConstVal],
+    cache: bool,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+) -> Result<crate::gen::Written, Vec<Diagnostic>> {
     let site = Site {
         line: 0,
         root_key: importer,
     };
     let generated = run_resolved(
         importer,
-        &name,
+        name,
         args,
-        &module,
+        module,
         site,
         (cache, true),
         opts,
@@ -3532,7 +3552,7 @@ pub fn call_generator(
         engine,
         (&mut HashMap::new(), &mut Vec::new()),
     );
-    Some(generated.map(|g| g.written))
+    generated.map(|g| g.written)
 }
 
 /// What [`gen_export`] answered: the companion and the function, or none, and
@@ -6786,12 +6806,21 @@ fn keep_reached(program: &mut Program, gen: &str, std: bool) {
 
 /// The name the root's gen fn `declared` links as in `program`: its own, or
 /// its reserved spelling where the root is an injected module (`std/json`'s
-/// `json$jsonEncoders`).
+/// `json$jsonEncoders`); else an exported gen fn of a module a generator import
+/// of the root wrote ([`run_gen_fn`]).
 fn own_gen<'a>(program: &'a Program, declared: &str) -> Option<&'a str> {
-    (program.functions.iter())
-        .filter(|f| f.module.is_none())
+    let named = |f: &&Function| program.spellings.written(&f.name) == declared;
+    let written = |f: &&Function| {
+        f.is_gen
+            && f.exported
+            && f.module
+                .as_deref()
+                .is_some_and(|m| written_chain(m).is_some())
+    };
+    let mut fns = program.functions.iter();
+    (fns.clone().filter(|f| f.module.is_none()).find(named))
+        .or_else(|| fns.find(|f| written(f) && named(f)))
         .map(|f| f.name.as_str())
-        .find(|n| program.spellings.written(n) == declared)
 }
 
 /// Returns every name `roots` reach in `program`: its functions and module

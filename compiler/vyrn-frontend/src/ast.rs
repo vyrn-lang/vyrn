@@ -446,13 +446,14 @@ pub fn is_gen_record(n: &str) -> bool {
 /// They are not reserved: a module that declares or imports one means its own.
 /// The question is asked of the calling module's scope, never of the linked
 /// program (see [`Program::surface_shadows`]).
-pub const SURFACE_BUILTINS: [&str; 10] = [
+pub const SURFACE_BUILTINS: [&str; 11] = [
     "render",
     "lex",
     "codeRuns",
     "vyrnModule",
     "vyrnType",
     "syntaxParser",
+    "syntaxReporter",
     "name",
     "diag",
     "codeAt",

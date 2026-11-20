@@ -1,0 +1,28 @@
+/// The ledger language of `*.calc` files: `calc.syntax` states it, and its
+/// written parser reads a ledger and refuses a broken line. Its companion,
+/// `calc.editor.vyrn`, also refuses an account the ledger does not know.
+
+import { syntax } from "std/syntax"
+import { parseInt64 } from "std/num"
+import * as ledger from syntax("./calc.syntax")
+
+/// The sum of the amounts `text` pays, or the first refusal's line.
+export fn total(text: String) -> Result<Int64, Int64> {
+    return match ledger.parseLedger(text) {
+        Ok(l) => Ok(sum(l)),
+        Err(errors) => Err(errors[0].line),
+    }
+}
+
+fn sum(l: ledger.Ledger) -> Int64 {
+    let mut t = 0
+    for line in l.lines {
+        t = t + (parseInt64(line.amount.text.text) ?? 0)
+    }
+    return t
+}
+
+/// Whether a ledger may pay the account `name`.
+export to "./calc.editor" fn isAccount(name: String) -> Bool {
+    return name == "rent" || name == "power" || name == "stock"
+}

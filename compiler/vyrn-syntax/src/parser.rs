@@ -1826,6 +1826,90 @@ impl Writer<'_> {
     }
 }
 
+/// The name of the reporting `gen fn` of start rule `rule`.
+pub(crate) fn report_fn(rule: &str) -> String {
+    format!("report{}", type_name(rule))
+}
+
+/// Returns the Vyrn source of the reports of `g`'s refusals: a module that imports
+/// the parser of the grammar at `path`, as the caller spells it, and exports one
+/// `gen fn report<Start>(path) -> Code` per start rule. Each report stands at a
+/// refusal's line and column and says the sentence `sentences` holds for its row,
+/// `std/syntaxreport`'s `syntaxSentence` reading them; `sentences` is the grammar's
+/// `<stem>.errors/en.json`, keyed by row name with a lower-case first letter.
+pub fn report(
+    g: &Grammar,
+    path: &str,
+    sentences: &BTreeMap<String, String>,
+) -> Result<String, Refused> {
+    let rows = rows(g);
+    let mut catalogue = String::new();
+    for row in rows.keys() {
+        let key: String = (row.chars().enumerate())
+            .map(|(i, c)| if i == 0 { c.to_ascii_lowercase() } else { c })
+            .collect();
+        if let Some(text) = sentences.get(&key) {
+            let _ = writeln!(catalogue, "{row}={}", text.replace(['\n', '\r'], " "));
+        }
+    }
+    let catalogue = string_lit(&catalogue);
+    let mut o = format!(
+        "import {{ syntax }} from \"std/syntax\"\n\
+         import {{ SyntaxHole, SyntaxRow, syntaxSentence }} from \"std/syntaxreport\"\n\
+         import * as parsed from syntax({})\n\n",
+        string_lit(path)
+    );
+    for r in start_rules(g)? {
+        let rule = &g.body(r).name;
+        let _ = write!(
+            o,
+            "/// The refusals `parse{name}` gives the text at `path`, each a report at its
+/// line and column.
+export gen fn {report}(path: String) -> Code {{
+    let mut out = vyrn\"\"
+    match parsed.parse{name}(readFile(path) ?? \"\") {{
+        Ok(tree) => {{}}
+        Err(errors) => {{
+            for e in errors {{
+                let at = \"\\{{path}}:\\{{e.line.toString()}}:\\{{e.col.toString()}}\"
+                out = out + diag(\"error\", at, syntaxSentence(rowParts(e.row), {catalogue}))
+            }}
+        }}
+    }}
+    return out
+}}
+
+",
+            name = type_name(rule),
+            report = report_fn(rule),
+        );
+    }
+    o.push_str("/// A refusal's row as text, for `syntaxSentence`.\ngen fn rowParts(row: parsed.Row) -> SyntaxRow {\n    return match row {\n");
+    for (row, holes) in &rows {
+        let bind: Vec<String> = (0..holes.len()).map(|i| format!("h{i}")).collect();
+        let bind = match bind.is_empty() {
+            true => String::new(),
+            false => format!("({})", bind.join(", ")),
+        };
+        let parts: Vec<String> = (holes.iter().enumerate())
+            .map(|(i, h)| {
+                format!(
+                    "SyntaxHole {{ name: {}, value: h{i}.copy() }}",
+                    string_lit(h)
+                )
+            })
+            .collect();
+        let _ = writeln!(
+            o,
+            "        {row}{bind} => SyntaxRow {{ name: {}, holes: [{}] }},",
+            string_lit(row),
+            parts.join(", ")
+        );
+    }
+    o.push_str("    }\n}\n");
+    Ok(o)
+}
+
 /// The helpers a written module may call, each before the helpers it calls.
 fn helpers(g: &Grammar, rows: &BTreeMap<Rc<str>, Vec<Rc<str>>>) -> Vec<(&'static str, String)> {
     let trivia = match g.rule("trivia").is_some() {

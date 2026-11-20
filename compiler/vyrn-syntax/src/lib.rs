@@ -31,7 +31,7 @@ use std::rc::Rc;
 
 pub use gen::{bytes, lexer};
 pub use load::load;
-pub use parser::parser;
+pub use parser::{parser, report};
 pub use recognizer::recognizer;
 pub use textmate::{language_configuration, textmate, Naming, Scope};
 
@@ -239,6 +239,13 @@ impl Grammar {
     /// Returns the first rule no other rule reads, where a text of the grammar starts.
     pub fn start(&self) -> Option<RuleId> {
         parser::start_rules(self).ok()?.first().copied()
+    }
+
+    /// Returns the name of the exported `gen fn` that [`crate::report`] writes for the
+    /// start rule: `report<Start>(path) -> Code`, a report at each refusal of the
+    /// text at `path`.
+    pub fn report_fn(&self) -> Option<String> {
+        Some(parser::report_fn(self.rule_name(self.start()?)))
     }
 
     /// Returns the name of rule `id`.

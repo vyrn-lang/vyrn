@@ -635,10 +635,16 @@ pub fn language_claim(
     }))
 }
 
+/// The key of the root [`input_check`] runs a grammar's reports from, beside the
+/// claim's importer. No file holds it: a key the loader serves from a string.
+const REPORT_ROOT: &str = ".vyrn-report.vyrn";
+
 /// Returns what the editor companion of `claim`'s module refuses in the input
 /// `file`, through its `gen fn vyrnCheck*(root, path) -> Code`: each report of
-/// the code it writes, at the place the report names. Empty when the claim names
-/// no module, no companion declares such a function, or the run fails.
+/// the code it writes, at the place the report names. With no such function, a
+/// module that states a grammar ([`crate::loader::grammar_of`]) refuses through
+/// the `report<Start>(path)` that `syntaxReport` writes from it. Empty when the claim
+/// names no module, neither function exists, or the run fails.
 pub fn input_check(
     claim: &Claim,
     file: &str,
@@ -653,7 +659,7 @@ pub fn input_check(
             ConstVal::Str(claim.spell(file)?),
         ];
         let module = claim.module.as_deref()?;
-        crate::loader::call_generator(
+        let companion = crate::loader::call_generator(
             &claim.importer,
             module,
             "vyrnCheck",
@@ -662,8 +668,27 @@ pub fn input_check(
             opts,
             resolver,
             engine,
-        )?
-        .ok()
+        );
+        // The reports `syntaxReport` writes from the module's grammar, run from a
+        // root beside the importer that no file holds, so no program links them.
+        let written = || {
+            let grammar =
+                crate::loader::grammar_of(&claim.importer, module, opts, resolver, engine)?;
+            let name = vyrn_syntax::load(&resolver.read(&grammar).ok()?)
+                .ok()?
+                .report_fn()?;
+            let dir = claim.importer.rsplit_once('/').map_or("", |(d, _)| d);
+            let root = format!("{dir}/{REPORT_ROOT}");
+            let source = format!(
+                "import {{ syntaxReport }} from \"std/syntax\"\nimport * as reported from syntaxReport(\"./{}\")\n",
+                relative_to(&grammar, dir)?
+            );
+            let with = crate::loader::WithRoot::new(&root, &source, resolver);
+            let path = [args[1].clone()];
+            let run = crate::loader::run_gen_fn;
+            Some(run(&root, &root, &name, &path, true, opts, &with, engine))
+        };
+        companion.or_else(written)?.ok()
     };
     let Some(written) = call() else {
         return Vec::new();

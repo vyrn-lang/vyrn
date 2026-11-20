@@ -83,3 +83,88 @@ fn a_written_parser_is_what_the_formatter_writes() {
         assert!(text == formatted, "{}", grammar.display());
     }
 }
+
+/// The `report<Start>` a written parser exports refuses a broken line at its line
+/// and column, in the sentence the catalogue beside the grammar holds, and a row
+/// the catalogue does not hold as the row and its holes.
+#[test]
+fn a_written_parser_reports_a_broken_line_in_its_sentence() {
+    let dir = std::env::temp_dir().join(format!("vyrn-stdsyntax-report-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("toy.errors")).expect("create the directory");
+    let files = [
+        (
+            "toy.syntax",
+            "syntax Toy\nexpect ^Expected(found=.)\ntrivia = ws*\nFile = items:Item*\nItem = 'pay' amount:Num\nNum = text:number\nnumber = [0-9]+ (',' ^Comma(at=.))?\n",
+        ),
+        ("toy.errors/en.json", "{ \"expected\": \"{$found} cannot stand here\" }"),
+        (
+            "toy.vyrn",
+            "import { syntaxReport } from \"std/syntax\"\nimport * as toy from syntaxReport(\"./toy.syntax\")\n",
+        ),
+        ("broken.toy", "pay 1\npay x\n"),
+        ("comma.toy", "pay 1,2\n"),
+    ];
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).expect("write the file");
+    }
+    let root = (dir.to_string_lossy().replace('\\', "/")) + "/toy.vyrn";
+    let std_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    let opts = vyrn_frontend::loader::LoadOptions {
+        std_root: Some(std_root.to_string_lossy().replace('\\', "/")),
+        ..Default::default()
+    };
+    let engine = vyrn_genwasm::engine();
+    let report = |input: &str| {
+        let arg = [vyrn_frontend::consteval::ConstVal::Str(input.to_string())];
+        let resolver = vyrn_frontend::loader::DiskResolver;
+        let run = vyrn_frontend::loader::run_gen_fn;
+        let w = run(
+            &root,
+            &root,
+            "reportFile",
+            &arg,
+            false,
+            &opts,
+            &resolver,
+            Some(&*engine),
+        );
+        let w = w.expect("the report runs");
+        w.reports.iter().map(|r| r.line.clone()).collect::<Vec<_>>()
+    };
+    let got = (report("./broken.toy"), report("./comma.toy"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let want = (
+        vec!["error ./broken.toy:2:5 x cannot stand here".to_string()],
+        vec!["error ./comma.toy:1:7 Comma(at=2)".to_string()],
+    );
+    assert_eq!(got, want);
+}
+
+/// A catalogue that is no JSON object of sentences is refused at its own file.
+#[test]
+fn a_catalogue_member_that_is_no_sentence_is_refused_at_the_catalogue() {
+    let dir = std::env::temp_dir().join(format!("vyrn-stdsyntax-catalogue-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("toy.errors")).expect("create the directory");
+    let files = [
+        ("toy.syntax", "syntax Toy\nexpect ^Expected\nFile = 'pay'\n"),
+        ("toy.errors/en.json", "{ \"expected\": 3 }"),
+        (
+            "main.vyrn",
+            "import { syntaxReport } from \"std/syntax\"\nimport * as toy from syntaxReport(\"./toy.syntax\")\n\nfn main() -> Int64 {\n    return 0\n}\n",
+        ),
+    ];
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).expect("write the file");
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["check", "main.vyrn"])
+        .current_dir(&dir)
+        .output()
+        .expect("vyrn check");
+    let _ = std::fs::remove_dir_all(&dir);
+    let said = norm(&out.stderr);
+    let want = "toy.errors/en.json:1:1: the catalogue's `expected` is no sentence: a sentence is a JSON string";
+    assert!(said.contains(want), "{said}");
+}

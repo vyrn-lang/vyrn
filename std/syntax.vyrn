@@ -19,7 +19,10 @@
 ///
 /// A grammar states shape only, so the parser holds no sentence. A row is a name and
 /// its holes, and the reader says what each row means. A label is a field of the
-/// tree, and every record holds its byte span.
+/// tree, and every record holds its byte span. `syntaxReport(path)` writes, from the
+/// same grammar, what the editor says about a file of it: a report at each refusal,
+/// in the sentence `<stem>.errors/en.json` beside the grammar holds for its row. A
+/// program that only parses imports `syntax(path)` alone and links no report.
 
 /// One refusal of a grammar whose rows are `R`: its row, a 1-based line and column,
 /// and the byte offset past the refused token. A parser answers with its own `Row`,
@@ -30,4 +33,12 @@ export type SyntaxError<R> = { row: R, line: Int64, col: Int64, end: Int64 }
 /// at its line and column, and the path must be one the generator's caller passed.
 export gen fn syntax(path: String) -> Code {
     return syntaxParser(path)
+}
+
+/// The reports of the grammar at `path`: a module over its parser that exports one
+/// `gen fn report<Start>(path) -> Code` per start rule, a report at each refusal of
+/// the text at `path` in its catalogue's sentence. A catalogue that is no JSON
+/// object of strings is a report at its file.
+export gen fn syntaxReport(path: String) -> Code {
+    return syntaxReporter(path)
 }

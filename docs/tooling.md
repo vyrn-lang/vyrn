@@ -527,9 +527,11 @@ input's own grammar come from the `gen fn vyrnComplete*` and
 cursor maps through `OriginMaps` into the generated module. A document the
 languages map names (`manifest::language_of`) is claimed by its language module
 instead, with no search: the companion's `vyrnCheck*` gives its diagnostics,
-`vyrnHover*` its hover, `vyrnComplete*` and `vyrnDefinition*` the rest, and its
-semantic tokens are `vyrn_syntax::colour::runs` over the grammar the module
-states (`loader::grammar_of`), mapped onto the legend. The server registers the
+else the `report<Start>` that `syntaxReport` writes from the grammar the module
+states (`loader::grammar_of`); `vyrnHover*` gives its hover, `vyrnComplete*` and
+`vyrnDefinition*` the rest, and its semantic tokens are `vyrn_syntax::colour::runs`
+over that grammar, mapped onto the legend. A change to any open document reads
+every other open language document again, so a grammar edit reaches them. The server registers the
 map's globs with the client, the defaults at start and a project's beside its
 `inputs`; `std/grammar.editor` serves `.syntax` files. In a static `class` or a string literal of a `:class`, completion offers the classes `vyrn_frontend::classes` reads, each with its source: the component's own style block (local), the stylesheets the app's layouts link with `stylesheet "..."`, mapped to the files under the manifest's `public` directory, and the files the `stylesheets` globs name (global); the theme's alphabet follows. Hover shows each rule that defines the class with its file and line, local first, and definition jumps to the first. There a name on an
 import line the module dropped as a repeat maps to the import that kept it, and
@@ -636,14 +638,22 @@ with its text: a `.vyrn`, `.vyx` or `.von` tab is Vyrn, a `.syntax` tab is check
 `vyrn_syntax::load` and coloured by `vyrn_syntax::colour` reading it with
 `syntax.syntax`, and a tab of any other kind is neither. Run runs a Vyrn tab only.
 `site/public/play-worker.js` runs the compiled program with `web/wasi-min.js`.
-A `derive` generator runs in the page: the module calls its one import,
+`play_check` and `play_compile` also take the project: the path of the tab
+being read and every tab's text by path, so a relative import or a
+generator's read resolves to a tab, and a missing one reports
+`module not found`. `std/` is embedded at build time.
+A generator runs in the page: the module calls its one import,
 `vyrn_play.run_generator`, and `site/public/play-wasm.js` instantiates the
-generator's module synchronously and serves it its `TypeArg`. The generator's
-code imports (`text`, `splice`, `render` and the rest, not `codeAt`) go back
-into the compiler through `code_call`, which runs them in the arena the native
-engine uses.
-`std/` is embedded at build time; a relative import reports
-`module not found`.
+generator's module synchronously and serves it its `String` and `Int64`
+arguments or its `TypeArg`. The generator's code imports (`text`, `splice`,
+`render` and the rest) and its `read`, `syntaxParser` and `syntaxReporter` go
+back into the compiler through `code_call` and run in the run's arena
+(`vyrn_genwasm::Arena`), which holds the files the load reads as data and
+serves the reads through the native host's `serve`, recorded as reads. A
+generator whose module calls `moduleInterface`, `moduleCode`, `contractOf` or
+`codeAt` fails with a sentence naming the call, unless the lowering refuses its
+program, which is then what the page shows.
+A diagnostic in another tab names its file.
 
 It is outside the workspace, and the build must run from its own directory,
 because `.cargo/config.toml` there sets the linker's stack size:

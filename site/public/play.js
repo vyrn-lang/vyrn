@@ -71,6 +71,9 @@ export function mountPlay(root, opts = {}) {
   }
 
   function showDiags(diags) {
+    // A diagnostic in another tab is listed with its place, unanchored here.
+    const here = project().path || "play.vyrn";
+    diags = diags && diags.map((d) => (d.file && d.file !== here ? { ...d, line: 0, col: 0, message: `${d.file}:${d.line}:${d.col}: ${d.message}` } : d));
     showDiagnostics(diagPane, diags, caretToLine);
     squiggle(srcHost(), diags);
   }
@@ -92,7 +95,7 @@ export function mountPlay(root, opts = {}) {
       return;
     }
     try {
-      showDiags(play.check(srcHost().value, kind).diagnostics);
+      showDiags(play.check(srcHost().value, kind, project()).diagnostics);
     } catch (err) {
       showDiags([
         {
@@ -129,7 +132,7 @@ export function mountPlay(root, opts = {}) {
     status.textContent = "Running…";
     say(outPane, "…", "dim");
     const src = srcHost().value;
-    runInWorker(src, stdin ? stdin.value : "", {
+    runInWorker(src, stdin ? stdin.value : "", project(), {
       done: (r) => {
         if (r.exitCode === undefined) {
           say(outPane, "This program did not compile.", "dim");
@@ -208,6 +211,9 @@ export function mountPlay(root, opts = {}) {
 
   ide = mountIde(root, { input, layer, editor, runBtn, stdin, examples, diagPane, paint, scheduleCheck, spansOf, ready: () => play !== null, startCompiler, api: () => play });
   const srcHost = ide ? ide.srcHost : () => input;
+  // The tab being read and every tab's text: a relative import or a generator's
+  // read resolves to a tab.
+  const project = () => (ide ? ide.project() : {});
 
   if (shareBtn) {
     shareBtn.addEventListener("click", async () => {

@@ -27,8 +27,8 @@ pub mod verdict;
 mod world;
 
 pub use pipeline::{
-    check_and_synthesize, gen_engine, load, load_admitting, load_warned, refusals, JUDGE,
-    JUDGE_COST,
+    check_and_synthesize, gen_engine, gen_refusal, load, load_admitting, load_warned, refusals,
+    JUDGE, JUDGE_COST,
 };
 
 pub use world::{analyze, FnRow, Fns, World};

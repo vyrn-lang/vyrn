@@ -274,10 +274,24 @@ pub fn diag_span(severity: &str, anchor: &str, message: &str) -> Result<Span, St
     })
 }
 
-/// Returns what `syntaxParser` answers for the grammar at `path`, whose `bytes` the
-/// run read, `None` when it could not: the parser as code by module `key`, or a report
-/// at the place the grammar goes wrong.
-pub fn syntax_parser_span(key: &str, path: &str, bytes: Option<&[u8]>) -> Result<Span, String> {
+/// What a grammar is written as: its parser (`syntaxParser`), or the reports of
+/// its refusals (`syntaxReporter`) with the bytes of its `<stem>.errors/en.json`
+/// ([`catalogue_of`]) as the run read them, `None` where it has none.
+pub enum Writes<'a> {
+    Parser,
+    Report(Option<&'a [u8]>),
+}
+
+/// Returns what `syntaxParser` or `syntaxReporter` answers for the grammar at
+/// `path`, whose `bytes` the run read, `None` when it could not: the module
+/// `writes` names as code by module `key`, or a report at the place the grammar
+/// or its catalogue goes wrong.
+pub fn syntax_span(
+    key: &str,
+    path: &str,
+    bytes: Option<&[u8]>,
+    writes: Writes<'_>,
+) -> Result<Span, String> {
     let report = |at: String, sentence: &str| diag_span("error", &at, &sentence.replace('\n', " "));
     let Some(bytes) = bytes else {
         return report(format!("{path}:1:1"), "cannot read this grammar");
@@ -285,7 +299,22 @@ pub fn syntax_parser_span(key: &str, path: &str, bytes: Option<&[u8]>) -> Result
     let Ok(src) = std::str::from_utf8(bytes) else {
         return report(format!("{path}:1:1"), "a grammar is UTF-8 text");
     };
-    match vyrn_syntax::load(src).and_then(|g| vyrn_syntax::parser(&g)) {
+    let sentences = match writes {
+        Writes::Parser => None,
+        Writes::Report(None) => Some(Default::default()),
+        Writes::Report(Some(bytes)) => match sentences_of(bytes) {
+            Ok(sentences) => Some(sentences),
+            Err(why) => {
+                let at = catalogue_of(path).unwrap_or_default();
+                return report(format!("{at}:1:1"), &why);
+            }
+        },
+    };
+    let written = vyrn_syntax::load(src).and_then(|g| match &sentences {
+        None => vyrn_syntax::parser(&g),
+        Some(sentences) => vyrn_syntax::report(&g, path, sentences),
+    });
+    match written {
         Ok(text) => Ok(Span {
             text,
             author: Author::File {
@@ -297,6 +326,30 @@ pub fn syntax_parser_span(key: &str, path: &str, bytes: Option<&[u8]>) -> Result
         }),
         Err(e) => report(format!("{path}:{}:{}", e.line, e.col), &e.sentence),
     }
+}
+
+/// The sentences of a grammar's catalogue, a JSON object of strings by key, or
+/// why the bytes are no such object.
+fn sentences_of(bytes: &[u8]) -> Result<std::collections::BTreeMap<String, String>, String> {
+    use crate::schema::Json;
+    let text = std::str::from_utf8(bytes).map_err(|_| "a catalogue is UTF-8 text".to_string())?;
+    let Json::Obj(members) = crate::schema::parse_json(text)? else {
+        return Err("a catalogue is a JSON object of sentences by row".to_string());
+    };
+    (members.into_iter())
+        .map(|(k, v)| match v {
+            Json::Str(s) => Ok((k, s)),
+            _ => Err(format!(
+                "the catalogue's `{k}` is no sentence: a sentence is a JSON string"
+            )),
+        })
+        .collect()
+}
+
+/// The resolver key of the catalogue beside the grammar at `key`:
+/// `<stem>.errors/en.json` for `<stem>.syntax`.
+pub fn catalogue_of(key: &str) -> Option<String> {
+    Some(format!("{}.errors/en.json", key.strip_suffix(".syntax")?))
 }
 
 /// Returns the span `codeAt` copies: `text`, which must stand at `line:col`

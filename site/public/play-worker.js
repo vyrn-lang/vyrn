@@ -2,11 +2,11 @@ import { loadPlay } from "./play-wasm.js";
 import { runVyrn } from "./wasi-min.js";
 
 self.onmessage = async (e) => {
-  const { src, stdin } = e.data;
+  const { src, stdin, project } = e.data;
   try {
     // A fresh instance per run: a RangeError mid-compile leaves an instance that panics on the next call.
     const play = await loadPlay(new URL("play.wasm", import.meta.url));
-    const answer = play.compile(src);
+    const answer = play.compile(src, project);
     if (!answer.module) {
       self.postMessage({ ok: true, result: answer });
       return;

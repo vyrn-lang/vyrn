@@ -1,0 +1,94 @@
+/// A refusal's sentence, for the modules `syntaxReport` (`std/syntax`) writes.
+/// A program that only parses never loads it.
+
+/// A refusal's row as text: its name and each hole's name and value. A module
+/// `syntaxReport` writes builds one for [`syntaxSentence`].
+export to "./syntax" type SyntaxRow = { name: String, holes: Array<SyntaxHole> }
+
+/// A hole of a [`SyntaxRow`]: its name in the grammar and the text it holds.
+export to "./syntax" type SyntaxHole = { name: String, value: String }
+
+/// What a refusal with `row` says, on one line. `catalogue` holds one
+/// `Row=sentence` line per entry of the grammar's `<stem>.errors/en.json`, as the
+/// parser's writer read it. In a sentence `{$name}` is a hole and a backslash
+/// escapes the next character. A row with no line reads as the row and its holes.
+export gen fn syntaxSentence(row: SyntaxRow, catalogue: String) -> String {
+    let b = bytes(catalogue)
+    let key = bytes(row.name + "=")
+    let mut out: Array<UInt8> = []
+    let mut at = syntaxEntry(b, key)
+    if at < 0 {
+        for x in key {
+            out.push(x)
+        }
+        out.pop()
+        let mut sep = "("
+        for h in row.holes {
+            for x in bytes(sep + h.name + "=" + h.value) {
+                out.push(x)
+            }
+            sep = ", "
+        }
+        if row.holes.length > 0 {
+            out.push(')')
+        }
+    }
+    while at >= 0 && at < b.length && b[at] != '\n' {
+        let c = b[at]
+        if c == '\\' && at + 1 < b.length {
+            out.push(b[at + 1])
+            at = at + 2
+        } else if c == '{' && at + 1 < b.length && b[at + 1] == '$' {
+            let mut e = at + 2
+            while e < b.length && b[e] != '}' && b[e] != '\n' {
+                e = e + 1
+            }
+            let name = stringFromBytes(bytes(catalogue, at + 2, e)) ?? ""
+            let mut said = false
+            for h in row.holes {
+                if !said && h.name == name {
+                    for x in bytes(h.value) {
+                        out.push(x)
+                    }
+                    said = true
+                }
+            }
+            if said {
+                at = e + 1
+            } else {
+                out.push(c)
+                at = at + 1
+            }
+        } else {
+            out.push(c)
+            at = at + 1
+        }
+    }
+    let mut i = 0
+    while i < out.length {
+        if out[i] == '\n' || out[i] == '\r' {
+            out[i] = ' '
+        }
+        i = i + 1
+    }
+    return stringFromBytes(out) ?? ""
+}
+
+/// The offset past `key` on the line of `b` that starts with it, or -1.
+gen fn syntaxEntry(b: Array<UInt8>, key: Array<UInt8>) -> Int64 {
+    let mut line = 0
+    while line < b.length {
+        let mut k = 0
+        while k < key.length && line + k < b.length && b[line + k] == key[k] {
+            k = k + 1
+        }
+        if k == key.length {
+            return line + k
+        }
+        while line < b.length && b[line] != '\n' {
+            line = line + 1
+        }
+        line = line + 1
+    }
+    return -1
+}

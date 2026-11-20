@@ -40,14 +40,32 @@ test("derive runs its generator in the page and the program prints what it wrote
   assert.equal(exitCode, 0);
 });
 
-test("a generator that asks the page for more than its TypeArg is refused, not run", async () => {
+test("a generator that reflects on a module is refused, naming the call", async () => {
   const play = await instantiatePlay(bytes);
   const reads = src.replace("let mut words = n.shape.kind.copy()", 'let mut words = moduleInterface("./x").types.length.toString()');
   const { diagnostics } = play.compile(reads);
-  assert.deepEqual(
-    diagnostics.map((d) => d.message),
-    ["the playground serves a generator its TypeArg and nothing else"],
-  );
+  const said = "the playground cannot run `fieldsOf`: its module calls `moduleInterface`, which the page's host does not serve";
+  assert.ok(diagnostics.some((d) => d.message.includes(said)), JSON.stringify(diagnostics));
+});
+
+const calc = await readFile(fileURLToPath(new URL("examples/syntaxcalc.vyrn", root)), "utf8");
+const calcGrammar = await readFile(fileURLToPath(new URL("examples/syntaxcalc.syntax", root)), "utf8");
+
+test("syntax() reads a grammar tab, and the program prints what vyrn run prints", async () => {
+  const play = await instantiatePlay(bytes);
+  const project = { path: "syntaxcalc.vyrn", files: { "syntaxcalc.syntax": calcGrammar } };
+  const answer = play.compile(calc, project);
+  assert.ok(answer.module, JSON.stringify(answer));
+  const { exitCode, stdout } = await runVyrn(answer.module, {});
+  assert.ok(stdout.startsWith("let a = (|| (== (>= (+ 1 (* 2 (^ 3 (^ 4 5)))) 6) 7) 8)\n"), stdout);
+  assert.equal(exitCode, 0);
+});
+
+test("a broken grammar tab is refused in the grammar's own place", async () => {
+  const play = await instantiatePlay(bytes);
+  const project = { path: "syntaxcalc.vyrn", files: { "syntaxcalc.syntax": "syntax T\nexpect ^E\nA = 'a\n" } };
+  const [d] = play.check(calc, "vyrn", project).diagnostics;
+  assert.deepEqual([d.file, d.line, d.col, d.message], ["syntaxcalc.syntax", 3, 7, "rule A: an unclosed literal"]);
 });
 
 const code = `export gen fn fieldsOf(t: TypeArg) -> Code {
