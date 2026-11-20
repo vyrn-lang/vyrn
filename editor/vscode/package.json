@@ -6,7 +6,7 @@
   "publisher": "vyrn-lang",
   "license": "MIT",
   "icon": "icons/vyrn.png",
-  "engines": { "vscode": "^1.70.0" },
+  "engines": { "vscode": "^1.91.0" },
   "categories": ["Programming Languages"],
   "activationEvents": [
     "onLanguage:vyrn",
@@ -170,6 +170,6 @@
     }
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.1"
+    "vscode-languageclient": "^11.0.0"
   }
 }

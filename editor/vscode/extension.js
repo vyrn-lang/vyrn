@@ -17,7 +17,7 @@ function activate(context) {
   // Required here rather than at the top so this file loads outside VS Code
   // with nothing installed — which is what lets `test/resolve.test.mjs` import
   // the real server-resolution helpers instead of a copy of them.
-  const { LanguageClient, TransportKind } = require("vscode-languageclient");
+  const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 
   // Shared handle to the started language client, so the CodeLens provider can
   // query the server's `vyrn/isDevEntry` predicate for the
@@ -140,7 +140,7 @@ function activate(context) {
  *
  * @param {import("vscode").ExtensionContext} context
  * @param {typeof import("vscode")} vsc
- * @param {{ client: import("vscode-languageclient").LanguageClient | null }} lspState
+ * @param {{ client: import("vscode-languageclient/node").LanguageClient | null }} lspState
  */
 function registerRun(context, vsc, lspState) {
   // Fired to make VS Code re-request CodeLenses — used once the language server
