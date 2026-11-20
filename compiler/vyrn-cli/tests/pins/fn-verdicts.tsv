@@ -3330,6 +3330,9 @@ std/symbolmap.vyrn	mapJson	no, it calls `emit`, which is not trap-free	no, its e
 std/symbolmap.vyrn	mapSlug	yes	no, its effect set is alloc
 std/symbolmap.vyrn	symbolMapFn	no, it calls `mapJson`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/syntax.vyrn	syntax	yes	no, its effect set is gen-only
+std/syntax.vyrn	syntaxReport	yes	no, its effect set is gen-only
+std/syntaxreport.vyrn	syntaxSentence	no, it keeps a slice check	no, its effect set is alloc
+std/syntaxreport.vyrn	syntaxEntry	yes	no, the loop is no counter loop
 std/task.vyrn	task$sleep	yes	no, its effect set is waits
 std/task.vyrn	task$taskAt	yes	no, its effect set is module-state
 std/task.vyrn	task$waitAt	yes	no, its effect set is module-state

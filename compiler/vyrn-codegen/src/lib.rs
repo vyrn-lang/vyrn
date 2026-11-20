@@ -286,6 +286,8 @@ pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
         ("codeAt", &[I32, I64, I64, I32], &[I64]),
         // The parser a grammar writes.
         ("syntaxParser", &[I32], &[I64]),
+        // The reports of a grammar's refusals.
+        ("syntaxReporter", &[I32], &[I64]),
         ("at", &[I64, I32, I64, I64], &[I64]),
         ("concat", &[I64, I64], &[I64]),
         ("render", &[I64], &[I64]),

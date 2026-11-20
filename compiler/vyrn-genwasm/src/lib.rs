@@ -230,13 +230,13 @@ fn serve(
             }
         };
     }
-    let grammar = (mode == MODE_SYNTAX).then(|| resolved.clone());
+    let grammar = matches!(mode, MODE_SYNTAX | MODE_REPORT).then(|| resolved.clone());
     match inputs.resolver.read(&resolved) {
         Ok(content) => {
             let bytes = content.into_bytes();
             reads.push((resolved, Some(bytes.clone())));
             if let Some(key) = grammar {
-                return syntax_parser(inputs, reads, path, key, Some(&bytes));
+                return syntax_parser(inputs, reads, (path, mode), key, Some(&bytes));
             }
             // Recorded before the NUL rule rejects it: the cache must notice
             // when the file changes.
@@ -255,29 +255,38 @@ fn serve(
                 return Err(why);
             }
             if let Some(key) = grammar {
-                return syntax_parser(inputs, reads, path, key, None);
+                return syntax_parser(inputs, reads, (path, mode), key, None);
             }
             Ok(Served::Bytes(1, Vec::new()))
         }
     }
 }
 
-/// Answers `syntaxParser` with the span of the grammar's parser or of its report,
-/// and records the read of the grammar's catalogue, present or not.
+/// Answers `syntaxParser` or `syntaxReporter` (`mode`) with the span of what the
+/// grammar writes or of its report. The reports read the grammar's catalogue, a
+/// recorded read, present or not.
 fn syntax_parser(
     inputs: &GenInputs<'_>,
     reads: &mut Vec<GenRead>,
-    path: &str,
+    (path, mode): (&str, i32),
     key: String,
     bytes: Option<&[u8]>,
 ) -> Result<Served, String> {
-    let catalogue = vyrn_frontend::gen::catalogue_of(&key).map(|k| {
-        let bytes = inputs.resolver.read(&k).ok().map(String::into_bytes);
-        reads.push((k, bytes.clone()));
-        bytes
-    });
-    let catalogue = catalogue.flatten();
-    vyrn_frontend::gen::syntax_parser_span(&inputs.module, path, bytes, catalogue.as_deref())
+    use vyrn_frontend::gen::Writes;
+    let catalogue = (mode == MODE_REPORT)
+        .then(|| vyrn_frontend::gen::catalogue_of(&key))
+        .flatten()
+        .map(|k| {
+            let bytes = inputs.resolver.read(&k).ok().map(String::into_bytes);
+            reads.push((k, bytes.clone()));
+            bytes
+        });
+    let writes = match (mode, &catalogue) {
+        (MODE_REPORT, Some(bytes)) => Writes::Report(bytes.as_deref()),
+        (MODE_REPORT, None) => Writes::Report(None),
+        _ => Writes::Parser,
+    };
+    vyrn_frontend::gen::syntax_span(&inputs.module, path, bytes, writes)
         .map(|span| Served::Parser(key, Box::new(span)))
 }
 
@@ -921,6 +930,8 @@ const MODE_LIST_KINDS: i32 = 4;
 const MODE_CODE_AT: i32 = 5;
 /// `syntaxParser`: a read, whose bytes the host thread writes a parser from.
 pub const MODE_SYNTAX: i32 = 7;
+/// `syntaxReporter`: a read, whose bytes the host writes the reports of.
+pub const MODE_REPORT: i32 = 9;
 /// Not a read: `appPath` asks for an input's path from the project root.
 const MODE_APP_PATH: i32 = 8;
 
@@ -1398,24 +1409,30 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
             denied((streams.code).code_at(&key, &path, &bytes, (line, col), &text))
         },
     )?;
-    linker.func_wrap(
-        "vyrn_gen",
-        "syntaxParser",
-        |mut caller: Caller<'_, T<X>>, path: i32| -> Result<i64> {
-            let (data, host) = guest_mem(&mut caller)?;
-            let streams = &mut host.gen;
-            let path = cstr(data, path)?;
-            let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
-            caps.req
-                .send((path, MODE_SYNTAX))
-                .map_err(|_| Error::msg("generator host is gone"))?;
-            let served = caps
-                .resp
-                .recv()
-                .map_err(|_| Error::msg("generator host is gone"))?;
-            Ok(denied(served.and_then(|s| streams.code.answer(s)))?.0)
-        },
-    )?;
+    // What a grammar writes: its parser, or the reports of its refusals.
+    for (import, mode) in [
+        ("syntaxParser", MODE_SYNTAX),
+        ("syntaxReporter", MODE_REPORT),
+    ] {
+        linker.func_wrap(
+            "vyrn_gen",
+            import,
+            move |mut caller: Caller<'_, T<X>>, path: i32| -> Result<i64> {
+                let (data, host) = guest_mem(&mut caller)?;
+                let streams = &mut host.gen;
+                let path = cstr(data, path)?;
+                let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
+                caps.req
+                    .send((path, mode))
+                    .map_err(|_| Error::msg("generator host is gone"))?;
+                let served = caps
+                    .resp
+                    .recv()
+                    .map_err(|_| Error::msg("generator host is gone"))?;
+                Ok(denied(served.and_then(|s| streams.code.answer(s)))?.0)
+            },
+        )?;
+    }
     linker.func_wrap(
         "vyrn_gen",
         "at",

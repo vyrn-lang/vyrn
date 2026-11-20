@@ -21,9 +21,10 @@ fn valid(text: String) -> Bool {
 
 A grammar states shape only, so the parser holds no sentence. A row is a name and
 its holes, and the reader says what each row means. A label is a field of the
-tree, and every record holds its byte span. For the editor, each start rule also
-has a `gen fn report<Start>(path)`: a report at each refusal of the file at `path`,
-in the sentence `<stem>.errors/en.json` beside the grammar holds for its row.
+tree, and every record holds its byte span. `syntaxReport(path)` writes, from the
+same grammar, what the editor says about a file of it: a report at each refusal,
+in the sentence `<stem>.errors/en.json` beside the grammar holds for its row. A
+program that only parses imports `syntax(path)` alone and links no report.
 
 ## SyntaxError
 
@@ -43,3 +44,14 @@ fn syntax(path: String) -> Code
 
 The parser the grammar at `path` writes. A grammar that does not load is a report
 at its line and column, and the path must be one the generator's caller passed.
+
+## syntaxReport
+
+```vyrn
+fn syntaxReport(path: String) -> Code
+```
+
+The reports of the grammar at `path`: a module over its parser that exports one
+`gen fn report<Start>(path) -> Code` per start rule, a report at each refusal of
+the text at `path` in its catalogue's sentence. A catalogue that is no JSON
+object of strings is a report at its file.

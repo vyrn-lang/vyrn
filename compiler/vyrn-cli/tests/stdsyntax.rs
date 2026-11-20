@@ -18,7 +18,7 @@ fn format_grammar() -> PathBuf {
 fn written(grammar: &Path) -> String {
     let text = std::fs::read_to_string(grammar).expect("the grammar reads");
     let g = vyrn_syntax::load(&text).expect("the grammar loads");
-    vyrn_syntax::parser(&g, &Default::default()).expect("the grammar lowers")
+    vyrn_syntax::parser(&g).expect("the grammar lowers")
 }
 
 /// Runs `main` in a new directory that holds the two grammars this crate owns,
@@ -100,7 +100,7 @@ fn a_written_parser_reports_a_broken_line_in_its_sentence() {
         ("toy.errors/en.json", "{ \"expected\": \"{$found} cannot stand here\" }"),
         (
             "toy.vyrn",
-            "import { syntax } from \"std/syntax\"\nimport * as toy from syntax(\"./toy.syntax\")\n",
+            "import { syntaxReport } from \"std/syntax\"\nimport * as toy from syntaxReport(\"./toy.syntax\")\n",
         ),
         ("broken.toy", "pay 1\npay x\n"),
         ("comma.toy", "pay 1,2\n"),
@@ -139,4 +139,32 @@ fn a_written_parser_reports_a_broken_line_in_its_sentence() {
         vec!["error ./comma.toy:1:7 Comma(at=2)".to_string()],
     );
     assert_eq!(got, want);
+}
+
+/// A catalogue that is no JSON object of sentences is refused at its own file.
+#[test]
+fn a_catalogue_member_that_is_no_sentence_is_refused_at_the_catalogue() {
+    let dir = std::env::temp_dir().join(format!("vyrn-stdsyntax-catalogue-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("toy.errors")).expect("create the directory");
+    let files = [
+        ("toy.syntax", "syntax Toy\nexpect ^Expected\nFile = 'pay'\n"),
+        ("toy.errors/en.json", "{ \"expected\": 3 }"),
+        (
+            "main.vyrn",
+            "import { syntaxReport } from \"std/syntax\"\nimport * as toy from syntaxReport(\"./toy.syntax\")\n\nfn main() -> Int64 {\n    return 0\n}\n",
+        ),
+    ];
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).expect("write the file");
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["check", "main.vyrn"])
+        .current_dir(&dir)
+        .output()
+        .expect("vyrn check");
+    let _ = std::fs::remove_dir_all(&dir);
+    let said = norm(&out.stderr);
+    let want = "toy.errors/en.json:1:1: the catalogue's `expected` is no sentence: a sentence is a JSON string";
+    assert!(said.contains(want), "{said}");
 }

@@ -3524,7 +3524,7 @@ pub fn call_generator(
 /// Runs the `gen fn` `name` of the module at resolver key `module` on `args`, as
 /// [`call_generator`] runs what it finds: a function of the module, or one a
 /// module written by one of its generator imports exports, such as a written
-/// parser's `report<Start>` ([`vyrn_syntax::Grammar::report_fn`]).
+/// `syntaxReport` module's `report<Start>` ([`vyrn_syntax::Grammar::report_fn`]).
 #[allow(clippy::too_many_arguments)]
 pub fn run_gen_fn(
     importer: &str,

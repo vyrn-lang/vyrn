@@ -5393,6 +5393,7 @@ impl<'a> Checker<'a> {
                     "vyrnModule" => "`vyrnModule` is",
                     "vyrnType" => "`vyrnType` is",
                     "syntaxParser" => "`syntaxParser` is",
+                    "syntaxReporter" => "`syntaxReporter` is",
                     "name" => "`name` is",
                     "diag" => "`diag` is",
                     "codeAt" => "`codeAt` is",

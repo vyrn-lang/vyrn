@@ -552,6 +552,7 @@ const LATTICE: &[(&str, &str, bool)] = &[
     ("vyrnModule", "gen-only", true),
     ("vyrnType", "gen-only", true),
     ("syntaxParser", "gen-only", true),
+    ("syntaxReporter", "gen-only", true),
     ("render", "gen-only", true),
     ("name", "gen-only", true),
     ("diag", "gen-only", true),

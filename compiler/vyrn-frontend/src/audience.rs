@@ -635,11 +635,15 @@ pub fn language_claim(
     }))
 }
 
+/// The key of the root [`input_check`] runs a grammar's reports from, beside the
+/// claim's importer. No file holds it: a key the loader serves from a string.
+const REPORT_ROOT: &str = ".vyrn-report.vyrn";
+
 /// Returns what the editor companion of `claim`'s module refuses in the input
 /// `file`, through its `gen fn vyrnCheck*(root, path) -> Code`: each report of
 /// the code it writes, at the place the report names. With no such function, a
 /// module that states a grammar ([`crate::loader::grammar_of`]) refuses through
-/// the `report<Start>(path)` its written parser exports. Empty when the claim
+/// the `report<Start>(path)` that `syntaxReport` writes from it. Empty when the claim
 /// names no module, neither function exists, or the run fails.
 pub fn input_check(
     claim: &Claim,
@@ -665,24 +669,24 @@ pub fn input_check(
             resolver,
             engine,
         );
+        // The reports `syntaxReport` writes from the module's grammar, run from a
+        // root beside the importer that no file holds, so no program links them.
         let written = || {
             let grammar =
                 crate::loader::grammar_of(&claim.importer, module, opts, resolver, engine)?;
             let name = vyrn_syntax::load(&resolver.read(&grammar).ok()?)
                 .ok()?
                 .report_fn()?;
-            let key = crate::loader::resolve_spec(module, &claim.importer, opts).ok()?;
+            let dir = claim.importer.rsplit_once('/').map_or("", |(d, _)| d);
+            let root = format!("{dir}/{REPORT_ROOT}");
+            let source = format!(
+                "import {{ syntaxReport }} from \"std/syntax\"\nimport * as reported from syntaxReport(\"./{}\")\n",
+                relative_to(&grammar, dir)?
+            );
+            let with = crate::loader::WithRoot::new(&root, &source, resolver);
             let path = [args[1].clone()];
-            Some(crate::loader::run_gen_fn(
-                &claim.importer,
-                &key,
-                &name,
-                &path,
-                true,
-                opts,
-                resolver,
-                engine,
-            ))
+            let run = crate::loader::run_gen_fn;
+            Some(run(&root, &root, &name, &path, true, opts, &with, engine))
         };
         companion.or_else(written)?.ok()
     };

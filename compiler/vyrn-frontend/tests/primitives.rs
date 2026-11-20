@@ -130,6 +130,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("vyrnModule", Compiler, "the compiler's OWN recognizer, reading a module's nodes"),
     ("vyrnType", Compiler, "the compiler's OWN recognizer, reading a type's nodes"),
     ("syntaxParser", Compiler, "the compiler's OWN reader of a grammar, against the bytes the host read"),
+    ("syntaxReporter", Compiler, "the compiler's OWN reader of a grammar and its catalogue, against the bytes the host read"),
     ("@codeQuote", Compiler, "the desugar of vyrn\"…\", its parts and holes in one call"),
     ("__vyrnGenReflect", Compiler, "a generator host's reflection, moved out as atoms"),
     ("__vyrnGenNextInt", Compiler, "as `__vyrnGenReflect`: the next Int64 atom"),

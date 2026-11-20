@@ -43,10 +43,8 @@ use crate::{
 const NOT_STARTS: &[&str] = &["scan", "trivia", "token"];
 
 /// Returns the Vyrn source of `g`'s parser, or where the grammar has no such parser
-/// and why. `sentences` is the grammar's catalogue, `<stem>.errors/en.json`: a
-/// row's sentence under its name with a lower-case first letter, a hole as
-/// `{$name}`. A row it does not hold reads as the row and its holes.
-pub fn parser(g: &Grammar, sentences: &BTreeMap<String, String>) -> Result<String, Refused> {
+/// and why.
+pub fn parser(g: &Grammar) -> Result<String, Refused> {
     refuse_unset_flags(g)?;
     let starts = start_rules(g)?;
     let rules = reached(g, &starts);
@@ -78,7 +76,6 @@ pub fn parser(g: &Grammar, sentences: &BTreeMap<String, String>) -> Result<Strin
         free: free_labels(g, &rules),
         fallible: fallible(g),
         rows,
-        sentences,
         o: String::new(),
         ind: 0,
         fresh: 0,
@@ -431,7 +428,6 @@ struct Writer<'g> {
     /// Whether each rule can fail without a refusal.
     fallible: Vec<bool>,
     rows: BTreeMap<Rc<str>, Vec<Rc<str>>>,
-    sentences: &'g BTreeMap<String, String>,
     o: String,
     ind: usize,
     /// The number of the next local of the function being written.
@@ -807,22 +803,6 @@ impl Writer<'_> {
         self.line("return Err(consume p.errors)");
         self.close();
         self.o.push('\n');
-        let name = type_name(&rule.name);
-        self.line(format!(
-            "/// The refusals `parse{name}` gives the text at `path`, each a report at its\n/// line and column."
-        ));
-        self.open(format!(
-            "export gen fn {}(path: String) -> Code {{",
-            report_fn(&rule.name)
-        ));
-        self.open(format!(
-            "return match parse{name}(readFile(path) ?? \"\") {{"
-        ));
-        self.line("Ok(tree) => vyrn\"\",");
-        self.line("Err(errors) => reported(path, errors),");
-        self.close();
-        self.close();
-        self.o.push('\n');
         Ok(())
     }
 
@@ -848,7 +828,7 @@ impl Writer<'_> {
         head.push_str("}\n\n");
         let mut text = self.o;
         // Each helper calls only helpers later in the list, so one pass finds them.
-        for (name, body) in helpers(g, &self.rows, self.sentences) {
+        for (name, body) in helpers(g, &self.rows) {
             if text.contains(&format!("{name}(")) {
                 text.push_str(&body);
                 text.push('\n');
@@ -1851,67 +1831,87 @@ pub(crate) fn report_fn(rule: &str) -> String {
     format!("report{}", type_name(rule))
 }
 
-/// The Vyrn expression of `row`'s sentence in `sentences`, over the bindings `h0`,
-/// `h1`, ... of its `holes`: the catalogue's text, or the row and its holes. In the
-/// text a backslash escapes the next character, and a `{$name}` that names no hole
-/// stays text.
-fn sentence(row: &str, holes: &[Rc<str>], sentences: &BTreeMap<String, String>) -> String {
-    let key: String = (row.chars().enumerate())
-        .map(|(i, c)| if i == 0 { c.to_ascii_lowercase() } else { c })
-        .collect();
-    let (mut parts, mut lit) = (Vec::new(), String::new());
-    let hole = |lit: &mut String, parts: &mut Vec<String>, i: usize| {
-        parts.push(string_lit(&std::mem::take(lit)));
-        parts.push(format!("h{i}"));
-    };
-    match sentences.get(&key) {
-        Some(text) => {
-            let mut rest = text.as_str();
-            while let Some(c) = rest.chars().next() {
-                let named = rest.strip_prefix("{$").and_then(|r| {
-                    let (name, after) = r.split_once('}')?;
-                    Some((holes.iter().position(|h| &**h == name)?, after))
-                });
-                if let Some((i, after)) = named {
-                    hole(&mut lit, &mut parts, i);
-                    rest = after;
-                    continue;
-                }
-                rest = &rest[c.len_utf8()..];
-                match (c, rest.chars().next()) {
-                    ('\\', Some(next)) => {
-                        lit.push(next);
-                        rest = &rest[next.len_utf8()..];
-                    }
-                    _ => lit.push(c),
-                }
-            }
-        }
-        None => {
-            lit.push_str(row);
-            for (i, h) in holes.iter().enumerate() {
-                lit.push_str(&format!("{}{h}=", if i == 0 { "(" } else { ", " }));
-                hole(&mut lit, &mut parts, i);
-            }
-            if !holes.is_empty() {
-                lit.push(')');
-            }
+/// Returns the Vyrn source of the reports of `g`'s refusals: a module that imports
+/// the parser of the grammar at `path`, as the caller spells it, and exports one
+/// `gen fn report<Start>(path) -> Code` per start rule. Each report stands at a
+/// refusal's line and column and says the sentence `sentences` holds for its row,
+/// `std/syntaxreport`'s `syntaxSentence` reading them; `sentences` is the grammar's
+/// `<stem>.errors/en.json`, keyed by row name with a lower-case first letter.
+pub fn report(
+    g: &Grammar,
+    path: &str,
+    sentences: &BTreeMap<String, String>,
+) -> Result<String, Refused> {
+    let rows = rows(g);
+    let mut catalogue = String::new();
+    for row in rows.keys() {
+        let key: String = (row.chars().enumerate())
+            .map(|(i, c)| if i == 0 { c.to_ascii_lowercase() } else { c })
+            .collect();
+        if let Some(text) = sentences.get(&key) {
+            let _ = writeln!(catalogue, "{row}={}", text.replace(['\n', '\r'], " "));
         }
     }
-    parts.push(string_lit(&lit));
-    let kept: Vec<String> = (parts.into_iter().enumerate())
-        .filter(|(i, p)| *i == 0 || p != "\"\"")
-        .map(|(_, p)| p)
-        .collect();
-    kept.join(" + ")
+    let catalogue = string_lit(&catalogue);
+    let mut o = format!(
+        "import {{ syntax }} from \"std/syntax\"\n\
+         import {{ SyntaxHole, SyntaxRow, syntaxSentence }} from \"std/syntaxreport\"\n\
+         import * as parsed from syntax({})\n\n",
+        string_lit(path)
+    );
+    for r in start_rules(g)? {
+        let rule = &g.body(r).name;
+        let _ = write!(
+            o,
+            "/// The refusals `parse{name}` gives the text at `path`, each a report at its
+/// line and column.
+export gen fn {report}(path: String) -> Code {{
+    let mut out = vyrn\"\"
+    match parsed.parse{name}(readFile(path) ?? \"\") {{
+        Ok(tree) => {{}}
+        Err(errors) => {{
+            for e in errors {{
+                let at = \"\\{{path}}:\\{{e.line.toString()}}:\\{{e.col.toString()}}\"
+                out = out + diag(\"error\", at, syntaxSentence(rowParts(e.row), {catalogue}))
+            }}
+        }}
+    }}
+    return out
+}}
+
+",
+            name = type_name(rule),
+            report = report_fn(rule),
+        );
+    }
+    o.push_str("/// A refusal's row as text, for `syntaxSentence`.\ngen fn rowParts(row: parsed.Row) -> SyntaxRow {\n    return match row {\n");
+    for (row, holes) in &rows {
+        let bind: Vec<String> = (0..holes.len()).map(|i| format!("h{i}")).collect();
+        let bind = match bind.is_empty() {
+            true => String::new(),
+            false => format!("({})", bind.join(", ")),
+        };
+        let parts: Vec<String> = (holes.iter().enumerate())
+            .map(|(i, h)| {
+                format!(
+                    "SyntaxHole {{ name: {}, value: h{i}.copy() }}",
+                    string_lit(h)
+                )
+            })
+            .collect();
+        let _ = writeln!(
+            o,
+            "        {row}{bind} => SyntaxRow {{ name: {}, holes: [{}] }},",
+            string_lit(row),
+            parts.join(", ")
+        );
+    }
+    o.push_str("    }\n}\n");
+    Ok(o)
 }
 
 /// The helpers a written module may call, each before the helpers it calls.
-fn helpers(
-    g: &Grammar,
-    rows: &BTreeMap<Rc<str>, Vec<Rc<str>>>,
-    sentences: &BTreeMap<String, String>,
-) -> Vec<(&'static str, String)> {
+fn helpers(g: &Grammar, rows: &BTreeMap<Rc<str>, Vec<Rc<str>>>) -> Vec<(&'static str, String)> {
     let trivia = match g.rule("trivia").is_some() {
         true => "    lexTrivia(text, p)\n",
         false => "",
@@ -1947,21 +1947,6 @@ fn helpers(
         };
         let _ = writeln!(row_arms, "        {row}{bind} => {},", string_lit(row));
     }
-    let mut sentence_arms = String::new();
-    for (row, holes) in rows {
-        let bind = match holes.len() {
-            0 => String::new(),
-            n => format!(
-                "({})",
-                (0..n)
-                    .map(|i| format!("h{i}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        };
-        let said = sentence(row, holes, sentences);
-        let _ = writeln!(sentence_arms, "        {row}{bind} => {said},");
-    }
     let mut punct = String::new();
     let mut spellings: Vec<&(String, String, bool)> = g.tokens.iter().filter(|t| !t.2).collect();
     spellings.sort_by_key(|t| std::cmp::Reverse(t.1.len()));
@@ -1985,48 +1970,6 @@ fn helpers(
         }
     }
     vec![
-        (
-            "reported",
-            "/// A report at each refusal's line and column in the file at `path`.
-gen fn reported(path: String, errors: Array<SyntaxError<Row>>) -> Code {
-    let mut out = vyrn\"\"
-    for e in errors {
-        let at = \"\\{path}:\\{e.line.toString()}:\\{e.col.toString()}\"
-        out = out + diag(\"error\", at, oneLine(rowSentence(e.row)))
-    }
-    return out
-}
-"
-            .to_string(),
-        ),
-        (
-            "rowSentence",
-            format!(
-                "/// What a refusal with `row` says.
-gen fn rowSentence(row: Row) -> String {{
-    return match row {{
-{sentence_arms}    }}
-}}
-"
-            ),
-        ),
-        (
-            "oneLine",
-            "/// `s` with each line break a space, because a report is one line.
-gen fn oneLine(s: String) -> String {
-    let mut b = bytes(s)
-    let mut i = 0
-    while i < b.length {
-        if b[i] == '\\n' || b[i] == '\\r' {
-            b[i] = ' '
-        }
-        i = i + 1
-    }
-    return stringFromBytes(b) ?? \"\"
-}
-"
-            .to_string(),
-        ),
         (
             "syncToStatement",
             "/// Skips a failed statement's tokens to a token on a new line at this block's
@@ -2272,7 +2215,6 @@ fn charWidth(c: UInt8) -> Int64 {
 #[cfg(test)]
 mod tests {
     use crate::{load, parser};
-    use std::collections::BTreeMap;
 
     fn text(file: &str) -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
@@ -2282,16 +2224,13 @@ mod tests {
     #[test]
     fn a_flag_no_rule_sets_is_refused() {
         let g = load(&text("vyrn.syntax")).expect("vyrn.syntax loads");
-        let err = parser(&g, &BTreeMap::new()).err().expect("refused");
+        let err = parser(&g).err().expect("refused");
         assert!(err.sentence.contains("and no rule sets it"), "{err:?}");
     }
 
     fn refusal(grammar: &str) -> String {
         let g = load(grammar).expect("the grammar loads");
-        parser(&g, &BTreeMap::new())
-            .err()
-            .expect("refused")
-            .sentence
+        parser(&g).err().expect("refused").sentence
     }
 
     #[test]
@@ -2349,22 +2288,21 @@ mod tests {
     #[test]
     fn a_cycle_of_choices_has_its_release() {
         let g = load("expect ^E\nA = '(' A ')' / B\nB = 'b'\n").expect("it loads");
-        let written = parser(&g, &BTreeMap::new()).expect("it lowers");
+        let written = parser(&g).expect("it lowers");
         assert!(written.contains("impl Owned for A"), "{written}");
     }
 
     #[test]
     fn two_records_on_one_cycle_have_one_release() {
         let grammar = "expect ^E\nDoc = a:A\nA = '(' b:B? ')'\nB = '[' a:A ']'\n";
-        let written =
-            parser(&load(grammar).expect("it loads"), &BTreeMap::new()).expect("it lowers");
+        let written = parser(&load(grammar).expect("it loads")).expect("it lowers");
         assert_eq!(written.matches("impl Owned for").count(), 1, "{written}");
     }
 
     #[test]
     fn a_row_line_names_its_holes() {
         let g = crate::load("expect ^E\nrow Two(a, b)\nrow None\nDoc = 'x'\n").expect("loads");
-        let written = parser(&g, &BTreeMap::new()).expect("writes");
+        let written = parser(&g).expect("writes");
         assert!(written.contains("    Two(String, String),\n"), "{written}");
         assert!(written.contains("    None,\n"), "{written}");
         for bad in ["row Two(a, a)", "row Two(a", "row Two(1)", "row 1"] {
@@ -2394,7 +2332,7 @@ mod tests {
     #[test]
     fn the_format_grammar_writes_a_parser() {
         let g = load(&text("../../std/syntax.syntax")).expect("syntax.syntax loads");
-        let written = parser(&g, &BTreeMap::new()).expect("it lowers");
+        let written = parser(&g).expect("it lowers");
         assert!(
             written.contains("export fn parseFile(text: String)"),
             "{written}"

@@ -3,10 +3,11 @@
 ///
 /// No program links this module. The editor finds it beside `calc.vyrn`.
 
-import { syntax } from "std/syntax"
+import { syntax, syntaxReport } from "std/syntax"
 import { report, Severity } from "std/diag"
 import { isAccount } from "./calc"
 import * as ledger from syntax("./calc.syntax")
+import * as reported from syntaxReport("./calc.syntax")
 
 /// A 1-based line and column.
 type Place = { line: Int64, col: Int64 }
@@ -34,7 +35,7 @@ export gen fn vyrnCheckCalc(root: String, path: String) -> Code {
     let text = readFile(path) ?? ""
     return match ledger.parseLedger(text) {
         Ok(l) => unknownAccounts(path, text, l),
-        Err(errors) => ledger.reportLedger(path),
+        Err(errors) => reported.reportLedger(path),
     }
 }
 

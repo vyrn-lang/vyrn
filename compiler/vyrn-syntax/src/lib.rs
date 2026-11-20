@@ -31,7 +31,7 @@ use std::rc::Rc;
 
 pub use gen::{bytes, lexer};
 pub use load::load;
-pub use parser::parser;
+pub use parser::{parser, report};
 pub use recognizer::recognizer;
 pub use textmate::{language_configuration, textmate, Naming, Scope};
 
@@ -241,7 +241,7 @@ impl Grammar {
         parser::start_rules(self).ok()?.first().copied()
     }
 
-    /// Returns the name of the exported `gen fn` the written parser holds for the
+    /// Returns the name of the exported `gen fn` that [`crate::report`] writes for the
     /// start rule: `report<Start>(path) -> Code`, a report at each refusal of the
     /// text at `path`.
     pub fn report_fn(&self) -> Option<String> {

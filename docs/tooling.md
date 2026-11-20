@@ -527,7 +527,7 @@ input's own grammar come from the `gen fn vyrnComplete*` and
 cursor maps through `OriginMaps` into the generated module. A document the
 languages map names (`manifest::language_of`) is claimed by its language module
 instead, with no search: the companion's `vyrnCheck*` gives its diagnostics,
-else the `report<Start>` of the parser written from the grammar the module
+else the `report<Start>` that `syntaxReport` writes from the grammar the module
 states (`loader::grammar_of`); `vyrnHover*` gives its hover, `vyrnComplete*` and
 `vyrnDefinition*` the rest, and its semantic tokens are `vyrn_syntax::colour::runs`
 over that grammar, mapped onto the legend. A change to any open document reads

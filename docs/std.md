@@ -149,7 +149,8 @@ Each of these is a library of `gen fn`s. The compiler knows none of their domain
 | `std/code` | `join(xs, sep)`: the one list form a code quote takes. |
 | `std/diag` | `report` and `reportHere`: a generator's diagnostic at a file and line it read, as `Code`. |
 | `std/grammar` | The language of a `.syntax` file, `std/syntax.syntax`, which the editor reads grammar files through; it exports to its companion how a grammar names its rules, and the companion gives a grammar file its refusals, rule definition, hover and completion. |
-| `std/syntax` | `syntax(path)`: the generator import that writes a parser from a `.syntax` grammar, with its `Row` enum and a typed tree, and `SyntaxError<R>`, what the parser refuses with. A start rule's `gen fn report<Start>(path)` reports each refusal of a file in the sentences of `<stem>.errors/en.json` beside the grammar. |
+| `std/syntax` | `syntax(path)`: the generator import that writes a parser from a `.syntax` grammar, with its `Row` enum and a typed tree, and `SyntaxError<R>`, what the parser refuses with. `syntaxReport(path)` writes, from the same grammar, a `gen fn report<Start>(path)` per start rule that reports each refusal of a file in the sentences of `<stem>.errors/en.json` beside the grammar. |
+| `std/syntaxreport` | `syntaxSentence(row, catalogue)`: the sentence of a refusal's row in a grammar's catalogue, which the modules `syntaxReport` writes call; `SyntaxRow` and `SyntaxHole`, a row as text. |
 | `std/hints` | Per-project rule levels and per-line waivers for checking libraries. |
 | `std/vyx-hints` | Accessibility, security and performance rules for `.vyx` files, reported through `std/hints`. |
 | `std/imports` | `importBlock`: the `import` lines of a generated module, one per module that declares a type it uses. |
