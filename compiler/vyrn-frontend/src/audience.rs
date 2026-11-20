@@ -354,7 +354,7 @@ pub fn generator_input(importer: &str, arg: &str) -> Option<String> {
 }
 
 /// One claim on the files an argument names: a generator import's, or a
-/// languages map entry's. The import graph and the map are the only registries
+/// `languages` entry's. The import graph and the entries are the only registries
 /// of generator inputs: a file is an input because a claim covers it, whatever
 /// its extension.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,7 +382,7 @@ pub enum ClaimKind {
         module: Option<String>,
         generator: String,
     },
-    /// A languages map entry: the module that reads the file.
+    /// A `languages` entry: the module that reads the file.
     Language { module: String },
 }
 
@@ -636,24 +636,16 @@ pub fn input_definition(
 /// manifest `m` ([`crate::manifest::language_of`]): its editor companion serves
 /// the file as a generator module's serves an input. Its argument spells
 /// `file` from the importer.
-///
-/// # Errors
-///
-/// The manifest's refusal of two entries over `file`.
-pub fn language_claim(
-    m: Option<&crate::manifest::Manifest>,
-    file: &str,
-) -> Result<Option<Claim>, String> {
-    let Some((importer, module)) = crate::manifest::language_of(m, file)? else {
-        return Ok(None);
-    };
+pub fn language_claim(m: Option<&crate::manifest::Manifest>, file: &str) -> Option<Claim> {
+    let (importer, module) = crate::manifest::language_of(m, file)?;
+    let module = module?;
     let dir = importer.rsplit_once('/').map_or("", |(d, _)| d);
-    Ok(relative_to(file, dir).map(|rel| Claim {
+    relative_to(file, dir).map(|rel| Claim {
         arg: format!("./{rel}"),
         target: file.to_string(),
         importer,
         kind: ClaimKind::Language { module },
-    }))
+    })
 }
 
 /// The key of the root [`input_check`] runs a grammar's reports from, beside the

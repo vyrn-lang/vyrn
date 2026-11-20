@@ -540,18 +540,20 @@ const INPUT_METHODS: [(&str, &str); 11] = [
     ("textDocument/semanticTokens", "semanticTokens"),
 ];
 
-/// Asks the client to send the documents the `inputs` and `languages` globs of
-/// the manifest governing `dir` name, and to send this server their requests,
-/// once per manifest.
+/// Asks the client to send the documents the `inputs` globs and the
+/// `languages` entries with a module of the manifest governing `dir` name, and
+/// to send this server their requests, once per manifest. Publishes the
+/// manifest's warnings on its `vyrn.json`.
 fn register_inputs(connection: &Connection, server: &mut Server, dir: &std::path::Path) {
     let Ok(Some(m)) = manifest_of(dir) else {
         return;
     };
-    let globs = m.inputs.iter().chain(m.languages.iter().map(|(g, _)| g));
-    let globs: Vec<&String> = globs.collect();
+    let read = (m.languages.iter()).filter_map(|l| l.module.as_ref().map(|_| &l.files));
+    let globs: Vec<&String> = m.inputs.iter().chain(read).collect();
     if globs.is_empty() || !server.inputs_registered.insert(m.dir.clone()) {
         return;
     }
+    publish_manifest(connection, &m.dir, &m.language_warnings());
     let Ok(base) = Url::from_directory_path(&m.dir) else {
         return;
     };
@@ -559,6 +561,21 @@ fn register_inputs(connection: &Connection, server: &mut Server, dir: &std::path
         .map(|g| serde_json::json!({ "pattern": { "baseUri": base, "pattern": g } }))
         .collect();
     register_documents(connection, server, &inputs_id(&m.dir), selector);
+}
+
+/// Publishes `diags` on the `vyrn.json` in slash directory `dir`; none clears
+/// what was published there.
+fn publish_manifest(
+    connection: &Connection,
+    dir: &str,
+    diags: &[vyrn_frontend::diagnostics::Diagnostic],
+) {
+    let file = std::path::Path::new(dir).join("vyrn.json");
+    let Ok(uri) = Url::from_file_path(&file) else {
+        return;
+    };
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    publish(connection, &uri, None, &text, diags);
 }
 
 /// The request id under which [`register_inputs`] asks for the globs of the
@@ -594,6 +611,7 @@ fn reregister_inputs(connection: &Connection, server: &mut Server, dir: &std::pa
             serde_json::json!({ "unregisterations": unregisterations }),
         );
         let _ = connection.sender.send(Message::Request(request));
+        publish_manifest(connection, &key, &[]);
     }
     register_inputs(connection, server, dir);
 }
@@ -738,7 +756,7 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
     // Owner discovery for a generator input also runs here, in case a request precedes
     // the open's discovery. It publishes no diagnostics; didOpen does.
     if let Some(uri) = request_uri(&req) {
-        if !is_vyrn_uri(&uri) && matches!(language_claim(&uri), Ok(None)) {
+        if !is_vyrn_uri(&uri) && matches!(language_claim(&uri), Ok(None)) && !left_plain(&uri) {
             ensure_input_owner(server, &uri);
             dbg_log(&format!(
                 "  input owner for {} => {:?} (ownerless={})",
@@ -3065,12 +3083,26 @@ fn language_claim(uri: &Url) -> Result<Option<vyrn_frontend::audience::Claim>, S
     };
     let m = manifest_of(file.parent().unwrap_or(&file))?;
     let file = file.to_string_lossy().replace('\\', "/");
-    vyrn_frontend::audience::language_claim(m.as_ref(), &file)
+    Ok(vyrn_frontend::audience::language_claim(m.as_ref(), &file))
+}
+
+/// Whether the manifest's languages leave the document `uri` to no module
+/// (`"module": null`): plain text, for which the server serves nothing.
+fn left_plain(uri: &Url) -> bool {
+    let Ok(file) = uri.to_file_path() else {
+        return false;
+    };
+    let Ok(m) = manifest_of(file.parent().unwrap_or(&file)) else {
+        return false;
+    };
+    let file = file.to_string_lossy().replace('\\', "/");
+    let named = vyrn_frontend::manifest::language_of(m.as_ref(), &file);
+    matches!(named, Some((_, None)))
 }
 
 /// Publishes what a language document's companion refuses
-/// ([`vyrn_frontend::audience::input_check`]), or the manifest's refusal of two
-/// languages over it.
+/// ([`vyrn_frontend::audience::input_check`]), or why its manifest cannot be
+/// read.
 fn check_language(connection: &Connection, server: &Server, uri: &Url, claim: Result<(), String>) {
     let text = doc_text(server, uri).unwrap_or_default();
     let diags = match (claim, input_claim(server, uri)) {
@@ -3263,6 +3295,8 @@ fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
         reanalyze_root(connection, server, uri);
     } else if let Some(claim) = language_claim(uri).map(|c| c.map(|_| ())).transpose() {
         check_language(connection, server, uri, claim);
+    } else if left_plain(uri) {
+        // Plain text: nothing is served.
     } else if let Some(owner) = uri_path(uri)
         .and_then(|p| server.input_owner.get(&p))
         .cloned()

@@ -428,7 +428,7 @@ policy.
 | `hints` | per-rule severity for the hint libraries (`std/hints`, `std/vyx-hints`) |
 | `stylesheets` | globs naming the app's own CSS that no layout links, whose classes the editor offers and whose rules it shows |
 | `inputs` | globs naming the generator inputs the editor sends the language server, beside the `.vyx` files the VS Code extension sends |
-| `languages` | glob to the module that reads the files it names, as an import specifier (`"*.calc": "./calc"`); the toolchain's defaults, `**/*.syntax` to `std/grammar`, are rows of the same map, and a project's entry wins over a default. A relative module that does not exist is refused at its key, and two entries over one file are refused naming both |
+| `languages` | an array of `{ "files": glob, "module": specifier }`, read in order: the last entry whose glob names a file decides which module reads it (`[{ "files": "*.calc", "module": "./calc" }]`). The toolchain's defaults, `**/*.syntax` to `std/grammar`, are entries before the project's, so a project's entry overrides one. `"module": null` leaves the files it matches plain text, served by no module. A relative module that does not exist is refused at its entry. `vyrn check` and the editor warn of an entry that reads no file because later entries take every file it matches, naming both by index and glob |
 | `proved` | globs naming the modules where every check must be proved (language.md, Proofs); `vyrn check`, `build`, `run`, `why` and the editor read it, and no flag replaces it |
 
 An unknown tool name under `toolchain` is refused and the error lists the known
@@ -525,15 +525,16 @@ input's own grammar come from the `gen fn vyrnComplete*` and
 `vyrnDefinition*` in the claiming generator module's editor companion
 (`loader::call_generator`), `std/vyx.editor`'s for `.vyx`; anywhere else the
 cursor maps through `OriginMaps` into the generated module. A document the
-languages map names (`manifest::language_of`) is claimed by its language module
+languages list names (`manifest::language_of`) is claimed by its language module
 instead, with no search: the companion's `vyrnCheck*` gives its diagnostics,
 else the `report<Start>` that `syntaxReport` writes from the grammar the module
 states (`loader::grammar_of`); `vyrnHover*` gives its hover, `vyrnComplete*` and
 `vyrnDefinition*` the rest, and its semantic tokens are `vyrn_syntax::colour::runs`
 over that grammar, mapped onto the legend. A change to any open document reads
 every other open language document again, so a grammar edit reaches them. The server registers the
-map's globs with the client, the defaults at start and a project's beside its
-`inputs`; `std/grammar.editor` serves `.syntax` files. Every `vyrn.json` under a
+globs of the entries with a module with the client, the defaults at start and a project's beside
+its `inputs`, and publishes the manifest's warnings on its `vyrn.json`; a file an entry leaves to
+no module is served nothing. `std/grammar.editor` serves `.syntax` files. Every `vyrn.json` under a
 workspace folder is a module root, found at start by the walk owner discovery
 makes, and its globs are registered relative to its directory. An event that
 creates, changes or deletes a `vyrn.json` withdraws that module's globs and
