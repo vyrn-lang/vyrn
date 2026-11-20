@@ -646,11 +646,13 @@ A generator runs in the page: the module calls its one import,
 `vyrn_play.run_generator`, and `site/public/play-wasm.js` instantiates the
 generator's module synchronously and serves it its `String` and `Int64`
 arguments or its `TypeArg`. The generator's code imports (`text`, `splice`,
-`render` and the rest) and its `read` and `syntaxParser` go back into the
-compiler through `code_call`: the first run in the arena the native engine
-uses, and the reads go through the load's resolver and the native host's
-`serve`, recorded as reads. A generator whose module calls `moduleInterface`,
-`moduleCode`, `contractOf` or `codeAt` fails with a sentence naming the call.
+`render` and the rest) and its `read`, `syntaxParser` and `syntaxReporter` go
+back into the compiler through `code_call` and run in the run's arena
+(`vyrn_genwasm::Arena`), which holds the files the load reads as data and
+serves the reads through the native host's `serve`, recorded as reads. A
+generator whose module calls `moduleInterface`, `moduleCode`, `contractOf` or
+`codeAt` fails with a sentence naming the call, unless the lowering refuses its
+program, which is then what the page shows.
 A diagnostic in another tab names its file.
 
 It is outside the workspace, and the build must run from its own directory,

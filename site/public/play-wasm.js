@@ -63,6 +63,7 @@ const CODE_IMPORTS = {
   render: [],
   read: [0],
   syntaxParser: [0],
+  syntaxReporter: [0],
 };
 
 // Runs one code import in the compiler; answers its i64 result and the text

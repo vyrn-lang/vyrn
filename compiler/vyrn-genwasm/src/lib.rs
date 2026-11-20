@@ -320,9 +320,19 @@ fn argv_of(
     Ok(argv)
 }
 
-/// What a pure engine's page asks of the host for a capability import: the
-/// guest's path and the import's mode, served as the native host serves it.
-pub type Server<'a> = dyn FnMut(&str, i32) -> Result<Served, String> + 'a;
+/// What the page's host serves a run's `read`, `syntaxParser` and
+/// `syntaxReporter` from, owned so the run's [`Arena`] carries it: the sandbox
+/// [`GenInputs`] gives the run, the files the page holds, and the reads served.
+pub struct PageHost {
+    module: String,
+    importer_dir: String,
+    project: String,
+    allowed: Vec<String>,
+    aliased: Vec<(String, String)>,
+    opts: vyrn_frontend::loader::LoadOptions,
+    files: Arc<dyn vyrn_frontend::loader::ModuleResolver + Send + Sync>,
+    reads: Vec<GenRead>,
+}
 
 /// The calls the page's host cannot serve: module reflection and `codeAt`,
 /// beside the write capabilities every engine declines.
@@ -330,24 +340,26 @@ const UNSERVED_PURE: &[&str] = &["moduleInterface", "moduleCode", "contractOf", 
 
 /// Runs generator `fn_name` without wasmtime, for the playground, where the
 /// browser runs the module. `exec` instantiates the module bytes, runs them
-/// with the argv and the `TypeArg`'s atoms, serves its `read` and
-/// `syntaxParser` imports through the [`Server`] it is handed, and answers the
-/// module's stdout and the [`Arena`] its code imports ran in. Reads go
-/// through `inputs.resolver` and are recorded, as on the native path.
+/// with the argv and the `TypeArg`'s atoms and the [`Arena`] it is handed,
+/// which serves the module's code imports and, from `files`, its reads, and
+/// answers the module's stdout and that arena. `files` is what
+/// `inputs.resolver` reads; the reads are recorded, as on the native path.
 ///
 /// A generator this host cannot serve fails the run with a sentence that names
-/// what it reaches.
+/// what it reaches, unless the lowering refuses its program first.
 pub fn run_pure(
     program: &Program,
     fn_name: &str,
     args: &[ConstVal],
     inputs: &GenInputs<'_>,
-    exec: impl FnOnce(&[u8], &[String], &[Atom], &mut Server<'_>) -> Result<(Vec<u8>, Arena), String>,
+    files: Arc<dyn vyrn_frontend::loader::ModuleResolver + Send + Sync>,
+    exec: impl FnOnce(&[u8], &[String], &[Atom], Arena) -> Result<(Vec<u8>, Arena), String>,
 ) -> Option<Result<GenOutput, GenError>> {
     let declined = |why: String| {
-        Some(Err(GenError::Failed(format!(
-            "the playground cannot run `{fn_name}`: {why}"
-        ))))
+        let sentence = format!("the playground cannot run `{fn_name}`: {why}");
+        Some(Err(
+            vyrn_lower::gen_refusal(program).unwrap_or(GenError::Failed(sentence))
+        ))
     };
     let argv = match argv_of(program, fn_name, args, inputs) {
         Ok(argv) => argv,
@@ -360,8 +372,17 @@ pub fn run_pure(
     }
     let types = type_map(program);
     let mut atoms = Vec::new();
-    let mut reads = Vec::new();
-    let run = || -> Result<Written, GenError> {
+    let page = PageHost {
+        module: inputs.module.clone(),
+        importer_dir: inputs.importer_dir.clone(),
+        project: inputs.project.clone(),
+        allowed: inputs.allowed.clone(),
+        aliased: inputs.aliased.clone(),
+        opts: inputs.opts.clone(),
+        files,
+        reads: Vec::new(),
+    };
+    let run = || -> Result<GenOutput, GenError> {
         if let Some(arg) = &inputs.type_arg {
             encode(&Type::Named("TypeArg".into()), arg, &types, &mut atoms)
                 .map_err(GenError::Failed)?;
@@ -370,11 +391,14 @@ pub fn run_pure(
             "the wrapper program cannot be synthesized".into(),
         ))?;
         let bytes = vyrn_codegen::direct::compile_gen_host(&wrapper)?;
-        let mut server = |path: &str, mode: i32| serve(inputs, &mut reads, path, mode);
-        let (_, mut code) = exec(&bytes, &argv, &atoms, &mut server).map_err(GenError::Failed)?;
-        code.written().map_err(GenError::Failed)
+        let mut arena = Arena::default();
+        arena.page = Some(page);
+        let (_, mut code) = exec(&bytes, &argv, &atoms, arena).map_err(GenError::Failed)?;
+        let reads = code.page.take().map(|p| p.reads).unwrap_or_default();
+        let written = code.written().map_err(GenError::Failed)?;
+        Ok(GenOutput { written, reads })
     };
-    Some(run().map(|written| GenOutput { written, reads }))
+    Some(run())
 }
 
 /// Whether the engine can serve this function: an exported `gen fn` returning
@@ -993,6 +1017,9 @@ pub struct Arena {
     result: Option<Arc<Rope>>,
     /// [`Written::grammars`].
     grammars: Vec<String>,
+    /// What serves the run's reads in the page; `None` on the native host,
+    /// whose own thread serves them.
+    page: Option<PageHost>,
 }
 
 impl Arena {
@@ -1127,6 +1154,33 @@ impl Arena {
                 Err("a read was answered with a copy or a literal".to_string())
             }
         }
+    }
+
+    /// Serves a `read` (`mode` its mode), `syntaxParser` or `syntaxReporter`
+    /// import of the guest's `path` from the page's files, as the native host's
+    /// thread does, and hands the guest the answer ([`Arena::answer`]).
+    pub fn page_read(&mut self, path: &str, mode: i32) -> Result<(i64, Vec<u8>), String> {
+        let host = self
+            .page
+            .as_mut()
+            .ok_or("no generator is running in the page")?;
+        let inputs = GenInputs {
+            engine: None,
+            resolver: &*host.files,
+            opts: &host.opts,
+            module: host.module.clone(),
+            importer_dir: host.importer_dir.clone(),
+            project: host.project.clone(),
+            allowed: host.allowed.clone(),
+            aliased: host.aliased.clone(),
+            fuel: 0,
+            max_output: 0,
+            sources_fingerprint: None,
+            type_arg: None,
+            checked: true,
+        };
+        let served = serve(&inputs, &mut host.reads, path, mode)?;
+        self.answer(served)
     }
 
     /// What the generator wrote: the value its wrapper handed to `result`.

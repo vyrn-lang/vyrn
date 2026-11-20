@@ -222,11 +222,15 @@ pub fn gen_engine(
         + 'static,
 ) -> Box<GenEngine> {
     Box::new(move |program, name, args, inputs| {
-        run(program, name, args, inputs).or_else(|| {
-            let owed = crate::analyze(program).owed_diagnostics();
-            (!owed.is_empty()).then_some(Err(GenError::Refused(owed)))
-        })
+        run(program, name, args, inputs).or_else(|| gen_refusal(program).map(Err))
     })
+}
+
+/// The lowering's refusal of a generator's program, which an engine that cannot
+/// run it reports in place of its decline; `None` where the program owes none.
+pub fn gen_refusal(program: &ast::Program) -> Option<GenError> {
+    let owed = crate::analyze(program).owed_diagnostics();
+    (!owed.is_empty()).then_some(GenError::Refused(owed))
 }
 
 /// The pipeline the editor runs after its load: [`check_and_synthesize`] with

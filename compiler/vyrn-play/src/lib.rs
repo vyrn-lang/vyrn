@@ -276,10 +276,6 @@ thread_local! {
     static CODE: RefCell<vyrn_genwasm::Arena> = RefCell::default();
     /// A [`code_call`] request, then its answer.
     static CODE_IO: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    /// The engine's [`vyrn_genwasm::Server`] while [`run_generator`] waits for
-    /// the page, which asks it for reads through [`code_call`]; `None` outside.
-    static SERVER: std::cell::Cell<Option<*mut vyrn_genwasm::Server<'static>>> =
-        const { std::cell::Cell::new(None) };
 }
 
 /// Reserves `len` bytes for a [`code_call`] request and returns where to write
@@ -310,10 +306,7 @@ pub extern "C" fn code_answer() -> *const u8 {
 pub extern "C" fn code_call(len: usize) -> usize {
     let req = CODE_IO.with(|o| std::mem::take(&mut *o.borrow_mut()));
     let answer = match decode_call(&req[..len.min(req.len())]) {
-        Some((name, args)) => match capability(&name, &args) {
-            Some(served) => served.and_then(|s| CODE.with(|c| c.borrow_mut().answer(s))),
-            None => CODE.with(|c| code_import(&mut c.borrow_mut(), &name, args)),
-        },
+        Some((name, args)) => CODE.with(|c| code_import(&mut c.borrow_mut(), &name, args)),
         None => Err("a code import's request does not decode".to_string()),
     };
     let bytes = match answer {
@@ -324,23 +317,6 @@ pub extern "C" fn code_call(len: usize) -> usize {
         *o.borrow_mut() = bytes;
         o.borrow().len()
     })
-}
-
-/// Serves a `read` or `syntaxParser` import through the engine's server, as
-/// the native host's thread does; `None` for any other import.
-fn capability(name: &str, args: &[Arg]) -> Option<Result<vyrn_genwasm::Served, String>> {
-    let (path, mode) = match (name, args) {
-        ("read", [Arg::Str(path), Arg::Int(mode)]) => (path, *mode as i32),
-        ("syntaxParser", [Arg::Str(path)]) => (path, vyrn_genwasm::MODE_SYNTAX),
-        _ => return None,
-    };
-    let Some(server) = SERVER.with(|s| s.get()) else {
-        return Some(Err("no generator is running".to_string()));
-    };
-    // SAFETY: `run_generator` sets the pointer to a server that outlives the
-    // page's call and clears it when the call returns; the page calls back
-    // only during it, on this thread, one call at a time.
-    Some(unsafe { (*server)(path, mode) })
 }
 
 /// A `code_call` argument.
@@ -407,6 +383,9 @@ fn code_import(
         }
         ("concat", [Int(a), Int(b)]) => code.concat(*a, *b)?,
         ("result", [Int(h)]) => code.result(*h).map(|()| 0)?,
+        ("read", [Str(path), Int(mode)]) => return code.page_read(path, *mode as i32),
+        ("syntaxParser", [Str(path)]) => return code.page_read(path, vyrn_genwasm::MODE_SYNTAX),
+        ("syntaxReporter", [Str(path)]) => return code.page_read(path, vyrn_genwasm::MODE_REPORT),
         ("render", [Int(h)]) => {
             let text = code.render(*h)?.into_bytes();
             return Ok((text.len() as i64, text));
@@ -448,17 +427,13 @@ fn run_generator(
     module: &[u8],
     argv: &[String],
     atoms: &[vyrn_genwasm::Atom],
-    server: &mut vyrn_genwasm::Server<'_>,
+    arena: vyrn_genwasm::Arena,
 ) -> Result<(Vec<u8>, vyrn_genwasm::Arena), String> {
-    // SAFETY: only the lifetime is erased; the pointer is cleared before
-    // `server`'s borrow ends, and `capability` reads it only in between.
-    let erased: *mut vyrn_genwasm::Server<'static> = unsafe { std::mem::transmute(server) };
-    SERVER.with(|s| s.set(Some(erased)));
+    CODE.with(|c| *c.borrow_mut() = arena);
     let status = page_run(&gen_request(module, argv, atoms));
-    SERVER.with(|s| s.set(None));
+    let code = CODE.with(|c| c.take());
     let status = status?;
     let out = GEN_OUT.with(|o| std::mem::take(&mut *o.borrow_mut()));
-    let code = CODE.with(|c| c.take());
     match status {
         0 => Ok((out, code)),
         _ => Err(String::from_utf8_lossy(&out).into_owned()),
@@ -509,9 +484,12 @@ fn gen_request(module: &[u8], argv: &[String], atoms: &[vyrn_genwasm::Atom]) -> 
     out
 }
 
-/// The playground's generation engine: each generator runs in the page.
-fn engine() -> Box<vyrn_frontend::gen::GenEngine> {
-    vyrn_lower::gen_engine(|p, f, a, i| vyrn_genwasm::run_pure(p, f, a, i, run_generator))
+/// The playground's generation engine: each generator runs in the page and
+/// reads the files `files` holds, the project's tabs and `std/`.
+fn engine(files: std::sync::Arc<MapResolver>) -> Box<vyrn_frontend::gen::GenEngine> {
+    vyrn_lower::gen_engine(move |p, f, a, i| {
+        vyrn_genwasm::run_pure(p, f, a, i, files.clone(), run_generator)
+    })
 }
 
 fn options(expansions: std::sync::Arc<vyrn_frontend::project::Expansions>) -> LoadOptions {
@@ -538,12 +516,13 @@ fn load(
     >,
     Vec<Diagnostic>,
 ) {
-    let engine = engine();
+    let files = std::sync::Arc::new(project.resolver());
+    let engine = engine(files.clone());
     vyrn_lower::load_warned(
         src,
         project.root(),
         &options(expansions),
-        &project.resolver(),
+        &*files,
         Some(&*engine),
     )
 }
@@ -631,12 +610,13 @@ fn signature_json(src: &str, line: usize, col: usize) -> String {
 /// The analysis `vyrn-lsp` answers an editor from, linked against the
 /// embedded `std/`.
 fn analysis(src: &str) -> Analysis {
-    let engine = engine();
+    let files = std::sync::Arc::new(Project::default().resolver());
+    let engine = engine(files.clone());
     analyze_linked(
         src,
         "play.vyrn",
         &options(Default::default()),
-        &Project::default().resolver(),
+        &*files,
         Some(&*engine),
     )
 }
