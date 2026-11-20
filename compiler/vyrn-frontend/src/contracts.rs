@@ -160,7 +160,7 @@ pub fn roles_for_project(
             engine,
         );
         role.except = Some(match stems {
-            Some(Ok(stems)) => stems.lines().map(String::from).collect(),
+            Some(Ok(stems)) => stems.source.lines().map(String::from).collect(),
             _ => Vec::new(),
         });
     }

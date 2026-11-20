@@ -11,6 +11,10 @@ fn grammar_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../vyrn-syntax")
 }
 
+fn format_grammar() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std/syntax.syntax")
+}
+
 fn written(grammar: &Path) -> String {
     let text = std::fs::read_to_string(grammar).expect("the grammar reads");
     let g = vyrn_syntax::load(&text).expect("the grammar loads");
@@ -23,8 +27,9 @@ fn run_beside_the_grammars(stem: &str, main: &str) -> (Option<i32>, String) {
     let dir = std::env::temp_dir().join(format!("vyrn-stdsyntax-{stem}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create the directory");
-    for name in ["syntax.syntax", "vyrn.syntax"] {
-        std::fs::copy(grammar_dir().join(name), dir.join(name)).expect("copy the grammar");
+    for grammar in [format_grammar(), grammar_dir().join("vyrn.syntax")] {
+        let name = grammar.file_name().expect("a file name");
+        std::fs::copy(&grammar, dir.join(name)).expect("copy the grammar");
     }
     std::fs::write(dir.join("main.vyrn"), main).expect("write the program");
     let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
@@ -68,7 +73,7 @@ fn the_format_grammar_reads_itself_and_vyrn_and_refuses_two_errors() {
 #[test]
 fn a_written_parser_is_what_the_formatter_writes() {
     let grammars = [
-        grammar_dir().join("syntax.syntax"),
+        format_grammar(),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/syntaxjson.syntax"),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/syntaxcalc.syntax"),
     ];

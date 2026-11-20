@@ -318,6 +318,10 @@ fn main() {
             if let Ok((watched, caps, folders)) = handle_initialize(&connection) {
                 server.watched = watched;
                 server.client_caps = caps;
+                let defaults = vyrn_frontend::manifest::default_language_globs()
+                    .map(|g| serde_json::json!({ "pattern": g }))
+                    .collect();
+                register_documents(&connection, &server, "vyrn/languages", defaults);
                 for folder in folders {
                     register_inputs(&connection, &mut server, &folder);
                 }
@@ -533,23 +537,41 @@ const INPUT_METHODS: [(&str, &str); 11] = [
     ("textDocument/semanticTokens", "semanticTokens"),
 ];
 
-/// Asks the client to send the documents the `inputs` globs of the manifest
-/// governing `dir` name, and to send this server their requests, once per
-/// manifest. A method the client cannot register dynamically is not asked
-/// for. The client answers with a response nothing reads.
+/// Asks the client to send the documents the `inputs` and `languages` globs of
+/// the manifest governing `dir` name, and to send this server their requests,
+/// once per manifest.
 fn register_inputs(connection: &Connection, server: &mut Server, dir: &std::path::Path) {
     let Ok(Some(m)) = manifest_of(dir) else {
         return;
     };
-    if m.inputs.is_empty() || !server.inputs_registered.insert(m.dir.clone()) {
+    let globs = m.inputs.iter().chain(m.languages.iter().map(|(g, _)| g));
+    let globs: Vec<&String> = globs.collect();
+    if globs.is_empty() || !server.inputs_registered.insert(m.dir.clone()) {
         return;
     }
     let Ok(base) = Url::from_directory_path(&m.dir) else {
         return;
     };
-    let selector: Vec<serde_json::Value> = (m.inputs.iter())
+    let selector = (globs.into_iter())
         .map(|g| serde_json::json!({ "pattern": { "baseUri": base, "pattern": g } }))
         .collect();
+    register_documents(
+        connection,
+        server,
+        &format!("vyrn/inputs:{}", m.dir),
+        selector,
+    );
+}
+
+/// Asks the client, under request `id`, to send the documents `selector` names
+/// and their requests. A method the client cannot register dynamically is not
+/// asked for. The client answers with a response nothing reads.
+fn register_documents(
+    connection: &Connection,
+    server: &Server,
+    id: &str,
+    selector: Vec<serde_json::Value>,
+) {
     let dynamic = |cap: &str| {
         let at = format!("/textDocument/{cap}/dynamicRegistration");
         server.client_caps.pointer(&at) == Some(&serde_json::Value::Bool(true))
@@ -568,7 +590,7 @@ fn register_inputs(connection: &Connection, server: &mut Server, dir: &std::path
             };
             options["documentSelector"] = serde_json::json!(selector);
             serde_json::json!({
-                "id": format!("{}:{method}", m.dir), "method": method, "registerOptions": options
+                "id": format!("{id}:{method}"), "method": method, "registerOptions": options
             })
         })
         .collect();
@@ -576,7 +598,7 @@ fn register_inputs(connection: &Connection, server: &mut Server, dir: &std::path
         return;
     }
     let request = Request::new(
-        format!("vyrn/inputs:{}", m.dir).into(),
+        id.to_string().into(),
         RegisterCapability::METHOD.to_string(),
         serde_json::json!({ "registrations": registrations }),
     );
@@ -675,7 +697,7 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
     // Owner discovery for a generator input also runs here, in case a request precedes
     // the open's discovery. It publishes no diagnostics; didOpen does.
     if let Some(uri) = request_uri(&req) {
-        if !is_vyrn_uri(&uri) {
+        if !is_vyrn_uri(&uri) && matches!(language_claim(&uri), Ok(None)) {
             ensure_input_owner(server, &uri);
             dbg_log(&format!(
                 "  input owner for {} => {:?} (ownerless={})",
@@ -853,6 +875,8 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
             None => (server.docs.get(uri))
                 .and_then(|src| class_hover(server, uri, analysis, src, line, col)),
         })
+    } else if let Some(h) = companion_hover(server, uri, line, col) {
+        Some(format!("```\n{h}\n```"))
     } else {
         input_forward(server, uri, line, col).and_then(|fwd| {
             let a = &fwd.synth.analysis;
@@ -967,6 +991,16 @@ fn companion_definition(
         &resolver,
         Some(&*engine),
     )
+}
+
+/// The hover the claiming module's editor companion gives at `line`, `col` of the
+/// input `uri` ([`vyrn_frontend::audience::input_hover`]).
+fn companion_hover(server: &Server, uri: &Url, line: usize, col: usize) -> Option<String> {
+    let (root, claim, file) = input_claim(server, uri)?;
+    let overlays = overlays_of(server);
+    let (opts, resolver, _, _) = load_context(&server.session, &root, &overlays)?;
+    let engine = engine();
+    vyrn_frontend::audience::input_hover(&claim, &file, line, col, &opts, &resolver, Some(&*engine))
 }
 
 /// The top of the file an import specifier string under the cursor names,
@@ -1324,7 +1358,7 @@ fn generator_completion(
             &resolver,
             Some(&*engine),
         )?;
-        out.ok()
+        out.ok().map(|w| w.source)
     };
     let Some(out) = call() else {
         return Vec::new();
@@ -1746,9 +1780,13 @@ fn semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenType::FUNCTION,    // 6
             SemanticTokenType::METHOD,      // 7
             SemanticTokenType::MACRO,       // 8
-            SemanticTokenType::KEYWORD,     // 9 (in the legend for parity; not
-                                            //    currently emitted — the grammar
-                                            //    owns keywords)
+            SemanticTokenType::KEYWORD,     // 9, from here on a grammar's scopes
+            SemanticTokenType::COMMENT,     // 10
+            SemanticTokenType::STRING,      // 11
+            SemanticTokenType::NUMBER,      // 12
+            SemanticTokenType::OPERATOR,    // 13
+            SemanticTokenType::REGEXP,      // 14
+            SemanticTokenType::DECORATOR,   // 15: a label
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,     // bit 0
@@ -1801,8 +1839,11 @@ fn handle_semantic_tokens_full(
     params: serde_json::Value,
 ) -> Option<SemanticTokensResult> {
     let p: SemanticTokensParams = serde_json::from_value(params).ok()?;
-    let toks = document_sem_tokens(server, &p.text_document.uri)?;
     let text = doc_text(server, &p.text_document.uri).unwrap_or_default();
+    if let Some(runs) = language_runs(server, &p.text_document.uri) {
+        return Some(SemanticTokensResult::Tokens(encode_runs(&runs, &text)));
+    }
+    let toks = document_sem_tokens(server, &p.text_document.uri)?;
     Some(SemanticTokensResult::Tokens(encode_tokens(toks, &text)))
 }
 
@@ -2036,15 +2077,57 @@ fn init_shows_type(line: &str, end_col: usize, ty: &str) -> bool {
 /// `[delta line, delta start, len, type, mods]` in 0-based UTF-16 units.
 fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>, text: &str) -> SemanticTokens {
     toks.sort_by_key(|t| (t.line, t.col));
-    let mut data = Vec::with_capacity(toks.len());
-    let mut prev_line = 0u32;
-    let mut prev_col = 0u32;
-    for t in toks {
+    let placed = toks.into_iter().map(|t| {
         let line = t.line.saturating_sub(1) as u32;
         let line_text = line_of_text(text, line as usize);
         let start = t.col.saturating_sub(1);
         let col = char_col_to_utf16(line_text, start);
         let len = char_col_to_utf16(line_text, start + t.len) - col;
+        (
+            line,
+            col,
+            len,
+            sem_type_index(t.kind),
+            sem_mods_bits(t.mods),
+        )
+    });
+    delta_encode(placed)
+}
+
+/// The tokens of a grammar's runs over `text`: one per line a run covers.
+fn encode_runs(runs: &[vyrn_syntax::colour::Run], text: &str) -> SemanticTokens {
+    let mut placed = Vec::new();
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+    let utf16 = |a: usize, b: usize| text[a..b].encode_utf16().count() as u32;
+    for r in runs {
+        let (ty, mods) = scope_token(r.scope);
+        let mut line = starts.partition_point(|&s| s <= r.start) - 1;
+        let mut from = r.start;
+        while from < r.stop {
+            let end = text[from..r.stop].find('\n').map_or(r.stop, |i| from + i);
+            if end > from {
+                placed.push((
+                    line as u32,
+                    utf16(starts[line], from),
+                    utf16(from, end),
+                    ty,
+                    mods,
+                ));
+            }
+            (from, line) = (end + 1, line + 1);
+        }
+    }
+    delta_encode(placed.into_iter())
+}
+
+/// The LSP's relative encoding of tokens placed at an absolute 0-based line and
+/// UTF-16 column, in order.
+fn delta_encode(placed: impl Iterator<Item = (u32, u32, u32, u32, u32)>) -> SemanticTokens {
+    let mut data = Vec::new();
+    let mut prev_line = 0u32;
+    let mut prev_col = 0u32;
+    for (line, col, len, token_type, token_modifiers_bitset) in placed {
         let delta_line = line.saturating_sub(prev_line);
         let delta_start = if delta_line == 0 {
             col.saturating_sub(prev_col)
@@ -2055,8 +2138,8 @@ fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>, text: &str) -> Semantic
             delta_line,
             delta_start,
             length: len,
-            token_type: sem_type_index(t.kind),
-            token_modifiers_bitset: sem_mods_bits(t.mods),
+            token_type,
+            token_modifiers_bitset,
         });
         prev_line = line;
         prev_col = col;
@@ -2905,6 +2988,10 @@ fn input_claim(
 ) -> Option<(Url, vyrn_frontend::audience::Claim, String)> {
     let path = uri_path(uri)?;
     let file = (uri.to_file_path().ok()?.to_string_lossy()).replace('\\', "/");
+    if let Ok(Some(claim)) = language_claim(uri) {
+        let root = Url::from_file_path(claim.importer.replace('/', std::path::MAIN_SEPARATOR_STR));
+        return Some((root.ok()?, claim, file));
+    }
     let owner = server.input_owner.get(&path);
     let kept = server.input_claimant.borrow().get(&path).cloned();
     let stands = |(root, _, text): &(Url, _, String)| {
@@ -2923,6 +3010,95 @@ fn input_claim(
         server.input_claimant.borrow_mut().insert(path, kept);
     }
     Some((root, claim, file))
+}
+
+/// The claim the language module of the document `uri` makes on it, under its
+/// manifest ([`vyrn_frontend::audience::language_claim`]); `Ok(None)` for a
+/// document no language reads.
+fn language_claim(uri: &Url) -> Result<Option<vyrn_frontend::audience::Claim>, String> {
+    let Some(file) = uri.to_file_path().ok() else {
+        return Ok(None);
+    };
+    let m = manifest_of(file.parent().unwrap_or(&file))?;
+    let file = file.to_string_lossy().replace('\\', "/");
+    vyrn_frontend::audience::language_claim(m.as_ref(), &file)
+}
+
+/// Publishes what a language document's companion refuses
+/// ([`vyrn_frontend::audience::input_check`]), or the manifest's refusal of two
+/// languages over it.
+fn check_language(connection: &Connection, server: &Server, uri: &Url, claim: Result<(), String>) {
+    let text = doc_text(server, uri).unwrap_or_default();
+    let diags = match (claim, input_claim(server, uri)) {
+        (Err(e), _) => vec![vyrn_frontend::diagnostics::Diagnostic::error(
+            1, 0, "lsp", e,
+        )],
+        (Ok(()), Some((root, claim, file))) => {
+            let overlays = overlays_of(server);
+            let Some((opts, resolver, _, _)) = load_context(&server.session, &root, &overlays)
+            else {
+                return;
+            };
+            vyrn_frontend::audience::input_check(&claim, &file, &opts, &resolver, Some(&*engine()))
+        }
+        (Ok(()), None) => Vec::new(),
+    };
+    publish(
+        connection,
+        uri,
+        server.versions.get(uri).copied(),
+        &text,
+        &diags,
+    );
+}
+
+/// The coloured runs of a language document: its text read by the grammar its
+/// language module states ([`vyrn_frontend::loader::grammar_of`]), from the
+/// grammar's start rule.
+fn language_runs(server: &Server, uri: &Url) -> Option<Vec<vyrn_syntax::colour::Run>> {
+    use vyrn_frontend::loader::ModuleResolver;
+    // A generator input, such as a `.vyx` file, is coloured through its owner.
+    language_claim(uri).ok()??;
+    let (root, claim, _) = input_claim(server, uri)?;
+    let overlays = overlays_of(server);
+    let (opts, resolver, _, _) = load_context(&server.session, &root, &overlays)?;
+    let module = claim.module.as_deref()?;
+    let engine = engine();
+    let grammar = vyrn_frontend::loader::grammar_of(
+        &claim.importer,
+        module,
+        &opts,
+        &resolver,
+        Some(&*engine),
+    )?;
+    let g = vyrn_syntax::load(&resolver.read(&grammar).ok()?).ok()?;
+    Some(vyrn_syntax::colour::runs(
+        &g,
+        g.start()?,
+        &doc_text(server, uri)?,
+    ))
+}
+
+/// The legend index and modifier bits of a grammar's scope, per
+/// [`semantic_tokens_legend`].
+fn scope_token(s: vyrn_syntax::Scope) -> (u32, u32) {
+    use vyrn_syntax::Scope;
+    let library = 1 << 2;
+    match s {
+        Scope::Doc | Scope::Comment => (10, 0),
+        Scope::String | Scope::Char | Scope::Escape => (11, 0),
+        Scope::Number => (12, 0),
+        Scope::Operator => (13, 0),
+        Scope::CharClass => (14, 0),
+        Scope::Label => (15, 0),
+        Scope::Keyword => (9, 0),
+        Scope::Function => (6, 0),
+        Scope::SupportFunction => (6, library),
+        Scope::TypeName => (1, 0),
+        Scope::SupportType => (1, library),
+        Scope::Parameter => (3, 0),
+        Scope::Variable => (4, 0),
+    }
 }
 
 /// The `.vyrn` files nearest `dir`, at most [`MAX_OWNER_CANDIDATES`]: `dir`'s
@@ -3041,6 +3217,8 @@ fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
         server.input_ownerless.clear();
         server.input_claimant.get_mut().clear();
         reanalyze_root(connection, server, uri);
+    } else if let Some(claim) = language_claim(uri).map(|c| c.map(|_| ())).transpose() {
+        check_language(connection, server, uri, claim);
     } else if let Some(owner) = uri_path(uri)
         .and_then(|p| server.input_owner.get(&p))
         .cloned()

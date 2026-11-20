@@ -1,0 +1,76 @@
+/// Editor support for the `.syntax` files `std/grammar` reads.
+///
+/// No program links this module, so it costs a program nothing. A tool finds it
+/// beside `std/grammar` by its name.
+
+import { syntax } from "std/syntax"
+import { Json, JsonField, emit } from "std/json"
+import { lines } from "std/strings"
+import { grammarWordStart, grammarHead, grammarTarget } from "std/grammar"
+
+/// The lines of the grammar at `path`, none when it does not read.
+gen fn grammarLines(path: String) -> Array<String> {
+    return match readFile(path) {
+        Ok(src) => lines(src),
+        Err(e) => [],
+    }
+}
+
+gen fn grammarItem(label: String, kind: String, detail: String, from: Int64) -> Json {
+    return JObj([
+        JsonField { key: "label", value: JStr(label.copy()) },
+        JsonField { key: "kind", value: JStr(kind.copy()) },
+        JsonField { key: "detail", value: JStr(detail.copy()) },
+        JsonField { key: "from", value: JNum("\{from}") },
+    ])
+}
+
+/// What the grammar at `path` refuses: the report `syntax` gives where it does not
+/// load or does not lower, at its line and column. `root` is the same path.
+export gen fn vyrnCheckGrammar(root: String, path: String) -> Code {
+    return syntax(path)
+}
+
+/// The head of the rule a reference at 1-based `line` and `col` of the grammar at
+/// `path` names, as a `path:line:col` anchor, or "" where the name is no rule.
+export gen fn vyrnDefinitionGrammar(root: String, path: String, line: Int64, col: Int64) -> String {
+    let at = grammarTarget(grammarLines(path), line, col)
+    if at == 0 {
+        return ""
+    }
+    return "\{path}:\{at}:1"
+}
+
+/// The line that defines the rule a reference at 1-based `line` and `col` of the
+/// grammar at `path` names, or "".
+export gen fn vyrnHoverGrammar(root: String, path: String, line: Int64, col: Int64) -> String {
+    let ls = grammarLines(path)
+    let at = grammarTarget(ls, line, col)
+    if at == 0 {
+        return ""
+    }
+    return ls[at - 1].copy()
+}
+
+/// Completion items at 1-based `line` and `col` of the grammar at `path`: the
+/// rules it defines, then the loader's built-ins. Returns a JSON array of
+/// `{label, kind, detail, from}`.
+export gen fn vyrnCompleteGrammar(root: String, path: String, line: Int64, col: Int64) -> String {
+    let ls = grammarLines(path)
+    if line < 1 || line > ls.length {
+        return "[]"
+    }
+    let from = grammarWordStart(ls[line - 1], col)
+    let mut items: Array<Json> = []
+    for l in ls {
+        let head = grammarHead(l)
+        if head.byteLength > 0 {
+            items.push(grammarItem(head, "class", "rule", from))
+        }
+    }
+    // The loader's names, in load.rs; a rule cannot take one.
+    for b in ["eof", "nonl", "alpha", "alnum", "digit", "hex", "ws", "reserved", "punct"] {
+        items.push(grammarItem(b, "keyword", "built-in", from))
+    }
+    return emit(JArr(items))
+}

@@ -693,7 +693,7 @@ Each span of a `Code` value has an author: a quote's text is written by the modu
 
 ### A grammar writes a parser
 
-`import { parseFile, File, Row } from syntax("./x.syntax")` writes a parser as ordinary Vyrn code, which runs at generation and at run time alike. `std/syntax` exports `syntax` and `SyntaxError<R>`, and `compiler/vyrn-syntax/syntax.syntax` is the file format. A `.syntax` file is an input like any other, named through the `inputs` globs.
+`import { parseFile, File, Row } from syntax("./x.syntax")` writes a parser as ordinary Vyrn code, which runs at generation and at run time alike. `std/syntax` exports `syntax` and `SyntaxError<R>`, and `std/syntax.syntax` is the file format. A `.syntax` file is an input like any other, named through the `inputs` globs.
 
 - Each rule no other rule reads is a start rule, apart from `trivia`, `token` and `scan`. It writes `parse<Start>(text: String) -> Result<Start, Array<SyntaxError<Row>>>`, which refuses text the rule leaves unread.
 - `Row` has one variant per `^Row` and per `row` line, with one `String` per hole in the order the file first names them. `row Mismatch(open, close)` states a row a reader raises and its holes, because a grammar compares no names. A grammar holds no sentence, so a reader states each row's in one `match`.

@@ -130,6 +130,45 @@ pub struct Manifest {
     pub inputs: Vec<String>,
     /// The `proved` key: the modules where every check must be proved.
     pub proved: Proved,
+    /// The `languages` key: a glob relative to `dir`, and the module that reads
+    /// the files it names, as an import specifier resolved against `dir`.
+    pub languages: Vec<(String, String)>,
+}
+
+/// The toolchain's own languages, which a project's `languages` entries merge over.
+const DEFAULT_LANGUAGES: [(&str, &str); 1] = [("**/*.syntax", "std/grammar")];
+
+/// Returns the globs of the toolchain's own languages, which match anywhere.
+pub fn default_language_globs() -> impl Iterator<Item = &'static str> {
+    DEFAULT_LANGUAGES.iter().map(|(g, _)| *g)
+}
+
+/// Returns the module that reads the file at slash path `path`, as the importer
+/// it resolves against and its import specifier: the one entry of `m` whose glob
+/// names it, against `m`'s `vyrn.json`, else the default whose glob does, against
+/// the file, else `None`.
+///
+/// # Errors
+///
+/// Two entries of `m` that name the file, as a sentence naming both.
+pub fn language_of(m: Option<&Manifest>, path: &str) -> Result<Option<(String, String)>, String> {
+    let path = path.replace('\\', "/");
+    let own: Vec<(&Manifest, &(String, String))> = m.map_or(Vec::new(), |m| {
+        let rel = crate::audience::relative_to(&path, &m.dir);
+        (m.languages.iter())
+            .filter(|(g, _)| rel.as_deref().is_some_and(|r| glob_path(g, r)))
+            .map(|e| (m, e))
+            .collect()
+    });
+    match own[..] {
+        [(m, (_, module))] => Ok(Some((format!("{}/vyrn.json", m.dir), module.clone()))),
+        [(_, (a, _)), (_, (b, _)), ..] => Err(format!(
+            "`languages` entries `{a}` and `{b}` both name {path}; one module reads a file"
+        )),
+        [] => Ok((DEFAULT_LANGUAGES.iter())
+            .find(|(g, _)| glob_path(g, &path))
+            .map(|(_, module)| (path.clone(), module.to_string()))),
+    }
 }
 
 impl Manifest {
@@ -253,7 +292,7 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
     // A present `dependencies` or `toolchain` that is not an object of strings is
     // refused, not read as empty; empty would surface later as an unrelated
     // "cannot resolve import".
-    let str_map = |k: &str| -> Result<Vec<(String, String)>, String> {
+    let str_map = |k: &str, what: &str| -> Result<Vec<(String, String)>, String> {
         match doc.get(k) {
             None => Ok(Vec::new()),
             Some(Json::Obj(entries)) => {
@@ -264,7 +303,7 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
                         other => {
                             return Err(format!(
                                 "`{k}.{name}` must be a string, found {} — vyrn.json's \
-                                 `{k}` maps names to version strings",
+                                 `{k}` maps {what}",
                                 json_kind(other)
                             ))
                         }
@@ -298,13 +337,27 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
             )),
         }
     };
-    let dependencies = str_map("dependencies")?;
+    let dependencies = str_map("dependencies", "names to version strings")?;
     let stylesheets = str_list("stylesheets")?;
     let inputs = str_list("inputs")?;
     let proved = str_list("proved")?;
+    // A relative module is a file of the project, which must exist; any other
+    // specifier resolves as an import does.
+    let languages = (str_map("languages", "globs to modules")?.into_iter())
+        .map(|(glob, module)| {
+            if !module.starts_with("./") && !module.starts_with("../") {
+                return Ok((glob, module));
+            }
+            let file = format!("{}/{module}.vyrn", slash_dir.trim_end_matches('/'));
+            match std::path::Path::new(&file).is_file() {
+                true => Ok((glob, module)),
+                false => Err(format!("`languages.{glob}`: no module {module}.vyrn")),
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     // An unknown tool name is refused where it is written: a typo that declared
     // nothing would leave the build on PATH, a silent fallback.
-    let toolchain = str_map("toolchain")?;
+    let toolchain = str_map("toolchain", "names to version strings")?;
     for (name, _) in &toolchain {
         if !crate::toolpin::KNOWN_TOOLS.contains(&name.as_str()) {
             return Err(crate::toolpin::unknown_tool(name));
@@ -335,6 +388,7 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
         stylesheets,
         inputs,
         proved,
+        languages,
         dependencies,
         toolchain,
         audience,
@@ -1123,6 +1177,32 @@ mod tests {
                 "{e}"
             );
         }
+    }
+
+    /// A file's module is the one project entry naming it, else the default; a
+    /// missing module and two entries over one file are refused.
+    #[test]
+    fn the_languages_map_names_one_module_per_file() {
+        let d = tmp("languages");
+        std::fs::write(d.join("calc.vyrn"), "").unwrap();
+        let read = |json: &str| {
+            std::fs::write(d.join("vyrn.json"), json).unwrap();
+            find(&d)
+        };
+        let m = read(r#"{"languages":{"*.calc":"./calc","**/*.syntax":"./calc"}}"#);
+        let m = m.unwrap().unwrap();
+        let file = |name: &str| format!("{}/{name}", m.dir);
+        let calc = Some((file("vyrn.json"), "./calc".to_string()));
+        assert_eq!(language_of(Some(&m), &file("a.calc")), Ok(calc.clone()));
+        assert_eq!(language_of(Some(&m), &file("x/a.syntax")), Ok(calc));
+        let std = Some((file("x/a.syntax"), "std/grammar".to_string()));
+        assert_eq!(language_of(None, &file("x/a.syntax")), Ok(std));
+        assert_eq!(language_of(Some(&m), &file("a.txt")), Ok(None));
+        let m = read(r#"{"languages":{"*.calc":"./calc","a.*":"std/x"}}"#);
+        let e = language_of(Some(&m.unwrap().unwrap()), &file("a.calc")).unwrap_err();
+        assert!(e.contains("`*.calc` and `a.*` both name"), "{e}");
+        let e = read(r#"{"languages":{"*.calc":"./none"}}"#).err().unwrap();
+        assert_eq!(e, "`languages.*.calc`: no module ./none.vyrn");
     }
 
     /// A present but mistyped map is refused, not read as no dependencies.

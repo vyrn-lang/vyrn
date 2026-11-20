@@ -1,5 +1,5 @@
 import { apiDocs } from "./apidoc"
-import { docModules, docSummary, docIntro, docEntries, docTests, docCount } from apiDocs("../../std")
+import { docModules, docLanguages, docSummary, docIntro, docEntries, docTests, docCount } from apiDocs("../../std")
 import { startsWith } from "std/strpred"
 import { split } from "std/strings"
 import { includes } from "std/arrays"
@@ -10,12 +10,12 @@ import { Markup, markupString } from "std/html"
 
 export type ApiEntry = { name: String, kind: String, sig: Markup, prose: Markup, line: Int64 }
 
-export type ApiModule = { name: String, summary: String, count: Int64 }
+export type ApiModule = { name: String, summary: String, count: Int64, language: Bool }
 
 export fn apiModules() -> Array<ApiModule> {
     let mut out: Array<ApiModule> = []
     for m in docModules() {
-        out.push(ApiModule { name: m.copy(), summary: docSummary(m), count: docCount(m) })
+        out.push(ApiModule { name: m.copy(), summary: docSummary(m), count: docCount(m), language: includes(docLanguages(), m) })
     }
     return out
 }
@@ -59,7 +59,7 @@ export fn apiGroups() -> Array<ApiGroup> {
         let mut mods: Array<ApiModule> = []
         for m in apiModules() {
             if groupOf(m.name) == g.name {
-                mods.push(ApiModule { name: m.name.copy(), summary: m.summary.copy(), count: m.count })
+                mods.push(ApiModule { name: m.name.copy(), summary: m.summary.copy(), count: m.count, language: m.language })
             }
         }
         if mods.length > 0 {
@@ -123,14 +123,15 @@ test "every signature the reference renders is a whole declaration" {
     assert(total > 300)
 }
 
-test "every module has a name, a summary and at least one export" {
+test "every module has a name, a summary and an export, or states a language" {
     let mods = apiModules()
     assert(mods.length > 20)
     for m in mods {
         assert(m.name.byteLength > 0)
         assert(m.summary.byteLength > 0)
-        assert(m.count > 0)
+        assert(m.count > 0 || m.language)
     }
+    assert(includes(docLanguages(), "grammar"))
 }
 
 test "a module's exports arrive in declaration order" {

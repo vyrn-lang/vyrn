@@ -146,7 +146,7 @@ fn refuse_unset_flags(g: &Grammar) -> Result<(), Refused> {
 
 /// Each rule no other rule reads, in file order. Such a rule cannot read a label,
 /// because no caller binds one.
-fn start_rules(g: &Grammar) -> Result<Vec<RuleId>, Refused> {
+pub(crate) fn start_rules(g: &Grammar) -> Result<Vec<RuleId>, Refused> {
     let mut read = vec![false; g.rules.len()];
     for (i, rule) in g.rules.iter().enumerate() {
         for callee in callees(&rule.body) {
@@ -2247,7 +2247,7 @@ mod tests {
 
     #[test]
     fn the_format_grammar_writes_a_parser() {
-        let g = load(&text("syntax.syntax")).expect("syntax.syntax loads");
+        let g = load(&text("../../std/syntax.syntax")).expect("syntax.syntax loads");
         let written = parser(&g).expect("it lowers");
         assert!(
             written.contains("export fn parseFile(text: String)"),

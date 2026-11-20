@@ -1669,6 +1669,8 @@ pub type ModuleGraph = Vec<(String, Vec<String>, Option<GenModule>)>;
 pub struct GenModule {
     pub source: String,
     pub inputs: GenDeps,
+    /// [`crate::gen::Written::grammars`].
+    pub grammars: Vec<String>,
 }
 
 /// What a generation's output depends on: each input its run read and each source of
@@ -1716,6 +1718,27 @@ fn graph_of(modules: &[Module]) -> ModuleGraph {
         .iter()
         .map(|m| (m.key.clone(), m.import_targets.clone(), m.generated.clone()))
         .collect()
+}
+
+/// Returns the grammar the module `spec` states, as `importer` resolves it: the
+/// first grammar whose parser a generator wrote for one of the module's imports
+/// ([`crate::gen::Written::grammars`]). `None` when the module does not load or
+/// writes no parser.
+pub fn grammar_of(
+    importer: &str,
+    spec: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+) -> Option<String> {
+    let key = resolve_spec(spec, importer, opts).ok()?;
+    let source = resolver.read(&key).ok()?;
+    let graph = module_graph(&source, &key, opts, resolver, engine).0.ok()?;
+    let (_, targets, _) = graph.iter().find(|(k, ..)| *k == key)?;
+    targets.iter().find_map(|t| {
+        let (_, _, generated) = graph.iter().find(|(k, ..)| k == t)?;
+        generated.as_ref()?.grammars.first().cloned()
+    })
 }
 
 /// Returns every module reachable from the root, with the load's warnings, and
@@ -2119,6 +2142,7 @@ fn load_modules(
             generated: generated.map(|g| GenModule {
                 source: text.clone(),
                 inputs: g.inputs.clone(),
+                grammars: g.written.grammars.clone(),
             }),
             spans: written.map(|g| Rc::from(g.spans.as_slice())),
             injected: None,
@@ -3448,7 +3472,7 @@ fn join_importer_dir(importer: &str, s: &str) -> String {
 /// Runs the exported `gen fn` whose name starts with `prefix` that the editor
 /// companion of the module `spec` names, or of a module it imports, declares,
 /// as an import `from <name>(args)` written in `importer` would, and returns
-/// its output unparsed. `None` when no such function takes `args.len()`
+/// what it wrote unparsed. `None` when no such function takes `args.len()`
 /// parameters.
 ///
 /// A module's editor companion is `<stem>.editor.vyrn` beside it; no program
@@ -3470,7 +3494,7 @@ pub fn call_generator(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
-) -> Option<Result<String, Vec<Diagnostic>>> {
+) -> Option<Result<crate::gen::Written, Vec<Diagnostic>>> {
     let key = resolve_spec(spec, importer, opts).ok()?;
     let memo_key = (key.clone(), prefix.to_string(), args.len());
     let held = GEN_EXPORTS.with(|m| m.borrow().get(&memo_key).cloned());
@@ -3508,7 +3532,7 @@ pub fn call_generator(
         engine,
         (&mut HashMap::new(), &mut Vec::new()),
     );
-    Some(generated.map(|g| g.written.source))
+    Some(generated.map(|g| g.written))
 }
 
 /// What [`gen_export`] answered: the companion and the function, or none, and
@@ -4262,11 +4286,11 @@ const ABSENT: &str = "absent";
 /// The cache entry format tag, bumped when an entry's meaning changes.
 /// [`read_cache_entry`] rejects any other tag as a miss, so the generator re-runs
 /// and overwrites the entry.
-const CACHE_ENTRY_TAG: &str = "v7";
+const CACHE_ENTRY_TAG: &str = "v8";
 
 /// Formats this compiler wrote before [`CACHE_ENTRY_TAG`]. Such an entry is
 /// stale, not foreign, so it is ignored without a warning.
-const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2", "v3", "v4", "v5", "v6"];
+const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2", "v3", "v4", "v5", "v6", "v7"];
 
 /// Serializes a cache entry: `v7 <tag> <N>`, then `path<TAB>hash` lines, each
 /// with `<TAB>stamp` where `stamps` holds one; then `-`, or the count of `gens`
@@ -4303,9 +4327,10 @@ fn render_cache_entry(
     format!("{CACHE_ENTRY_TAG} {} {body}", entry_tag(key, &body))
 }
 
-/// A span table and the reports as cache lines: the row count, then one
+/// A span table, the reports and the grammars as cache lines: the row count, then one
 /// `offset<TAB>author<TAB>shown` line per row; then the report count, then one
-/// `offset<TAB>line` line per report. An author is `-` for the call site or
+/// `offset<TAB>line` line per report; then the grammar count, then one key per
+/// line. An author is `-` for the call site or
 /// `line:col:key`; a shown position is `-` or `line:col:path`. The key, the
 /// path and the report's line come last, so a colon or a tab in them splits
 /// nothing.
@@ -4326,13 +4351,17 @@ fn written_table(w: &Written) -> String {
     for r in &w.reports {
         out.push_str(&format!("{}\t{}\n", r.offset, r.line));
     }
+    out.push_str(&format!("{}\n", w.grammars.len()));
+    for g in &w.grammars {
+        out.push_str(&format!("{g}\n"));
+    }
     out
 }
 
 /// Inverse of [`written_table`], read from `next`.
 fn read_written_table<'a>(
     mut next: impl FnMut() -> Option<&'a str>,
-) -> Option<(Vec<SpanRow>, Vec<Report>)> {
+) -> Option<(Vec<SpanRow>, Vec<Report>, Vec<String>)> {
     // `line:col:rest`, the rest keeping any colon. Rows repeat one key and one
     // path, so a rest equal to `last` shares it.
     let placed = |field: &str,
@@ -4382,7 +4411,11 @@ fn read_written_table<'a>(
         let line = line.to_string();
         reports.push(Report { offset, line });
     }
-    Some((rows, reports))
+    let mut grammars = Vec::new();
+    for _ in 0..next()?.parse::<usize>().ok()? {
+        grammars.push(next()?.to_string());
+    }
+    Some((rows, reports, grammars))
 }
 
 /// Inverse of [`render_cache_entry`], for an entry this compiler wrote.
@@ -4481,7 +4514,7 @@ fn read_cache_entry(
             Some(gens)
         }
     };
-    let (spans, reports) = read_written_table(&mut line)?;
+    let (spans, reports, grammars) = read_written_table(&mut line)?;
     Some(CacheEntry {
         inputs: Rc::from(inputs),
         stamps,
@@ -4490,6 +4523,7 @@ fn read_cache_entry(
             source: text[idx..].to_string(),
             spans,
             reports,
+            grammars,
         },
     })
 }
@@ -7583,8 +7617,8 @@ mod tests {
         }
     }
 
-    /// A span table, its reports, the stamps and the gen fns survive the cache, a
-    /// colon in a key or a path and a tab in a report included.
+    /// A span table, its reports, its grammars, the stamps and the gen fns survive
+    /// the cache, a colon in a key or a path and a tab in a report included.
     #[test]
     fn a_cache_entry_keeps_its_span_table() {
         let inputs = [
@@ -7618,6 +7652,7 @@ mod tests {
                 offset: 24,
                 line: "warning C:/p/in.txt:1:1 a\tb".to_string(),
             }],
+            grammars: vec!["C:/p/a:b.syntax".to_string()],
         };
         let gens = vec![
             GenFn {

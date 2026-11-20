@@ -2088,7 +2088,13 @@ fn the_manifest_inputs_globs_are_registered_with_the_client() {
     }));
     let _ = client.read_response(&init_id);
     client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
-    let register = client.read_notification("client/registerCapability");
+    // The languages map's defaults register first, whatever the folder holds.
+    let register = loop {
+        let r = client.read_notification("client/registerCapability");
+        if r["id"] != "vyrn/languages" {
+            break r;
+        }
+    };
     let regs = register["params"]["registrations"].as_array().unwrap();
     let methods: Vec<&str> = regs.iter().filter_map(|r| r["method"].as_str()).collect();
     assert_eq!(
@@ -2167,6 +2173,12 @@ const SEM_TYPES: &[&str] = &[
     "method",
     "macro",
     "keyword",
+    "comment",
+    "string",
+    "number",
+    "operator",
+    "regexp",
+    "decorator",
 ];
 
 /// One decoded semantic token at an absolute 0-based position; `mods` is the
@@ -6558,4 +6570,57 @@ fn a_class_hovers_with_each_rule_and_jumps_to_the_first() {
     let target = definition_target(&mut client, &uri, l, c).expect("a linked rule");
     assert!(target.ends_with("public/linked.css"), "{target}");
     let _ = client.child.kill();
+}
+
+/// A `.syntax` file is read by `std/grammar`, the languages map's default row:
+/// the loader's refusal at its line, then definition, hover, completion and
+/// colour from the grammar's companion and the format grammar.
+#[test]
+fn a_grammar_file_is_served_through_its_language_module() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_grammar_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("g.syntax");
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    let broken = "expect ^E\nfile = ( 'x'\n";
+    std::fs::write(&path, broken).unwrap();
+    did_open(&mut client, &uri, "syntax", broken);
+    let diags = read_diags_for(&mut client, "g.syntax");
+    let line = diags.pointer("/params/diagnostics/0/range/start/line");
+    assert_eq!(line, Some(&serde_json::json!(1)), "{diags}");
+    let good = "expect ^E\nfile = item*\nitem = name / 'x'\nname = [a-z]+\n";
+    std::fs::write(&path, good).unwrap();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": { "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": good }] }
+    }));
+    let diags = read_diags_for(&mut client, "g.syntax");
+    assert_eq!(
+        diags.pointer("/params/diagnostics"),
+        Some(&serde_json::json!([])),
+        "{diags}"
+    );
+    let mut ask = |id: i64, method: &str, line: u32, character: u32| {
+        let id = serde_json::json!(id);
+        let at = serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } });
+        client.send(
+            &serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": at }),
+        );
+        client.read_response(&id)
+    };
+    let definition = ask(2, "textDocument/definition", 1, 8);
+    let start = definition.pointer("/result/range/start/line");
+    assert_eq!(start, Some(&serde_json::json!(2)), "{definition}");
+    let hover = ask(3, "textDocument/hover", 2, 8);
+    assert!(hover.to_string().contains("name = [a-z]+"), "{hover}");
+    let completion = ask(4, "textDocument/completion", 3, 0).to_string();
+    for label in ["\"item\"", "\"name\"", "\"eof\""] {
+        assert!(completion.contains(label), "{label}: {completion}");
+    }
+    let tokens = ask(5, "textDocument/semanticTokens/full", 0, 0);
+    let data = tokens.pointer("/result/data").and_then(|d| d.as_array());
+    assert!(data.is_some_and(|d| d.len() >= 5 * 8), "{tokens}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

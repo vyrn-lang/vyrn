@@ -8,7 +8,7 @@ import { join } from "std/code"
 
 type Entry = { name: String, kind: String, sig: String, doc: String, line: Int64 }
 
-type Mod = { name: String, doc: String, entries: Array<Entry>, tests: Array<String> }
+type Mod = { name: String, doc: String, entries: Array<Entry>, tests: Array<String>, language: Bool }
 
 gen fn offsetOf(starts: Array<Int64>, t: Token) -> Int64 {
     return starts[t.line - 1] + t.col - 1
@@ -118,6 +118,18 @@ gen fn exportsOf(src: String, toks: Array<Token>) -> Array<Entry> {
         i = i + 1
     }
     return out
+}
+
+/// Whether a module states a language: it imports the parser `syntax(...)` writes.
+gen fn statesLanguage(toks: Array<Token>) -> Bool {
+    let mut i = 0
+    while i + 2 < toks.length {
+        if toks[i].text == "from" && toks[i + 1].text == "syntax" && toks[i + 2].text == "(" {
+            return true
+        }
+        i = i + 1
+    }
+    return false
 }
 
 gen fn testNames(toks: Array<Token>) -> Array<String> {
@@ -388,6 +400,7 @@ export gen fn apiDocs(stdDir: String) -> Code {
                 doc: headerDoc(toks),
                 entries: exportsOf(src, toks),
                 tests: testNames(toks),
+                language: statesLanguage(toks),
             })
         }
     }
@@ -398,7 +411,11 @@ export gen fn apiDocs(stdDir: String) -> Code {
     let mut entryLists: Array<Code> = []
     let mut testLists: Array<Code> = []
     let mut counts: Array<Code> = []
+    let mut languages: Array<String> = []
     for m in mods {
+        if m.language {
+            languages.push(m.name.copy())
+        }
         let mut exported: Array<String> = []
         for e in m.entries {
             exported.push(e.name.copy())
@@ -430,6 +447,8 @@ export gen fn apiDocs(stdDir: String) -> Code {
         import { Markup } from "std/html"
         /// Every documented module, sorted.
         export fn docModules() -> Array<String> { return \{modules} }
+        /// The modules that state a language, which a file is read through and which need export nothing.
+        export fn docLanguages() -> Array<String> { return \{quotedList(languages)} }
         /// The first sentence of a module's header block.
         \{summaryFn}
         /// A module's header block, as HTML.

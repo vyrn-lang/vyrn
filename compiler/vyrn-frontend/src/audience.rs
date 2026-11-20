@@ -383,6 +383,15 @@ impl Claim {
         f == t || f == format!("{t}.vyrn") || f.starts_with(&format!("{t}/"))
     }
 
+    /// The context an anchor of the claim's companion resolves in: beside the
+    /// importer.
+    fn context<'a>(&'a self, opts: &'a crate::loader::LoadOptions) -> crate::origin::Context<'a> {
+        crate::origin::Context {
+            importer_dir: self.importer.rsplit_once('/').map_or("", |(d, _)| d),
+            project: crate::loader::project_dir(opts, &self.importer),
+        }
+    }
+
     /// Spells a file the claim covers as the import would: [`Self::arg`], then
     /// the file's path under the target. `None` for a file it does not cover.
     pub fn spell(&self, file: &str) -> Option<String> {
@@ -469,7 +478,7 @@ pub fn companion_answers(
                 resolver,
                 engine,
             )?;
-            Some((c, answer.ok()?))
+            Some((c, answer.ok()?.source))
         })
         .collect()
 }
@@ -558,7 +567,7 @@ pub fn input_view(
         engine,
     )?
     .ok()?;
-    Some(InputView::new(&input, &view))
+    Some(InputView::new(&input, &view.source))
 }
 
 /// Returns the definition the editor companion of `claim`'s generator module
@@ -597,12 +606,108 @@ pub fn input_definition(
         engine,
     )?
     .ok()?;
-    let dir = claim.importer.rsplit_once('/').map_or("", |(d, _)| d);
-    let ctx = crate::origin::Context {
-        importer_dir: dir,
-        project: crate::loader::project_dir(opts, &claim.importer),
+    crate::origin::anchor(out.source.trim(), &claim.context(opts)).ok()
+}
+
+/// Returns the claim the language module of `file` makes on it, under the
+/// manifest `m` ([`crate::manifest::language_of`]): its editor companion serves
+/// the file as a generator module's serves an input. The claim names no
+/// generator, and its argument spells `file` from the importer.
+///
+/// # Errors
+///
+/// The manifest's refusal of two entries over `file`.
+pub fn language_claim(
+    m: Option<&crate::manifest::Manifest>,
+    file: &str,
+) -> Result<Option<Claim>, String> {
+    let Some((importer, module)) = crate::manifest::language_of(m, file)? else {
+        return Ok(None);
     };
-    crate::origin::anchor(out.trim(), &ctx).ok()
+    let dir = importer.rsplit_once('/').map_or("", |(d, _)| d);
+    Ok(relative_to(file, dir).map(|rel| Claim {
+        arg: format!("./{rel}"),
+        target: file.to_string(),
+        importer,
+        line: 0,
+        module: Some(module),
+        generator: String::new(),
+    }))
+}
+
+/// Returns what the editor companion of `claim`'s module refuses in the input
+/// `file`, through its `gen fn vyrnCheck*(root, path) -> Code`: each report of
+/// the code it writes, at the place the report names. Empty when the claim names
+/// no module, no companion declares such a function, or the run fails.
+pub fn input_check(
+    claim: &Claim,
+    file: &str,
+    opts: &crate::loader::LoadOptions,
+    resolver: &dyn crate::loader::ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+) -> Vec<crate::diagnostics::Diagnostic> {
+    use crate::consteval::ConstVal;
+    let call = || {
+        let args = [
+            ConstVal::Str(claim.arg.clone()),
+            ConstVal::Str(claim.spell(file)?),
+        ];
+        let module = claim.module.as_deref()?;
+        crate::loader::call_generator(
+            &claim.importer,
+            module,
+            "vyrnCheck",
+            &args,
+            false,
+            opts,
+            resolver,
+            engine,
+        )?
+        .ok()
+    };
+    let Some(written) = call() else {
+        return Vec::new();
+    };
+    let ctx = claim.context(opts);
+    (written.reports.iter())
+        .filter_map(|r| crate::origin::report(&claim.importer, 0, &r.line, &ctx))
+        .collect()
+}
+
+/// Returns the hover the editor companion of `claim`'s module gives at 1-based
+/// `line` and `col` of the input `file`, through its
+/// `gen fn vyrnHover*(root, path, line, col) -> String`, as Markdown. `None`
+/// where [`input_definition`] would be, or for an empty answer.
+#[allow(clippy::too_many_arguments)]
+pub fn input_hover(
+    claim: &Claim,
+    file: &str,
+    line: usize,
+    col: usize,
+    opts: &crate::loader::LoadOptions,
+    resolver: &dyn crate::loader::ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+) -> Option<String> {
+    use crate::consteval::ConstVal;
+    let args = [
+        ConstVal::Str(claim.arg.clone()),
+        ConstVal::Str(claim.spell(file)?),
+        ConstVal::Int(line as i64),
+        ConstVal::Int(col as i64),
+    ];
+    let module = claim.module.as_deref()?;
+    let out = crate::loader::call_generator(
+        &claim.importer,
+        module,
+        "vyrnHover",
+        &args,
+        false,
+        opts,
+        resolver,
+        engine,
+    )?
+    .ok()?;
+    Some(out.source).filter(|s| !s.trim().is_empty())
 }
 
 /// Returns the first string argument of the innermost generator call in a

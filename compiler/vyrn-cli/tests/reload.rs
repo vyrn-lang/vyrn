@@ -439,7 +439,7 @@ fn an_edited_companion_is_checked_again() {
         );
         out.expect("the companion exports a vyrnProbe generator")
     };
-    assert_eq!(call().ok().as_deref(), Some("one"));
+    assert_eq!(call().ok().map(|w| w.source).as_deref(), Some("one"));
 
     std::fs::write(&gen, answers.replace("\"one\"", "1")).unwrap();
     let edited = call();
@@ -449,5 +449,5 @@ fn an_edited_companion_is_checked_again() {
     );
 
     std::fs::write(&gen, answers).unwrap();
-    assert_eq!(call().ok().as_deref(), Some("one"));
+    assert_eq!(call().ok().map(|w| w.source).as_deref(), Some("one"));
 }
