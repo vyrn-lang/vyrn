@@ -685,6 +685,9 @@ pub enum St {
         old: Old,
         /// The source line, which a refusal names as the checker does.
         line: usize,
+        /// The 1-based column of the name the store writes through, which a
+        /// refusal names; 0 for a store this pass made up.
+        col: usize,
         /// The statement the plan keys its store decision by. [`Site::None`]
         /// for a store this pass made up (a global's initializer, a desugar's
         /// temporary) and for a user container's `c[i] = v`, whose store
@@ -796,6 +799,9 @@ pub enum St {
     Do {
         rhs: Rhs,
         line: usize,
+        /// The 1-based column the expression starts at, where a removal's
+        /// refusal sits; 0 for a row this pass made up.
+        col: usize,
         site: NodeId,
     },
     /// A refusal or a `panic`: the path ends here and owes nothing.
@@ -1222,14 +1228,10 @@ impl Said {
         Said { line, col, text }
     }
 
-    /// `text` at `line` on the name spelled at `id`'s column, as a binder or an
-    /// assignment records it.
-    pub fn at(line: usize, id: crate::ast::Id, text: String) -> Said {
-        Said {
-            line,
-            col: id.col(),
-            text,
-        }
+    /// `text` at `line` on the name spelled at 1-based column `col`, as a
+    /// binder or an assignment records it; 0 is the whole line.
+    pub fn at(line: usize, col: usize, text: String) -> Said {
+        Said { line, col, text }
     }
 
     /// `text` about the whole of `line`: a construct that spells no name.

@@ -51,7 +51,7 @@ pub fn stores(
 ) -> Vec<Said> {
     let mut out: Vec<Said> = Vec::new();
     for f in body.frames() {
-        let mut judge = |place: &Place, line, site: Option<NodeId>, removal: Option<&str>| {
+        let mut judge = |place: &Place, line, col, site: Option<NodeId>, removal: Option<&str>| {
             let (at, path) = split(place);
             // The first step out of the root decides the words.
             let step = path.first().copied();
@@ -91,7 +91,7 @@ pub fn stores(
                 (_, Some(Place::Field(..)), _) if !elem => rule!(FieldNotMut, name),
                 (_, Some(_), _) => rule!(StoreNotMut, name),
             };
-            out.push(Said::line(line, rule.render()));
+            out.push(Said::at(line, col, rule.render()));
         };
         rows(&f.stmts).for_each(|(s, _)| row_stores(s, &f.names, &mut judge));
     }
@@ -112,12 +112,12 @@ pub(crate) fn split(place: &Place) -> (&Place, Vec<&Place>) {
 }
 
 /// Every place the one row `s` stores into, without the rows it holds, with
-/// its line, the source statement it is keyed by where the row names one, and
-/// the builtin where the store is a removal's receiver.
+/// its line and column, the source statement it is keyed by where the row
+/// names one, and the builtin where the store is a removal's receiver.
 pub(crate) fn row_stores(
     s: &St,
     names: &[NameInfo],
-    f: &mut dyn FnMut(&Place, usize, Option<NodeId>, Option<&str>),
+    f: &mut dyn FnMut(&Place, usize, usize, Option<NodeId>, Option<&str>),
 ) {
     fn modified(rhs: &Rhs) -> Vec<(Place, Option<&str>)> {
         match rhs {
@@ -143,23 +143,34 @@ pub(crate) fn row_stores(
     }
     match s {
         St::Store {
-            place, line, site, ..
+            place,
+            line,
+            col,
+            site,
+            ..
         } => {
             let key = match site {
                 Site::Node(k) => Some(*k),
                 _ => None,
             };
-            f(place, *line, key, None)
+            f(place, *line, *col, key, None)
         }
-        St::Do { rhs, line, site } => {
+        St::Do {
+            rhs,
+            line,
+            col,
+            site,
+        } => {
             let key = Some(*site).filter(|k| *k != NodeId::NONE);
-            modified(rhs).iter().for_each(|(p, r)| f(p, *line, key, *r))
+            modified(rhs)
+                .iter()
+                .for_each(|(p, r)| f(p, *line, *col, key, *r))
         }
         St::Let(n, rhs) => {
             let info = &names[n.index()];
             modified(rhs)
                 .iter()
-                .for_each(|(p, r)| f(p, info.line, info.binding, *r))
+                .for_each(|(p, r)| f(p, info.line, 0, info.binding, *r))
         }
         _ => {}
     }
@@ -209,6 +220,7 @@ struct Open {
     name: Name,
     ty: String,
     line: usize,
+    col: usize,
 }
 
 struct Groups<'b, 'r> {
@@ -251,7 +263,7 @@ impl Groups<'_, '_> {
                     };
                     for o in &open {
                         let name = self.src(o.name);
-                        self.refuse(*line, rule!(GroupExit, what, name));
+                        self.refuse(*line, 0, rule!(GroupExit, what, name));
                     }
                     open.clear();
                 }
@@ -262,7 +274,7 @@ impl Groups<'_, '_> {
                         .collect();
                     for n in callers {
                         let name = self.src(n);
-                        self.refuse(*line, rule!(GroupExit, what, name));
+                        self.refuse(*line, 0, rule!(GroupExit, what, name));
                     }
                     open.clear();
                 }
@@ -273,7 +285,7 @@ impl Groups<'_, '_> {
                     let group = open.iter().find(|o| o.name == r);
                     if let (Some((_, long, short)), Some(o)) = (fails, group) {
                         let (name, k, n) = (self.src(r), c.site.line, &o.ty);
-                        self.refuse(o.line, rule!(GroupFalse, name, k, long, short, n));
+                        self.refuse(o.line, 0, rule!(GroupFalse, name, k, long, short, n));
                     }
                 }
                 _ => {
@@ -287,14 +299,19 @@ impl Groups<'_, '_> {
                         continue;
                     }
                     self.observe(s, &open);
-                    row_stores(s, &self.f.names, &mut |place, line, _, _| {
+                    row_stores(s, &self.f.names, &mut |place, line, col, _, _| {
                         let (Place::Name(c), path) = split(place) else {
                             return;
                         };
                         let ty = &self.f.names[c.index()].ty;
                         if let Some(ty) = (self.rules.grouped)(ty, &path) {
                             if !open.iter().any(|o| o.name == *c) {
-                                open.push(Open { name: *c, ty, line });
+                                open.push(Open {
+                                    name: *c,
+                                    ty,
+                                    line,
+                                    col,
+                                });
                             }
                         }
                     });
@@ -311,10 +328,10 @@ impl Groups<'_, '_> {
         for o in open {
             let name = self.src(o.name);
             if reads_whole(s, o.name) {
-                self.refuse(line, rule!(GroupRead, name));
+                self.refuse(line, 0, rule!(GroupRead, name));
             }
             if let Some(f) = self.called(s).filter(|_| self.callers(o.name)) {
-                self.refuse(line, rule!(GroupCall, f, name));
+                self.refuse(line, 0, rule!(GroupCall, f, name));
             }
         }
     }
@@ -362,7 +379,7 @@ impl Groups<'_, '_> {
     fn unchecked(&mut self, open: &[Open]) {
         for o in open {
             let (n, name) = (&o.ty, self.src(o.name));
-            self.refuse(o.line, rule!(StoreRuled, n, name));
+            self.refuse(o.line, o.col, rule!(StoreRuled, n, name));
         }
     }
 
@@ -370,8 +387,8 @@ impl Groups<'_, '_> {
         self.f.names[n.index()].source.clone()
     }
 
-    fn refuse(&mut self, line: usize, rule: Rule) {
-        let u = Said::line(line, rule.render());
+    fn refuse(&mut self, line: usize, col: usize, rule: Rule) {
+        let u = Said::at(line, col, rule.render());
         if !self.out.contains(&u) {
             self.out.push(u);
         }

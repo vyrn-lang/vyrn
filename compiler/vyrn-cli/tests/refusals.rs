@@ -2272,7 +2272,7 @@ fn a_refused_generator_program_is_refused_when_its_run_succeeds() {
     )
     .expect("write host.vyrn");
     let cold = refused_cold_and_warm(&dir, &["emit-gen", "host.vyrn"]);
-    assert!(cold.starts_with("lib.vyrn:3:0: cannot assign"), "{cold}");
+    assert!(cold.starts_with("lib.vyrn:3:5: cannot assign"), "{cold}");
 }
 
 /// A `_` binder over a must-use value is refused with a fix the user can
@@ -3007,6 +3007,6 @@ fn a_statement_after_a_refused_one_is_judged() {
     assert_eq!(
         refused_src("trap-after", src),
         "main.vyrn:2:11: call to unknown function `g`\n\
-         main.vyrn:4:0: cannot assign to `x` (declared without `mut`)\n"
+         main.vyrn:4:5: cannot assign to `x` (declared without `mut`)\n"
     );
 }

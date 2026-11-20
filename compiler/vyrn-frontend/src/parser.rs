@@ -2170,7 +2170,6 @@ impl<'a> Build<'a> {
             };
             let value = self.expr();
             self.eat_semi();
-            let id = if base.is_empty() { id } else { Id::NEW };
             return Stmt::Store {
                 id,
                 name,

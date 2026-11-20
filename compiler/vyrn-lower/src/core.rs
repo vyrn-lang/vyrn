@@ -1109,11 +1109,7 @@ fn fn_slot(
                     }
                     Misfit::Param(..) => return None,
                 };
-                return Some(Said::at(
-                    *at,
-                    vyrn_frontend::ast::Id::at(*col),
-                    says.render(),
-                ));
+                return Some(Said::at(*at, *col, says.render()));
             }
             Expr::Var { name: vn, .. } if bound(vn) => match recorded(arg)
                 .map(|t| resolve(t, decls))
@@ -1285,7 +1281,7 @@ fn seeded<'a>(
             let name = b.body.spelled(&f.name).to_string();
             falls_through(&mut b.body, &f.ret, |owes| {
                 let rule = rule!(FunctionFallsThrough, name, owes);
-                Said::at(f.line, Id::at(f.col), rule.render())
+                Said::at(f.line, f.col, rule.render())
             });
         }
         Source::Block(ob) => {
@@ -1312,6 +1308,7 @@ fn seeded<'a>(
                     value: v,
                     old: Old::Nothing,
                     line: g.line,
+                    col: 0,
                     site: Site::None,
                     releases: false,
                     holes: Vec::new(),
@@ -1722,6 +1719,7 @@ impl<'a> Builder<'a> {
             value: Val::Lit(Lit::Bool(v)),
             old: Old::Nothing,
             line,
+            col: 0,
             site: Site::None,
             releases: false,
             holes: Vec::new(),
@@ -2887,7 +2885,7 @@ impl<'a> Builder<'a> {
         shallow(rows, &mut flat);
         let mut out: Vec<(Name, String)> = Vec::new();
         for s in flat {
-            crate::typed::row_stores(s, &self.body.names, &mut |place, _, _, _| {
+            crate::typed::row_stores(s, &self.body.names, &mut |place, _, _, _, _| {
                 if let Some((c, to)) = group_of(self.proto, &self.body.names, place) {
                     if !out.iter().any(|(m, _)| *m == c) {
                         out.push((c, to));
@@ -2922,6 +2920,7 @@ impl<'a> Builder<'a> {
         leaf: &'a Step,
         value: &'a Expr,
         line: usize,
+        col: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
         let (root, rty) = self.named_place(name, line)?;
@@ -2950,7 +2949,7 @@ impl<'a> Builder<'a> {
                 // A second projected step is the expansion's own, which the
                 // checker typed and expanded in turn.
                 if self.program.expansions.stored_step(b, l).is_some() {
-                    return self.store(sid, into, b, l, value, line, out);
+                    return self.store(sid, into, b, l, value, line, col, out);
                 }
                 let steps: Vec<At> = b.iter().chain([l]).map(Step::at).collect();
                 // The steps up to the element `atSet` yields: the receiver's own
@@ -2987,9 +2986,9 @@ impl<'a> Builder<'a> {
         };
         let nested = !base.is_empty();
         match leaf {
-            Step::Field(field) => self.set_field(at, &quoted, field, value, sid, line, out),
+            Step::Field(field) => self.set_field(at, &quoted, field, value, sid, line, col, out),
             Step::Index(index) => self.index_set(
-                at, name, &quoted, index, value, sid, nested, whole, line, out,
+                at, name, &quoted, index, value, sid, nested, whole, line, col, out,
             ),
         }
     }
@@ -3188,8 +3187,8 @@ impl<'a> Builder<'a> {
                 _ => None,
             };
             let col = match s {
-                Some(Stmt::Let { col, .. }) => vyrn_frontend::ast::Id::at(*col),
-                _ => vyrn_frontend::ast::Id::NEW,
+                Some(Stmt::Let { col, .. }) => *col,
+                _ => 0,
             };
             self.body
                 .mistyped
@@ -3360,7 +3359,7 @@ impl<'a> Builder<'a> {
                         let ([to, vty], []) = self.body.speech().say([to, &vty], []);
                         let name = self.written(name);
                         let refusal = rule!(AssignMismatch, name, to, vty).render();
-                        self.body.mistyped.push(Said::at(*line, *id, refusal));
+                        self.body.mistyped.push(Said::at(*line, id.col(), refusal));
                     }
                 }
                 let n = self.lookup(name);
@@ -3469,6 +3468,7 @@ impl<'a> Builder<'a> {
                     value: v,
                     old,
                     line: *line,
+                    col: id.col(),
                     site: Site::Node(sid),
                     releases,
                     holes: if releases {
@@ -3489,7 +3489,7 @@ impl<'a> Builder<'a> {
                 leaf,
                 value,
                 line,
-                id: _,
+                id,
             } => {
                 let known = match base.first().unwrap_or(leaf) {
                     Step::Field(_) => {
@@ -3502,7 +3502,7 @@ impl<'a> Builder<'a> {
                 if !known {
                     return Ok(());
                 }
-                self.store(sid, name, base, leaf, value, *line, out)?;
+                self.store(sid, name, base, leaf, value, *line, id.col(), out)?;
             }
             Stmt::Return { value, line, id: _ } => {
                 let vty = match value {
@@ -3894,6 +3894,7 @@ impl<'a> Builder<'a> {
                 out.push(St::Do {
                     rhs,
                     line: e.line(),
+                    col: start_col(e),
                     site: sid,
                 });
                 if let Some((r, _, malloc)) = self.frame.pending_receiver.take() {
@@ -3919,6 +3920,7 @@ impl<'a> Builder<'a> {
                         out.push(St::Do {
                             rhs,
                             line: e.line(),
+                            col: start_col(e),
                             site: sid,
                         });
                     }
@@ -4156,6 +4158,7 @@ impl<'a> Builder<'a> {
 
     /// A store into `field` of the place `base`, a part of a root that the
     /// reader wrote as `quoted`.
+    #[allow(clippy::too_many_arguments)]
     fn set_field(
         &mut self,
         base: (Place, Type),
@@ -4164,6 +4167,7 @@ impl<'a> Builder<'a> {
         value: &'a Expr,
         sid: NodeId,
         line: usize,
+        col: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
         self.field_store(&base.1, quoted, field, value, line)?;
@@ -4176,6 +4180,7 @@ impl<'a> Builder<'a> {
             value: v,
             old: self.old_for(&fty, value, quoted, releases),
             line,
+            col,
             site: Site::Node(sid),
             releases,
             holes: if releases {
@@ -4333,6 +4338,7 @@ impl<'a> Builder<'a> {
         nested: bool,
         whole: Option<Place>,
         line: usize,
+        col: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
         self.index_store(&base.1, quoted, index, value, line)?;
@@ -4390,6 +4396,7 @@ impl<'a> Builder<'a> {
             value: v,
             old: self.old_for(&ety, value, name, releases),
             line,
+            col,
             site,
             releases,
             holes: if releases {
@@ -4711,6 +4718,7 @@ impl<'a> Builder<'a> {
             value: Val::Name(t),
             old: Old::Nothing,
             line,
+            col: 0,
             site: Site::None,
             releases: false,
             holes: Vec::new(),
@@ -5666,10 +5674,9 @@ impl<'a> Builder<'a> {
                         let sp = self.body.speech();
                         let refusal =
                             got.and_then(|g| stored_slot(Some(&g), None, &t, &decls, &sp));
-                        let at = vyrn_frontend::ast::Id::at(*col);
                         self.body
                             .mistyped
-                            .extend(refusal.map(|r| Said::at(*line, at, r)));
+                            .extend(refusal.map(|r| Said::at(*line, *col, r)));
                     }
                     (ptys, Some(*r))
                 }
@@ -6279,6 +6286,7 @@ impl<'a> Builder<'a> {
             value,
             old: Old::Nothing,
             line,
+            col: 0,
             site: Site::None,
             releases: false,
             holes: Vec::new(),
@@ -6408,6 +6416,7 @@ impl<'a> Builder<'a> {
                 out.push(St::Do {
                     rhs: r,
                     line: *line,
+                    col: 0,
                     site: NodeId::NONE,
                 });
                 out.push(St::Trap);
@@ -6609,6 +6618,7 @@ impl<'a> Builder<'a> {
                     value: tv,
                     old: Old::Nothing,
                     line: *line,
+                    col: 0,
                     site: Site::None,
                     releases: false,
                     holes: Vec::new(),
@@ -6627,6 +6637,7 @@ impl<'a> Builder<'a> {
                             value: ev,
                             old: Old::Nothing,
                             line: *line,
+                            col: 0,
                             site: Site::None,
                             releases: false,
                             holes: Vec::new(),
@@ -6691,6 +6702,7 @@ impl<'a> Builder<'a> {
                                 value: v,
                                 old: Old::Nothing,
                                 line: *line,
+                                col: 0,
                                 site: Site::None,
                                 releases: false,
                                 holes: Vec::new(),
@@ -6813,6 +6825,7 @@ impl<'a> Builder<'a> {
                         .unwrap_or(Val::Lit(Lit::Opaque(Opaque::Unbound))),
                     old: Old::Nothing,
                     line: *line,
+                    col: 0,
                     site: Site::None,
                     releases: false,
                     holes: Vec::new(),
@@ -6942,6 +6955,7 @@ impl<'a> Builder<'a> {
             value: Val::Name(t),
             old: Old::Nothing,
             line,
+            col: 0,
             site: Site::None,
             releases: false,
             holes: Vec::new(),
@@ -7076,6 +7090,7 @@ impl<'a> Builder<'a> {
                 out.push(St::Do {
                     rhs: first,
                     line,
+                    col: 0,
                     site: NodeId::NONE,
                 });
                 return self.call(name, std::slice::from_ref(&**rhs), line, ret, dest, out);
@@ -8625,6 +8640,14 @@ fn ruled_steps(own: &Owned, ty: &Type, path: &[&Place]) -> Vec<(usize, String)> 
     out
 }
 
+/// The column `e` starts at when that is on its line, else 0.
+fn start_col(e: &Expr) -> usize {
+    match e.start() {
+        (l, col) if l == e.line() => col,
+        _ => 0,
+    }
+}
+
 /// The row that checks record name `n` against its type `to`'s `where` rule:
 /// the constructor reads it, and traps as at a boundary.
 fn rule_check(to: String, n: Name, line: usize) -> St {
@@ -8640,6 +8663,7 @@ fn rule_check(to: String, n: Name, line: usize) -> St {
             awaits: None,
         },
         line,
+        col: 0,
         site: NodeId::NONE,
     }
 }

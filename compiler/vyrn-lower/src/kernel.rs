@@ -2410,7 +2410,9 @@ impl<'b> Kernel<'b> {
                 self.by = By::Return;
                 self.takes.set(Taker::Stores);
             }
-            St::Do { rhs, line, site } => {
+            St::Do {
+                rhs, line, site, ..
+            } => {
                 self.here = *line;
                 self.stmt = *site;
                 self.takes.set(taker_of(rhs));
