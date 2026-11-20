@@ -18,6 +18,32 @@ export type Both<A, B> = { first: A, second: B }
 /// The branch of a `race` that finished first, and its result.
 export type Race<A, B> = enum { First(A), Second(B) }
 
+/// Waits for `t` to end and returns its result. If `t` is cancelled, the
+/// caller is cancelled where it waits.
+export fn join<T>(t: consume Task<T>) -> T {
+    let id = taskId(t)
+    if stateOf(id) == 2 {
+        let op = newOp()
+        watch(id, op)
+        await taskWait(op)
+    }
+    if stateOf(id) == 1 {
+        await cancelled()
+    }
+    forget(id)
+    return taskTake(t)
+}
+
+/// Ends `t` where it waits, releasing what it holds, or releases its result
+/// when it returned. Does not wait.
+export fn cancel<T>(t: consume Task<T>) {
+    let id = taskId(t)
+    stop(id)
+    let returned = stateOf(id) == 0
+    forget(id)
+    taskFree(t, returned)
+}
+
 /// Runs two calls at once and waits for both: `await both(f(a), g(b))`.
 ///
 /// Each argument is a call, and the two are one call's arguments, so a
@@ -71,15 +97,29 @@ export fn timeout<T>(ms: Int64, f: fn() -> T) -> Option<T> {
 // through `wake`, which the emitter exports as `__vyrn_wake`; the module runs
 // the woken tasks in wake order, so the same deliveries print the same bytes
 // on every engine. The emitter calls the functions below by name: `_start`
-// and a waiting export start a task, a host wait waits on its operation's id.
+// and a waiting export start a task, `fork` starts one, and a wait waits on
+// its operation's id. A host's operation ids count up from 1 and the run
+// queue's own count down from -1, so one table serves both.
 
-/// A task the host started by calling `main` or an export that waits: its
-/// number from 1 in start order, the emitter's number of the root that started
-/// it, the root's frame while it waits, the host's id for it (0 for `main`,
-/// which no host names), and the root's result once it returned.
-type Run = { id: Int64, root: Int32, frame: Int32, host: Int64, result: Int64 }
+/// A task: its number from 1 in start order, the emitter's number of the root
+/// that started it, the root's frame while it waits (a forked task's block),
+/// the host's id for it (0 for `main` and a forked task, which no host names),
+/// the root's result once it returned, whether `fork` started it, its state, 2
+/// while it runs, 0 returned and 1 cancelled, and the operation its end
+/// delivers to its owner, 0 for none. A forked task stays until its owner
+/// takes or frees it.
+type Run = {
+    id: Int64,
+    root: Int32,
+    frame: Int32,
+    host: Int64,
+    result: Int64,
+    forked: Bool,
+    state: Int32,
+    watch: Int64,
+}
 
-/// A host operation a task waits on: its id, the task, and what the wake
+/// An operation a task waits on: its id, the task, and what the wake
 /// delivered: a status, 2 until it came, 0 completed and 1 cancelled, and a
 /// payload. A task waits on one operation per branch that waits.
 type Wait = { id: Int64, task: Int64, status: Int32, payload: Int64 }
@@ -99,6 +139,9 @@ let mut readyAt: Int64 = 0
 let mut running: Int64 = 0
 
 let mut started: Int64 = 0
+
+/// The last of the run queue's own operation ids.
+let mut ops: Int64 = 0
 
 /// How many cancellations run: while one does, every wait a poll reaches is
 /// cancelled.
@@ -123,12 +166,18 @@ fn waitAt(id: Int64) -> Int64 {
     return i
 }
 
-/// Removes task `id`, which ended with status `st`, 0 returned or 1
-/// cancelled. A host that named the task learns its end, with the result of a
+/// Task `id` ended with status `st`, 0 returned or 1 cancelled. A forked
+/// task keeps its row, and its end is delivered to its owner's watch. Any
+/// other leaves, and a host that named it learns its end, with the result of a
 /// task that returned.
 fn taskEnd(id: Int64, st: Int32) {
     let i = taskAt(id)
     if i < runs.length {
+        if runs[i].forked {
+            runs[i].state = st
+            deliver(runs[i].watch, st, 0)
+            return
+        }
         if runs[i].host != 0 {
             hostDone(runs[i].host, st, runs[i].result)
         }
@@ -139,9 +188,112 @@ fn taskEnd(id: Int64, st: Int32) {
 /// A task for the root the host is starting as `host`, which runs from here.
 fn taskBegin(root: Int32, host: Int64) -> Int64 {
     started = started + 1
-    runs.push(Run { id: started, root: root, frame: 0, host: host, result: 0 })
+    runs.push(Run {
+        id: started,
+        root: root,
+        frame: 0,
+        host: host,
+        result: 0,
+        forked: false,
+        state: 2,
+        watch: 0,
+    })
     running = started
     return started
+}
+
+/// A task `fork` starts with its root `root` over its block `block`, which
+/// runs from here to its first wait: the root calls this before the call's
+/// first step, and `taskForked` after it. Returns the task that ran before.
+fn taskFork(root: Int32, block: Int32) -> Int64 {
+    let was = running
+    started = started + 1
+    runs.push(Run {
+        id: started,
+        root: root,
+        frame: block,
+        host: 0,
+        result: 0,
+        forked: true,
+        state: 2,
+        watch: 0,
+    })
+    running = started
+    return was
+}
+
+/// The first step of the running forked task answered `st`, and `was` runs
+/// again. Returns the forked task's id.
+fn taskForked(was: Int64, st: Int32) -> Int64 {
+    let id = running
+    running = was
+    if UInt32(st) < 2 {
+        taskEnd(id, st)
+    }
+    return id
+}
+
+/// A fresh operation id of the run queue's own.
+fn newOp() -> Int64 {
+    ops = ops - 1
+    return ops
+}
+
+/// The state of task `id`: 2 while it runs, 0 returned, 1 cancelled.
+fn stateOf(id: Int64) -> Int32 {
+    let i = taskAt(id)
+    if i == runs.length {
+        return 1
+    }
+    return runs[i].state
+}
+
+/// Delivers task `id`'s end to `op`.
+fn watch(id: Int64, op: Int64) {
+    let i = taskAt(id)
+    if i < runs.length {
+        runs[i].watch = op
+    }
+}
+
+/// Forgets task `id` once its owner took or freed it.
+fn forget(id: Int64) {
+    let i = taskAt(id)
+    if i < runs.length {
+        runs.swapRemove(i)
+    }
+}
+
+/// Runs task `id` down its cancellation edges in this step: every wait it
+/// reaches answers cancelled. A task that ended is left as it is.
+fn stop(id: Int64) {
+    let i = taskAt(id)
+    if i == runs.length || runs[i].state != 2 {
+        return
+    }
+    let was = running
+    running = id
+    cancelBegin()
+    let st = hostResume(runs[i].root, runs[i].frame)
+    cancelEnd()
+    running = was
+    taskEnd(id, st)
+}
+
+/// The start of `taskWait(op)`: the running task waits on `op` unless a
+/// delivery came first. Answers as `delivery` does.
+fn waitFor(op: Int64) -> Int32 {
+    if waitAt(op) == waits.length {
+        waitOn(op)
+    }
+    return delivery(op)
+}
+
+/// Cancels the running task where it waits here.
+fn cancelled() {
+    let op = newOp()
+    waits.push(Wait { id: op, task: running, status: 1, payload: 0 })
+    await taskWait(op)
 }
 
 /// The running task's root returned `result`, one word, as `hostDone` passes
@@ -191,7 +343,9 @@ fn delivery(id: Int64) -> Int32 {
     }
     let mut st = waits[i].status
     if st == 2 && cancelling > 0 {
-        hostCancel(id)
+        if id > 0 {
+            hostCancel(id)
+        }
         st = 1
     }
     if st != 2 {
@@ -226,7 +380,13 @@ fn cancelEnd() {
 fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
     deliver(id, status, payload)
     drain()
-    return Int32(runs.length)
+    let mut n: Int32 = 0
+    for r in runs {
+        if r.state == 2 {
+            n = n + 1
+        }
+    }
+    return n
 }
 
 /// Operation `id` ended with `status` and `payload`: the task that waits on
@@ -280,15 +440,25 @@ fn taskTrapped() -> Int64 {
         return 0
     }
     let host = runs[i].host
+    let forked = runs[i].forked
+    let watching = runs[i].watch
     runs.swapRemove(i)
     let mut j: Int64 = 0
     while j < waits.length {
         if waits[j].task == id {
-            hostCancel(waits[j].id)
+            if waits[j].id > 0 {
+                hostCancel(waits[j].id)
+            }
             waits.swapRemove(j)
         } else {
             j = j + 1
         }
+    }
+    // A trap ends a forked task alone, and its owner is cancelled where it
+    // waits for it.
+    if forked {
+        deliver(watching, 1, 0)
+        drain()
     }
     return host
 }

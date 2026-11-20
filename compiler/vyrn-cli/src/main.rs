@@ -4190,8 +4190,10 @@ fn serve_world(program: &mut vyrn_frontend::ast::Program) -> std::sync::Arc<vyrn
         (program.functions.iter_mut()).filter(|f| f.module.is_none() && f.name == "vyrnServeHandle")
     {
         vyrn_frontend::project::walk_block(f.block_mut(), &mut |e| {
-            if let Expr::Call { name, awaits, .. } = e {
-                *awaits |= name == "handle";
+            if let Expr::Call { name, mark, .. } = e {
+                if name == "handle" {
+                    *mark = vyrn_frontend::ast::Mark::Await;
+                }
             }
         });
     }

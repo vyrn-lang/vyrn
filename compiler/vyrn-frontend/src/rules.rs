@@ -355,6 +355,8 @@ rules! {
         "extern fn `{name}` returns {ret}, which cannot cross the JS boundary \
         (allowed: Int64, sized ints, Float64, Float32, Bool, String, Unit)";
     GlobalUnit { name } "cannot bind module state `{name}` to a Unit value";
+    TaskState { ty }
+        "`{ty}` may not be module state: a task has one owner, which joins or cancels it";
     GlobalStream { name }
         "module state `{name}` may not be a `Stream`: a stream's \
         lifetime is a scope, and module state is never dropped";
@@ -720,9 +722,14 @@ rules! {
         "the `where` clause on the result of `{name}` reads `{param}`, a `{cap}` \
         parameter the body may change";
     AwaitMissing { callee }
-        "`{callee}` waits, and its call has no `await`"
-        fix "write `await` before the call";
+        "`{callee}` waits, and its call has no `await` or `fork`"
+        fix "write `await` to wait for it here, or `fork` to run it in a task of its own";
     AwaitNoWait { callee } "`await` marks a call that waits, and `{callee}` does not wait";
+    ForkNoWait { callee } "`fork` starts a call that waits, and `{callee}` does not wait";
+    ForkModify { arg, callee, place }
+        "`fork` hands its task every argument, and argument {arg} of `{callee}` is \
+        `modify`: the task may outlive `{place}`"
+        fix "return the value from `{callee}` instead";
     AwaitInside { callee, param }
         "`{callee}` waits only because it calls `{param}` with no `await`"
         fix "pass a function that does not wait";
@@ -913,6 +920,8 @@ rules! {
     NeedsField { name } "`{name}` needs at least one field, e.g. `{name}<T, field>`";
     NestingTooDeep { max } "nesting exceeds {max} levels";
     AwaitNotCall {} "`await` marks a call: write `await f(..)`";
+    ForkNotCall { operand }
+        "`fork` starts a call in a task of its own, and `{operand}` is no call";
     GlobalNeedsInit { name }
         "module state `{name}` needs an initializer: write `let {name} = <value>` \
         (top-level `let` has no default value)";
@@ -1164,6 +1173,10 @@ rules! {
     OwedStream { s }
         "a stream must be consumed with `for .. in`, passed to a `consume` parameter, \
         forwarded by returning it, or released with `close({s})`, on every path";
+    DropTask { s }
+        "`drop` ends no task: wait for `{s}` with `await join({s})`, or end it with `cancel({s})`";
+    OwedTask { s }
+        "wait for `{s}` with `await join({s})`, or end it with `cancel({s})`";
     OwedDeclared { ty, s }
         "`{ty}` declares `impl MustUse`, so a value of it must be handed on by name on every \
         path: passed to a `consume` parameter, forwarded by returning it, or released with \

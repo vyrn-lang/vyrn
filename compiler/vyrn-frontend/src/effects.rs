@@ -315,7 +315,9 @@ pub enum Mark {
     /// `await` before the call.
     Await,
     /// `await` before a `both` or `race` whose `n` branch calls follow it.
-    Fork(usize),
+    Both(usize),
+    /// `fork` before the call: it starts a task and does not wait.
+    Fork,
     /// A branch of the fork before it, which that fork's mark covers.
     Branch,
 }

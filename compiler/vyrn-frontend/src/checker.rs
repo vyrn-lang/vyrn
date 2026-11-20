@@ -371,6 +371,10 @@ pub const RESERVED: &[&str] = &[
     "hostCancel",
     "hostDone",
     "hostResume",
+    "taskId",
+    "taskTake",
+    "taskFree",
+    "taskWait",
     "orderBefore",
     "Int64",
     "Int32",
@@ -2306,6 +2310,16 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// Whether `ty` contains a `Task<T>` anywhere, through named types and
+    /// type arguments. A `fn` type holds none.
+    fn contains_task(&self, ty: &Type) -> bool {
+        self.reaches(ty, &|t| match t {
+            Type::Task(_) => Reach::Yes,
+            Type::Fn(_, _) => Reach::No,
+            _ => Reach::Parts,
+        })
+    }
+
     /// Whether `ty` contains a function-value type anywhere, for
     /// the positions a function value may not take.
     fn contains_fn(&self, ty: &Type) -> bool {
@@ -2560,7 +2574,7 @@ impl<'a> Checker<'a> {
                     Err(Bases(a, ab, b, bb)) => return Err(cerr!(line, UnionBases, a, ab, b, bb)),
                 }
             }
-            Type::Stream(inner) => self.ensure_type_exists(inner, line)?,
+            Type::Stream(inner) | Type::Task(inner) => self.ensure_type_exists(inner, line)?,
             // A `lazy T` stores a T, so T's rules apply through it.
             Type::Lazy(inner) => self.ensure_type_exists(inner, line)?,
             // The inline capacity is bounded to keep the inline footprint small.
@@ -3030,6 +3044,10 @@ impl<'a> Checker<'a> {
                 }
                 if matches!(self.base(&vty), Type::Stream(_)) {
                     return Err(cerr!(g.line, GlobalStream, name = DeclName(&g.name)));
+                }
+                let held = g.ty.as_ref().unwrap_or(&vty);
+                if self.contains_task(held) {
+                    return Err(cerr!(g.line, TaskState, ty = held));
                 }
                 if let Some(declared) = &g.ty {
                     if !self.coercible(&vty, declared) {
@@ -3628,8 +3646,15 @@ impl<'a> Checker<'a> {
             }
             // The dropped binding's type, which the lowering instantiates a
             // generic declared `release` at.
-            Stmt::Drop { name, id, .. } => {
+            Stmt::Drop { name, id, line } => {
                 let b = self.lookup(scope, name);
+                // A task ends by `join` or `cancel`, so a silent cancellation is written. A
+                // generic body's `drop` of a `T` is no task's, whatever `T` an instance is.
+                if b.as_ref()
+                    .is_some_and(|b| matches!(self.base(&b.ty), Type::Task(_)))
+                {
+                    return Err(cerr!(*line, DropTask, s = name.as_str()));
+                }
                 if let (Some(b), Some(r)) = (b, &mut self.acc.borrow_mut().record) {
                     r.node_types.insert(id.0, b.ty);
                 }
@@ -4103,7 +4128,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Call {
                 form,
-                awaits: _,
+                mark,
                 name,
                 args,
                 type_args,
@@ -4111,9 +4136,26 @@ impl<'a> Checker<'a> {
                 id,
             } => {
                 let at = (expr.id(), form);
+                // `fork f(..)` is the task of the call, so the call answers inside it.
+                let inner;
+                let expected = match (mark, expected) {
+                    (Mark::Fork, Some(e)) => match self.base(e) {
+                        Type::Task(t) => {
+                            inner = *t;
+                            Some(&inner)
+                        }
+                        _ => None,
+                    },
+                    (Mark::Fork, None) => None,
+                    _ => expected,
+                };
                 let t = self
                     .call(name, at, args, type_args, *line, scope, expected, fn_ret)
                     .map_err(|d| spelled_at(d, *line, id.col(), name))?;
+                let t = match mark {
+                    Mark::Fork => Type::Task(Box::new(t)),
+                    _ => t,
+                };
                 // `schemaOf<T>()` lowers through the literal it stands for, so
                 // the checker types those nodes too (`project::schema`).
                 if let ("schemaOf", [Type::Named(tn) | Type::App(tn, _)], true) =
@@ -6673,7 +6715,7 @@ impl<'a> Checker<'a> {
                 match e {
                     Expr::Call {
                         form,
-                        awaits: _,
+                        mark: _,
                         name,
                         args,
                         line,
@@ -6851,6 +6893,10 @@ impl<'a> Checker<'a> {
             },
             Type::Stream(inner) => match crate::types::resolve(aty, self) {
                 Type::Stream(a) => self.unify_at(inner, &a, false, subst, line),
+                _ => Err(cerr!(line, Expected, pty, aty)),
+            },
+            Type::Task(inner) => match crate::types::resolve(aty, self) {
+                Type::Task(a) => self.unify_at(inner, &a, false, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
             // `N` must match: integer arguments do not infer.
@@ -7433,9 +7479,9 @@ pub fn fn_sigs_match(a: &Type, b: &Type) -> bool {
                 && ap.iter().zip(bp).all(|(x, y)| fn_sigs_match(x, y))
                 && fn_sigs_match(ar, br)
         }
-        (Type::Array(x), Type::Array(y)) | (Type::Stream(x), Type::Stream(y)) => {
-            fn_sigs_match(x, y)
-        }
+        (Type::Array(x), Type::Array(y))
+        | (Type::Stream(x), Type::Stream(y))
+        | (Type::Task(x), Type::Task(y)) => fn_sigs_match(x, y),
         (Type::Map(x1, x2), Type::Map(y1, y2)) => fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2),
         // Option and Result match through their payloads; a declared enum
         // compares equal.

@@ -1,0 +1,12 @@
+import { sleep } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn main() -> Int64 {
+    let t = fork pause(5)
+    drop t
+    return 0
+}

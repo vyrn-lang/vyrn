@@ -343,6 +343,7 @@ pub const CONTEXTUAL: &[&str] = &[
     "stdout",
     "file",
     "Stream",
+    "Task",
     "Array",
     "SmallArray",
     "Map",
@@ -374,6 +375,7 @@ pub const CONTEXTUAL: &[&str] = &[
     "Logger",
     "lazy",
     "await",
+    "fork",
     "vyrn",
 ];
 

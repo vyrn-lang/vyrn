@@ -446,7 +446,7 @@ pub struct Await {
     /// The `await`'s call, the plan's key for the edge's releases.
     pub site: NodeId,
     pub line: usize,
-    /// The branches of a `both` or `race` row, whose kind is [`Callee::Fork`].
+    /// The branches of a `both` or `race` row, whose kind is [`Callee::Both`].
     pub fork: Option<Fork>,
 }
 
@@ -574,15 +574,59 @@ pub enum Callee {
     Value(Name),
     /// A `both` or `race` of `std/task`: its branches are the row's
     /// [`Fork`], and an emitter calls each branch, never the row's callee.
-    Fork,
+    Both,
+    /// `fork f(..)`: the call starts in a task of its own, and the row's value
+    /// is the task. Every argument is taken as a `consume` parameter takes it.
+    Fork(Forked),
+}
+
+/// The call a [`Callee::Fork`] starts: one a task can resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Forked {
+    Fn(FnId),
+    Bound,
+    Method,
+    Value(Name),
+}
+
+impl Forked {
+    /// The started call of a call to `kind`, or `None` for a callee no task can run.
+    pub fn of(kind: Callee) -> Option<Forked> {
+        Some(match kind {
+            Callee::Fn(id) => Forked::Fn(id),
+            Callee::Bound => Forked::Bound,
+            Callee::Method => Forked::Method,
+            Callee::Value(n) => Forked::Value(n),
+            _ => return None,
+        })
+    }
+}
+
+impl From<Forked> for Callee {
+    fn from(f: Forked) -> Callee {
+        match f {
+            Forked::Fn(id) => Callee::Fn(id),
+            Forked::Bound => Callee::Bound,
+            Forked::Method => Callee::Method,
+            Forked::Value(n) => Callee::Value(n),
+        }
+    }
 }
 
 impl Callee {
     /// The name a call through a value reads.
     pub fn value(self) -> Option<Name> {
-        match self {
+        match self.run() {
             Callee::Value(n) => Some(n),
             _ => None,
+        }
+    }
+
+    /// The callee the call runs: a fork's started call, or the callee itself.
+    pub fn run(self) -> Callee {
+        match self {
+            Callee::Fork(f) => f.into(),
+            c => c,
         }
     }
 
@@ -591,7 +635,11 @@ impl Callee {
     /// whose capabilities `vyrn_lower::core::Builder::call` synthesizes stores its argument
     /// instead, and storing a heapless value copies it.
     pub fn declared(self) -> bool {
-        self.direct() || matches!(self, Callee::Method | Callee::Projection | Callee::Fork)
+        self.direct()
+            || matches!(
+                self,
+                Callee::Method | Callee::Projection | Callee::Both | Callee::Fork(_)
+            )
     }
 
     /// Whether an emitter calls the callee's name directly: a declared
@@ -1020,7 +1068,7 @@ impl Rhs {
         let (one, fork) = match self {
             Rhs::Call {
                 awaits: Some(a),
-                kind: Callee::Fork,
+                kind: Callee::Both,
                 ..
             } => (None, a.fork.as_ref()),
             Rhs::Call { callee, kind, .. } => (Some((callee.as_str(), *kind)), None),

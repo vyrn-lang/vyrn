@@ -553,9 +553,12 @@ The module's shape:
   (`Fn_::resume_dispatch`), so no relooper exists. A cancelled callee sends
   the caller down the row's cancellation edge, then out with status 1
   (`Fn_::await_close`).
-- The run queue: `std/task`'s module state holds a task per call that started
-  one and a wait per host operation a task waits on, found by the operation's
-  id, and `wake` runs the woken tasks in wake order. A task's root is `main` (0) or a waiting export (from 1),
+- The run queue: `std/task`'s module state holds a `Run` per task and a wait
+  per operation a task waits on, found by the operation's id: a host's count
+  up from 1 and the queue's own down from -1. `wake` is `deliver`, which
+  readies the task that waits, then `drain`, which runs the ready tasks in
+  wake order. A forked task's end delivers to the operation its owner
+  watches. A task's root is `main` (0) or a waiting export (from 1),
   whose export is a step that begins the task. The step takes the host's id
   for the task first; the root's end hands its result word to `taskResult`,
   and `taskEnd` calls `hostDone`, the import `vyrn_wait.done`, with the host's
@@ -578,7 +581,17 @@ The module's shape:
   and returns a frame as a waiting body does, and holds a block of its own
   with the tag and its target's frame while the target waits
   (`lower_dispatcher`).
-- Forks: an awaited `both` or `race` is one call row of kind `Callee::Fork`,
+- Tasks: `fork f(x)` is one call row of kind `Callee::Fork`, whose arguments
+  the builder states as `consume`. `Fn_::core_task` allocates the task's block
+  (`task_block`: the run queue's id at 0, the callee's frame at 8, the result,
+  then each argument), stores the arguments in it, and calls the call's root,
+  one per callee instance (`lower_fork_root`), which is run-queue root
+  `FORK_ROOTS` plus its position in `$resumeRoot`. The root starts the call
+  from the block between `taskFork` and `taskForked`, or resumes its frame, and
+  at the call's end stores a scalar result and releases each argument the
+  callee only read. `taskId`, `taskTake` and `taskFree` read and free a block
+  (`Fn_::task_op`); `taskWait` waits on one of the run queue's own operations.
+- Both and race: an awaited `both` or `race` is one call row of kind `Callee::Both`,
   whose arguments are every branch's in order and whose `core::Fork` holds each
   branch's callee and argument count, so the kernel judges the branches as one
   call. The row is one resume point (`Fn_::core_fork`); in a frame that does

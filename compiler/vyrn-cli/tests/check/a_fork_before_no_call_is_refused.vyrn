@@ -1,0 +1,5 @@
+fn main() -> Int64 {
+    let n: Int64 = 3
+    let t = fork n
+    return 0
+}

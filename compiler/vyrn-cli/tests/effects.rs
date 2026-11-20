@@ -535,6 +535,7 @@ const LATTICE: &[(&str, &str, bool)] = &[
     ("args", "args", false),
     ("serveStream", "serve", false),
     ("hostSleep", "waits", false),
+    ("taskWait", "waits", false),
     ("hostFetch", "net", false),
     ("hostResume", "trap", true),
     ("panic", "trap", true),

@@ -503,6 +503,13 @@ pub(crate) fn await_marks(view: View<'_>, open: usize, answers: &HashSet<String>
     matches!(at, Expr::Call { .. })
 }
 
+/// Whether the `fork` at event `open` stands before a call.
+pub(crate) fn fork_marks(view: View<'_>, open: usize, answers: &HashSet<String>) -> bool {
+    let mut b = Build::read(view, open, answers);
+    b.at += 1;
+    matches!(b.postfix(), Expr::Call { .. })
+}
+
 /// The variant, the binders and the scrutinee of the refutable `let` at event
 /// `open`.
 pub(crate) fn ref_let_parts(
@@ -1780,6 +1787,7 @@ impl<'a> Build<'a> {
             "Logger" => Type::Logger,
             // `Stream<T>`: linear, disposed exactly once; movecheck checks it.
             "Stream" => Type::Stream(Box::new(one(self))),
+            "Task" => Type::Task(Box::new(one(self))),
             "Array" => {
                 self.eat(&Tok::Lt);
                 let inner = Box::new(self.type_());
@@ -2293,7 +2301,8 @@ impl<'a> Build<'a> {
     fn unary_here(&mut self) -> Expr {
         let line = self.line();
         // `consume place`: the take. `await f(..)` marks a waiting call, and it marks
-        // the call under any `?` after it: `await f(x)?` is `(await f(x))?`.
+        // the call under any `?` after it: `await f(x)?` is `(await f(x))?`. `fork f(..)`
+        // marks the call it starts, and only a call: `fork f(x)?` is no call.
         if let Event::Word(_) = self.event() {
             if self.at_word("consume") {
                 let id = self.spelled();
@@ -2311,8 +2320,16 @@ impl<'a> Build<'a> {
                 while let Expr::Try { expr, .. } = at {
                     at = &mut **expr;
                 }
-                if let Expr::Call { awaits, .. } = at {
-                    *awaits = true;
+                if let Expr::Call { mark, .. } = at {
+                    *mark = Mark::Await;
+                }
+                return e;
+            }
+            if self.at_word("fork") {
+                self.at += 1;
+                let mut e = self.postfix();
+                if let Expr::Call { mark, .. } = &mut e {
+                    *mark = Mark::Fork;
                 }
                 return e;
             }
@@ -2369,7 +2386,7 @@ impl<'a> Build<'a> {
                 Expr::Call {
                     id,
                     form: CallForm::Protocol(protocol),
-                    awaits: false,
+                    mark: Mark::Plain,
                     name,
                     args,
                     type_args: Vec::new(),
@@ -2442,7 +2459,7 @@ impl<'a> Build<'a> {
                         true => CallForm::Method,
                         false => CallForm::Plain,
                     },
-                    awaits: false,
+                    mark: Mark::Plain,
                     name,
                     args,
                     type_args: Vec::new(),
@@ -2462,7 +2479,7 @@ impl<'a> Build<'a> {
                     name: "@at".to_string(),
                     args: vec![e, idx],
                     form: CallForm::Plain,
-                    awaits: false,
+                    mark: Mark::Plain,
                     type_args: Vec::new(),
                     line,
                     id,
@@ -2650,7 +2667,7 @@ impl<'a> Build<'a> {
                 Expr::Call {
                     id: spelled,
                     form: CallForm::Plain,
-                    awaits: false,
+                    mark: Mark::Plain,
                     name,
                     args,
                     type_args,
@@ -2875,7 +2892,7 @@ impl<'a> Build<'a> {
         let decode = |t: &Expr, text: Expr| Expr::Call {
             id: Id::NEW,
             form: CallForm::Plain,
-            awaits: false,
+            mark: Mark::Plain,
             name: "fromJson".to_string(),
             args: vec![text],
             type_args: match t {

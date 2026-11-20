@@ -689,6 +689,31 @@ fn census() -> Vec<Row> {
              `import { Race } from \"std/task\"`",
             Kernel::Elsewhere,
         ),
+        row(
+            "r101_a_fork_of_a_call_that_does_not_wait.vyrn",
+            "`fork` starts a call that waits",
+            "`fork` starts a call that waits, and `square` does not wait",
+            Kernel::Its,
+        ),
+        row(
+            "r102_a_fork_with_a_modify_argument.vyrn",
+            "a forked call takes every argument as a `consume` parameter does",
+            "`fork` hands its task every argument, and argument 1 of `fill` is `modify`: the \
+             task may outlive `a`",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r103_a_drop_of_a_task.vyrn",
+            "a task ends by `join` or `cancel`",
+            "`drop` ends no task: wait for `t` with `await join(t)`, or end it with `cancel(t)`",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r104_a_task_never_joined_or_cancelled.vyrn",
+            "a task is must-use",
+            "`t` is a `Task<Int64>` and is never disposed",
+            Kernel::Its,
+        ),
     ]
 }
 

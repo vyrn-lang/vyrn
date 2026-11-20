@@ -673,8 +673,8 @@ pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
             leaf(Leaf::V128)
         }
         Type::Bool => leaf(Leaf::I1),
-        // A logger handle is a pointer to its name string.
-        Type::Str | Type::Logger => leaf(Leaf::Ptr),
+        // A logger handle is a pointer to its name string, a task one to its block.
+        Type::Str | Type::Logger | Type::Task(_) => leaf(Leaf::Ptr),
         // `Never` carries no value, so it lowers like `Unit`.
         Type::Unit | Type::Never => Shape::Void,
         // `{ ptr data, i64 len, i64 cap }`.
@@ -961,6 +961,7 @@ mod tests {
             Type::ConstInt(8),
             Type::Map(b(Type::Str), b(Type::Int)),
             Type::Stream(b(Type::Int)),
+            Type::Task(b(Type::Int)),
             Type::Logger,
             Type::Fn(vec![Type::Int], b(Type::Unit)),
             Type::Lazy(b(Type::Int)),

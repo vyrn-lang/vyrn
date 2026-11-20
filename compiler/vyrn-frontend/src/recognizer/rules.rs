@@ -36,6 +36,7 @@ pub enum Hook {
     StmtExpr,
     PlainStmt,
     AwaitTail,
+    ForkTail,
     RefLet,
     CName,
     CLet,
@@ -1466,7 +1467,7 @@ impl Recognizer<'_> {
         let hit = me._primitive()?
             || ({
                 let p0 = me.save();
-                (matches!(me.peek(), Tok::Ident(w) if matches!(w.as_str(), "Stream" | "Array" | "SmallArray" | "Map" | "Option" | "Result" | "Omit" | "Pick" | "Merge" | "Partial" | "Readonly"))
+                (matches!(me.peek(), Tok::Ident(w) if matches!(w.as_str(), "Stream" | "Task" | "Array" | "SmallArray" | "Map" | "Option" | "Result" | "Omit" | "Pick" | "Merge" | "Partial" | "Readonly"))
                     && (me._constructor()? || (me.committed(p0) && me.expected("\"Readonly\"")?)))
                 || { me.back(p0); false }
             })
@@ -1499,6 +1500,14 @@ impl Recognizer<'_> {
         let hit = ({
                 let p0 = me.save();
                 (me.word("Stream")
+                    && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
+                    && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                    && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
+                || { me.back(p0); false }
+            })
+            || ({
+                let p0 = me.save();
+                (me.word("Task")
                     && (me.eat(&Tok::Lt) || (me.committed(p0) && me.expected("Lt")?))
                     && (me._type()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                     && (me._close()? || (me.committed(p0) && me.expected("Gt")?)))
@@ -2167,6 +2176,12 @@ impl Recognizer<'_> {
                     && (me._await_tail()? || (me.committed(p0) && me.expected("\"await\"")?)))
                 || { me.back(p0); false }
             })
+            || ({
+                let p0 = me.save();
+                ((matches!(me.peek(), Tok::Ident(w) if w == "fork") && (matches!(me.ahead(1), Tok::Ident(_)) || matches!(me.ahead(1), Tok::Vself)))
+                    && (me._fork_tail()? || (me.committed(p0) && me.expected("\"fork\"")?)))
+                || { me.back(p0); false }
+            })
             || me._postfix()?;
         me.depth -= 1;
         Ok(hit)
@@ -2184,6 +2199,22 @@ impl Recognizer<'_> {
         });
         if hit {
             me.closed(Hook::AwaitTail, open, start)?;
+        }
+        Ok(hit)
+    }
+
+    fn _fork_tail(&mut self) -> R {
+        let me = self;
+        let open = me.mark();
+        let start = me.cur;
+        let hit = ({
+            let p0 = me.save();
+            (me.word("fork")
+                && (me._postfix()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+            || { me.back(p0); false }
+        });
+        if hit {
+            me.closed(Hook::ForkTail, open, start)?;
         }
         Ok(hit)
     }

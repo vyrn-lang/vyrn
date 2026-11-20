@@ -206,7 +206,10 @@ once on every path, by passing it to a `consume` parameter, returning it, or
 `drop`. A `read` or `modify` parameter borrows the value, so the caller keeps
 the obligation and the callee may not dispose of it. `Stream<T>` carries the
 same obligation, and `for .. in` and `close(s)` take it as a `consume`
-parameter does. A must-use temporary fills only a position that takes it. A
+parameter does. `Task<T>` carries it too: `join` and `cancel` take it, and
+`drop t` is refused, because a dropped task would be cancelled unwritten. Its
+release is `cancel`, which a cancellation edge and the release of a holder
+place as any release. A must-use temporary fills only a position that takes it. A
 store over a must-use value still held is refused: dispose of the old value
 first. A name bound to a value with no parts, such as `None` or `[]`, holds
 nothing to dispose of. `for t in consume xs` over a must-use element owns

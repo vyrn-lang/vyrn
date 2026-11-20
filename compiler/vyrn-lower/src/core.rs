@@ -18,8 +18,8 @@ use std::sync::Arc;
 use crate::effects::Waiting;
 use vyrn_frontend::ast::{
     ArmBody, At, BinOp, Binder, Block, CallForm, Capability, Expr, FnId, Function, Id, LambdaBody,
-    MatchArm, MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Step, Stmt, Type,
-    TypeDecl, UnOp,
+    Mark, MatchArm, MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Step, Stmt,
+    Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
 use vyrn_frontend::diagnostics::{Diagnostic, Fix};
@@ -37,8 +37,8 @@ use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::check::{Ensures, Promise, Raises, Verdict};
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, AtRead, Await, Body, BorrowKind, Branch, Callee, Cand,
-    Copied, Ctor, Facts, Fork, Form, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload,
-    Place, Rhs, Said, Site, Spelled, St, Target, Test, Use, Val, Walk,
+    Copied, Ctor, Facts, Fork, Forked, Form, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque,
+    Payload, Place, Rhs, Said, Site, Spelled, St, Target, Test, Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::{DeclName, Rule};
@@ -117,6 +117,15 @@ pub(crate) fn fork_form(callee: &str) -> Option<Form> {
         "both" => Some(Form::Both),
         "race" => Some(Form::Race),
         _ => None,
+    }
+}
+
+/// A place argument as the source wrote it: `a` or `a.f`.
+fn written(e: &Expr) -> String {
+    match e {
+        Expr::Var { name, .. } => name.clone(),
+        Expr::Field { expr, field, .. } => format!("{}.{field}", written(expr)),
+        _ => String::new(),
     }
 }
 
@@ -533,7 +542,7 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
                     | Callee::Ctor
                     | Callee::Named
                     | Callee::Proven
-                    | Callee::Fork
+                    | Callee::Both
             ) && builtin_row(callee, false).is_none()
                 && !kind.value().is_some_and(|n| !body.params.contains(&n))
             {
@@ -6103,7 +6112,7 @@ impl<'a> Builder<'a> {
         let held = self.frame.held.len();
         let fork = match e {
             Expr::Call {
-                awaits: true,
+                mark: Mark::Await,
                 name,
                 args,
                 line,
@@ -6112,11 +6121,29 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         let mut r = match fork {
-            Some((form, name, args, line)) => self.fork(e, form, name, args, line, out),
+            Some((form, name, args, line)) => self.both(e, form, name, args, line, out),
+            None if matches!(
+                e,
+                Expr::Call {
+                    mark: Mark::Fork,
+                    ..
+                }
+            ) =>
+            {
+                self.fork(e, out)
+            }
             None => self.rhs_inner(e, out),
         };
         match &mut r {
-            Ok(Rhs::Call { awaits, .. }) if matches!(e, Expr::Call { awaits: true, .. }) => {
+            Ok(Rhs::Call { awaits, .. })
+                if matches!(
+                    e,
+                    Expr::Call {
+                        mark: Mark::Await,
+                        ..
+                    }
+                ) =>
+            {
                 let fork = awaits.take().and_then(|a| a.fork);
                 match self.leave_cancel(e.id(), e.line(), held) {
                     Ok(c) => *awaits = Some(Box::new(Await { fork, ..c })),
@@ -6133,11 +6160,70 @@ impl<'a> Builder<'a> {
         r
     }
 
+    /// `fork f(..)` at `e`: the call, built as a call on its own, whose task
+    /// owns every argument, so each is taken as a `consume` parameter takes
+    /// it ([`Callee::Fork`]). A call that cannot start a task and a `modify`
+    /// argument, which the task may outlive, are refused where they stand.
+    fn fork(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
+        let Expr::Call { args, line, .. } = e else {
+            unreachable!("`Builder::rhs` forks only a call");
+        };
+        let r = self.rhs_inner(e, out)?;
+        let forked = match &r {
+            Rhs::Call {
+                kind,
+                write_back: false,
+                awaits: None,
+                ..
+            } => Forked::of(*kind),
+            _ => None,
+        };
+        let (
+            Some(kind),
+            Rhs::Call {
+                callee,
+                args: taken,
+                solved,
+                targets,
+                ..
+            },
+        ) = (forked, &r)
+        else {
+            let callee = match &r {
+                Rhs::Call { callee, .. } => prelude::method_surface(callee),
+                _ => "",
+            };
+            let refusal = rule!(ForkNoWait, callee = DeclName(callee));
+            (self.body.refused).push(Said::of(*line, e, refusal.render_in(&self.body.speech())));
+            return Ok(r);
+        };
+        if let Some(i) = taken.iter().position(|(_, c)| *c == Capability::Modify) {
+            let place = args.get(i).map_or_else(String::new, written);
+            let refusal = rule!(ForkModify, arg = i + 1, callee = DeclName(callee), place);
+            (self.body.refused).push(Said::of(*line, e, refusal.render_in(&self.body.speech())));
+        }
+        Ok(Rhs::Call {
+            callee: callee.clone(),
+            args: (taken.iter())
+                .map(|(a, c)| match c {
+                    Capability::Modify => (a.clone(), *c),
+                    _ => (a.clone(), Capability::Consume),
+                })
+                .collect(),
+            write_back: false,
+            kind: Callee::Fork(kind),
+            ret: self.produced(e),
+            solved: solved.clone(),
+            targets: targets.clone(),
+            awaits: None,
+        })
+    }
+
     /// An awaited `both` or `race` at `e`: each argument is a branch call,
     /// built as a call on its own, and the row is one call over every
     /// branch's arguments ([`vyrn_frontend::core::Fork`]), so the kernel
     /// judges them as one call's. [`Builder::rhs`] adds the edge.
-    fn fork(
+    fn both(
         &mut self,
         e: &'a Expr,
         form: Form,
@@ -6154,7 +6240,9 @@ impl<'a> Builder<'a> {
         };
         for b in branches {
             let call = match b {
-                Expr::Call { awaits: false, .. } => self.rhs_inner(b, out)?,
+                Expr::Call {
+                    mark: Mark::Plain, ..
+                } => self.rhs_inner(b, out)?,
                 _ => return refuse(rule!(ForkBranch, form = spelled), Vec::new(), line),
             };
             let Rhs::Call {
@@ -6187,7 +6275,7 @@ impl<'a> Builder<'a> {
             callee: name.to_string(),
             args,
             write_back: false,
-            kind: Callee::Fork,
+            kind: Callee::Both,
             ret: self.produced(e),
             solved: self.solved.get(&e.id()).cloned().unwrap_or_default(),
             targets: Vec::new(),
@@ -6230,7 +6318,7 @@ impl<'a> Builder<'a> {
     /// other mark goes to its call row ([`Builder::rhs`]).
     fn awaits_nothing(&mut self, e: &Expr) {
         if let Expr::Call {
-            awaits: true,
+            mark: Mark::Await,
             name,
             line,
             ..
@@ -6405,7 +6493,7 @@ impl<'a> Builder<'a> {
             }
             Expr::Call {
                 form: _,
-                awaits: _,
+                mark: _,
                 name,
                 args,
                 line,
@@ -6426,7 +6514,7 @@ impl<'a> Builder<'a> {
             // are reads, not calls.
             Expr::Call {
                 form: _,
-                awaits: _,
+                mark: _,
                 name,
                 args,
                 line,
@@ -9702,6 +9790,11 @@ fn discharged(l: &Linear, sp: &Speech) -> String {
         Linear::Stream => "discharged, not leaked — a stream is consumed, forwarded or closed \
              on every path, and that lowering frees it"
             .to_string(),
+        Linear::Task => {
+            "discharged, not leaked — a task is joined, cancelled or forwarded on every \
+             path, and that ends it"
+                .to_string()
+        }
         Linear::Declared(by) => format!(
             "discharged, not leaked — `{}` declares `impl MustUse`, so it is handed on or \
              dropped on every path",

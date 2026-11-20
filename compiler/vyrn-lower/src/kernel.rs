@@ -843,6 +843,7 @@ impl<'b> Kernel<'b> {
             Some(_) if s == "_" => rule!(OwedUnnamed, ty, release = "drop t"),
             Some(d) if *d == i.ty.to_string() => rule!(OwedDeclared, ty, s),
             Some(_) => rule!(OwedHeld, by, ty, s),
+            None if matches!(i.linear, Some(Linear::Task)) => rule!(OwedTask, s),
             None => rule!(OwedStream, s),
         };
         let rule = match twice {

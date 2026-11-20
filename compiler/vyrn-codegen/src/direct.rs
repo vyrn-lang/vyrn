@@ -569,6 +569,20 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             }
             continue;
         }
+        // One root per call `fork` starts. Drained before the shapes: a root releases the
+        // arguments its callee only reads, which queues a shape body.
+        let fr = {
+            let reg = cx.reg.borrow();
+            let k = reg.forks.done;
+            reg.forks.roots.get(k).cloned().map(|r| (k, r))
+        };
+        if let Some((k, r)) = fr {
+            cx.subst = HashMap::new();
+            let body = emit_here(&mut m, &cx, |log| lower_fork_root(log, &cx, &r, k))?;
+            m.fill(r.index, body)?;
+            cx.reg.borrow_mut().forks.done += 1;
+            continue;
+        }
         // One release or copy body per type. Drained after the instances and before the
         // dispatchers: a shape body reaches a declared `release`, which may be generic and queue
         // an instance. The substitution is empty because each shape's type was substituted where
@@ -920,6 +934,16 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
                     .ins(&Instruction::End);
             }
             b.ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::Br(1))
+                .ins(&Instruction::End);
+        }
+        for (k, r) in cx.reg.borrow().forks.roots.iter().enumerate() {
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(FORK_ROOTS + k as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::Call(r.index))
                 .ins(&Instruction::Br(1))
                 .ins(&Instruction::End);
         }
@@ -1397,7 +1421,29 @@ struct Reg {
     shapes: Shapes,
     /// Written by [`merge`] alone: a body logs the site it asks for ([`Log::site`]).
     sites: Sites,
+    forks: Forks,
 }
+
+/// The calls `fork` starts, one root body each ([`lower_fork_root`]). The `done` first are
+/// written. Root `k` is the run queue's root [`FORK_ROOTS`] plus `k`.
+#[derive(Clone, Default)]
+struct Forks {
+    roots: Vec<ForkRoot>,
+    done: usize,
+}
+
+/// One root a forked task runs: its function, `(block) -> status`, the callee's signature,
+/// and per argument whether the root releases it when the task ends, because the callee
+/// only reads it.
+#[derive(Clone, PartialEq)]
+struct ForkRoot {
+    index: u32,
+    sig: Sig,
+    frees: Vec<bool>,
+}
+
+/// The run queue's number of the first fork root, past every root the host starts.
+const FORK_ROOTS: i32 = 1 << 16;
 
 /// How long each list of a [`Reg`] was when an emission began.
 #[derive(Clone, Copy)]
@@ -1406,6 +1452,7 @@ struct Lens {
     fnvals: usize,
     dispatch: usize,
     shapes: usize,
+    forks: usize,
 }
 
 /// The entries one emission added to a [`Reg`], each list in the order they were added.
@@ -1414,6 +1461,7 @@ struct Added {
     fnvals: Vec<FnVal>,
     dispatch: Vec<(Type, Sig)>,
     shapes: Vec<(u32, ShapeKey, usize)>,
+    forks: Vec<ForkRoot>,
 }
 
 impl Reg {
@@ -1423,6 +1471,7 @@ impl Reg {
             fnvals: self.fnvals.len(),
             dispatch: self.dispatch.sigs.len(),
             shapes: self.shapes.todo.len(),
+            forks: self.forks.roots.len(),
         }
     }
 
@@ -1433,6 +1482,7 @@ impl Reg {
             fnvals: self.fnvals.split_off(at.fnvals),
             dispatch: self.dispatch.sigs.split_off(at.dispatch),
             shapes: self.shapes.todo.split_off(at.shapes),
+            forks: self.forks.roots.split_off(at.forks),
         }
     }
 
@@ -1468,6 +1518,8 @@ enum Owner {
     Dispatch(Vec<ValType>, Vec<ValType>),
     /// A release or copy, whose signature is `(i32) -> ()`.
     Shape,
+    /// A fork root, whose signature is `(i32) -> i32`.
+    Fork,
 }
 
 /// A constant in a body's code that the module decides. A [`Hole`] indexes [`Log::consts`].
@@ -1578,9 +1630,14 @@ fn merge(m: &mut Module, cx: &Cx<'_>, e: Emitted) -> Option<Result<Frame, String
         fnvals,
         dispatch,
         shapes,
+        forks,
     } = e.added;
-    let (mut insts, mut dispatch, mut shapes) =
-        (insts.into_iter(), dispatch.into_iter(), shapes.into_iter());
+    let (mut insts, mut dispatch, mut shapes, mut forks) = (
+        insts.into_iter(),
+        dispatch.into_iter(),
+        shapes.into_iter(),
+        forks.into_iter(),
+    );
     for owner in e.log.funcs {
         let index = match owner {
             Owner::Inst(params, results) => {
@@ -1626,11 +1683,27 @@ fn merge(m: &mut Module, cx: &Cx<'_>, e: Emitted) -> Option<Result<Frame, String
                     }
                 }
             }
+            Owner::Fork => {
+                let mut r = forks.next().expect("an added fork root per reservation");
+                r.sig.index = real(&funcs, r.sig.index);
+                match (reg.forks.roots.iter()).find(|q| q.sig == r.sig && q.frees == r.frees) {
+                    Some(q) => q.index,
+                    None => {
+                        r.index = m.reserve_func([ValType::I32], [ValType::I32]);
+                        let index = r.index;
+                        reg.forks.roots.push(r);
+                        index
+                    }
+                }
+            }
         };
         funcs.push(index);
     }
     assert!(
-        insts.next().is_none() && dispatch.next().is_none() && shapes.next().is_none(),
+        insts.next().is_none()
+            && dispatch.next().is_none()
+            && shapes.next().is_none()
+            && forks.next().is_none(),
         "a registry entry added with no reservation"
     );
     let tags: Vec<u32> = (fnvals.into_iter())
@@ -3412,6 +3485,133 @@ fn lower_shape(
     } else {
         f.copy_body(m, &mut b, 0, ty, line)?;
     }
+    Ok(b)
+}
+
+/// The layout of a task's block for a call to `sig`: the task's id, the callee's frame, the
+/// result and each argument, in that order. So the id is at 0, the frame at 8, and the result at
+/// an offset its type alone decides ([`task_result_at`]).
+fn task_block(cx: &Cx<'_>, sig: &Sig) -> Result<Layout, String> {
+    let head = [Type::Int, INT32, sig.ret_ty.clone()];
+    let parts = head
+        .iter()
+        .chain(&sig.params)
+        .map(|t| cx.shape(t))
+        .collect();
+    Shape::Struct(parts)
+        .layout()
+        .map_err(|e| format!("direct backend: layout of a task block: {e}"))
+}
+
+/// The offset of a `Task<T>`'s result `T` in its block ([`task_block`]).
+fn task_result_at(cx: &Cx<'_>, t: &Type) -> Result<u32, String> {
+    let parts = [Type::Int, INT32, t.clone()]
+        .iter()
+        .map(|t| cx.shape(t))
+        .collect();
+    Shape::Struct(parts)
+        .layout()
+        .map(|l| l.fields[2])
+        .map_err(|e| format!("direct backend: layout of a task block: {e}"))
+}
+
+/// The root of a task `fork` started, `(block) -> status`: run-queue root [`FORK_ROOTS`] plus
+/// `k`, which `hostResume` reaches through `$resumeRoot`. While the block holds no frame, the
+/// root starts the task: `taskFork` makes it the running task, and the call takes its arguments
+/// from the block, an aggregate at its address there. Else it resumes the callee's frame with
+/// zeros for the parameters, as every root does. Once the call ends, the root stores a scalar
+/// result in the block (the callee wrote an aggregate one through the block's address) and
+/// releases each argument the callee only read. `taskForked` ends a start.
+fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<Frame, String> {
+    let sig = &r.sig;
+    let l = task_block(cx, sig)?;
+    let (params, results) = cx.wasm_sig(sig, 0)?;
+    let mut b = Frame::new(&[ValType::I32], &[ValType::I32], &[], 0);
+    let mut f = top_level(cx);
+    let (blk, start, st, was) = (
+        0,
+        b.local(ValType::I32),
+        b.local(ValType::I32),
+        b.local(ValType::I64),
+    );
+    let held: Vec<u32> = (results[..results.len() - 1].iter())
+        .map(|t| b.local(*t))
+        .collect();
+    let settle = |b: &mut Frame| {
+        b.ins(&Instruction::Call(sig.index))
+            .ins(&Instruction::LocalSet(st));
+        for h in held.iter().rev() {
+            b.ins(&Instruction::LocalSet(*h));
+        }
+    };
+    b.ins(&Instruction::LocalGet(blk))
+        .ins(&Instruction::I32Load(word_at(8)))
+        .ins(&Instruction::I32Eqz)
+        .ins(&Instruction::LocalTee(start))
+        .ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::I32Const(FORK_ROOTS + k as i32))
+        .ins(&Instruction::LocalGet(blk))
+        .ins(&Instruction::Call(cx.task("taskFork", 0)?))
+        .ins(&Instruction::LocalSet(was));
+    if sig.ret.out().is_some() {
+        b.ins(&Instruction::LocalGet(blk))
+            .ins(&Instruction::I32Const(l.fields[2] as i32))
+            .ins(&Instruction::I32Add);
+    }
+    for (p, off) in sig.params.iter().zip(&l.fields[3..]) {
+        match cx.repr(p, 0)? {
+            Repr::Unit => b.ins(&Instruction::I32Const(0)),
+            Repr::Scalar(_) => b.ins(&Instruction::LocalGet(blk)).ins(&cx.load(p, *off)),
+            Repr::Agg(_) => b
+                .ins(&Instruction::LocalGet(blk))
+                .ins(&Instruction::I32Const(*off as i32))
+                .ins(&Instruction::I32Add),
+        };
+    }
+    b.ins(&Instruction::I32Const(0));
+    settle(&mut b);
+    b.ins(&Instruction::Else);
+    for t in &params[..params.len() - 1] {
+        b.ins(&zero(*t));
+    }
+    b.ins(&Instruction::LocalGet(blk))
+        .ins(&Instruction::I32Load(word_at(8)));
+    settle(&mut b);
+    b.ins(&Instruction::End)
+        .ins(&Instruction::LocalGet(st))
+        .ins(&Instruction::I32Const(2))
+        .ins(&Instruction::I32GeU)
+        .ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::LocalGet(blk))
+        .ins(&Instruction::LocalGet(st))
+        .ins(&Instruction::I32Store(word_at(8)))
+        .ins(&Instruction::Else);
+    if let [h] = held[..] {
+        b.ins(&Instruction::LocalGet(blk))
+            .ins(&Instruction::LocalGet(h))
+            .ins(&cx.store(&sig.ret_ty, l.fields[2]));
+    }
+    for ((p, off), _) in (sig.params.iter().zip(&l.fields[3..]))
+        .zip(&r.frees)
+        .filter(|(_, f)| **f)
+    {
+        let a = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(blk))
+            .ins(&Instruction::I32Const(*off as i32))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(a));
+        f.rel_at(m, &mut b, a, p, 0)?;
+    }
+    b.ins(&Instruction::End)
+        .ins(&Instruction::LocalGet(start))
+        .ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::LocalGet(blk))
+        .ins(&Instruction::LocalGet(was))
+        .ins(&Instruction::LocalGet(st))
+        .ins(&Instruction::Call(cx.task("taskForked", 0)?))
+        .ins(&Instruction::I64Store(mem_arg(0, 3)))
+        .ins(&Instruction::End)
+        .ins(&Instruction::LocalGet(st));
     Ok(b)
 }
 
@@ -11878,7 +12078,11 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let (import, ret) = match (callee, args) {
             ("hostSleep", [(ms, _)]) => {
                 self.core_val(m, b, ms, &Type::Int, line)?;
-                (w.sleep, Type::Unit)
+                (Some(w.sleep), Type::Unit)
+            }
+            ("taskWait", [(op, _)]) => {
+                self.core_val(m, b, op, &Type::Int, line)?;
+                (None, Type::Unit)
             }
             ("hostFetch", [(req, _)]) => {
                 self.core_val(m, b, req, &Type::Str, line)?;
@@ -11887,19 +12091,29 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     .ins(&Instruction::LocalGet(at));
                 str_len(b);
                 b.ins(&Instruction::I64ExtendI32U);
-                (w.fetch, Type::Str)
+                (Some(w.fetch), Type::Str)
             }
             _ => return unsupported(&format!("the host wait `{callee}`"), line),
         };
         let id = b.local(ValType::I64);
-        b.ins(&Instruction::Call(import))
-            .ins(&Instruction::LocalSet(id));
+        if let Some(import) = import {
+            b.ins(&Instruction::Call(import));
+        }
+        b.ins(&Instruction::LocalSet(id));
         if ret == Type::Str {
             b.ins(&Instruction::I32Const(0));
         }
-        b.ins(&Instruction::LocalGet(id))
-            .ins(&Instruction::Call(wait_on))
-            .ins(&Instruction::I32Const(2));
+        // A host's operation is never delivered before its start returns; one of the run
+        // queue's own may be, so its start reads the delivery ([`std/task`]'s `waitFor`).
+        match import {
+            Some(_) => b
+                .ins(&Instruction::LocalGet(id))
+                .ins(&Instruction::Call(wait_on))
+                .ins(&Instruction::I32Const(2)),
+            None => b
+                .ins(&Instruction::LocalGet(id))
+                .ins(&Instruction::Call(self.cx.task("waitFor", line)?)),
+        };
         let results: &[ValType] = if ret == Type::Str {
             &[ValType::I32]
         } else {
@@ -12354,7 +12568,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     fn core_rhs_ty(&self, rhs: &Rhs, line: usize) -> Result<Type, String> {
         match rhs {
             Rhs::Call {
-                kind: Callee::Fork,
+                kind: Callee::Both | Callee::Fork(_),
                 ret,
                 ..
             } => ret
@@ -12376,6 +12590,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 Some(Spec::Asserts) => Ok(Type::Unit),
                 Some(Spec::HostWait(ret)) => Ok(ret.clone()),
                 Some(Spec::Resumes) => Ok(INT32),
+                Some(Spec::Tasks) => at
+                    .clone()
+                    .ok_or_else(|| gap("a task's block the checker did not type", line)),
                 Some(Spec::Logs) if callee == "logger" => Ok(Type::Logger),
                 Some(Spec::Logs) => Ok(Type::Unit),
                 // [`Fn_::lanes`] types a lane builtin as it emits; the row carries the
@@ -12432,8 +12649,11 @@ impl<'a, 'p> Fn_<'a, 'p> {
         hint: Option<(Dest, Type)>,
         line: usize,
     ) -> Result<Type, String> {
-        if kind == Callee::Fork {
+        if kind == Callee::Both {
             return self.core_fork(m, b, args, ret, hint, line);
+        }
+        if let Callee::Fork(f) = kind {
+            return self.core_task(m, b, callee, f.into(), solved, targets, args, ret, line);
         }
         if let Some(vs) = arg_vals(args) {
             return self.core_call_vals(m, b, callee, kind, solved, targets, &vs, ret, hint, line);
@@ -12455,6 +12675,186 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let slot = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(slot));
         self.core_remove(m, b, callee, slot, &aty, &rest, line)
+    }
+
+    /// `fork f(..)`: a block for the task ([`task_block`]) that holds the arguments, and the
+    /// call started over it in a task of its own by its root ([`lower_fork_root`]). Pushes the
+    /// block, the `Task<T>`.
+    #[allow(clippy::too_many_arguments)]
+    fn core_task(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        callee: &str,
+        kind: Callee,
+        solved: &[(String, Type)],
+        targets: &[Target],
+        args: &[(Arg, vyrn_frontend::ast::Capability)],
+        ret: Option<&Type>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Some(ty) = ret.cloned() else {
+            return unsupported("a fork the checker did not type", line);
+        };
+        let frees: Vec<bool> = match self.cx.world.body_of(callee) {
+            Some(body) if kind.direct() => (body.params.iter())
+                .map(|p| {
+                    matches!(
+                        body.names[p.index()].borrow_kind,
+                        Some(BorrowKind::Param { cap: "read", .. })
+                    )
+                })
+                .collect(),
+            _ => return unsupported("a fork of a call through a value", line),
+        };
+        if !self.regions.is_empty() {
+            return unsupported("a fork inside a region", line);
+        }
+        let (sig, args) = self.call_sig(m, callee, kind, solved, targets, args, line)?;
+        if !sig.waits
+            || sig.in_place.is_some()
+            || matches!(sig.ret, Ret::Words(_))
+            || frees.len() != args.len()
+        {
+            return unsupported("a fork of a call whose frame does not wait", line);
+        }
+        let l = task_block(self.cx, &sig)?;
+        let root = self.fork_root(m, &sig, frees);
+        let blk = b.local(ValType::I32);
+        b.ins(&Instruction::I64Const(l.size as i64))
+            .ins(&Instruction::Call(self.cx.rt.malloc))
+            .ins(&Instruction::LocalTee(blk))
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::I32Store(word_at(8)));
+        for (((a, _), p), off) in args.iter().zip(&sig.params).zip(&l.fields[3..]) {
+            let Arg::Val(v) = a else {
+                return unsupported("a fork of a place argument", line);
+            };
+            match self.cx.repr(p, line)? {
+                Repr::Unit => {}
+                Repr::Scalar(_) => {
+                    b.ins(&Instruction::LocalGet(blk));
+                    self.core_val(m, b, v, p, line)?;
+                    b.ins(&self.cx.store(p, *off));
+                }
+                Repr::Agg(al) => {
+                    b.ins(&Instruction::LocalGet(blk))
+                        .ins(&Instruction::I32Const(*off as i32))
+                        .ins(&Instruction::I32Add);
+                    self.core_val(m, b, v, p, line)?;
+                    b.copy(al.size);
+                }
+            }
+        }
+        b.ins(&Instruction::LocalGet(blk))
+            .ins(&Instruction::Call(root))
+            .ins(&Instruction::Drop)
+            .ins(&Instruction::LocalGet(blk));
+        Ok(ty)
+    }
+
+    /// The index of the root a fork of `sig` starts its task with, reserved and queued on first
+    /// request ([`Forks`]).
+    fn fork_root(&self, m: &mut Log, sig: &Sig, frees: Vec<bool>) -> u32 {
+        let mut reg = self.cx.reg.borrow_mut();
+        if let Some(r) = (reg.forks.roots.iter()).find(|r| r.sig == *sig && r.frees == frees) {
+            return r.index;
+        }
+        let index = m.func(Owner::Fork);
+        reg.forks.roots.push(ForkRoot {
+            index,
+            sig: sig.clone(),
+            frees,
+        });
+        index
+    }
+
+    /// `taskId`, `taskTake` and `taskFree` of a task's block ([`task_block`]). A take copies
+    /// the result out, into `hint`'s storage where it holds the type, before it frees the
+    /// block; a free releases the result of a task that returned first.
+    fn task_op(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        callee: &str,
+        args: &[(Val, Capability)],
+        hint: Option<(Dest, Type)>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let got = self.core_arg(m, b, callee, args, 0, None, line)?;
+        let Type::Task(t) = self.cx.resolve(&got) else {
+            return unsupported(&format!("`{callee}` of `{got}`"), line);
+        };
+        let blk = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(blk));
+        let at = task_result_at(self.cx, &t)?;
+        if callee == "taskId" {
+            b.ins(&Instruction::LocalGet(blk))
+                .ins(&Instruction::I64Load(mem_arg(0, 3)));
+            return Ok(Type::Int);
+        }
+        let ret = match callee {
+            "taskFree" => {
+                self.core_arg(m, b, callee, args, 1, Some(&Type::Bool), line)?;
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                let a = b.local(ValType::I32);
+                b.ins(&Instruction::LocalGet(blk))
+                    .ins(&Instruction::I32Const(at as i32))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalSet(a));
+                self.rel_at(m, b, a, &t, line)?;
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                None
+            }
+            _ => match self.cx.repr(&t, line)? {
+                Repr::Unit => None,
+                Repr::Scalar(v) => {
+                    let x = b.local(v);
+                    b.ins(&Instruction::LocalGet(blk))
+                        .ins(&self.cx.load(&t, at))
+                        .ins(&Instruction::LocalSet(x));
+                    Some(Place::Local(x))
+                }
+                Repr::Agg(l) => {
+                    let (dest, used) = match hint {
+                        Some((d, h)) if self.cx.shape(&h) == self.cx.shape(&t) => (d, true),
+                        _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
+                    };
+                    dest.addr(b, 0);
+                    b.ins(&Instruction::LocalGet(blk))
+                        .ins(&Instruction::I32Const(at as i32))
+                        .ins(&Instruction::I32Add);
+                    b.copy(l.size);
+                    self.dest_used = used;
+                    Some(match dest {
+                        Dest::Slot(off) => Place::Slot(off),
+                        d => {
+                            let a = b.local(ValType::I32);
+                            d.addr(b, 0);
+                            b.ins(&Instruction::LocalSet(a));
+                            Place::Local(a)
+                        }
+                    })
+                }
+            },
+        };
+        b.ins(&Instruction::LocalGet(blk))
+            .ins(&Instruction::Call(self.cx.rt.free));
+        match ret {
+            Some(Place::Local(x)) => {
+                b.ins(&Instruction::LocalGet(x));
+            }
+            Some(p) => {
+                p.addr(b, 0);
+            }
+            None => {}
+        }
+        Ok(match callee {
+            "taskFree" => Type::Unit,
+            _ => *t,
+        })
     }
 
     /// [`Fn_::core_call`] with every argument a value.
@@ -12707,6 +13107,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             // A pull binds two names, and [`Fn_::core_stmts`] emits it.
             Some(Spec::Pulls) => return unsupported("a pull apart from its loop head", line),
             Some(Spec::HostWait(_)) => return self.host_wait(m, b, callee, args, line),
+            Some(Spec::Tasks) => return self.task_op(m, b, callee, args, hint, line),
             // The step of a task the run queue resumes: a call of the root dispatcher.
             Some(Spec::Resumes) => {
                 for (v, _) in args {
@@ -12749,32 +13150,30 @@ impl<'a, 'p> Fn_<'a, 'p> {
         self.core_user_call(m, b, callee, kind, solved, targets, &args, hint, line)
     }
 
-    /// Calls a declared function. A place argument ([`Arg`]) crosses as its address, as a
-    /// layout name does.
+    /// The signature a call of `callee` goes to and the arguments it passes: a call through a
+    /// stored value calls the signature's dispatcher with the value first, and a specialization
+    /// takes its arguments in its own order.
     #[allow(clippy::too_many_arguments)]
-    fn core_user_call(
+    fn call_sig<'x>(
         &mut self,
         m: &mut Log,
-        b: &mut Frame,
         callee: &str,
         kind: Callee,
         solved: &[(String, Type)],
         targets: &[Target],
-        args: &[(Arg, vyrn_frontend::ast::Capability)],
-        hint: Option<(Dest, Type)>,
+        args: &'x [(Arg, vyrn_frontend::ast::Capability)],
         line: usize,
-    ) -> Result<Type, String> {
+    ) -> Result<(Sig, Cow<'x, [(Arg, vyrn_frontend::ast::Capability)]>), String> {
         // A call through a stored value calls the signature's dispatcher, with the value as
         // the leading argument.
-        let through: Vec<(Arg, vyrn_frontend::ast::Capability)>;
         let mut spliced = Vec::new();
-        let (sig, args) = match self.core_through(kind) {
+        Ok(match self.core_through(kind) {
             Some((n, sig_ty)) => {
-                through =
+                let through =
                     std::iter::once((Arg::Val(Val::Name(n)), vyrn_frontend::ast::Capability::Read))
                         .chain(args.iter().cloned())
                         .collect();
-                (self.dispatcher(m, &sig_ty, line)?, &through[..])
+                (self.dispatcher(m, &sig_ty, line)?, Cow::Owned(through))
             }
             None => {
                 // A stored value's dispatcher is registered before the
@@ -12810,13 +13209,32 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 (
                     sig,
                     if spliced.is_empty() {
-                        args
+                        Cow::Borrowed(args)
                     } else {
-                        &spliced[..]
+                        Cow::Owned(spliced)
                     },
                 )
             }
-        };
+        })
+    }
+
+    /// Calls a declared function. A place argument ([`Arg`]) crosses as its address, as a
+    /// layout name does.
+    #[allow(clippy::too_many_arguments)]
+    fn core_user_call(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        callee: &str,
+        kind: Callee,
+        solved: &[(String, Type)],
+        targets: &[Target],
+        args: &[(Arg, vyrn_frontend::ast::Capability)],
+        hint: Option<(Dest, Type)>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let (sig, args) = self.call_sig(m, callee, kind, solved, targets, args, line)?;
+        let args = &args[..];
         // An awaited call waits only through a callee whose frame waits, a waiting type's
         // dispatcher included. Into any other frame it is a plain call, which finishes at its
         // start: its point is never suspended at. A fork branch may finish at its start too.
@@ -15546,7 +15964,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         match rhs {
             // A fork builds its value in the destination ([`Fn_::core_fork`]).
             Rhs::Call {
-                kind: Callee::Fork,
+                kind: Callee::Both,
                 ret,
                 ..
             } => ret
@@ -15568,6 +15986,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
                             // The result type is the row's, which a stream
                             // reader's operands do not carry.
                             Some(Spec::Builds(_)) => ret.is_some(),
+                            // `taskTake` of a layout copies it into the destination.
+                            Some(Spec::Tasks) => ret
+                                .as_ref()
+                                .is_some_and(|t| matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_)))),
                             // `x.copy()` of a layout: [`Fn_::copy_stack`] builds
                             // the copy in a slot of its own, as `Builds` does.
                             Some(Spec::OwnType) => {
@@ -15853,6 +16275,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 | Spec::Effect(_)
                 | Spec::HostWait(_)
                 | Spec::Resumes
+                | Spec::Tasks
                 | Spec::Logs
                 | Spec::Traps
                 | Spec::Asserts,
@@ -15913,6 +16336,20 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 vs.iter().all(|v| self.core_val_readable(v))
             }
             Rhs::Prim(_, vs, _) => vs.iter().all(|v| self.core_operand(v)),
+            // A fork's call is read as the call it starts ([`Fn_::core_task`]).
+            Rhs::Call {
+                callee,
+                args,
+                kind: Callee::Fork(f),
+                solved,
+                targets,
+                ..
+            } => {
+                self.core_args_readable(args)
+                    && self
+                        .core_sig(callee, (*f).into(), solved, targets)
+                        .is_some()
+            }
             // A handed-back receiver asks nothing extra: the builder states the call and the
             // store back as two rows, each read where it stands.
             Rhs::Call {

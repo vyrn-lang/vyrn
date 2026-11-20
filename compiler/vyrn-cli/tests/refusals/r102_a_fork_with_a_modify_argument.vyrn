@@ -1,0 +1,13 @@
+import { sleep, join } from "std/task"
+
+fn fill(xs: modify Array<Int64>, ms: Int64) -> Int64 {
+    await sleep(ms)
+    xs.push(ms)
+    return ms
+}
+
+fn main() -> Int64 {
+    let mut a: Array<Int64> = []
+    let t = fork fill(a, 2)
+    return await join(t)
+}

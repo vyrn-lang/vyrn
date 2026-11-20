@@ -653,6 +653,12 @@ impl<'t> Recognizer<'t> {
                     self.refuse((first.line, first.col), |_| Rule::AwaitNotCall {})?;
                 }
             }
+            Hook::ForkTail => {
+                if !parser::fork_marks(self.view(), open, self.cx.answers) {
+                    let operand = self.spell(&toks[start.at as usize + 1..self.cur.at as usize]);
+                    self.refuse((first.line, first.col), |_| rule!(ForkNotCall, operand))?;
+                }
+            }
             Hook::RefLet => {
                 let (variant, binds, scrut) =
                     parser::ref_let_parts(self.view(), open, self.cx.answers);
@@ -1060,7 +1066,12 @@ impl<'t> Recognizer<'t> {
 
     /// What a label matched, as a refusal prints it: a name, or the type it spells.
     fn text(&self, c: Capture) -> String {
-        match &self.toks[c.from.at as usize..c.to.at as usize] {
+        self.spell(&self.toks[c.from.at as usize..c.to.at as usize])
+    }
+
+    /// What `toks` print as in a refusal: a name, or the type they spell.
+    fn spell(&self, toks: &[Token]) -> String {
+        match toks {
             [Token {
                 tok: Tok::Ident(name),
                 ..

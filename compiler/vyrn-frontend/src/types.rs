@@ -1178,6 +1178,7 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
             Box::new(substitute(v, subst)),
         ),
         Type::Stream(inner) => Type::Stream(Box::new(substitute(inner, subst))),
+        Type::Task(inner) => Type::Task(Box::new(substitute(inner, subst))),
         Type::Fn(params, ret) => Type::Fn(
             params.iter().map(|p| substitute(p, subst)).collect(),
             Box::new(substitute(ret, subst)),
@@ -2297,6 +2298,11 @@ pub fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
         },
         Type::Stream(p) => {
             if let Type::Stream(a) = aty {
+                solve_param(p, a, subst);
+            }
+        }
+        Type::Task(p) => {
+            if let Type::Task(a) = aty {
                 solve_param(p, a, subst);
             }
         }

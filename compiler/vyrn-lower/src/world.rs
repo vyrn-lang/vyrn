@@ -335,23 +335,15 @@ pub(crate) fn add_callees(top: &Body, fns: &HashMap<&str, (FnId, &Function)>, ou
     };
     for b in top.frames() {
         for (s, _) in rows(&b.stmts) {
-            if let St::Let(
-                _,
-                Rhs::Call {
-                    kind: Callee::Fn(g),
-                    ..
-                },
-            )
+            if let St::Let(_, Rhs::Call { kind, .. })
             | St::Do {
-                rhs:
-                    Rhs::Call {
-                        kind: Callee::Fn(g),
-                        ..
-                    },
+                rhs: Rhs::Call { kind, .. },
                 ..
             } = s
             {
-                add(*g);
+                if let Callee::Fn(g) = kind.run() {
+                    add(g);
+                }
             }
             for b in s
                 .awaits()

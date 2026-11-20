@@ -1,0 +1,38 @@
+// Tasks are values: `fork` starts a call in a task of its own, `join` waits
+// for it, and `cancel` ends it where it waits. A task is must-use, so every
+// path joins, cancels or hands on each one.
+
+import { sleep, join, cancel } from "std/task"
+
+fn pause(label: String, ms: Int64) -> Int64 {
+    print("start \{label}")
+    await sleep(ms)
+    print("end \{label}")
+    return ms
+}
+
+// Forking does not wait, so a function that only forks does not wait.
+fn start(ms: Int64) -> Task<Int64> {
+    return fork pause("started", ms)
+}
+
+// Cancelled where it waits, a task cancels the tasks it holds.
+fn holder(ms: Int64) -> Int64 {
+    let inner = fork pause("held", ms * 2)
+    await sleep(ms)
+    return ms + await join(inner)
+}
+
+fn main() -> Int64 {
+    let a = fork pause("a", 30)
+    let b = start(10)
+    let x = await join(b)
+    await sleep(10)
+    print("waited")
+    let y = await join(a)
+    let h = fork holder(5)
+    await sleep(1)
+    cancel(h)
+    print("joined \{x} \{y}")
+    return 0
+}

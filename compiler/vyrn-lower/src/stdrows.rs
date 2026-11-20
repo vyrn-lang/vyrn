@@ -643,6 +643,7 @@ const STREAM: usize = INT_N + 12;
 const LAZY: usize = INT_N + 13;
 const ELEM: usize = INT_N + 14;
 const MAP: usize = INT_N + 15;
+const TASK: usize = INT_N + 16;
 
 /// The code of a call's mark, whether it passes a function value and whether
 /// it binds an owned result.
@@ -651,7 +652,8 @@ fn mark_code(c: &Call) -> usize {
         Mark::None => 0,
         Mark::Await => 1,
         Mark::Branch => 2,
-        Mark::Fork(n) => 3 + n,
+        Mark::Fork => 3,
+        Mark::Both(n) => 4 + n,
     };
     mark * 4 + usize::from(c.passes) * 2 + usize::from(c.born)
 }
@@ -663,7 +665,8 @@ fn mark_of(code: usize) -> (Mark, bool, bool) {
         0 => Mark::None,
         1 => Mark::Await,
         2 => Mark::Branch,
-        n => Mark::Fork(n - 3),
+        3 => Mark::Fork,
+        n => Mark::Both(n - 4),
     };
     (mark, code & 2 != 0, code & 1 != 0)
 }
@@ -818,10 +821,11 @@ impl<'a> Enc<'a> {
                 self.u(*n);
                 self.ty(b);
             }
-            Type::Array(b) | Type::Stream(b) | Type::Lazy(b) | Type::Elem(b) => {
+            Type::Array(b) | Type::Stream(b) | Type::Task(b) | Type::Lazy(b) | Type::Elem(b) => {
                 self.u(match t {
                     Type::Array(_) => ARRAY,
                     Type::Stream(_) => STREAM,
+                    Type::Task(_) => TASK,
                     Type::Lazy(_) => LAZY,
                     _ => ELEM,
                 });
@@ -994,6 +998,7 @@ impl<'t> Dec<'t> {
             }
             ARRAY => Type::Array(self.boxed()?),
             STREAM => Type::Stream(self.boxed()?),
+            TASK => Type::Task(self.boxed()?),
             LAZY => Type::Lazy(self.boxed()?),
             ELEM => Type::Elem(self.boxed()?),
             MAP => Type::Map(self.boxed()?, self.boxed()?),

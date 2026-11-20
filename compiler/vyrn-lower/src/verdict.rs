@@ -400,8 +400,8 @@ fn reach(program: &Program, world: &World, b: &Body, rhs: &Rhs) -> Reach {
     }
     match kind {
         Callee::Value(_) | Callee::Bound => Reach::Traps(Trap::Value),
-        // A fork runs its branches, which no one body states.
-        Callee::Method | Callee::Projection | Callee::Fork => {
+        // A fork runs its branches, and a task its call, which no one body states.
+        Callee::Method | Callee::Projection | Callee::Both | Callee::Fork(_) => {
             Reach::Traps(Trap::Unbuilt(name.into()))
         }
         Callee::Fn(f) => match program.functions.get(f.index()) {

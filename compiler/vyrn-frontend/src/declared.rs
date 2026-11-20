@@ -139,6 +139,7 @@ impl Owned {
         };
         match &*crate::types::resolved(ty, &*self.types) {
             Type::Stream(_) => Some(Linear::Stream),
+            Type::Task(_) => Some(Linear::Task),
             Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => {
                 any(&mut std::iter::once(&**e))
             }
@@ -301,6 +302,11 @@ impl Owned {
             // The stream lowering pushes its own release; answering here too
             // would release it twice.
             Type::Stream(_) => None,
+            // A task's release is `cancel`, which ends it where it waits.
+            Type::Task(_) => Some(DropKind::Release(
+                format!("{}cancel", crate::loader::TASK_PREFIX),
+                ty.clone(),
+            )),
             Type::Int
             | Type::IntN { .. }
             | Type::Float
@@ -387,7 +393,8 @@ fn self_referring_past(
             | Type::ArrayN(t, _)
             | Type::SmallArray(t, _)
             | Type::Lazy(t)
-            | Type::Stream(t) => deeper(t),
+            | Type::Stream(t)
+            | Type::Task(t) => deeper(t),
             Type::Map(a, b) => deeper(a).or_else(|| deeper(b)),
             Type::Record(fs) => fs.iter().find_map(|f| go(&f.ty, types, stops, seen)),
             Type::Enum(vs) => vs
@@ -423,9 +430,12 @@ pub fn owns_heap(ty: &Type, types: &dyn Decls) -> bool {
         // `go` pops what it pushes, so the children share one `seen`.
         let mut deeper = |t: &Type| go(t, types, seen);
         match &*crate::types::resolved(ty, types) {
-            Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..) | Type::Stream(_) => {
-                true
-            }
+            Type::Str
+            | Type::Array(_)
+            | Type::SmallArray(..)
+            | Type::Map(..)
+            | Type::Stream(_)
+            | Type::Task(_) => true,
             Type::ArrayN(t, _) | Type::Lazy(t) => deeper(t),
             Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
             // A boxed payload owns its box; `types::payload_boxed` is the
