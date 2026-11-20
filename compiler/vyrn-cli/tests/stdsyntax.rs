@@ -18,7 +18,7 @@ fn format_grammar() -> PathBuf {
 fn written(grammar: &Path) -> String {
     let text = std::fs::read_to_string(grammar).expect("the grammar reads");
     let g = vyrn_syntax::load(&text).expect("the grammar loads");
-    vyrn_syntax::parser(&g).expect("the grammar lowers")
+    vyrn_syntax::parser(&g, &Default::default()).expect("the grammar lowers")
 }
 
 /// Runs `main` in a new directory that holds the two grammars this crate owns,
@@ -82,4 +82,61 @@ fn a_written_parser_is_what_the_formatter_writes() {
         let formatted = vyrn_frontend::fmt::fmt(&text).expect("the written parser parses");
         assert!(text == formatted, "{}", grammar.display());
     }
+}
+
+/// The `report<Start>` a written parser exports refuses a broken line at its line
+/// and column, in the sentence the catalogue beside the grammar holds, and a row
+/// the catalogue does not hold as the row and its holes.
+#[test]
+fn a_written_parser_reports_a_broken_line_in_its_sentence() {
+    let dir = std::env::temp_dir().join(format!("vyrn-stdsyntax-report-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("toy.errors")).expect("create the directory");
+    let files = [
+        (
+            "toy.syntax",
+            "syntax Toy\nexpect ^Expected(found=.)\ntrivia = ws*\nFile = items:Item*\nItem = 'pay' amount:Num\nNum = text:number\nnumber = [0-9]+ (',' ^Comma(at=.))?\n",
+        ),
+        ("toy.errors/en.json", "{ \"expected\": \"{$found} cannot stand here\" }"),
+        (
+            "toy.vyrn",
+            "import { syntax } from \"std/syntax\"\nimport * as toy from syntax(\"./toy.syntax\")\n",
+        ),
+        ("broken.toy", "pay 1\npay x\n"),
+        ("comma.toy", "pay 1,2\n"),
+    ];
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).expect("write the file");
+    }
+    let root = (dir.to_string_lossy().replace('\\', "/")) + "/toy.vyrn";
+    let std_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    let opts = vyrn_frontend::loader::LoadOptions {
+        std_root: Some(std_root.to_string_lossy().replace('\\', "/")),
+        ..Default::default()
+    };
+    let engine = vyrn_genwasm::engine();
+    let report = |input: &str| {
+        let arg = [vyrn_frontend::consteval::ConstVal::Str(input.to_string())];
+        let resolver = vyrn_frontend::loader::DiskResolver;
+        let run = vyrn_frontend::loader::run_gen_fn;
+        let w = run(
+            &root,
+            &root,
+            "reportFile",
+            &arg,
+            false,
+            &opts,
+            &resolver,
+            Some(&*engine),
+        );
+        let w = w.expect("the report runs");
+        w.reports.iter().map(|r| r.line.clone()).collect::<Vec<_>>()
+    };
+    let got = (report("./broken.toy"), report("./comma.toy"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let want = (
+        vec!["error ./broken.toy:2:5 x cannot stand here".to_string()],
+        vec!["error ./comma.toy:1:7 Comma(at=2)".to_string()],
+    );
+    assert_eq!(got, want);
 }

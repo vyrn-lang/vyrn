@@ -276,8 +276,15 @@ pub fn diag_span(severity: &str, anchor: &str, message: &str) -> Result<Span, St
 
 /// Returns what `syntaxParser` answers for the grammar at `path`, whose `bytes` the
 /// run read, `None` when it could not: the parser as code by module `key`, or a report
-/// at the place the grammar goes wrong.
-pub fn syntax_parser_span(key: &str, path: &str, bytes: Option<&[u8]>) -> Result<Span, String> {
+/// at the place the grammar goes wrong. `catalogue` is the grammar's
+/// `<stem>.errors/en.json` ([`catalogue_of`]) as the run read it; each string member
+/// is a sentence of the parser's reports.
+pub fn syntax_parser_span(
+    key: &str,
+    path: &str,
+    bytes: Option<&[u8]>,
+    catalogue: Option<&[u8]>,
+) -> Result<Span, String> {
     let report = |at: String, sentence: &str| diag_span("error", &at, &sentence.replace('\n', " "));
     let Some(bytes) = bytes else {
         return report(format!("{path}:1:1"), "cannot read this grammar");
@@ -285,7 +292,18 @@ pub fn syntax_parser_span(key: &str, path: &str, bytes: Option<&[u8]>) -> Result
     let Ok(src) = std::str::from_utf8(bytes) else {
         return report(format!("{path}:1:1"), "a grammar is UTF-8 text");
     };
-    match vyrn_syntax::load(src).and_then(|g| vyrn_syntax::parser(&g)) {
+    let sentences = (catalogue.and_then(|b| std::str::from_utf8(b).ok()))
+        .and_then(|t| crate::schema::parse_json(t).ok());
+    let sentences: std::collections::BTreeMap<String, String> = match sentences {
+        Some(crate::schema::Json::Obj(members)) => (members.into_iter())
+            .filter_map(|(k, v)| match v {
+                crate::schema::Json::Str(s) => Some((k, s)),
+                _ => None,
+            })
+            .collect(),
+        _ => Default::default(),
+    };
+    match vyrn_syntax::load(src).and_then(|g| vyrn_syntax::parser(&g, &sentences)) {
         Ok(text) => Ok(Span {
             text,
             author: Author::File {
@@ -297,6 +315,12 @@ pub fn syntax_parser_span(key: &str, path: &str, bytes: Option<&[u8]>) -> Result
         }),
         Err(e) => report(format!("{path}:{}:{}", e.line, e.col), &e.sentence),
     }
+}
+
+/// The resolver key of the catalogue beside the grammar at `key`:
+/// `<stem>.errors/en.json` for `<stem>.syntax`.
+pub fn catalogue_of(key: &str) -> Option<String> {
+    Some(format!("{}.errors/en.json", key.strip_suffix(".syntax")?))
 }
 
 /// Returns the span `codeAt` copies: `text`, which must stand at `line:col`

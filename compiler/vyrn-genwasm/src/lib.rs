@@ -256,7 +256,7 @@ fn serve(
             let bytes = content.into_bytes();
             reads.push((resolved, Some(bytes.clone())));
             if let Some(key) = grammar {
-                return syntax_parser(inputs, path, key, Some(&bytes));
+                return syntax_parser(inputs, reads, path, key, Some(&bytes));
             }
             // Recorded before the NUL rule rejects it: the cache must notice
             // when the file changes.
@@ -275,22 +275,30 @@ fn serve(
                 return Err(why);
             }
             if let Some(key) = grammar {
-                return syntax_parser(inputs, path, key, None);
+                return syntax_parser(inputs, reads, path, key, None);
             }
             Ok(Served::Bytes(1, Vec::new()))
         }
     }
 }
 
-/// Answers `syntaxParser` with the span of the grammar's parser or of its report.
+/// Answers `syntaxParser` with the span of the grammar's parser or of its report,
+/// and records the read of the grammar's catalogue, present or not.
 #[cfg(feature = "host")]
 fn syntax_parser(
     inputs: &GenInputs<'_>,
+    reads: &mut Vec<GenRead>,
     path: &str,
     key: String,
     bytes: Option<&[u8]>,
 ) -> Result<Served, String> {
-    vyrn_frontend::gen::syntax_parser_span(&inputs.module, path, bytes)
+    let catalogue = vyrn_frontend::gen::catalogue_of(&key).map(|k| {
+        let bytes = inputs.resolver.read(&k).ok().map(String::into_bytes);
+        reads.push((k, bytes.clone()));
+        bytes
+    });
+    let catalogue = catalogue.flatten();
+    vyrn_frontend::gen::syntax_parser_span(&inputs.module, path, bytes, catalogue.as_deref())
         .map(|span| Served::Parser(key, Box::new(span)))
 }
 

@@ -241,6 +241,13 @@ impl Grammar {
         parser::start_rules(self).ok()?.first().copied()
     }
 
+    /// Returns the name of the exported `gen fn` the written parser holds for the
+    /// start rule: `report<Start>(path) -> Code`, a report at each refusal of the
+    /// text at `path`.
+    pub fn report_fn(&self) -> Option<String> {
+        Some(parser::report_fn(self.rule_name(self.start()?)))
+    }
+
     /// Returns the name of rule `id`.
     pub fn rule_name(&self, id: RuleId) -> &str {
         &self.rules[id.0 as usize].name

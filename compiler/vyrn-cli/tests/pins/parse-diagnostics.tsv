@@ -1512,7 +1512,7 @@ std/strings.vyrn	0	cbf29ce484222325	20	17	b629a5aa6d142897
 std/strpred.vyrn	0	cbf29ce484222325	20	17	cc6bc59f6decd9aa
 std/sum.vyrn	0	cbf29ce484222325	20	15	8c91500e0625df59
 std/symbolmap.vyrn	0	cbf29ce484222325	20	16	a2136b9a284642be
-std/syntax.vyrn	0	cbf29ce484222325	20	13	ee4b663ee331e4fa
+std/syntax.vyrn	0	cbf29ce484222325	20	10	08ef231673d69e4f
 std/task.vyrn	0	cbf29ce484222325	20	15	60a812a24b4b99a6
 std/text.vyrn	0	cbf29ce484222325	20	14	bc0918ce6f331d94
 std/tile.vyrn	0	cbf29ce484222325	20	18	0d5778cdb398a9d9

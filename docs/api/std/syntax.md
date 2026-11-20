@@ -21,7 +21,9 @@ fn valid(text: String) -> Bool {
 
 A grammar states shape only, so the parser holds no sentence. A row is a name and
 its holes, and the reader says what each row means. A label is a field of the
-tree, and every record holds its byte span.
+tree, and every record holds its byte span. For the editor, each start rule also
+has a `gen fn report<Start>(path)`: a report at each refusal of the file at `path`,
+in the sentence `<stem>.errors/en.json` beside the grammar holds for its row.
 
 ## SyntaxError
 
