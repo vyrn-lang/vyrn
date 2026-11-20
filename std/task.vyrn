@@ -77,7 +77,7 @@ export fn timeout<T>(ms: Int64, f: fn() -> T) -> Option<T> {
 /// number from 1 in start order, the emitter's number of the root that started
 /// it, the root's frame while it waits, the host's id for it (0 for `main`,
 /// which no host names), and the root's result once it returned.
-type Task = { id: Int64, root: Int32, frame: Int32, host: Int64, result: Int64 }
+type Run = { id: Int64, root: Int32, frame: Int32, host: Int64, result: Int64 }
 
 /// A host operation a task waits on: its id, the task, and what the wake
 /// delivered: a status, 2 until it came, 0 completed and 1 cancelled, and a
@@ -85,7 +85,7 @@ type Task = { id: Int64, root: Int32, frame: Int32, host: Int64, result: Int64 }
 type Wait = { id: Int64, task: Int64, status: Int32, payload: Int64 }
 
 /// The tasks that run or wait.
-let mut tasks: Array<Task> = []
+let mut runs: Array<Run> = []
 
 /// The operations the tasks wait on, until each wait reads its delivery.
 let mut waits: Array<Wait> = []
@@ -104,10 +104,10 @@ let mut started: Int64 = 0
 /// cancelled.
 let mut cancelling: Int64 = 0
 
-/// The position of task `id` in `tasks`, or the length when it has ended.
+/// The position of task `id` in `runs`, or the length when it has ended.
 fn taskAt(id: Int64) -> Int64 {
     let mut i: Int64 = 0
-    while i < tasks.length && tasks[i].id != id {
+    while i < runs.length && runs[i].id != id {
         i = i + 1
     }
     return i
@@ -128,18 +128,18 @@ fn waitAt(id: Int64) -> Int64 {
 /// task that returned.
 fn taskEnd(id: Int64, st: Int32) {
     let i = taskAt(id)
-    if i < tasks.length {
-        if tasks[i].host != 0 {
-            hostDone(tasks[i].host, st, tasks[i].result)
+    if i < runs.length {
+        if runs[i].host != 0 {
+            hostDone(runs[i].host, st, runs[i].result)
         }
-        tasks.swapRemove(i)
+        runs.swapRemove(i)
     }
 }
 
 /// A task for the root the host is starting as `host`, which runs from here.
 fn taskBegin(root: Int32, host: Int64) -> Int64 {
     started = started + 1
-    tasks.push(Task { id: started, root: root, frame: 0, host: host, result: 0 })
+    runs.push(Run { id: started, root: root, frame: 0, host: host, result: 0 })
     running = started
     return started
 }
@@ -148,8 +148,8 @@ fn taskBegin(root: Int32, host: Int64) -> Int64 {
 /// it: the emitter calls this before the task ends.
 fn taskResult(result: Int64) {
     let i = taskAt(running)
-    if i < tasks.length {
-        tasks[i].result = result
+    if i < runs.length {
+        runs[i].result = result
     }
 }
 
@@ -162,8 +162,8 @@ fn taskSettle(id: Int64, st: Int32) {
         return
     }
     let i = taskAt(id)
-    if i < tasks.length {
-        tasks[i].frame = st
+    if i < runs.length {
+        runs[i].frame = st
     }
 }
 
@@ -222,11 +222,17 @@ fn cancelEnd() {
 }
 
 /// `__vyrn_wake`: the host's operation `id` ended with `status`, 0 completed
-/// or 1 cancelled, and `payload`. The task that waits on it joins the ready
-/// queue, once, and the ready tasks run in wake order until none is ready.
-/// Returns how many tasks still wait. A wake that names no pending wait
-/// changes nothing.
+/// or 1 cancelled, and `payload`. Returns how many tasks still wait.
 fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
+    deliver(id, status, payload)
+    drain()
+    return Int32(runs.length)
+}
+
+/// Operation `id` ended with `status` and `payload`: the task that waits on
+/// it joins the ready queue, once. A delivery that names no pending wait
+/// changes nothing.
+fn deliver(id: Int64, status: Int32, payload: Int64) {
     let i = waitAt(id)
     if i < waits.length && waits[i].status == 2 {
         waits[i].status = status
@@ -240,13 +246,17 @@ fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
             ready.push(t)
         }
     }
+}
+
+/// Runs the ready tasks in wake order until none is ready.
+fn drain() {
     while readyAt < ready.length {
         let t = ready[readyAt]
         readyAt = readyAt + 1
         let k = taskAt(t)
-        if k < tasks.length {
+        if k < runs.length {
             running = t
-            let st = hostResume(tasks[k].root, tasks[k].frame)
+            let st = hostResume(runs[k].root, runs[k].frame)
             if UInt32(st) < 2 {
                 taskEnd(t, st)
             }
@@ -255,7 +265,6 @@ fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
     }
     ready = []
     readyAt = 0
-    return Int32(tasks.length)
 }
 
 /// `__vyrn_trapped`: the running task trapped, so the host gave up its step and
@@ -267,11 +276,11 @@ fn taskTrapped() -> Int64 {
     let id = running
     running = 0
     let i = taskAt(id)
-    if i == tasks.length {
+    if i == runs.length {
         return 0
     }
-    let host = tasks[i].host
-    tasks.swapRemove(i)
+    let host = runs[i].host
+    runs.swapRemove(i)
     let mut j: Int64 = 0
     while j < waits.length {
         if waits[j].task == id {
