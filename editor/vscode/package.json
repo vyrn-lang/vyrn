@@ -103,7 +103,7 @@
     "snippets": [
       {
         "language": "vyrn",
-        "path": "./snippets/vyrn.json"
+        "path": "./snippets/vyrn.code-snippets"
       }
     ],
     "commands": [

@@ -20,7 +20,7 @@ It is deliberately tiny and plain-JavaScript (no TypeScript compile step):
   reserved words, contextual words where the grammar reads them, numbers,
   operators, and the naming conventions for types and calls. Works even without
   the server. Do not edit it: `VYRN_PIN=write cargo test -p vyrn-syntax` rewrites it.
-- `snippets/vyrn.json` — snippets for `fn`, `main`, record/enum `type`,
+- `snippets/vyrn.code-snippets` — snippets for `fn`, `main`, record/enum `type`,
   `protocol`, `impl`, `match`, `import`, the `logging` block, `test` and `bench`.
 - `language-configuration.json` — `//` comment toggle + bracket matching.
 
@@ -116,7 +116,7 @@ editor/vscode/
   package.json              extension manifest + grammar/language/snippet contributions
   extension.js              the LSP client + ▶ Run / ▶ Run test CodeLenses/commands (plain JS)
   vyrn.tmLanguage.json      TextMate grammar, written from vyrn.syntax
-  snippets/vyrn.json        snippets (fn, main, type, protocol, impl, match, import, logging, test, bench)
+  snippets/vyrn.code-snippets snippets (fn, main, type, protocol, impl, match, import, logging, test, bench)
   language-configuration.json   written from vyrn.syntax
   syntax.tmLanguage.json    TextMate grammar of .syntax files, written from syntax.syntax
   syntax-language-configuration.json   written from syntax.syntax
