@@ -695,7 +695,7 @@ pub fn input_check(
     };
     let ctx = claim.context(opts);
     (written.reports.iter())
-        .filter_map(|r| crate::origin::report(&claim.importer, 0, &r.line, &ctx))
+        .filter_map(|r| crate::origin::report(&claim.importer, 0, &r.line, &ctx, None))
         .collect()
 }
 

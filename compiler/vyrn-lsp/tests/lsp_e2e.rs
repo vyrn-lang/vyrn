@@ -6677,8 +6677,9 @@ fn a_project_language_file_is_coloured_and_refused_through_its_grammar() {
     let message = first
         .and_then(|d| d.pointer("/message"))
         .and_then(|m| m.as_str());
-    let said = "a ledger line cannot hold `x` here\n";
-    assert!(message.is_some_and(|m| m.starts_with(said)), "{diags}");
+    // The report sits at the user's line, so it carries no note.
+    let said = "a ledger line cannot hold `x` here";
+    assert_eq!(message, Some(said), "{diags}");
     let grammar = std::fs::read_to_string(dir.join("calc.syntax")).unwrap();
     let grammar = grammar.replace("'pay'", "'give'");
     std::fs::write(dir.join("calc.syntax"), &grammar).unwrap();

@@ -233,8 +233,16 @@ const NO_POSITION: &str = "-";
 /// `path:line:col` origin; `-` or a malformed anchor reports at the generated
 /// location, the latter keeping it in the message. An unknown severity becomes
 /// a warning holding the whole line, so a newer generator neither fails nor
-/// vanishes.
-pub fn report(banner: &str, gen_line: usize, line: &str, ctx: &Context<'_>) -> Option<Diagnostic> {
+/// vanishes. An anchored report notes `call`, the line and column of the
+/// generator call in `banner`'s importer, where there is one: an editor
+/// claim's report has none, and sits at the user's line alone.
+pub fn report(
+    banner: &str,
+    gen_line: usize,
+    line: &str,
+    ctx: &Context<'_>,
+    call: Option<(usize, usize)>,
+) -> Option<Diagnostic> {
     let body = line.trim();
     let (severity, rest, unknown) = match body.split_once(char::is_whitespace) {
         Some(("error", tail)) => (Severity::Error, tail.trim(), None),
@@ -269,10 +277,10 @@ pub fn report(banner: &str, gen_line: usize, line: &str, ctx: &Context<'_>) -> O
             d.line = origin.line;
             d.col = origin.col;
             d.from_generated = true;
-            d.note = Some(format!(
-                "in generated code {}:{gen_line} (see `vyrn emit-gen`)",
-                crate::loader::shown_key(banner, None),
-            ));
+            d.note = call.map(|(l, c)| {
+                let banner = crate::loader::shown_key(banner, None);
+                format!("in code {banner}:{l}:{c} (see `vyrn emit-gen`)")
+            });
         }
         None => d.file = Some(banner.to_string()),
     }
@@ -506,18 +514,28 @@ mod tests {
     #[test]
     fn a_positioned_warning_points_at_the_input_file() {
         let line = "warning ./routes/p/[id].vyx:13:1 `fn old` is deprecated";
-        let d = report("b", 1, line, &ctx("app")).unwrap();
+        let d = report("b", 1, line, &ctx("app"), Some((7, 22))).unwrap();
         assert_eq!(d.severity, Severity::Warning);
         assert_eq!(d.file.as_deref(), Some("app/routes/p/[id].vyx"));
         assert_eq!((d.line, d.col), (13, 1));
         assert_eq!(d.message, "`fn old` is deprecated");
-        assert!(d.note.as_deref().unwrap().contains("generated code b:1"));
+        assert_eq!(
+            d.note.as_deref(),
+            Some("in code b:7:22 (see `vyrn emit-gen`)")
+        );
         assert!(d.from_generated);
     }
 
     #[test]
     fn the_no_position_marker_is_consumed_not_spoken() {
-        let d = report("b", 1, "warning - `fn old` is deprecated", &ctx("app")).unwrap();
+        let d = report(
+            "b",
+            1,
+            "warning - `fn old` is deprecated",
+            &ctx("app"),
+            None,
+        )
+        .unwrap();
         assert_eq!(d.message, "`fn old` is deprecated");
         assert_eq!(d.file.as_deref(), Some("b"));
         assert!(!d.from_generated);
@@ -525,20 +543,20 @@ mod tests {
 
     #[test]
     fn a_malformed_position_keeps_the_whole_line_as_the_message() {
-        let d = report("b", 1, "warning whoops something is off", &ctx("")).unwrap();
+        let d = report("b", 1, "warning whoops something is off", &ctx(""), None).unwrap();
         assert_eq!(d.message, "whoops something is off");
         assert_eq!(d.file.as_deref(), Some("b"));
     }
 
     #[test]
     fn an_empty_report_says_nothing() {
-        assert!(report("b", 1, "", &ctx("")).is_none());
+        assert!(report("b", 1, "", &ctx(""), None).is_none());
     }
 
     #[test]
     fn the_severity_is_the_generators_to_choose() {
         let line = "error ./schema/users.tbl:14:3 column `id` is declared twice";
-        let d = report("b", 1, line, &ctx("app")).unwrap();
+        let d = report("b", 1, line, &ctx("app"), Some((7, 22))).unwrap();
         assert_eq!(d.severity, Severity::Error);
         assert_eq!(d.file.as_deref(), Some("app/schema/users.tbl"));
         assert_eq!((d.line, d.col), (14, 3));
@@ -549,7 +567,7 @@ mod tests {
     #[test]
     fn an_unrecognized_severity_neither_escalates_nor_vanishes() {
         let line = "hint ./x.vyx:1:1 consider a shorter name";
-        let d = report("b", 1, line, &ctx("")).unwrap();
+        let d = report("b", 1, line, &ctx(""), None).unwrap();
         assert_eq!(d.severity, Severity::Warning);
         assert_eq!(d.message, line);
         assert!(d.note.as_deref().unwrap().contains("hint"));
