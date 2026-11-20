@@ -353,19 +353,16 @@ pub fn generator_input(importer: &str, arg: &str) -> Option<String> {
     Some(join_normalized(&dir, arg))
 }
 
-/// One generator import's claim on the files its first argument names. The
-/// import graph is the only registry of generator inputs: a file is an input
-/// because a claim covers it, whatever its extension.
+/// One claim on the files an argument names: a generator import's, or a
+/// languages map entry's. The import graph and the map are the only registries
+/// of generator inputs: a file is an input because a claim covers it, whatever
+/// its extension.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
-    /// The module that wrote the import, as the caller spelled it.
+    /// The module that wrote the import, as the caller spelled it, or the
+    /// `vyrn.json` that holds the map.
     pub importer: String,
-    /// The import's 1-based line in `importer`.
-    pub line: usize,
-    /// The specifier the generator was imported from; `None` for a local `gen fn`.
-    pub module: Option<String>,
-    /// The generator's name as its module exports it.
-    pub generator: String,
+    pub kind: ClaimKind,
     /// The first argument as the import spells it.
     pub arg: String,
     /// The first argument resolved against `importer`: the file
@@ -374,7 +371,31 @@ pub struct Claim {
     pub target: String,
 }
 
+/// Who claims a file, with the facts only that claimant has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimKind {
+    /// A generator import: its 1-based line in the importer, the specifier
+    /// the generator was imported from (`None` for a local `gen fn`), and the
+    /// generator's name as its module exports it.
+    Generator {
+        line: usize,
+        module: Option<String>,
+        generator: String,
+    },
+    /// A languages map entry: the module that reads the file.
+    Language { module: String },
+}
+
 impl Claim {
+    /// The module whose editor companion serves the claimed files; `None` for
+    /// a local `gen fn`.
+    pub fn module(&self) -> Option<&str> {
+        match &self.kind {
+            ClaimKind::Generator { module, .. } => module.as_deref(),
+            ClaimKind::Language { module } => Some(module),
+        }
+    }
+
     /// Whether the claim covers `file`: the target, a file under it, or the
     /// module the target names.
     pub fn covers(&self, file: &str) -> bool {
@@ -444,9 +465,11 @@ pub fn claims(
         };
         out.push(Claim {
             importer: importer.to_string(),
-            line: imp.line,
-            module,
-            generator,
+            kind: ClaimKind::Generator {
+                line: imp.line,
+                module,
+                generator,
+            },
             arg: arg.clone(),
             target,
         });
@@ -467,7 +490,7 @@ pub fn companion_answers(
 ) -> Vec<(Claim, String)> {
     (claims(importer, program, opts).into_iter())
         .filter_map(|c| {
-            let module = c.module.as_deref()?;
+            let module = c.module()?;
             let answer = crate::loader::call_generator(
                 importer,
                 module,
@@ -555,7 +578,7 @@ pub fn input_view(
 ) -> Option<InputView> {
     let input = resolver.read(file).ok()?;
     let arg = crate::consteval::ConstVal::Str(claim.spell(file)?);
-    let module = claim.module.as_deref()?;
+    let module = claim.module()?;
     let view = crate::loader::call_generator(
         &claim.importer,
         module,
@@ -594,7 +617,7 @@ pub fn input_definition(
         ConstVal::Int(line as i64),
         ConstVal::Int(col as i64),
     ];
-    let module = claim.module.as_deref()?;
+    let module = claim.module()?;
     let out = crate::loader::call_generator(
         &claim.importer,
         module,
@@ -611,8 +634,8 @@ pub fn input_definition(
 
 /// Returns the claim the language module of `file` makes on it, under the
 /// manifest `m` ([`crate::manifest::language_of`]): its editor companion serves
-/// the file as a generator module's serves an input. The claim names no
-/// generator, and its argument spells `file` from the importer.
+/// the file as a generator module's serves an input. Its argument spells
+/// `file` from the importer.
 ///
 /// # Errors
 ///
@@ -629,9 +652,7 @@ pub fn language_claim(
         arg: format!("./{rel}"),
         target: file.to_string(),
         importer,
-        line: 0,
-        module: Some(module),
-        generator: String::new(),
+        kind: ClaimKind::Language { module },
     }))
 }
 
@@ -658,7 +679,7 @@ pub fn input_check(
             ConstVal::Str(claim.arg.clone()),
             ConstVal::Str(claim.spell(file)?),
         ];
-        let module = claim.module.as_deref()?;
+        let module = claim.module()?;
         let companion = crate::loader::call_generator(
             &claim.importer,
             module,
@@ -720,7 +741,7 @@ pub fn input_hover(
         ConstVal::Int(line as i64),
         ConstVal::Int(col as i64),
     ];
-    let module = claim.module.as_deref()?;
+    let module = claim.module()?;
     let out = crate::loader::call_generator(
         &claim.importer,
         module,
@@ -863,10 +884,13 @@ mod tests {
         let program = crate::parser::parse_accum(crate::lexer::lex(src).unwrap()).0;
         let cs = claims("/p/app.vyrn", &program, &Default::default());
         assert_eq!(cs.len(), 2, "{cs:?}");
-        assert_eq!((cs[0].line, cs[0].module.as_deref()), (2, Some("std/ui")));
+        let ClaimKind::Generator { line, .. } = cs[0].kind else {
+            panic!("{cs:?}")
+        };
+        assert_eq!((line, cs[0].module()), (2, Some("std/ui")));
         assert!(cs[0].covers("/p/routes/blog/index.vyx"));
         assert!(!cs[0].covers("/p/routesx/index.vyx"));
-        assert_eq!(cs[1].module, None);
+        assert_eq!(cs[1].module(), None);
         assert!(cs[1].covers("/p/users.tbl"));
         assert_eq!(
             cs[0].spell("/p/routes/Blog/a.vyx").as_deref(),

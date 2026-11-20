@@ -44,6 +44,7 @@ use lsp_types::{
     TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 
+use vyrn_frontend::audience::ClaimKind;
 use vyrn_frontend::symbolmap::MappedSymbol;
 use vyrn_frontend::{
     analyze_judged, class_completions, class_site, class_token_hover, member_completions,
@@ -1387,7 +1388,7 @@ fn generator_completion(
             ConstVal::Int(line as i64),
             ConstVal::Int(col as i64),
         ];
-        let (module, engine) = (claim.module.as_deref()?, engine());
+        let (module, engine) = (claim.module()?, engine());
         let out = vyrn_frontend::loader::call_generator(
             &importer,
             module,
@@ -2861,7 +2862,10 @@ fn companion_lists(
         &resolver,
         Some(&*engine()),
     );
-    (answers.iter()).any(|(c, names)| names.lines().any(|n| n == c.generator))
+    (answers.iter()).any(|(c, names)| match &c.kind {
+        ClaimKind::Generator { generator, .. } => names.lines().any(|n| n == generator),
+        ClaimKind::Language { .. } => false,
+    })
 }
 
 /// Every generated symbol standing for a declaration in `path`, from every root
@@ -3102,7 +3106,7 @@ fn language_runs(server: &Server, uri: &Url) -> Option<Vec<vyrn_syntax::colour::
     let (root, claim, _) = input_claim(server, uri)?;
     let overlays = overlays_of(server);
     let (opts, resolver, _, _) = load_context(&server.session, &root, &overlays)?;
-    let module = claim.module.as_deref()?;
+    let module = claim.module()?;
     let engine = engine();
     let grammar = vyrn_frontend::loader::grammar_of(
         &claim.importer,
