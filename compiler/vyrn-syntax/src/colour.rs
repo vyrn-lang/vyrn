@@ -1,7 +1,8 @@
 //! Colours text by the grammar that reads it, for an editor with no TextMate engine.
 //!
-//! [`runs`] reads the text with the grammar's lexical rules, with full PEG
-//! backtracking. A rule whose name [`scope_of`] knows colours what it matched, and
+//! [`runs`] reads the text with the grammar's rules, with full PEG backtracking. As
+//! in the written parser, each token a syntactic rule takes takes the trivia after
+//! it, and a syntactic start rule skips the trivia before its first token. A rule whose name [`scope_of`] knows colours what it matched, and
 //! an inner one outranks an outer one. Outside those, a word literal is a keyword
 //! and a punctuation literal that is no bracket or separator is an operator. A
 //! refusal, or a form only a syntactic rule holds, ends the reading: the text after
@@ -38,8 +39,13 @@ pub fn runs(g: &Grammar, start: RuleId, src: &str) -> Vec<Run> {
         g,
         src,
         marks: Vec::new(),
+        syntactic: false,
     };
-    let _ = r.rule(start, 0);
+    let at = match g.body(start).syntactic {
+        true => r.trivia(0),
+        false => 0,
+    };
+    let _ = r.rule(start, at);
     let mut by_byte: Vec<Option<Scope>> = vec![None; src.len()];
     // A rule's mark follows the marks of the rules it holds, so the stable sort by
     // start, longest first, paints the outer one first. A literal's mark yields to
@@ -109,16 +115,37 @@ struct Reader<'g> {
     src: &'g str,
     /// The marks of what matched on the path read so far.
     marks: Vec<Mark>,
+    /// Whether the rule being read is syntactic, so a token skips trivia.
+    syntactic: bool,
 }
 
 impl Reader<'_> {
     fn rule(&mut self, r: RuleId, at: usize) -> Step {
         let rule = self.g.body(r);
+        let outer = std::mem::replace(&mut self.syntactic, rule.syntactic);
         let step = self.read(&rule.body, at);
+        self.syntactic = outer;
         if let (Step::To(stop), Some(scope)) = (&step, scope_of(&rule.name)) {
             self.mark(at, *stop, scope, true);
         }
-        step
+        match step {
+            Step::To(stop) if outer && !rule.syntactic => Step::To(self.trivia(stop)),
+            step => step,
+        }
+    }
+
+    /// The byte past the trivia at `at`: what the grammar's `trivia` rule reads there.
+    fn trivia(&mut self, at: usize) -> usize {
+        let Some(t) = self.g.rule("trivia") else {
+            return at;
+        };
+        let outer = std::mem::replace(&mut self.syntactic, false);
+        let step = self.rule(t, at);
+        self.syntactic = outer;
+        match step {
+            Step::To(stop) => stop,
+            Step::Miss | Step::End => at,
+        }
     }
 
     fn mark(&mut self, start: usize, stop: usize, scope: Scope, strong: bool) {
@@ -160,7 +187,10 @@ impl Reader<'_> {
                 {
                     self.mark(at, stop, Scope::Operator, false);
                 }
-                Step::To(stop)
+                match self.syntactic {
+                    true => Step::To(self.trivia(stop)),
+                    false => Step::To(stop),
+                }
             }
             E::Lit(_) => Step::Miss,
             E::Class(ranges, negated) => match rest.chars().next() {
@@ -261,6 +291,15 @@ mod tests {
             let found = run.map(|r| (r.start, r.stop, r.scope));
             assert_eq!(found, Some((start, start + part.len(), scope)), "{part}");
         }
+    }
+
+    #[test]
+    fn a_syntactic_rule_reads_past_the_trivia_after_each_token() {
+        let src = "expect ^E\ntrivia = ' '*\nFile = 'pay' n:Num\nNum = t:number\nnumber = [0-9]+\n";
+        let g = crate::load(src).expect("the grammar loads");
+        let got = runs(&g, g.start().expect("a start rule"), " pay  12");
+        let found: Vec<_> = got.iter().map(|r| (r.start, r.stop, r.scope)).collect();
+        assert_eq!(found, [(1, 4, Scope::Keyword), (6, 8, Scope::Number)]);
     }
 
     #[test]
