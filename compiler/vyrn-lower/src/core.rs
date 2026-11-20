@@ -4521,7 +4521,7 @@ impl<'a> Builder<'a> {
             Type::ArrayN(..) => rule!(ShrinkFixedArray, op, t),
             _ => rule!(ShrinkNeedsArray, op, t),
         };
-        Some(Said::line(line, refusal.render()))
+        Some(Said::of(line, recv, refusal.render()))
     }
 
     fn unknown_at(&mut self, e: &Expr) {

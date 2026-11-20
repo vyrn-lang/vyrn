@@ -576,6 +576,9 @@ pub struct GlobalDecl {
 pub struct ImportName {
     pub original: String,
     pub alias: Option<String>,
+    /// The 1-based column `original` is spelled at; 0 for a name no source
+    /// spells.
+    pub col: usize,
 }
 
 impl ImportName {
@@ -583,6 +586,7 @@ impl ImportName {
         ImportName {
             original: name.into(),
             alias: None,
+            col: 0,
         }
     }
     /// Returns the name this binding has in the importing module: the alias if
@@ -2307,15 +2311,21 @@ impl Stmt {
         }
     }
 
-    /// Returns the store `name <leaf> = value` at `line`, with no id yet.
-    pub fn store(name: impl Into<String>, leaf: Step, value: Expr, line: usize) -> Self {
+    /// Returns the store `name <leaf> = value` at `line`, with `name` spelled
+    /// at column `col` and no node id yet.
+    pub fn store(
+        name: impl Into<String>,
+        leaf: Step,
+        value: Expr,
+        (line, col): (usize, usize),
+    ) -> Self {
         Stmt::Store {
             name: name.into(),
             base: Vec::new(),
             leaf,
             value,
             line,
-            id: Id::NEW,
+            id: Id::at(col),
         }
     }
 

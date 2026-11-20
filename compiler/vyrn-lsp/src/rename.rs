@@ -701,10 +701,7 @@ fn main() -> Int64 {\n    let t = Square { side: 2 }\n    return t::Area.area()\
         ImportDecl {
             names: names
                 .iter()
-                .map(|n| vyrn_frontend::ast::ImportName {
-                    original: n.to_string(),
-                    alias: None,
-                })
+                .map(|n| vyrn_frontend::ast::ImportName::bare(*n))
                 .collect(),
             namespace: None,
             source,

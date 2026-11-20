@@ -6082,12 +6082,12 @@ fn link(
                         visible.insert(name.clone());
                     }
                     None => {
-                        errors.push(load_error(
-                            &m.key,
-                            root_key,
-                            imp.line,
-                            rule!(TargetLacks, target = spoken(&m.key, target, opts), name),
-                        ));
+                        // The name as written: a prefixed module's import
+                        // names carry its prefix (`task$First`).
+                        let (target, name) = (spoken(&m.key, target, opts), unprefixed(name));
+                        let rule = rule!(TargetLacks, target, name);
+                        let d = Diagnostic::refusal(imp.line, imp_name.col, "load", rule);
+                        errors.push(in_module(d, &m.key, root_key));
                     }
                 }
             }
