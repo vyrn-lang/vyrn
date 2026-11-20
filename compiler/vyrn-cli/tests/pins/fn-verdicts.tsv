@@ -406,6 +406,15 @@ examples/dot_call_through_a_local_fn_value.vyrn	shout	yes	no, its effect set is 
 examples/dot_call_through_a_local_fn_value.vyrn	step	no, it calls a function value	no, its effect set is alloc
 examples/dot_call_through_a_local_fn_value.vyrn	main	no, it calls a function value	no, its effect set is alloc, write-output
 examples/dropparam.vyrn		does not check	does not check
+examples/dsl/calc.editor.vyrn	placeOf	no, it keeps an index check	no, it is not trap-free
+examples/dsl/calc.editor.vyrn	vyrnCheckCalc	no, it calls `parseLedger`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+examples/dsl/calc.editor.vyrn	unknownAccounts	no, it calls `placeOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+examples/dsl/calc.editor.vyrn	vyrnHoverCalc	no, it calls `parseLedger`, which is not trap-free	no, its effect set is alloc, fs-read
+examples/dsl/calc.editor.vyrn	accountHover	no, it calls `placeOf`, which is not trap-free	no, its effect set is alloc
+examples/dsl/calc.vyrn	total	no, it keeps an index check	no, its effect set is alloc
+examples/dsl/calc.vyrn	sum	yes	no, `l` is Ledger, not an integer, Bool or a read array of one
+examples/dsl/calc.vyrn	isAccount	yes	no, `name` is String, not an integer, Bool or a read array of one
+examples/dsl/main.vyrn	main	no, it calls `total`, which is not trap-free	no, its effect set is alloc, write-output, fs-read
 examples/ecs.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/encoding.vyrn	charCount	yes	no, its effect set is alloc
 examples/encoding.vyrn	show	yes	no, its effect set is alloc

@@ -1140,6 +1140,9 @@ examples/derive.vyrn	0	cbf29ce484222325	20	18	c3c33474d893e732
 examples/domdemo.vyrn	0	cbf29ce484222325	20	17	8194f09c070db347
 examples/dot_call_through_a_local_fn_value.vyrn	0	cbf29ce484222325	20	18	21534c408567c0bb
 examples/dropparam.vyrn	0	cbf29ce484222325	20	19	6e6ad6a877fd2b8a
+examples/dsl/calc.editor.vyrn	0	cbf29ce484222325	20	18	6ed667e42ad8b6a7
+examples/dsl/calc.vyrn	0	cbf29ce484222325	20	17	139b5e000757d1ea
+examples/dsl/main.vyrn	0	cbf29ce484222325	20	20	016d9c9031635152
 examples/ecs.vyrn	0	cbf29ce484222325	20	15	5278528d5ca10587
 examples/encoding.vyrn	0	cbf29ce484222325	20	19	6c0282d300d1484b
 examples/enum.vyrn	0	cbf29ce484222325	20	16	d3db0cf556340584

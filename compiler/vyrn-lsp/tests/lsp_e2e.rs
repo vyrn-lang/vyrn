@@ -6698,3 +6698,61 @@ fn a_project_language_file_is_coloured_and_refused_through_its_grammar() {
     let _ = client.child.kill();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A language module's companion replaces the default check: `calc.editor.vyrn`
+/// refuses an account the ledger does not know, keeps the grammar's own
+/// refusal, and gives an account's hover.
+#[test]
+fn a_language_companion_checks_past_the_grammar_and_hovers() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_dslc_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("calc.errors")).unwrap();
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/dsl");
+    let files = [
+        "vyrn.json",
+        "calc.vyrn",
+        "calc.editor.vyrn",
+        "calc.syntax",
+        "calc.errors/en.json",
+        "orders.calc",
+    ];
+    for name in files {
+        std::fs::copy(example.join(name), dir.join(name)).unwrap();
+    }
+    let uri = file_uri(&dir.join("orders.calc"));
+    let mut client = spawn_client();
+    let text = "pay rent 1200\npay taxes 5\npay power 85\npay power 15\n";
+    did_open(&mut client, &uri, "calc", text);
+    let diags = read_diags_for(&mut client, "orders.calc");
+    let first = diags.pointer("/params/diagnostics/0");
+    let at = first.and_then(|d| d.pointer("/range/start"));
+    assert_eq!(
+        at,
+        Some(&serde_json::json!({ "line": 1, "character": 4 })),
+        "{diags}"
+    );
+    let message = first
+        .and_then(|d| d.pointer("/message"))
+        .and_then(|m| m.as_str());
+    let said = "the ledger knows no account `taxes`";
+    assert!(message.is_some_and(|m| m.starts_with(said)), "{diags}");
+    let id = serde_json::json!(2);
+    let at = serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 6 } });
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "textDocument/hover", "params": at }));
+    let hover = client.read_response(&id).to_string();
+    assert!(hover.contains("the ledger pays it 100"), "{hover}");
+    let broken = "pay rent x\n";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": { "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": broken }] }
+    }));
+    let diags = read_diags_for(&mut client, "orders.calc");
+    let message = diags
+        .pointer("/params/diagnostics/0/message")
+        .and_then(|m| m.as_str());
+    let said = "a ledger line cannot hold `x` here";
+    assert!(message.is_some_and(|m| m.starts_with(said)), "{diags}");
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
