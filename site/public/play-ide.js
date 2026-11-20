@@ -941,5 +941,6 @@ export function mountIde(root, core) {
     startCompiler();
   });
 
-  return { srcHost: () => focusedG.input, kindOf: (textarea) => kindOf(groups().find((g) => g.input === textarea)?.active ?? ""), onPlayReady, shareHash };
+  const project = () => ({ path: focusedG.active === WELCOME ? "" : focusedG.active || "", files: Object.fromEntries(userFiles) });
+  return { srcHost: () => focusedG.input, project, kindOf: (textarea) => kindOf(groups().find((g) => g.input === textarea)?.active ?? ""), onPlayReady, shareHash };
 }

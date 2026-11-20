@@ -21,8 +21,9 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use vyrn_frontend::ast::{Block, Expr, Function, Id, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
+use vyrn_frontend::gen::GenRead;
 #[cfg(feature = "host")]
-use vyrn_frontend::gen::{compiler_identity, GenEngine, GenRead};
+use vyrn_frontend::gen::{compiler_identity, GenEngine};
 use vyrn_frontend::gen::{
     Author, GenError, GenInputs, GenOutput, Kind, Pos, Rope, Span, Spliced, Written,
 };
@@ -87,16 +88,17 @@ enum EngineError {
     Refused(Vec<vyrn_frontend::diagnostics::Diagnostic>),
 }
 
-/// The first call anywhere in the program this path cannot serve.
+/// The first call anywhere in the program this path cannot serve: one of
+/// [`UNSERVED`] or of the path's own `extra`.
 ///
 /// Whole-program rather than reachability-precise: a false decline costs
 /// speed, a false accept would run a generator outside its sandbox.
-fn reaches_unserved(program: &Program) -> Option<String> {
+fn reaches_unserved(program: &Program, extra: &[&str]) -> Option<String> {
     program.functions.iter().find_map(|f| {
         let mut hits: Vec<String> =
             vyrn_frontend::checker::fn_calls(f.block(), &Default::default())
                 .into_iter()
-                .filter(|c| UNSERVED.contains(&c.as_str()))
+                .filter(|c| UNSERVED.contains(&c.as_str()) || extra.contains(&c.as_str()))
                 .collect();
         hits.sort();
         hits.into_iter().next()
@@ -113,28 +115,7 @@ fn run(
     // Checked here because the key does not name the target: a sibling's
     // artifact is a cache hit, and dispatching to a name the wrapper never
     // emitted traps rather than declines.
-    let target = match program.functions.iter().find(|f| f.name == fn_name) {
-        Some(f) if dispatchable(f) && f.params.len() == args.len() + takes_type_arg(f) as usize => {
-            f
-        }
-        _ => return Err(decline("the generator is not one this path serves")),
-    };
-
-    // The arguments travel as argv, so one compiled artifact serves every call.
-    // argv[0] is the generator's name, which `main` dispatches on: the artifact
-    // is one per module, not per generator.
-    let mut argv: Vec<String> = vec![fn_name.to_string()];
-    if takes_type_arg(target) && inputs.type_arg.is_none() {
-        return Err(decline("a `TypeArg` parameter with no type argument"));
-    }
-    for (a, p) in args.iter().zip(&target.params) {
-        argv.push(match (a, &p.ty) {
-            (ConstVal::Str(s), Type::Str) => s.clone(),
-            // Decimal, which `parse` reads.
-            (ConstVal::Int(n), Type::Int) => n.to_string(),
-            _ => return Err(decline("a constant argument this path cannot write")),
-        });
-    }
+    let argv = argv_of(program, fn_name, args, inputs).map_err(|why| decline(&why))?;
 
     let t = std::time::Instant::now();
     let key = artifact_key(program, inputs.sources_fingerprint.as_deref());
@@ -147,7 +128,7 @@ fn run(
     // Judged only when the artifact is built: the key names the program's
     // sources, so a cached artifact is one a program with no unserved call built.
     let written = run_module(&key, persist, &argv, program, inputs, &mut reads, || {
-        if let Some(what) = reaches_unserved(program) {
+        if let Some(what) = reaches_unserved(program, &[]) {
             return Err(decline(&format!("the module reaches `{what}`")));
         }
         let wrapper = wrapper_program(program)
@@ -170,7 +151,6 @@ fn run(
 ///
 /// `Err` is a scoping violation or an unreadable remote pin; it aborts
 /// generation and the guest never sees it.
-#[cfg(feature = "host")]
 fn serve(
     inputs: &GenInputs<'_>,
     reads: &mut Vec<GenRead>,
@@ -284,7 +264,6 @@ fn serve(
 
 /// Answers `syntaxParser` with the span of the grammar's parser or of its report,
 /// and records the read of the grammar's catalogue, present or not.
-#[cfg(feature = "host")]
 fn syntax_parser(
     inputs: &GenInputs<'_>,
     reads: &mut Vec<GenRead>,
@@ -302,45 +281,91 @@ fn syntax_parser(
         .map(|span| Served::Parser(key, Box::new(span)))
 }
 
+/// The argv a run of `fn_name` on `args` hands its module, or why no wrapper
+/// can call it. The arguments travel as argv, so one compiled artifact serves
+/// every call; argv[0] is the generator's name, which `main` dispatches on.
+fn argv_of(
+    program: &Program,
+    fn_name: &str,
+    args: &[ConstVal],
+    inputs: &GenInputs<'_>,
+) -> Result<Vec<String>, String> {
+    let target = match program.functions.iter().find(|f| f.name == fn_name) {
+        Some(f) if dispatchable(f) && f.params.len() == args.len() + takes_type_arg(f) as usize => {
+            f
+        }
+        _ => return Err("the generator is not one this path serves".to_string()),
+    };
+    if takes_type_arg(target) && inputs.type_arg.is_none() {
+        return Err("a `TypeArg` parameter with no type argument".to_string());
+    }
+    let mut argv: Vec<String> = vec![fn_name.to_string()];
+    for (a, p) in args.iter().zip(&target.params) {
+        argv.push(match (a, &p.ty) {
+            (ConstVal::Str(s), Type::Str) => s.clone(),
+            // Decimal, which `parse` reads.
+            (ConstVal::Int(n), Type::Int) => n.to_string(),
+            _ => return Err("a constant argument this path cannot write".to_string()),
+        });
+    }
+    Ok(argv)
+}
+
+/// What a pure engine's page asks of the host for a capability import: the
+/// guest's path and the import's mode, served as the native host serves it.
+pub type Server<'a> = dyn FnMut(&str, i32) -> Result<Served, String> + 'a;
+
+/// The calls the page's host cannot serve: module reflection and `codeAt`,
+/// beside the write capabilities every engine declines.
+const UNSERVED_PURE: &[&str] = &["moduleInterface", "moduleCode", "contractOf", "codeAt"];
+
 /// Runs generator `fn_name` without wasmtime, for the playground, where the
 /// browser runs the module. `exec` instantiates the module bytes, runs them
-/// with the argv and the `TypeArg`'s atoms, and answers the module's stdout
-/// and the [`Arena`] its code imports ran in.
+/// with the argv and the `TypeArg`'s atoms, serves its `read` and
+/// `syntaxParser` imports through the [`Server`] it is handed, and answers the
+/// module's stdout and the [`Arena`] its code imports ran in. Reads go
+/// through `inputs.resolver` and are recorded, as on the native path.
 ///
-/// Only a generator whose one parameter is a `TypeArg` is served: `exec`'s
-/// host answers no read and no module reflection, so any other generator is
-/// declined (`None`).
+/// A generator this host cannot serve fails the run with a sentence that names
+/// what it reaches.
 pub fn run_pure(
     program: &Program,
     fn_name: &str,
     args: &[ConstVal],
     inputs: &GenInputs<'_>,
-    exec: impl FnOnce(&[u8], &[String], &[Atom]) -> Result<(Vec<u8>, Arena), String>,
+    exec: impl FnOnce(&[u8], &[String], &[Atom], &mut Server<'_>) -> Result<(Vec<u8>, Arena), String>,
 ) -> Option<Result<GenOutput, GenError>> {
-    let target = program.functions.iter().find(|f| f.name == fn_name)?;
-    let arg = inputs.type_arg.as_ref()?;
-    if !dispatchable(target) || !takes_type_arg(target) || !args.is_empty() {
-        return None;
-    }
-    if reaches_unserved(program).is_some() {
-        return None;
+    let declined = |why: String| {
+        Some(Err(GenError::Failed(format!(
+            "the playground cannot run `{fn_name}`: {why}"
+        ))))
+    };
+    let argv = match argv_of(program, fn_name, args, inputs) {
+        Ok(argv) => argv,
+        Err(why) => return declined(why),
+    };
+    if let Some(what) = reaches_unserved(program, UNSERVED_PURE) {
+        return declined(format!(
+            "its module calls `{what}`, which the page's host does not serve"
+        ));
     }
     let types = type_map(program);
     let mut atoms = Vec::new();
-    let run = || -> Result<GenOutput, GenError> {
-        encode(&Type::Named("TypeArg".into()), arg, &types, &mut atoms)
-            .map_err(GenError::Failed)?;
+    let mut reads = Vec::new();
+    let run = || -> Result<Written, GenError> {
+        if let Some(arg) = &inputs.type_arg {
+            encode(&Type::Named("TypeArg".into()), arg, &types, &mut atoms)
+                .map_err(GenError::Failed)?;
+        }
         let wrapper = wrapper_program(program).ok_or(GenError::Failed(
             "the wrapper program cannot be synthesized".into(),
         ))?;
         let bytes = vyrn_codegen::direct::compile_gen_host(&wrapper)?;
-        let (_, mut code) =
-            exec(&bytes, &[fn_name.to_string()], &atoms).map_err(GenError::Failed)?;
-        let written = code.written().map_err(GenError::Failed)?;
-        let reads = Vec::new();
-        Ok(GenOutput { written, reads })
+        let mut server = |path: &str, mode: i32| serve(inputs, &mut reads, path, mode);
+        let (_, mut code) = exec(&bytes, &argv, &atoms, &mut server).map_err(GenError::Failed)?;
+        code.written().map_err(GenError::Failed)
     };
-    Some(run())
+    Some(run().map(|written| GenOutput { written, reads }))
 }
 
 /// Whether the engine can serve this function: an exported `gen fn` returning
@@ -874,19 +899,14 @@ fn compile_to_wasm(_key: &str, program: &Program) -> Result<Vec<u8>, EngineError
 }
 
 /// The `read` import's modes, shared with the emitter.
-#[cfg(feature = "host")]
 const MODE_READ: i32 = 0;
-#[cfg(feature = "host")]
 const MODE_LIST: i32 = 2;
 /// Not a read: `moduleInterface` needs the resolver and the loader, so it is
 /// served on the host thread like one.
-#[cfg(feature = "host")]
 const MODE_MODULE_INTERFACE: i32 = 3;
 /// `moduleCode`: served as `MODE_MODULE_INTERFACE` is.
-#[cfg(feature = "host")]
 const MODE_MODULE_CODE: i32 = 6;
 /// The module reflection a mode asks for, if it asks for one.
-#[cfg(feature = "host")]
 fn reflect_of(mode: i32) -> Option<vyrn_frontend::schema_reflect::Reflect> {
     use vyrn_frontend::schema_reflect::Reflect;
     match mode {
@@ -896,16 +916,12 @@ fn reflect_of(mode: i32) -> Option<vyrn_frontend::schema_reflect::Reflect> {
     }
 }
 /// `listDirKinds`: `MODE_LIST`'s encoding with `/` appended to each directory.
-#[cfg(feature = "host")]
 const MODE_LIST_KINDS: i32 = 4;
 /// Not a read: `codeAt` asks for the bytes a read already served.
-#[cfg(feature = "host")]
 const MODE_CODE_AT: i32 = 5;
 /// `syntaxParser`: a read, whose bytes the host thread writes a parser from.
-#[cfg(feature = "host")]
-const MODE_SYNTAX: i32 = 7;
+pub const MODE_SYNTAX: i32 = 7;
 /// Not a read: `appPath` asks for an input's path from the project root.
-#[cfg(feature = "host")]
 const MODE_APP_PATH: i32 = 8;
 
 /// One unit of a structured host result. Encoder and decoder walk the same
@@ -1085,6 +1101,23 @@ impl Arena {
         Ok(vyrn_frontend::gen::render_code(self.rope(h)?))
     }
 
+    /// Hands the guest what a `read` or `syntaxParser` import was served: a
+    /// read's status in the high word and its length in the low, with the
+    /// bytes `fetch` copies; or a parser's `Code` handle, whose grammar
+    /// [`Written::grammars`] records.
+    pub fn answer(&mut self, served: Served) -> Result<(i64, Vec<u8>), String> {
+        match served {
+            Served::Bytes(status, bytes) => Ok(((status as i64) << 32 | bytes.len() as i64, bytes)),
+            Served::Parser(key, span) => {
+                self.grammars.push(key);
+                Ok((self.leaf(*span), Vec::new()))
+            }
+            Served::Copy(..) | Served::Lit(_) => {
+                Err("a read was answered with a copy or a literal".to_string())
+            }
+        }
+    }
+
     /// What the generator wrote: the value its wrapper handed to `result`.
     pub fn written(&mut self) -> Result<Written, String> {
         let code = self.result.take();
@@ -1227,10 +1260,10 @@ struct Caps {
     resp: mpsc::Receiver<Result<Served, String>>,
 }
 
-/// The host thread's answer: bytes for a read or a listing, the reflection
-/// literal for `moduleInterface`, or the key and bytes `codeAt` copies from.
-#[cfg(feature = "host")]
-enum Served {
+/// The host's answer to a capability import: bytes for a read or a listing,
+/// the reflection literal for `moduleInterface`, or the key and bytes `codeAt`
+/// copies from. [`Arena::answer`] hands a read or a parser to the guest.
+pub enum Served {
     Bytes(i32, Vec<u8>),
     Copy(String, Vec<u8>),
     /// A grammar's parser or its report, and the grammar's key.
@@ -1284,19 +1317,14 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
             caps.req
                 .send((path, mode))
                 .map_err(|_| Error::msg("generator host is gone"))?;
-            match caps.resp.recv() {
-                Ok(Ok(Served::Bytes(status, bytes))) => {
-                    let len = bytes.len() as i64;
-                    streams.stash = bytes;
-                    Ok((status as i64) << 32 | len)
-                }
-                Ok(Ok(Served::Lit(_) | Served::Copy(..) | Served::Parser(..))) => {
-                    Err(Error::msg("read answered with a literal"))
-                }
-                // A scoping violation traps.
-                Ok(Err(msg)) => Err(Error::new(Denied(msg))),
-                Err(_) => Err(Error::msg("generator host is gone")),
-            }
+            let served = caps
+                .resp
+                .recv()
+                .map_err(|_| Error::msg("generator host is gone"))?;
+            // A scoping violation traps.
+            let (value, bytes) = denied(served.and_then(|s| streams.code.answer(s)))?;
+            streams.stash = bytes;
+            Ok(value)
         },
     )?;
     linker.func_wrap(
@@ -1381,15 +1409,11 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
             caps.req
                 .send((path, MODE_SYNTAX))
                 .map_err(|_| Error::msg("generator host is gone"))?;
-            match caps.resp.recv() {
-                Ok(Ok(Served::Parser(key, span))) => {
-                    streams.code.grammars.push(key);
-                    Ok(streams.code.leaf(*span))
-                }
-                Ok(Ok(_)) => Err(Error::msg("syntaxParser answered with no span")),
-                Ok(Err(msg)) => Err(Error::new(Denied(msg))),
-                Err(_) => Err(Error::msg("generator host is gone")),
-            }
+            let served = caps
+                .resp
+                .recv()
+                .map_err(|_| Error::msg("generator host is gone"))?;
+            Ok(denied(served.and_then(|s| streams.code.answer(s)))?.0)
         },
     )?;
     linker.func_wrap(

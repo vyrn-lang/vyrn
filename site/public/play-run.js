@@ -12,7 +12,7 @@ export function stopWorker() {
   }
 }
 
-export function runInWorker(src, stdin, { done, fail }) {
+export function runInWorker(src, stdin, project, { done, fail }) {
   stopWorker();
   worker = new Worker(new URL("play-worker.js", import.meta.url), { type: "module" });
   worker.onmessage = (e) => {
@@ -28,7 +28,7 @@ export function runInWorker(src, stdin, { done, fail }) {
     stopWorker();
     fail(`Stopped after ${RUN_LIMIT_MS / 1000} seconds. The program was still running.`, "Stopped");
   }, RUN_LIMIT_MS);
-  worker.postMessage({ src, stdin });
+  worker.postMessage({ src, stdin, project });
 }
 
 export function say(pane, text, cls) {

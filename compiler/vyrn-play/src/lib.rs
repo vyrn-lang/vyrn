@@ -6,11 +6,13 @@
 //! [`play_signature`] answer the editor from the analysis `vyrn-lsp` serves,
 //! at a 1-based line and char column. `site/public/play-worker.js` runs the
 //! module with `web/wasi-min.js`; this crate cannot, because it is one. `std/`
-//! is embedded by `build.rs`; a relative import reports `module not found`.
+//! is embedded by `build.rs`; a relative import reads the project's other tabs
+//! ([`Project`]).
 //!
 //! Calling convention: `input_ptr(n)` reserves `n` bytes to write; an entry
 //! point takes the length and returns the result length, and [`play_tokens`] and
-//! [`play_check`] take the tab's kind, `vyrn` or `syntax`, before the text;
+//! [`play_check`] take the tab's kind, `vyrn` or `syntax`, before the text, and
+//! [`play_check`] and [`play_compile`] take the [`Project`] after it;
 //! `result_ptr()` says where the result is. The result is UTF-8 JSON, or from [`play_compile`] a
 //! wasm module, told apart by the first byte (`\0asm` against `{`). A memory
 //! growth detaches `memory.buffer`, so the page re-reads both pointers after
@@ -53,19 +55,75 @@ pub extern "C" fn result_ptr() -> *const u8 {
 /// The coloured runs of a tab's text, read as its kind.
 #[no_mangle]
 pub extern "C" fn play_tokens(kind_len: usize, src_len: usize) -> usize {
-    with_kind(kind_len, src_len, |kind, src| match kind {
+    with_kind(kind_len, src_len, 0, |kind, src, _| match kind {
         Kind::Vyrn => tokens_json(src),
         Kind::Syntax => grammar_tokens_json(src),
     })
 }
 
-/// The diagnostics of a tab's text, read as its kind.
+/// The diagnostics of a tab's text, read as its kind in its project.
 #[no_mangle]
-pub extern "C" fn play_check(kind_len: usize, src_len: usize) -> usize {
-    with_kind(kind_len, src_len, |kind, src| match kind {
-        Kind::Vyrn => check_json(src),
-        Kind::Syntax => grammar_check_json(src),
-    })
+pub extern "C" fn play_check(kind_len: usize, src_len: usize, project_len: usize) -> usize {
+    with_kind(
+        kind_len,
+        src_len,
+        project_len,
+        |kind, src, project| match kind {
+            Kind::Vyrn => check_json(src, &Project::of(project)),
+            Kind::Syntax => grammar_check_json(src),
+        },
+    )
+}
+
+/// The playground's open project: the path of the tab being read and each
+/// tab's text by its path, which a relative import or a generator's read
+/// resolves to. The page sends it as JSON, `{"path": "a/main.vyrn", "files":
+/// {"a/x.syntax": "..."}}`; an empty or malformed one is the one tab
+/// `play.vyrn`.
+#[derive(Default)]
+struct Project {
+    path: String,
+    files: Vec<(String, String)>,
+}
+
+impl Project {
+    fn of(json: &str) -> Project {
+        use vyrn_frontend::schema::Json;
+        let Ok(doc) = vyrn_frontend::schema::parse_json(json) else {
+            return Project::default();
+        };
+        let path = match doc.get("path") {
+            Some(Json::Str(p)) => p.clone(),
+            _ => String::new(),
+        };
+        let files = match doc.get("files") {
+            Some(Json::Obj(fs)) => (fs.iter())
+                .filter_map(|(k, v)| match v {
+                    Json::Str(t) => Some((k.clone(), t.clone())),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        Project { path, files }
+    }
+
+    /// The resolver key of the tab being read.
+    fn root(&self) -> &str {
+        match self.path.is_empty() {
+            true => "play.vyrn",
+            false => &self.path,
+        }
+    }
+
+    /// `std/` and the project's tabs; a tab never shadows a std module.
+    fn resolver(&self) -> MapResolver {
+        let tabs = self.files.iter().filter(|(k, _)| !k.starts_with("std/"));
+        let std = std_modules::STD
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()));
+        MapResolver(tabs.cloned().chain(std).collect())
+    }
 }
 
 /// What a tab holds, by the name the page gives it: Vyrn source, or a grammar.
@@ -85,24 +143,36 @@ impl Kind {
     }
 }
 
-/// Reads the input as a kind of `kind_len` bytes and then a text of `src_len`, and
-/// publishes `f`'s answer. A kind this module does not read answers `{}`.
-fn with_kind(kind_len: usize, src_len: usize, f: impl FnOnce(Kind, &str) -> String) -> usize {
-    with_input(kind_len.saturating_add(src_len), |all| {
+/// Reads the input as a kind of `kind_len` bytes, a text of `src_len` and a
+/// project of `project_len`, and publishes `f`'s answer. A kind this module does
+/// not read answers `{}`.
+fn with_kind(
+    kind_len: usize,
+    src_len: usize,
+    project_len: usize,
+    f: impl FnOnce(Kind, &str, &str) -> String,
+) -> usize {
+    let len = kind_len.saturating_add(src_len);
+    with_input(len.saturating_add(project_len), |all| {
         let kind = all.get(..kind_len).and_then(Kind::of);
-        match (kind, all.get(kind_len..)) {
-            (Some(kind), Some(src)) => f(kind, src),
+        match (kind, all.get(kind_len..len), all.get(len..)) {
+            (Some(kind), Some(src), Some(project)) => f(kind, src, project),
             _ => "{}".to_string(),
         }
         .into_bytes()
     })
 }
 
-/// Compiles `input[..src_len]` to module bytes, or the JSON diagnostics of a
-/// program that did not compile.
+/// Compiles `input[..src_len]` in the project after it to module bytes, or the
+/// JSON diagnostics of a program that did not compile.
 #[no_mangle]
-pub extern "C" fn play_compile(src_len: usize) -> usize {
-    with_input(src_len, |src| compile_result(src))
+pub extern "C" fn play_compile(src_len: usize, project_len: usize) -> usize {
+    with_input(src_len.saturating_add(project_len), |all| {
+        match (all.get(..src_len), all.get(src_len..)) {
+            (Some(src), Some(project)) => compile_result(src, &Project::of(project)),
+            _ => b"{}".to_vec(),
+        }
+    })
 }
 
 /// Decodes the input as UTF-8, hands it to `f`, and publishes the result.
@@ -206,6 +276,10 @@ thread_local! {
     static CODE: RefCell<vyrn_genwasm::Arena> = RefCell::default();
     /// A [`code_call`] request, then its answer.
     static CODE_IO: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// The engine's [`vyrn_genwasm::Server`] while [`run_generator`] waits for
+    /// the page, which asks it for reads through [`code_call`]; `None` outside.
+    static SERVER: std::cell::Cell<Option<*mut vyrn_genwasm::Server<'static>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Reserves `len` bytes for a [`code_call`] request and returns where to write
@@ -236,7 +310,10 @@ pub extern "C" fn code_answer() -> *const u8 {
 pub extern "C" fn code_call(len: usize) -> usize {
     let req = CODE_IO.with(|o| std::mem::take(&mut *o.borrow_mut()));
     let answer = match decode_call(&req[..len.min(req.len())]) {
-        Some((name, args)) => CODE.with(|c| code_import(&mut c.borrow_mut(), &name, args)),
+        Some((name, args)) => match capability(&name, &args) {
+            Some(served) => served.and_then(|s| CODE.with(|c| c.borrow_mut().answer(s))),
+            None => CODE.with(|c| code_import(&mut c.borrow_mut(), &name, args)),
+        },
         None => Err("a code import's request does not decode".to_string()),
     };
     let bytes = match answer {
@@ -247,6 +324,23 @@ pub extern "C" fn code_call(len: usize) -> usize {
         *o.borrow_mut() = bytes;
         o.borrow().len()
     })
+}
+
+/// Serves a `read` or `syntaxParser` import through the engine's server, as
+/// the native host's thread does; `None` for any other import.
+fn capability(name: &str, args: &[Arg]) -> Option<Result<vyrn_genwasm::Served, String>> {
+    let (path, mode) = match (name, args) {
+        ("read", [Arg::Str(path), Arg::Int(mode)]) => (path, *mode as i32),
+        ("syntaxParser", [Arg::Str(path)]) => (path, vyrn_genwasm::MODE_SYNTAX),
+        _ => return None,
+    };
+    let Some(server) = SERVER.with(|s| s.get()) else {
+        return Some(Err("no generator is running".to_string()));
+    };
+    // SAFETY: `run_generator` sets the pointer to a server that outlives the
+    // page's call and clears it when the call returns; the page calls back
+    // only during it, on this thread, one call at a time.
+    Some(unsafe { (*server)(path, mode) })
 }
 
 /// A `code_call` argument.
@@ -354,8 +448,15 @@ fn run_generator(
     module: &[u8],
     argv: &[String],
     atoms: &[vyrn_genwasm::Atom],
+    server: &mut vyrn_genwasm::Server<'_>,
 ) -> Result<(Vec<u8>, vyrn_genwasm::Arena), String> {
-    let status = page_run(&gen_request(module, argv, atoms))?;
+    // SAFETY: only the lifetime is erased; the pointer is cleared before
+    // `server`'s borrow ends, and `capability` reads it only in between.
+    let erased: *mut vyrn_genwasm::Server<'static> = unsafe { std::mem::transmute(server) };
+    SERVER.with(|s| s.set(Some(erased)));
+    let status = page_run(&gen_request(module, argv, atoms));
+    SERVER.with(|s| s.set(None));
+    let status = status?;
     let out = GEN_OUT.with(|o| std::mem::take(&mut *o.borrow_mut()));
     let code = CODE.with(|c| c.take());
     match status {
@@ -421,20 +522,11 @@ fn options(expansions: std::sync::Arc<vyrn_frontend::project::Expansions>) -> Lo
     }
 }
 
-/// A resolver that holds `std/` alone, so a relative import reports `module not found`.
-fn std_resolver() -> MapResolver {
-    MapResolver(
-        std_modules::STD
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-    )
-}
-
 /// Loads `src` as a one-file program through `load_warned`, the CLI's entry
 /// point.
 fn load(
     src: &str,
+    project: &Project,
     expansions: std::sync::Arc<vyrn_frontend::project::Expansions>,
 ) -> (
     Result<
@@ -449,15 +541,15 @@ fn load(
     let engine = engine();
     vyrn_lower::load_warned(
         src,
-        "play.vyrn",
+        project.root(),
         &options(expansions),
-        &std_resolver(),
+        &project.resolver(),
         Some(&*engine),
     )
 }
 
-fn check_json(src: &str) -> String {
-    let (result, warnings) = load(src, Default::default());
+fn check_json(src: &str, project: &Project) -> String {
+    let (result, warnings) = load(src, project, Default::default());
     let mut all = match result {
         Ok(_) => Vec::new(),
         Err(diags) => diags,
@@ -482,11 +574,12 @@ fn grammar_check_json(src: &str) -> String {
 
 /// The program as a wasm module from the direct backend, or the diagnostics of
 /// one that did not compile. Warnings are left to `play_check`.
-fn compile_result(src: &str) -> Vec<u8> {
+fn compile_result(src: &str, project: &Project) -> Vec<u8> {
     // The load and the backend must walk one expansion of each desugared site
     // (`schemaOf<T>()`, a user container's `a[i]`), or the core's rows, keyed
     // by the load's nodes, miss the backend's.
-    let (program, world) = match load(src, vyrn_frontend::project::Expansions::shared()).0 {
+    let (program, world) = match load(src, project, vyrn_frontend::project::Expansions::shared()).0
+    {
         Ok(p) => p,
         Err(diags) => return format!("{{\"diagnostics\":{}}}", diags_json(&diags)).into_bytes(),
     };
@@ -543,7 +636,7 @@ fn analysis(src: &str) -> Analysis {
         src,
         "play.vyrn",
         &options(Default::default()),
-        &std_resolver(),
+        &Project::default().resolver(),
         Some(&*engine),
     )
 }
@@ -721,8 +814,13 @@ fn diag_json(d: &Diagnostic) -> String {
         Some(n) => json_str(n),
         None => "null".to_string(),
     };
+    // A diagnostic in another tab, such as a grammar a generator reads, names it.
+    let file = match &d.file {
+        Some(f) => json_str(f),
+        None => "null".to_string(),
+    };
     format!(
-        "{{\"line\":{},\"col\":{},\"endCol\":{},\"severity\":\"{}\",\"stage\":\"{}\",\"message\":{},\"note\":{}}}",
+        "{{\"file\":{file},\"line\":{},\"col\":{},\"endCol\":{},\"severity\":\"{}\",\"stage\":\"{}\",\"message\":{},\"note\":{}}}",
         d.line,
         d.col,
         d.end_col,
@@ -862,28 +960,55 @@ mod tests {
     #[test]
     fn a_program_that_compiles_reports_nothing() {
         assert_eq!(
-            check_json("fn main() -> Int64 {\n    return 0\n}\n"),
+            check_json(
+                "fn main() -> Int64 {\n    return 0\n}\n",
+                &Project::default()
+            ),
             "{\"diagnostics\":[]}"
         );
     }
 
     #[test]
     fn a_diagnostic_arrives_with_its_position_and_stage() {
-        let json = check_json("fn main() -> Int64 {\n    return nope\n}\n");
+        let json = check_json(
+            "fn main() -> Int64 {\n    return nope\n}\n",
+            &Project::default(),
+        );
         assert!(json.contains("\"line\":2"), "{json}");
         assert!(json.contains("\"stage\":\"check\""), "{json}");
         assert!(json.contains("\"severity\":\"error\""), "{json}");
     }
 
     #[test]
-    fn the_standard_library_is_here_and_a_second_file_is_not() {
+    fn the_standard_library_and_the_projects_tabs_are_here() {
         let std_import = check_json(
             "import { joinWith } from \"std/strings\"\nfn main() -> Int64 { return 0 }\n",
+            &Project::default(),
         );
         assert_eq!(std_import, "{\"diagnostics\":[]}");
-        // A relative import has nowhere to go, in the loader's own words.
-        let local = check_json("import { f } from \"./other\"\nfn main() -> Int64 { return 0 }\n");
+        let project = Project::of(
+            r#"{"path": "app/main.vyrn", "files": {"app/other.vyrn": "export fn f() -> Int64 { return 1 }\n"}}"#,
+        );
+        let main = "import { f } from \"./other\"\nfn main() -> Int64 { return f() }\n";
+        assert_eq!(check_json(main, &project), "{\"diagnostics\":[]}");
+        // A tab the project does not hold, in the loader's own words.
+        let local = check_json(
+            "import { f } from \"./gone\"\nfn main() -> Int64 { return 0 }\n",
+            &project,
+        );
         assert!(local.contains("module not found"), "{local}");
+    }
+
+    /// A generator the page's host cannot serve says what it reaches.
+    #[test]
+    fn a_declined_generator_names_what_the_page_cannot_serve() {
+        let project = Project::of(
+            r#"{"path": "main.vyrn", "files": {"g.vyrn": "export gen fn g(path: String) -> Code {\n    let i = moduleInterface(path)\n    return vyrn\"\"\n}\n"}}"#,
+        );
+        let main = "import { g } from \"./g\"\nimport * as x from g(\"./g.vyrn\")\nfn main() -> Int64 { return 0 }\n";
+        let json = check_json(main, &project);
+        let said = "the playground cannot run `g`: its module calls `moduleInterface`";
+        assert!(json.contains(said), "{json}");
     }
 
     /// How the page tells a module from JSON diagnostics.
@@ -894,6 +1019,7 @@ mod tests {
         let bytes = compile_result(
             "import { joinWith } from \"std/strings\"\n\
              fn main() -> Int64 {\n    print(joinWith([\"a\", \"b\"], \"-\"))\n    return 0\n}\n",
+            &Project::default(),
         );
         assert_eq!(
             &bytes[..4],
@@ -905,7 +1031,10 @@ mod tests {
 
     #[test]
     fn a_program_that_does_not_compile_answers_diagnostics_and_not_a_module() {
-        let bytes = compile_result("fn main() -> Int64 {\n    return nope\n}\n");
+        let bytes = compile_result(
+            "fn main() -> Int64 {\n    return nope\n}\n",
+            &Project::default(),
+        );
         let json = String::from_utf8(bytes).expect("diagnostics are UTF-8 JSON");
         assert!(json.starts_with("{\"diagnostics\":["), "{json}");
         assert!(json.contains("\"line\":2"), "{json}");
@@ -916,7 +1045,7 @@ mod tests {
     #[test]
     fn play_compile_length_past_the_buffer_answers_instead_of_aborting() {
         input_ptr(8); // reserve 8 zero bytes
-        let n = play_compile(usize::MAX);
+        let n = play_compile(usize::MAX, 0);
         let json = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(result_ptr(), n) })
             .into_owned();
         assert!(json.contains("exceeds the input buffer"), "{json}");
@@ -991,8 +1120,8 @@ mod tests {
         }
         let mut refused = Vec::new();
         for (id, src) in guide_programs() {
-            let checked = check_json(&src);
-            let bytes = compile_result(&src);
+            let checked = check_json(&src, &Project::default());
+            let bytes = compile_result(&src, &Project::default());
             let is_module = bytes.starts_with(b"\0asm");
             if let Some(d) = &dump {
                 let body = if is_module {

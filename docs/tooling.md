@@ -638,14 +638,20 @@ with its text: a `.vyrn`, `.vyx` or `.von` tab is Vyrn, a `.syntax` tab is check
 `vyrn_syntax::load` and coloured by `vyrn_syntax::colour` reading it with
 `syntax.syntax`, and a tab of any other kind is neither. Run runs a Vyrn tab only.
 `site/public/play-worker.js` runs the compiled program with `web/wasi-min.js`.
-A `derive` generator runs in the page: the module calls its one import,
+`play_check` and `play_compile` also take the project: the path of the tab
+being read and every tab's text by path, so a relative import or a
+generator's read resolves to a tab, and a missing one reports
+`module not found`. `std/` is embedded at build time.
+A generator runs in the page: the module calls its one import,
 `vyrn_play.run_generator`, and `site/public/play-wasm.js` instantiates the
-generator's module synchronously and serves it its `TypeArg`. The generator's
-code imports (`text`, `splice`, `render` and the rest, not `codeAt`) go back
-into the compiler through `code_call`, which runs them in the arena the native
-engine uses.
-`std/` is embedded at build time; a relative import reports
-`module not found`.
+generator's module synchronously and serves it its `String` and `Int64`
+arguments or its `TypeArg`. The generator's code imports (`text`, `splice`,
+`render` and the rest) and its `read` and `syntaxParser` go back into the
+compiler through `code_call`: the first run in the arena the native engine
+uses, and the reads go through the load's resolver and the native host's
+`serve`, recorded as reads. A generator whose module calls `moduleInterface`,
+`moduleCode`, `contractOf` or `codeAt` fails with a sentence naming the call.
+A diagnostic in another tab names its file.
 
 It is outside the workspace, and the build must run from its own directory,
 because `.cargo/config.toml` there sets the linker's stack size:
