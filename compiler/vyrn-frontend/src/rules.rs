@@ -725,6 +725,19 @@ rules! {
         "`{callee}` waits, and its call has no `await` or `fork`"
         fix "write `await` to wait for it here, or `fork` to run it in a task of its own";
     AwaitNoWait { callee } "`await` marks a call that waits, and `{callee}` does not wait";
+    ForkValue { name }
+        "`fork` starts a call of a declared function or a method, and `{name}` is a \
+        function value"
+        fix "fork a function that calls `{name}`";
+    ForkTakesValue { callee }
+        "`fork` cannot start `{callee}` over a function value: the task may outlive what \
+        the value captures"
+        fix "fork a function that takes no function value, or `await` the call here";
+    ForkInRegion {}
+        "`fork` cannot start a task inside a `region`: the task may outlive the region's arena";
+    ForkTaskResult { ty }
+        "`fork` cannot start a call that answers `{ty}`, which holds a task"
+        fix "join or cancel the inner task in the call, and return its result";
     ForkNoWait { callee } "`fork` starts a call that waits, and `{callee}` does not wait";
     ForkModify { arg, callee, place }
         "`fork` hands its task every argument, and argument {arg} of `{callee}` is \
@@ -733,8 +746,6 @@ rules! {
     AwaitInside { callee, param }
         "`{callee}` waits only because it calls `{param}` with no `await`"
         fix "pass a function that does not wait";
-    ForkBranch { form }
-        "each branch of `{form}` is a call of a function, which `{form}` starts and waits for";
     InitializerWaits { callee }
         "a module-state initializer cannot wait, and `{callee}` waits: state is set \
         before `main` runs";
@@ -1173,6 +1184,8 @@ rules! {
     OwedStream { s }
         "a stream must be consumed with `for .. in`, passed to a `consume` parameter, \
         forwarded by returning it, or released with `close({s})`, on every path";
+    OwedTasks { s }
+        "`{s}` holds tasks: join or cancel each one, or hand `{s}` on, on every path";
     DropTask { s }
         "`drop` ends no task: wait for `{s}` with `await join({s})`, or end it with `cancel({s})`";
     OwedTask { s }

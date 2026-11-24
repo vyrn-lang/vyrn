@@ -218,14 +218,8 @@ impl Judged<'_> {
         (0..calls.len()).filter_map(move |j| {
             let c = &calls[j];
             let callee = DeclName(&c.callee);
-            let span = match c.mark {
-                Mark::Both(n) => j + 1..j + 1 + n,
-                _ => j..j + 1,
-            };
-            let waits = span.clone().any(|b| self.waits(ks[b]));
-            let by_value = span
-                .into_iter()
-                .any(|b| self.waits_by_value(&calls[b], ks[b]));
+            let waits = self.waits(ks[j]);
+            let by_value = self.waits_by_value(c, ks[j]);
             if c.through.is_some() && c.mark == Mark::None && inside(i).is_some() {
                 return None;
             }
@@ -240,13 +234,13 @@ impl Judged<'_> {
             }
             let r = match (waits, at, c.mark) {
                 (true, Waiting::Initializer, _) => rule!(InitializerWaits, callee),
-                (false, _, Mark::Fork) if by_value => return None,
                 (false, _, Mark::Fork) => rule!(ForkNoWait, callee),
                 (true, Waiting::Body, Mark::None) => rule!(AwaitMissing, callee),
-                (false, _, Mark::Await | Mark::Both(_)) if by_value => return None,
-                (false, _, Mark::Await | Mark::Both(_)) => rule!(AwaitNoWait, callee),
-                (true, Waiting::Body, Mark::Await | Mark::Both(_) | Mark::Branch | Mark::Fork)
-                | (false, _, Mark::None | Mark::Branch) => return None,
+                (false, _, Mark::Await) if by_value => return None,
+                (false, _, Mark::Await) => rule!(AwaitNoWait, callee),
+                (true, Waiting::Body, Mark::Await | Mark::Fork) | (false, _, Mark::None) => {
+                    return None
+                }
             };
             Some((c.line, r))
         })
@@ -289,11 +283,15 @@ impl Judged<'_> {
 
     /// Per body, the body it reaches module state through on a shortest call
     /// path to a body whose own statements touch it. `None` for such a body
-    /// and for one that reaches no module state.
+    /// and for one that reaches no module state. The path passes no frame of
+    /// `std/task`: the run queue is each instance's scheduler, and a handler
+    /// that joins a task still runs under `--workers`.
     fn state_steps(&self) -> Vec<Option<usize>> {
-        let touches = |i: usize| self.effects[i].has(Effect::ModuleState);
-        let mut depth: Vec<Option<usize>> = (self.frames.iter())
-            .map(|f| f.own.has(Effect::ModuleState).then_some(0))
+        let queue =
+            |i: usize| (self.frames[i].name).starts_with(vyrn_frontend::loader::TASK_PREFIX);
+        let touches = |i: usize| self.effects[i].has(Effect::ModuleState) && !queue(i);
+        let mut depth: Vec<Option<usize>> = (0..self.frames.len())
+            .map(|i| (self.frames[i].own.has(Effect::ModuleState) && !queue(i)).then_some(0))
             .collect();
         let mut steps = vec![None; self.frames.len()];
         // Round `r` gives depth `r` to each touching body with an edge to depth
@@ -643,26 +641,14 @@ impl<'a> Walk<'a> {
                 self.place(p);
             }
         }
-        let fork = awaits.as_ref().and_then(|a| a.fork.as_ref());
-        let mark = match (awaits, fork, kind) {
-            (_, Some(f), _) => Mark::Both(f.branches.len()),
-            (Some(_), None, _) => Mark::Await,
-            (None, _, vyrn_frontend::core::Callee::Fork(_)) => Mark::Fork,
-            (None, _, _) => Mark::None,
+        let mark = match (awaits, kind) {
+            (Some(_), _) => Mark::Await,
+            (None, vyrn_frontend::core::Callee::Fork(_)) => Mark::Fork,
+            (None, _) => Mark::None,
         };
         // Only a mark reads whether a call passes a value (Judged::wait_rules).
         let passes = mark != Mark::None && self.passes(args, targets);
         self.call(callee, kind.value(), line, (born, passes), mark);
-        for (b, these) in fork.into_iter().flat_map(|f| f.calls(args)) {
-            let passes = self.passes(these, &b.targets);
-            self.call(
-                &b.callee,
-                b.kind.value(),
-                line,
-                (false, passes),
-                Mark::Branch,
-            );
-        }
     }
 
     /// Whether a call with `args` and `targets` passes a function value: a
@@ -1043,8 +1029,7 @@ pub(crate) fn judge_built<R>(
             return Callee::Dispatched(idx.clone());
         }
         // A program function with no judged body runs no body here: a generic
-        // only a `test` body reaches, or a fork primitive (`task$both`) the
-        // core splits into its branches.
+        // only a `test` body reaches.
         if pure.contains(name) || program.functions.iter().any(|f| f.name == name) {
             return Callee::Pure;
         }

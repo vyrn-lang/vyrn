@@ -14,7 +14,7 @@ examples/appendreserve.vyrn	main	no, it keeps an index check	no, its effect set 
 examples/arenas.vyrn	worker	yes	no, its effect set is alloc, write-output, waits
 examples/arenas.vyrn	label	yes	no, its effect set is alloc, waits
 examples/arenas.vyrn	polls	yes	no, its effect set is alloc, write-output, waits
-examples/arenas.vyrn	main	no, it calls `both`, which has no body to judge	no, its effect set is alloc, write-output, waits
+examples/arenas.vyrn	main	no, it calls `worker`, which has no body to judge	no, its effect set is alloc, write-output, module-state, waits
 examples/args.vyrn	main	yes	no, its effect set is alloc, write-output, args
 examples/argsdemo.vyrn	showOpt	yes	no, its effect set is alloc, write-output
 examples/argsdemo.vyrn	main	no, it calls `flag`, which is not trap-free	no, its effect set is alloc, write-output, args, trap
@@ -294,7 +294,7 @@ examples/clock.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is tr
 examples/clockorder.vyrn	work	yes	yes, emulated Int64
 examples/clockorder.vyrn	late	yes	no, its effect set is write-output, waits
 examples/clockorder.vyrn	busy	yes	no, its effect set is write-output, waits
-examples/clockorder.vyrn	main	no, it calls `both`, which has no body to judge	no, its effect set is alloc, write-output, waits
+examples/clockorder.vyrn	main	no, it calls `late`, which has no body to judge	no, its effect set is alloc, write-output, module-state, waits
 examples/closures2.vyrn	double	yes	yes, emulated Int64
 examples/closures2.vyrn	apply	no, it calls a function value	no, its effect set is alloc
 examples/closures2.vyrn	makeAdder	yes	no, its effect set is alloc
@@ -321,9 +321,9 @@ examples/columns.vyrn	where$cParticleColumns	no, it calls `panic`	no, its effect
 examples/concurrent.vyrn	pause	yes	no, its effect set is alloc, write-output, waits
 examples/concurrent.vyrn	word	yes	no, its effect set is alloc, waits
 examples/concurrent.vyrn	count	yes	no, its effect set is alloc, waits
-examples/concurrent.vyrn	twice	no, it calls `both`, which has no body to judge	no, its effect set is alloc, write-output, waits
+examples/concurrent.vyrn	twice	no, it calls `pause`, which has no body to judge	no, its effect set is alloc, write-output, module-state, waits
 examples/concurrent.vyrn	square	yes	yes, emulated Int64
-examples/concurrent.vyrn	main	no, it calls `both`, which has no body to judge	no, its effect set is alloc, write-output, waits
+examples/concurrent.vyrn	main	no, it calls `pause`, which has no body to judge	no, its effect set is alloc, write-output, module-state, trap, waits
 examples/consume.vyrn	redeem	yes	no, `t` is Token, not an integer, Bool or a read array of one
 examples/consume.vyrn	peek	yes	no, `t` is Token, not an integer, Bool or a read array of one
 examples/consume.vyrn	main	yes	no, `a` is Token, not an integer, Bool or a read array of one
@@ -472,7 +472,7 @@ examples/fannkuchperm.vyrn	main	no, it keeps a where clause check	no, its effect
 examples/fanout.vyrn	fetch	yes	no, its effect set is alloc, write-output, waits
 examples/fanout.vyrn	slow	yes	no, its effect set is waits
 examples/fanout.vyrn	quick	yes	no, its effect set is waits
-examples/fanout.vyrn	main	no, it calls `timeout`, which is not trap-free	no, its effect set is alloc, write-output, waits
+examples/fanout.vyrn	main	no, it calls `fetch`, which has no body to judge	no, its effect set is alloc, write-output, module-state, trap, waits
 examples/fasta.vyrn	nextRandom	yes	no, its effect set is module-state
 examples/fasta.vyrn	cumulative	yes	no, its effect set is alloc
 examples/fasta.vyrn	pick	no, it keeps an index check	no, its effect set is module-state
@@ -652,8 +652,9 @@ examples/graphql.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool
 examples/graphql.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
 examples/handlers.vyrn	fetch	yes	no, its effect set is alloc, waits
 examples/handlers.vyrn	local	yes	no, its effect set is alloc
+examples/handlers.vyrn	step	no, it calls a function value	no, its effect set is alloc, waits
 examples/handlers.vyrn	reply	yes	no, its effect set is alloc, waits
-examples/handlers.vyrn	main	no, it calls a function value	no, its effect set is alloc, write-output, waits
+examples/handlers.vyrn	main	no, it calls a function value	no, its effect set is alloc, write-output, module-state, trap, waits
 examples/heapfieldkey.vyrn		does not check	does not check
 examples/heapkey.vyrn		does not check	does not check
 examples/herofield.vyrn	ramp	yes	no, the result is String, not an integer, Bool or a read array of one
@@ -1226,10 +1227,10 @@ examples/rest.vyrn	where$cPathDel	no, it calls `panic`	no, its effect set is tra
 examples/rest.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/rest.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
 examples/results.vyrn	measure	yes	no, its effect set is alloc, waits
-examples/results.vyrn	report	no, it calls `both`, which has no body to judge	no, its effect set is alloc, waits
+examples/results.vyrn	report	no, it calls `measure`, which has no body to judge	no, its effect set is alloc, module-state, waits
 examples/results.vyrn	total	yes	no, its effect set is alloc, waits
 examples/results.vyrn	ready	yes	no, its effect set is waits
-examples/results.vyrn	main	no, it calls `report`, which is not trap-free	no, its effect set is alloc, write-output, waits
+examples/results.vyrn	main	no, it calls `report`, which is not trap-free	no, its effect set is alloc, write-output, module-state, waits
 examples/revcomp.vyrn	complementTable	yes	no, its effect set is alloc
 examples/revcomp.vyrn	reverseComplement	yes	no, its effect set is alloc
 examples/revcomp.vyrn	writeReverseComplement	yes	no, its effect set is alloc, write-output

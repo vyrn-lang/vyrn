@@ -1,8 +1,8 @@
-// `each` runs one waiting call per element at once and returns the results
-// in index order; `timeout` races a call against a timer. Both are `std/task`
-// code over `both` and `race`, so their calls start in order and a timed-out
-// call is cancelled where it waits, releasing what it holds.
-import { each, timeout, sleep } from "std/task"
+// A `for` forks one waiting call per element, and `joinAll` returns the results
+// in index order; `timeout` races a task against a timer. Both are `std/task`
+// code over tasks, so the calls start in order and a timed-out task is
+// cancelled where it waits, releasing what it holds.
+import { joinAll, timeout, sleep } from "std/task"
 
 fn fetch(ms: Int64) -> String {
     let url = "/item/\{ms}"
@@ -25,14 +25,22 @@ fn quick() -> String {
 
 fn main() -> Int64 {
     let delays: Array<Int64> = [30, 10, 20]
-    let pages = await each(delays, fetch)
+    let mut started: Array<Task<String>> = []
+    for ms in delays {
+        started.push(fork fetch(ms))
+    }
+    let pages = await joinAll(started)
     for p in pages {
         print(p)
     }
     let none: Array<Int64> = []
-    let empty = await each(none, fetch)
+    let mut idle: Array<Task<String>> = []
+    for ms in none {
+        idle.push(fork fetch(ms))
+    }
+    let empty = await joinAll(idle)
     print("\{empty.length} pages from none")
-    print(await timeout(20, slow) ?? "timed out")
-    print(await timeout(20, quick) ?? "timed out")
+    print(await timeout(20, fork slow()) ?? "timed out")
+    print(await timeout(20, fork quick()) ?? "timed out")
     return 0
 }

@@ -28,7 +28,7 @@ fn busy() -> Int64 {
 }
 
 fn main() -> Int64 {
-    let r = await both(late(), busy())
+    let r = await both(fork late(), fork busy())
     print("\{r.first} \{r.second}")
     return 0
 }

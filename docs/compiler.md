@@ -591,17 +591,6 @@ The module's shape:
   at the call's end stores a scalar result and releases each argument the
   callee only read. `taskId`, `taskTake` and `taskFree` read and free a block
   (`Fn_::task_op`); `taskWait` waits on one of the run queue's own operations.
-- Both and race: an awaited `both` or `race` is one call row of kind `Callee::Both`,
-  whose arguments are every branch's in order and whose `core::Fork` holds each
-  branch's callee and argument count, so the kernel judges the branches as one
-  call. The row is one resume point (`Fn_::core_fork`); in a frame that does
-  not wait it calls its branches in order, and the first wins a race. Its
-  start calls each branch with frame 0 in argument order; a resume polls
-  each branch still waiting. A branch's call is `Fn_::core_user_call`'s, and its result lands in
-  the branch's `result` name until the fork builds the row's value from them.
-  To cancel a branch the fork polls it between `std/task`'s `cancelBegin` and
-  `cancelEnd`, where every host wait answers cancelled, so each frame on the
-  branch takes its cancellation edge.
 - Traps: a failed check stores its row and value and branches to the one
   `trapAt` call per function. The wording is `vyrn_frontend::trap`'s table,
   laid out as data; `std/runtime` prints it. `tests/traps.rs` fails if any

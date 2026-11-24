@@ -36,9 +36,9 @@ use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::check::{Ensures, Promise, Raises, Verdict};
 use vyrn_frontend::core::{
-    count_reads, names_in, rows, Arg, Arm, AtRead, Await, Body, BorrowKind, Branch, Callee, Cand,
-    Copied, Ctor, Facts, Fork, Forked, Form, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque,
-    Payload, Place, Rhs, Said, Site, Spelled, St, Target, Test, Use, Val, Walk,
+    count_reads, names_in, rows, Arg, Arm, AtRead, Await, Body, BorrowKind, Callee, Cand, Copied,
+    Ctor, Facts, Forked, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Said,
+    Site, Spelled, St, Target, Test, Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::{DeclName, Rule};
@@ -108,16 +108,6 @@ pub struct Gap {
     /// about a keyword lives here because the kernel has none
     /// (`consume make()` and `make()` are one value to it).
     pub rule: Option<Box<Diagnostic>>,
-}
-
-/// The fork a `std/task` callee is: `both` or `race`, which the compiler
-/// knows by their declarations' names, as it knows `prove`.
-pub(crate) fn fork_form(callee: &str) -> Option<Form> {
-    match callee.strip_prefix(vyrn_frontend::loader::TASK_PREFIX)? {
-        "both" => Some(Form::Both),
-        "race" => Some(Form::Race),
-        _ => None,
-    }
 }
 
 /// A place argument as the source wrote it: `a` or `a.f`.
@@ -537,12 +527,7 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
             // either host, so the host is not read.
             if !matches!(
                 kind,
-                Callee::Fn(_)
-                    | Callee::Bound
-                    | Callee::Ctor
-                    | Callee::Named
-                    | Callee::Proven
-                    | Callee::Both
+                Callee::Fn(_) | Callee::Bound | Callee::Ctor | Callee::Named | Callee::Proven
             ) && builtin_row(callee, false).is_none()
                 && !kind.value().is_some_and(|n| !body.params.contains(&n))
             {
@@ -6110,29 +6095,11 @@ impl<'a> Builder<'a> {
     fn rhs(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
         let outer = std::mem::take(&mut self.frame.after);
         let held = self.frame.held.len();
-        let fork = match e {
+        let mut r = match e {
             Expr::Call {
-                mark: Mark::Await,
-                name,
-                args,
-                line,
-                ..
-            } => fork_form(name).map(|form| (form, name, args, *line)),
-            _ => None,
-        };
-        let mut r = match fork {
-            Some((form, name, args, line)) => self.both(e, form, name, args, line, out),
-            None if matches!(
-                e,
-                Expr::Call {
-                    mark: Mark::Fork,
-                    ..
-                }
-            ) =>
-            {
-                self.fork(e, out)
-            }
-            None => self.rhs_inner(e, out),
+                mark: Mark::Fork, ..
+            } => self.fork(e, out),
+            _ => self.rhs_inner(e, out),
         };
         match &mut r {
             Ok(Rhs::Call { awaits, .. })
@@ -6144,9 +6111,8 @@ impl<'a> Builder<'a> {
                     }
                 ) =>
             {
-                let fork = awaits.take().and_then(|a| a.fork);
                 match self.leave_cancel(e.id(), e.line(), held) {
-                    Ok(c) => *awaits = Some(Box::new(Await { fork, ..c })),
+                    Ok(c) => *awaits = Some(Box::new(c)),
                     Err(g) => r = Err(g),
                 }
             }
@@ -6202,6 +6168,18 @@ impl<'a> Builder<'a> {
             let refusal = rule!(ForkModify, arg = i + 1, callee = DeclName(callee), place);
             (self.body.refused).push(Said::of(*line, e, refusal.render_in(&self.body.speech())));
         }
+        // A call specialized over a function value reads the value's captures where the
+        // caller holds them, and the task may outlive the caller.
+        if !targets.is_empty() {
+            let refusal = rule!(ForkTakesValue, callee = DeclName(callee));
+            (self.body.refused).push(Said::of(*line, e, refusal.render_in(&self.body.speech())));
+        }
+        // The task takes the temporaries a read argument would have released after the row.
+        for (a, _) in taken {
+            if let Arg::Val(Val::Name(t)) = a {
+                self.frame.after.retain(|n| n != t);
+            }
+        }
         Ok(Rhs::Call {
             callee: callee.clone(),
             args: (taken.iter())
@@ -6216,75 +6194,6 @@ impl<'a> Builder<'a> {
             solved: solved.clone(),
             targets: targets.clone(),
             awaits: None,
-        })
-    }
-
-    /// An awaited `both` or `race` at `e`: each argument is a branch call,
-    /// built as a call on its own, and the row is one call over every
-    /// branch's arguments ([`vyrn_frontend::core::Fork`]), so the kernel
-    /// judges them as one call's. [`Builder::rhs`] adds the edge.
-    fn both(
-        &mut self,
-        e: &'a Expr,
-        form: Form,
-        name: &str,
-        branches: &'a [Expr],
-        line: usize,
-        out: &mut Vec<St>,
-    ) -> Result<Rhs, Gap> {
-        let spelled = name.trim_start_matches(vyrn_frontend::loader::TASK_PREFIX);
-        let mut args = Vec::new();
-        let mut fork = Fork {
-            form,
-            branches: Vec::with_capacity(branches.len()),
-        };
-        for b in branches {
-            let call = match b {
-                Expr::Call {
-                    mark: Mark::Plain, ..
-                } => self.rhs_inner(b, out)?,
-                _ => return refuse(rule!(ForkBranch, form = spelled), Vec::new(), line),
-            };
-            let Rhs::Call {
-                callee,
-                args: these,
-                write_back: false,
-                kind: kind @ (Callee::Fn(_) | Callee::Bound | Callee::Value(_)),
-                ret,
-                solved,
-                targets,
-                awaits: None,
-            } = call
-            else {
-                return refuse(rule!(ForkBranch, form = spelled), Vec::new(), line);
-            };
-            let ty = self.ty_of(b)?.into_owned();
-            let result = self.temp(ty, line);
-            fork.branches.push(Branch {
-                callee,
-                kind,
-                args: these.len(),
-                ret,
-                solved,
-                targets,
-                result,
-            });
-            args.extend(these);
-        }
-        Ok(Rhs::Call {
-            callee: name.to_string(),
-            args,
-            write_back: false,
-            kind: Callee::Both,
-            ret: self.produced(e),
-            solved: self.solved.get(&e.id()).cloned().unwrap_or_default(),
-            targets: Vec::new(),
-            awaits: Some(Box::new(Await {
-                rows: Vec::new(),
-                site: e.id(),
-                line,
-                fork: Some(fork),
-            })),
         })
     }
 
@@ -6305,12 +6214,7 @@ impl<'a> Builder<'a> {
             rows.push(St::Drop(t, Site::None, 0, None));
         }
         self.drops_at(Exit::Cancel, site, &mut rows)?;
-        Ok(Await {
-            rows,
-            site,
-            line,
-            fork: None,
-        })
+        Ok(Await { rows, site, line })
     }
 
     /// Refuses the `await` on `e` where the core states the call as no call
@@ -8073,32 +7977,11 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
             args,
             kind,
             targets,
-            awaits,
             ..
         } = rhs
         else {
             return;
         };
-        // A fork's branches are calls over slices of the row's arguments, so
-        // each binds its own and the slice keeps its length.
-        if let Some(fork) = awaits.as_mut().and_then(|a| a.fork.as_mut()) {
-            let mut at = 0;
-            for b in &mut fork.branches {
-                let mut these: Vec<(Arg, Capability)> = args.drain(at..at + b.args).collect();
-                bind_call(
-                    &mut b.callee,
-                    &mut b.kind,
-                    &mut b.targets,
-                    &mut these,
-                    bound,
-                    caps,
-                );
-                b.args = these.len();
-                args.splice(at..at, these);
-                at += b.args;
-            }
-            return;
-        }
         bind_call(callee, kind, targets, args, bound, caps);
     });
 }
@@ -9271,6 +9154,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // lowered again below. The instances it holds had their callees followed.
     let mut had: std::collections::HashSet<String> =
         lowered.instances.iter().map(Instance::spelling).collect();
+    as_declared(program, own, &w.fns, &mut names, &mut added);
     let placed: Vec<Release> = added.values().flatten().cloned().collect();
     let mut dispatches = crate::dispatches_new(&placed, &by_name, &had);
     w.late = dispatches;
@@ -9386,6 +9270,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                     &mut r.kernel,
                     trace,
                 );
+                as_declared(program, own, &w.fns, &mut names, &mut rows);
                 for (f, rows) in rows {
                     placed.extend(rows.iter().cloned());
                     own.releases.entry(f).or_default().extend(rows);
@@ -9806,6 +9691,47 @@ fn discharged(l: &Linear, sp: &Speech) -> String {
 /// The rows `augment` places, by owner, each owner's in placement order. No
 /// reader depends on the order of owners.
 type Added = HashMap<FnId, Vec<Release>>;
+
+/// Restates each declared-release row of a generic function at the type its
+/// binding is written with. The placer reads an instance's body, and a row
+/// is keyed by the function, so the first instance's type would stand for
+/// every instance and the worklist would miss the others' releases.
+fn as_declared(
+    program: &Program,
+    own: &Ownership,
+    fns: &Fns,
+    names: &mut NameMemo,
+    added: &mut Added,
+) {
+    let generic =
+        |f: &FnId| (program.functions.get(f.index())).is_some_and(|f| !f.type_params.is_empty());
+    let owes = |rows: &Vec<Release>| rows.iter().any(|r| matches!(r.kind, DropKind::Release(..)));
+    if !added.iter().any(|(f, rows)| generic(f) && owes(rows)) {
+        return;
+    }
+    let written = own.proto.as_written();
+    for inst in crate::as_written(program, own) {
+        let Some(rows) = added.get_mut(&inst.func_id).filter(|rows| owes(rows)) else {
+            continue;
+        };
+        let Ok(top) = build_in(program, &inst, own, &written, fns, names) else {
+            continue;
+        };
+        let mut tys: HashMap<NodeId, &Type> = HashMap::new();
+        for body in top.frames() {
+            for n in &body.names {
+                if let Some(b) = n.binding {
+                    tys.insert(b, &n.ty);
+                }
+            }
+        }
+        for r in rows.iter_mut() {
+            if let (DropKind::Release(_, ty), Some(t)) = (&mut r.kind, tys.get(&r.binding)) {
+                *ty = (*t).clone();
+            }
+        }
+    }
+}
 
 /// The kernel's placement of each frame of `top`, in frame order.
 fn placements(

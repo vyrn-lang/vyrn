@@ -1,0 +1,2 @@
+a_both_without_await_is_refused.vyrn:9:0: `both` waits, and its call has no `await` or `fork`
+  fix: write `await` to wait for it here, or `fork` to run it in a task of its own

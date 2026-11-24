@@ -2310,6 +2310,29 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// Refuses a `fork` of `name` that answers `ret` where no task can start: through a
+    /// function value, inside a `region`, whose arena the task may outlive, or of a call
+    /// whose result holds a task.
+    fn forkable(
+        &self,
+        name: &str,
+        form: &CallForm,
+        ret: &Type,
+        line: usize,
+        scope: &Scope,
+    ) -> Result<(), Diagnostic> {
+        if *form == CallForm::Plain && self.lookup(scope, name).is_some() {
+            return Err(cerr!(line, ForkValue, name = DeclName(name)));
+        }
+        if !self.region_floor.borrow().is_empty() {
+            return Err(cerr!(line, ForkInRegion));
+        }
+        if self.contains_task(ret) {
+            return Err(cerr!(line, ForkTaskResult, ty = ret));
+        }
+        Ok(())
+    }
+
     /// Whether `ty` contains a `Task<T>` anywhere, through named types and
     /// type arguments. A `fn` type holds none.
     fn contains_task(&self, ty: &Type) -> bool {
@@ -4152,6 +4175,10 @@ impl<'a> Checker<'a> {
                 let t = self
                     .call(name, at, args, type_args, *line, scope, expected, fn_ret)
                     .map_err(|d| spelled_at(d, *line, id.col(), name))?;
+                if *mark == Mark::Fork {
+                    self.forkable(name, form, &t, *line, scope)
+                        .map_err(|d| spelled_at(d, *line, id.col(), name))?;
+                }
                 let t = match mark {
                     Mark::Fork => Type::Task(Box::new(t)),
                     _ => t,

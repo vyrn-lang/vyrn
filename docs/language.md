@@ -320,41 +320,39 @@ fn main() -> Int64 {
 }
 ```
 
-- `fork` marks a call, as `await` does: a call of a named function or a method. `fork` before anything else is refused: ``fork` starts a call in a task of its own, and `n` is no call``. `let fork = 1` is a binding, and `fork(x)` a call of it.
+- `fork` marks a call, as `await` does: a call of a declared function or a method. `fork` before anything else is refused: ``fork` starts a call in a task of its own, and `n` is no call``. `let fork = 1` is a binding, and `fork(x)` a call of it.
+- A task holds nothing it could outlive, so `fork` is refused through a function value, over a call specialized on one, inside a `region`, and of a call whose result holds a task: ``fork` cannot start a task inside a `region`: the task may outlive the region's arena``.
 - The task owns every argument, as a `consume` parameter does: a named heap argument moves into it, and a `modify` argument is refused, because the task may outlive the place.
 - A call that does not wait is refused: ``fork` starts a call that waits, and `square` does not wait``.
 - Forking does not wait, so a function that only forks does not wait. A forker that joins waits, by `join`.
 - A `Task<T>` is must-use: every path joins it, cancels it, hands it to a `consume` parameter or returns it. `drop t` is refused, because a task ends by `join` or `cancel`. Module state cannot hold a task, and a lambda cannot consume one it captures.
-- A task cancelled where it waits releases what a `return` there would, and so cancels every task it holds. If the host cancels a task's wait, the task ends cancelled, and `join` of it is cancelled where it waits.
+- A task cancelled where it waits releases what a `return` there would, and so cancels every task it holds. If the host cancels a task's wait, the task ends cancelled. Its owner learns it only by waiting for it: a `join`, `both`, `race`, `joinAll` or `room` that waits for the task is cancelled where it waits, and one that starts after the task ended is cancelled at once.
 - A trap ends the task it happens in, and its `join` is cancelled.
 - Tasks move in wake order, and a task's end readies only the task that joins it, so the same deliveries print the same bytes.
 
 #### Running calls at once
 
-`both` and `race` from `std/task` run two waiting calls at once. Their arguments are the calls, not their values: `both` starts each and returns `Both { first, second }` once both finished; `race` returns `First(a)` or `Second(b)` for the first to finish.
+`std/task` waits for several tasks at once, in plain Vyrn over `Task<T>`. `both` returns `Both { first, second }` once both tasks returned; `race` returns `First(a)` or `Second(b)` for the first to return and cancels the other where it waits.
 
 ```vyrn
 import { both, race, sleep, Race } from "std/task"
 
 fn page(id: Int64) -> String {
-    let r = await both(getPosts(id), getLikes(id))
-    return match await race(render(r.first, r.second), sleep(2000)) {
+    let r = await both(fork getPosts(id), fork getLikes(id))
+    return match await race(fork render(r.first, r.second), fork sleep(2000)) {
         First(html) => html,
         Second(_) => "timed out",
     }
 }
 ```
 
-- The two calls are one call's arguments. A `modify` or `consume` argument of one branch may not name a place the other names, by path as in one call, so `both(fill(p.a), fill(p.b))` is accepted and `both(fill(p.a), fill(p.a))` is refused. A `read` argument is shared.
-- The arguments of both branches are evaluated first, in order. Then the first branch starts and runs to its first wait, then the second. The host's deliveries decide which branch moves next, so the same deliveries print the same bytes.
-- `race` takes the first branch, in argument order, that has finished once both started; after that, the first to finish. It cancels the other where it waits, and that branch releases what it holds, as a cancelled wait does. A loser that finished is released.
-- If the host cancels a wait inside a branch, `both` or `race` cancels the other branch and is cancelled itself.
-- A branch is a call of a function. Anything else is refused: ``each branch of `both` is a call of a function, which `both` starts and waits for``.
-- A branch that does not wait finishes when it starts. `await` on a `both` or `race` whose branches do not wait is refused, as it is on any call that does not wait; without `await`, `both(f(), g())` calls `f`, then `g`, and `race` returns `First` of the first.
-- No task outlives the call that started it: `both` and `race` return only after each branch finished or was cancelled.
-
-`each(xs, f)` calls `f` on every element at once and returns the results in index order; `timeout(ms, f)` is `race(f(), sleep(ms))`, giving `Some` of the result or `None`. Both are `std/task` code over `both` and `race`, so their calls start in order and a timed-out call is cancelled where it waits. `f` is a function, because an argument call would run before `each` or `timeout` starts: `await each(urls, fetchPage)`, `await timeout(500, fetchHome)`. An `f` that does not wait finishes at its start, so `each` calls it in index order.
-- A lambda waits as a function does, and a call that passes one to a `fn` parameter calls it directly: `await timeout(500, () -> await fetchPage(url))`.
+- The forks start in the order they are written, each to its first wait. The host's deliveries decide which task moves next, so the same deliveries print the same bytes.
+- `race` takes the first task, in argument order, that has returned once both started; after that, the first to return. A loser that returned is released.
+- If one task is cancelled, `both` cancels the other and is cancelled itself.
+- `timeout(ms, t)` is `race(t, fork sleep(ms))`: `Some` of the result, or `None`, and `t` is cancelled where it waits.
+- `joinAll(ts)` waits for an array of tasks and returns the results in index order; a `for` that forks one task per element and `joinAll` run a call per element at once.
+- A `Group<T>` holds tasks of one result type, at most `limit` running at once: `await room(g)` before each fork waits until fewer than the limit run, `add(g, fork f(x))` adds the task, and `joinGroup(g)` or `cancelGroup(g)` ends them. A group is must-use.
+- A lambda waits as a function does, and a call that passes one to a `fn` parameter calls it directly.
 - An `await` inside a `region` builds: the region has an arena of its own, so tasks that wait inside regions at once never share one ([memory.md](memory.md)).
 - A call through a function value waits when its type waits (Function types), and is marked `await` as any waiting call is: `await handler(req)`.
 
@@ -362,7 +360,7 @@ fn page(id: Int64) -> String {
 
 `fn(A, B) -> R` is a type. A function value can be a named function or a lambda, and it can be stored in a binding, a field, an array, a map, an `Option` or module state. A function value reads every argument, so a function with a `consume` or `modify` parameter is not a value of any `fn` type.
 
-A `fn` type waits when a function of its signature that the program stores as a value waits; nothing spells it, because the compiler infers it as it infers every effect. Each call through a value of a waiting type is marked `await`, and a call without the mark is refused, naming the value: `` `f` waits, and its call has no `await` ``. A function that does not wait is a value of a waiting type too: its call finishes where it starts, as a branch of `both` that does not wait.
+A `fn` type waits when a function of its signature that the program stores as a value waits; nothing spells it, because the compiler infers it as it infers every effect. Each call through a value of a waiting type is marked `await`, and a call without the mark is refused, naming the value: `` `f` waits, and its call has no `await` ``. A function that does not wait is a value of a waiting type too: its call finishes where it starts.
 
 ```vyrn
 type Transform = fn(Int64) -> Int64
@@ -834,6 +832,8 @@ Each line is a program the compiler refuses, and the reason.
 - An `if` expression with no `else`: every branch must yield a value.
 - Arithmetic on two different number types: nothing widens by itself.
 - A value used after it moved or was consumed: it has one owner.
+- A `fork` of a call that does not wait, with a `modify` argument, through a function value, or inside a `region`: a task may outlive its forker, so it owns everything it holds.
+- A `Task<T>` dropped, kept in module state or never joined or cancelled: a task ends by `join` or `cancel`.
 - A constant that breaks a `where` clause: the type cannot hold it.
 - A parameter's `where` clause that names a later or a `modify` parameter: it would not hold for the whole call.
 - A call whose argument the flow does not show sorted, by the order a fact clause names: a fact has no run-time check.

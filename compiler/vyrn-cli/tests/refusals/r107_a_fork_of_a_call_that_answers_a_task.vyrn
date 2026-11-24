@@ -1,0 +1,18 @@
+import { sleep, join, cancel } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn wrap(ms: Int64) -> Task<Int64> {
+    await sleep(ms)
+    return fork pause(ms)
+}
+
+fn main() -> Int64 {
+    let tt = fork wrap(2)
+    let inner = await join(tt)
+    print("\{await join(inner)}")
+    return 0
+}

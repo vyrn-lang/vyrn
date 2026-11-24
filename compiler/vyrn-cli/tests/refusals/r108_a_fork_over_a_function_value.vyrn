@@ -1,0 +1,21 @@
+import { sleep, both, Both } from "std/task"
+
+fn slow(x: Int64) -> Int64 {
+    await sleep(1)
+    return x + 100
+}
+
+fn call(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
+    return await f(x)
+}
+
+fn pair(f: fn(Int64) -> Int64) -> Int64 {
+    let r = await both(fork call(f, 1), fork call(f, 2))
+    return r.first + r.second
+}
+
+fn main() -> Int64 {
+    print(await pair(slow))
+    print(await pair(x -> x * 10))
+    return 0
+}

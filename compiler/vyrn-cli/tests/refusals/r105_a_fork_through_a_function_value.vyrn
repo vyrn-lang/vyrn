@@ -1,0 +1,12 @@
+import { sleep, join } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn main() -> Int64 {
+    let f: fn(Int64) -> Int64 = pause
+    let t = fork f(3)
+    return await join(t)
+}

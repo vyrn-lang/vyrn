@@ -47,7 +47,7 @@ fn main() -> Int64 {
     show(await fetchText(upstream + "/latin"))
     show(await fetchText(closed + "/"))
     show(await fetchText("ftp://127.0.0.1/"))
-    match await timeout(200, slow) {
+    match await timeout(200, fork slow()) {
         Some(r) => show(r),
         None => print("slow: timed out"),
     }

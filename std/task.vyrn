@@ -12,10 +12,10 @@ export fn sleep(ms: Int64) {
     await hostSleep(ms)
 }
 
-/// The results of the two branches of a `both`, in argument order.
+/// The results of the two tasks of a `both`, in argument order.
 export type Both<A, B> = { first: A, second: B }
 
-/// The branch of a `race` that finished first, and its result.
+/// The task of a `race` that returned first, and its result.
 export type Race<A, B> = enum { First(A), Second(B) }
 
 /// Waits for `t` to end and returns its result. If `t` is cancelled, the
@@ -44,53 +44,146 @@ export fn cancel<T>(t: consume Task<T>) {
     taskFree(t, returned)
 }
 
-/// Runs two calls at once and waits for both: `await both(f(a), g(b))`.
-///
-/// Each argument is a call, and the two are one call's arguments, so a
-/// `modify` or `consume` argument of one may not be named by the other.
-/// `both` starts the first, runs it to its first wait, then starts the
-/// second. If one is cancelled, `both` cancels the other and is cancelled.
-/// Without `await`, no branch waits, and the calls run in order.
-export fn both<A, B>(first: consume A, second: consume B) -> Both<A, B> {
-    return Both { first: first, second: second }
-}
-
-/// Runs two calls at once and returns the first to finish, cancelling the
-/// other where it waits: `await race(f(a), sleep(500))`.
-///
-/// `race` starts both as `both` does. The first branch, in argument order,
-/// that has finished when the starts end wins; after that, the first to
-/// finish. A finished loser's result is released. Without `await`, no branch
-/// waits, and the first wins.
-export fn race<A, B>(first: consume A, second: consume B) -> Race<A, B> {
-    return First(first)
-}
-
-/// Calls `f` on every element of `xs` at once and waits for every call: the
-/// results, in index order. The calls start in index order, each to its first
-/// wait. If one is cancelled, the others are, and `each` is cancelled.
-export fn each<T, R>(xs: Array<T>, f: fn(T) -> R) -> Array<R> {
-    return await eachUpTo(xs, xs.length, f)
-}
-
-/// `each` over the first `n` elements of `xs`.
-fn eachUpTo<T, R>(xs: Array<T>, n: Int64, f: fn(T) -> R) -> Array<R> {
-    if n == 0 {
-        return []
+/// Waits for both tasks: their results, in argument order. If one is
+/// cancelled, `both` cancels the other and is cancelled.
+export fn both<A, B>(first: consume Task<A>, second: consume Task<B>) -> Both<A, B> {
+    let a = taskId(first)
+    let b = taskId(second)
+    while (stateOf(a) == 2 || stateOf(b) == 2) && stateOf(a) != 1 && stateOf(b) != 1 {
+        let op = newOp()
+        watch(a, op)
+        watch(b, op)
+        await taskWait(op)
     }
-    let r = await both(eachUpTo(xs, n - 1, f), f(xs[n - 1]))
-    let mut out = consume r.first
-    out.push(consume r.second)
-    return out
+    if stateOf(b) == 1 {
+        let y = await join(second)
+        let x = await join(first)
+        return Both { first: x, second: y }
+    }
+    let x = await join(first)
+    let y = await join(second)
+    return Both { first: x, second: y }
 }
 
-/// Waits for `f()` at most `ms` milliseconds: `Some` of its result, or `None`
-/// when the time ran out first, and `f` was cancelled where it waited.
-export fn timeout<T>(ms: Int64, f: fn() -> T) -> Option<T> {
-    return match await race(f(), sleep(ms)) {
+/// The first task to return, in argument order once both started, and its
+/// result: `await race(fork f(a), fork sleep(500))`. The other is cancelled
+/// where it waits, or released if it returned. If the first to end was
+/// cancelled, `race` is cancelled.
+export fn race<A, B>(first: consume Task<A>, second: consume Task<B>) -> Race<A, B> {
+    let a = taskId(first)
+    let b = taskId(second)
+    if stateOf(a) == 2 && stateOf(b) == 2 {
+        let op = newOp()
+        watch(a, op)
+        watch(b, op)
+        await taskWait(op)
+    }
+    if stateOf(a) == 0 || stateOf(b) == 2 {
+        cancel(second)
+        return First(await join(first))
+    }
+    cancel(first)
+    return Second(await join(second))
+}
+
+/// `Some` of `t`'s result if it returns within `ms` milliseconds, else `None`,
+/// and `t` is cancelled where it waits.
+export fn timeout<T>(ms: Int64, t: consume Task<T>) -> Option<T> {
+    return match await race(t, fork sleep(ms)) {
         First(v) => Some(v),
         Second(_) => None,
     }
+}
+
+/// Waits for every task: the results, in index order. If one is cancelled,
+/// the rest are, and `joinAll` is cancelled.
+export fn joinAll<T>(ts: consume Array<Task<T>>) -> Array<T> {
+    while live(ts) > 0 && !anyCancelled(ts) {
+        let op = newOp()
+        for t in ts {
+            watch(taskId(t), op)
+        }
+        await taskWait(op)
+    }
+    // Popped twice so the joins run in index order: a cancelled join releases
+    // the tasks still held, which cancels them.
+    let mut rest = ts
+    let mut ahead: Array<Task<T>> = []
+    while let Some(t) = rest.pop() {
+        ahead.push(t)
+    }
+    drop rest
+    let mut out: Array<T> = []
+    while let Some(t) = ahead.pop() {
+        out.push(await join(t))
+    }
+    drop ahead
+    return out
+}
+
+/// Tasks of one result type, at most `limit` of them running at once, joined
+/// or cancelled together.
+export type Group<T> = { tasks: Array<Task<T>>, limit: Int64 }
+
+impl MustUse for Group<T> {}
+
+/// An empty group whose tasks run at most `limit` at once.
+export fn group<T>(limit: Int64) -> Group<T> {
+    return Group { tasks: [], limit: limit }
+}
+
+/// Waits until fewer than the limit of `g`'s tasks run: call it before each
+/// `fork` the group will hold.
+export fn room<T>(g: modify Group<T>) {
+    while live(g.tasks) >= g.limit {
+        let op = newOp()
+        for t in g.tasks {
+            watch(taskId(t), op)
+        }
+        await taskWait(op)
+    }
+}
+
+/// Adds `t` to `g`.
+export fn add<T>(g: modify Group<T>, t: consume Task<T>) {
+    g.tasks.push(t)
+}
+
+/// Waits for every task of `g`: the results, in the order they were added.
+export fn joinGroup<T>(g: consume Group<T>) -> Array<T> {
+    let ts = consume g.tasks
+    drop g
+    return await joinAll(ts)
+}
+
+/// Cancels every task of `g` where it waits.
+export fn cancelGroup<T>(g: consume Group<T>) {
+    let ts = consume g.tasks
+    drop g
+    for t in consume ts {
+        cancel(t)
+    }
+}
+
+/// How many of `ts` run.
+fn live<T>(ts: Array<Task<T>>) -> Int64 {
+    let mut n: Int64 = 0
+    for t in ts {
+        if stateOf(taskId(t)) == 2 {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+/// Whether one of `ts` was cancelled.
+fn anyCancelled<T>(ts: Array<Task<T>>) -> Bool {
+    for t in ts {
+        if stateOf(taskId(t)) == 1 {
+            return true
+        }
+    }
+    return false
 }
 
 // The run queue. The host owns the event loop and delivers each completion
@@ -121,7 +214,7 @@ type Run = {
 
 /// An operation a task waits on: its id, the task, and what the wake
 /// delivered: a status, 2 until it came, 0 completed and 1 cancelled, and a
-/// payload. A task waits on one operation per branch that waits.
+/// payload. A task waits on one operation at a time.
 type Wait = { id: Int64, task: Int64, status: Int32, payload: Int64 }
 
 /// The tasks that run or wait.
@@ -364,9 +457,9 @@ fn payloadOf(id: Int64) -> Int64 {
     return waits[i].payload
 }
 
-/// A `both` or `race` cancels a branch by polling it between `cancelBegin`
-/// and `cancelEnd`: every wait the poll reaches is cancelled, so each frame
-/// on the branch takes its cancellation edge.
+/// `stop` cancels a task by resuming it between `cancelBegin` and
+/// `cancelEnd`: every wait the step reaches is cancelled, so each frame of the
+/// task takes its cancellation edge.
 fn cancelBegin() {
     cancelling = cancelling + 1
 }
@@ -463,8 +556,8 @@ fn taskTrapped() -> Int64 {
     return host
 }
 
-// A `region` that holds an `await` has an arena of its own, so tasks and fork
-// branches that wait inside regions never bump or free one arena out of
+// A `region` that holds an `await` has an arena of its own, so tasks that
+// wait inside regions never bump or free one arena out of
 // order. The emitter keeps the arena outside such a region in a local of the
 // frame and calls these by name: `regionSwap(0)` where the region opens,
 // `regionSwap` at each suspension and each resume inside it, `regionClose` at

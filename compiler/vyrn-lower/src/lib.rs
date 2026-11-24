@@ -603,12 +603,8 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                     let written: Vec<(String, Type)> = (at.iter())
                         .map(|(p, t)| (vyrn_frontend::ast::written_param(p).to_string(), t.clone()))
                         .collect();
-                    // An awaited `both` or `race` calls its branches, not its own body.
-                    if !matches!(e, Expr::Call { mark: vyrn_frontend::ast::Mark::Await, name, .. } if crate::core::fork_form(name).is_some())
-                    {
-                        self.calls
-                            .push((callee.clone(), written.iter().cloned().collect()));
-                    }
+                    self.calls
+                        .push((callee.clone(), written.iter().cloned().collect()));
                     if !written.is_empty() {
                         self.facts.solved.insert(key, written);
                     }

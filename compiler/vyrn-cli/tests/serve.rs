@@ -1605,7 +1605,7 @@ fn upstream() -> Upstream {
 }
 
 /// A `handle` that fetches from the upstream on `port`. `/timeout` gives a request that
-/// never answers 200 ms; `/trap` races one against a branch that traps; any other path
+/// never answers 200 ms; `/trap` races one against a task that traps; any other path
 /// is fetched from the upstream and its body answered.
 fn fetching_src(port: u16) -> String {
     r#"
@@ -1631,13 +1631,13 @@ fn boom(n: Int64) -> Int64 {
 
 fn handle(req: Request) -> Response {
     if req.path == "/timeout" {
-        return match await timeout(200, hang) {
+        return match await timeout(200, fork hang()) {
             Some(_) => reply("answered"),
             None => reply("fallback"),
         }
     }
     if req.path == "/trap" {
-        return match await race(hang(), boom(1)) {
+        return match await race(fork hang(), fork boom(1)) {
             First(_) => reply("answered"),
             Second(_) => reply("trap missed"),
         }

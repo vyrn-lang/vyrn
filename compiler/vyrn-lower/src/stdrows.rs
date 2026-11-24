@@ -651,9 +651,7 @@ fn mark_code(c: &Call) -> usize {
     let mark = match c.mark {
         Mark::None => 0,
         Mark::Await => 1,
-        Mark::Branch => 2,
-        Mark::Fork => 3,
-        Mark::Both(n) => 4 + n,
+        Mark::Fork => 2,
     };
     mark * 4 + usize::from(c.passes) * 2 + usize::from(c.born)
 }
@@ -664,9 +662,7 @@ fn mark_of(code: usize) -> (Mark, bool, bool) {
     let mark = match code / 4 {
         0 => Mark::None,
         1 => Mark::Await,
-        2 => Mark::Branch,
-        3 => Mark::Fork,
-        n => Mark::Both(n - 4),
+        _ => Mark::Fork,
     };
     (mark, code & 2 != 0, code & 1 != 0)
 }

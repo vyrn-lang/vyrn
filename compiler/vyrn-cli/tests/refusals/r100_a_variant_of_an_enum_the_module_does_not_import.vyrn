@@ -1,9 +1,14 @@
 // A pattern names a variant of the scrutinee's enum, which another module
 // declares: the module that matches imports the enum, and so its variants.
-import { race } from "std/task"
+import { race, sleep } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
 
 fn main() -> Int64 {
-    match race(1, 2) {
+    match await race(fork pause(1), fork pause(2)) {
         First(v) => print("first \{v}"),
         Second(v) => print("second \{v}"),
     }

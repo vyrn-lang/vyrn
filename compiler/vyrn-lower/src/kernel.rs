@@ -262,8 +262,7 @@ fn writes_of<'s>(
     w
 }
 
-/// The globals the call row `r` may store into: its callee's, or every
-/// branch's of a fork.
+/// The globals the call row `r` may store into: its callee's.
 fn writes_state_of(state: &StateCallees, frame: Option<FnId>, r: &Rhs) -> Vec<String> {
     state_of(r.callees(), frame, state)
 }
@@ -843,7 +842,10 @@ impl<'b> Kernel<'b> {
             Some(_) if s == "_" => rule!(OwedUnnamed, ty, release = "drop t"),
             Some(d) if *d == i.ty.to_string() => rule!(OwedDeclared, ty, s),
             Some(_) => rule!(OwedHeld, by, ty, s),
-            None if matches!(i.linear, Some(Linear::Task)) => rule!(OwedTask, s),
+            None if matches!(i.linear, Some(Linear::Task)) => match i.ty {
+                vyrn_frontend::ast::Type::Task(_) => rule!(OwedTask, s),
+                _ => rule!(OwedTasks, s),
+            },
             None => rule!(OwedStream, s),
         };
         let rule = match twice {

@@ -345,16 +345,6 @@ pub(crate) fn add_callees(top: &Body, fns: &HashMap<&str, (FnId, &Function)>, ou
                     add(g);
                 }
             }
-            for b in s
-                .awaits()
-                .iter()
-                .flat_map(|a| &a.fork)
-                .flat_map(|f| &f.branches)
-            {
-                if let Callee::Fn(g) = b.kind {
-                    add(g);
-                }
-            }
         }
         let runs = (b.names.iter()).flat_map(|i| &i.runs);
         runs.filter_map(|r| fns.get(r.as_str()))
@@ -641,7 +631,7 @@ impl World {
     /// The frames from `f` to one whose own statements read or store module
     /// state, on a shortest call path by the effect judgment, with the first
     /// global that frame names. `None` when a call into `f` reaches no module
-    /// state.
+    /// state but the run queue's.
     pub fn state_path(&self, f: FnId) -> Option<(Vec<FnId>, Option<&str>)> {
         let mut path = vec![f];
         self.state_use(f)
@@ -654,12 +644,12 @@ impl World {
             }
             path.push(next);
         }
-        let last = self.body_at(path[path.len() - 1]);
         let decls = self.ownership.proto.types();
-        Some((
-            path,
-            last.and_then(|b| crate::effects::first_global(b, decls)),
-        ))
+        let global = match self.body_at(path[path.len() - 1]) {
+            Some(b) => Some(crate::effects::first_global(b, decls)?),
+            None => None,
+        };
+        Some((path, global))
     }
 
     /// The file `f` is declared in, when that is not the root file and a call to `f` may

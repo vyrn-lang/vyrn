@@ -714,6 +714,37 @@ fn census() -> Vec<Row> {
             "`t` is a `Task<Int64>` and is never disposed",
             Kernel::Its,
         ),
+        row(
+            "r105_a_fork_through_a_function_value.vyrn",
+            "`fork` starts a call of a declared function or a method",
+            "`fork` starts a call of a declared function or a method, and `f` is a function value",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r106_a_fork_inside_a_region.vyrn",
+            "a task may outlive the region's arena",
+            "`fork` cannot start a task inside a `region`: the task may outlive the region's arena",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r107_a_fork_of_a_call_that_answers_a_task.vyrn",
+            "a task's result holds no task",
+            "`fork` cannot start a call that answers `Task<Int64>`, which holds a task",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r108_a_fork_over_a_function_value.vyrn",
+            "a task holds no function value",
+            "`fork` cannot start `call` over a function value: the task may outlive what the \
+             value captures",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r109_an_array_of_tasks_never_joined.vyrn",
+            "a value that holds tasks is must-use",
+            "`ts` is an `Array<Task<Int64>>` and is never disposed",
+            Kernel::Its,
+        ),
     ]
 }
 
@@ -725,7 +756,7 @@ fn a_refusal_sits_where_its_subject_is_spelled() {
         ("r99_a_dropped_must_use_method_call_result.vyrn", "9:5"),
         (
             "r100_a_variant_of_an_enum_the_module_does_not_import.vyrn",
-            "7:9",
+            "12:9",
         ),
     ] {
         let (_, text) = refusal(file, false);
