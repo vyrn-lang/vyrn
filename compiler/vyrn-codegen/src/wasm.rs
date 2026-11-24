@@ -822,12 +822,18 @@ struct Open {
 /// Rewrites `f`'s body to count itself: one call on entry and, before each instruction that
 /// leaves a straight run, the run's operations at the fuel meter's prices, prologue and
 /// epilogue included. A `memory.copy` or `memory.fill` also costs one operation per byte, which
-/// the rewrite adds from the length on the stack. The rewrite flushes where wasmtime does, so a
+/// the rewrite adds from the length on the stack. A `memory.grow` that succeeds costs one per
+/// page it asked for. The meter also charges a failed request of a constant 128 pages or
+/// fewer, but the emitter never asks for a constant number of pages. The rewrite flushes where wasmtime does, so a
 /// trap loses the same operations. Unreachable code costs nothing: a block's end is live only if its body falls
 /// through or a live branch targets it.
 fn count(f: &mut Frame, c: Counter) -> Vec<Instruction<'static>> {
     use Instruction as I;
-    let (saved, len) = (f.local(ValType::I32), f.local(ValType::I32));
+    let (saved, len, grown) = (
+        f.local(ValType::I32),
+        f.local(ValType::I32),
+        f.local(ValType::I32),
+    );
     let body = std::mem::take(&mut f.body);
     let mut out = Vec::with_capacity(body.len() * 2);
     let quiet = |i: usize| f.instrument_all || f.instrument.iter().any(|r| r.0 <= i && i < r.1);
@@ -875,6 +881,20 @@ fn count(f: &mut Frame, c: Counter) -> Vec<Instruction<'static>> {
                     let n = std::mem::take(&mut pending);
                     bump(c, c.row + 8, &[I::I64Const(n as i64)], &mut out);
                 }
+            }
+            if let I::MemoryGrow(_) = ins {
+                out.extend([I::LocalTee(len), ins, I::LocalTee(grown)]);
+                let pages = [
+                    I::LocalGet(len),
+                    I::I32Const(0),
+                    I::LocalGet(grown),
+                    I::I32Const(-1),
+                    I::I32Ne,
+                    I::Select,
+                    I::I64ExtendI32U,
+                ];
+                bump(c, c.row + 8, &pages, &mut out);
+                continue;
             }
             if matches!(ins, I::MemoryCopy { .. } | I::MemoryFill(_)) {
                 out.push(I::LocalTee(len));
