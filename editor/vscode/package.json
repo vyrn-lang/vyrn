@@ -54,19 +54,19 @@
         "language": "vyrn",
         "scopeName": "source.vyrn",
         "path": "./vyrn.tmLanguage.json",
-        "tokenTypes": { "constant.character.vyrn": "string" }
+        "tokenTypes": { "constant.character.vyrn": "string", "meta.template.expression.vyrn": "other" }
       },
       {
         "language": "von",
         "scopeName": "source.vyrn",
         "path": "./vyrn.tmLanguage.json",
-        "tokenTypes": { "constant.character.vyrn": "string" }
+        "tokenTypes": { "constant.character.vyrn": "string", "meta.template.expression.vyrn": "other" }
       },
       {
         "language": "vyx",
         "scopeName": "source.vyx",
         "path": "./vyx.tmLanguage.json",
-        "tokenTypes": { "constant.character.vyrn": "string" }
+        "tokenTypes": { "constant.character.vyrn": "string", "meta.template.expression.vyrn": "other" }
       },
       {
         "language": "syntax",

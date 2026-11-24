@@ -345,6 +345,36 @@ fn adopt_foreign(mut d: Diagnostic) -> Diagnostic {
     d
 }
 
+/// Appends the identifier, `.` and `::` tokens of `tokens`, moved to stand at
+/// 1-based `at`, then each interpolation hole's, in source order. A hole that
+/// does not lex has no tokens: its refusal is the parser's.
+fn token_infos(tokens: &[lexer::Token], at: (usize, usize), out: &mut Vec<TokenInfo>) {
+    for t in tokens {
+        let (line, col) = lexer::moved((t.line, t.col), at);
+        let text = match &t.tok {
+            Tok::Ident(s) => s.clone(),
+            Tok::Dot => ".".to_string(),
+            Tok::ColonColon => "::".to_string(),
+            Tok::TemplateStr { exprs, .. } => {
+                for hole in exprs {
+                    if let Ok(inner) = lexer::lex(&hole.src) {
+                        token_infos(&inner, lexer::moved((hole.line, hole.col), at), out);
+                    }
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        let end_col = col + text.chars().count();
+        out.push(TokenInfo {
+            text,
+            line,
+            col,
+            end_col,
+        });
+    }
+}
+
 fn analyze_inner(
     source: &str,
     linker: Option<Linker<'_>>,
@@ -358,31 +388,11 @@ fn analyze_inner(
     // Cache identifier tokens, for cursor mapping and for each declaration
     // name's column, plus `.` and `::` tokens: [`member_completions`] finds the
     // receiver before a `.foo` or `::P` through them. No name is `.` or `::`, so
-    // they do not affect [`resolve`] or the name-column search.
-    let tok_info: Vec<TokenInfo> = tokens
-        .iter()
-        .filter_map(|t| match &t.tok {
-            Tok::Ident(s) => Some(TokenInfo {
-                text: s.clone(),
-                line: t.line,
-                col: t.col,
-                end_col: t.col + s.chars().count(),
-            }),
-            Tok::Dot => Some(TokenInfo {
-                text: ".".to_string(),
-                line: t.line,
-                col: t.col,
-                end_col: t.col + 1,
-            }),
-            Tok::ColonColon => Some(TokenInfo {
-                text: "::".to_string(),
-                line: t.line,
-                col: t.col,
-                end_col: t.col + 2,
-            }),
-            _ => None,
-        })
-        .collect();
+    // they do not affect [`resolve`] or the name-column search. An
+    // interpolation hole's tokens stand where the hole does, so hover,
+    // completion and colour reach into `"\{t.name}"`.
+    let mut tok_info: Vec<TokenInfo> = Vec::new();
+    token_infos(&tokens, (1, 1), &mut tok_info);
     // First column of each keyword or operator token, per line, captured before
     // the parser takes `tokens`. [`pin_diagnostics`] pins a line-only diagnostic
     // to the keyword it is about.
@@ -1202,26 +1212,42 @@ pub fn member_context(source: &str, line: usize, col: usize) -> bool {
     i < chars.len() && (chars[i] == '.' || (chars[i] == ':' && i > 0 && chars[i - 1] == ':'))
 }
 
-/// Whether an odd number of unescaped `"` precede the 1-based `(line, col)`
-/// cursor on its line of `source`. A per-line scan to route completion; the
-/// completion functions re-lex.
+/// Whether the 1-based `(line, col)` cursor of `source` stands in string text on
+/// its line: inside a `"`, outside any `\{..}` hole of it. A per-line scan to
+/// route completion; the completion functions re-lex.
 pub fn string_context(source: &str, line: usize, col: usize) -> bool {
     let Some(line_text) = source.lines().nth(line.saturating_sub(1)) else {
         return false;
     };
     let mut in_str = false;
     let mut escaped = false;
+    // The brace depth each open hole started at, innermost last.
+    let mut holes: Vec<usize> = Vec::new();
+    let mut depth = 0;
     for ch in line_text.chars().take(col.saturating_sub(1)) {
         if in_str {
             if escaped {
                 escaped = false;
+                if ch == '{' {
+                    holes.push(depth);
+                    in_str = false;
+                }
             } else if ch == '\\' {
                 escaped = true;
             } else if ch == '"' {
                 in_str = false;
             }
-        } else if ch == '"' {
-            in_str = true;
+            continue;
+        }
+        match ch {
+            '"' => in_str = true,
+            '{' => depth += 1,
+            '}' if holes.last() == Some(&depth) => {
+                holes.pop();
+                in_str = true;
+            }
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
         }
     }
     in_str
