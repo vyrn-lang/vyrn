@@ -11,6 +11,9 @@
 const path = require("path");
 const fs = require("fs");
 
+// The language ids this extension contributes.
+const OWN_LANGUAGES = new Set(["vyrn", "vyx", "von", "syntax", "vyrn-dsl"]);
+
 /** @param {import("vscode").ExtensionContext} context */
 function activate(context) {
   const vsc = require("vscode");
@@ -30,6 +33,9 @@ function activate(context) {
   // binary is missing below); the "▶ Run dev server" lens additionally consults
   // `lspState.client` and simply stays hidden until the server is up.
   registerRun(context, vsc, lspState);
+  context.subscriptions.push(
+    vsc.commands.registerCommand("vyrn.associateLanguages", () => associateLanguages(vsc))
+  );
 
   // Where the language server comes from, first hit wins:
   //   1. the `vyrn.serverPath` setting;
@@ -97,6 +103,19 @@ function activate(context) {
     initializationOptions: () => ({
       costHints: vsc.workspace.getConfiguration("vyrn").get("costHints", true),
     }),
+    // A document the server claims through a `languages` entry reopens as
+    // `vyrn-dsl`, so its tab shows that language's icon; the reopened document
+    // comes back here and goes to the server. A generator input the server
+    // claims through `inputs` keeps its own language.
+    middleware: {
+      didOpen: (doc, next) =>
+        OWN_LANGUAGES.has(doc.languageId) || !readByModule(vsc, doc)
+          ? next(doc)
+          : vsc.languages.setTextDocumentLanguage(doc, "vyrn-dsl").then(
+              () => undefined,
+              () => next(doc)
+            ),
+    },
   };
 
   const client = new LanguageClient(
@@ -611,8 +630,91 @@ function quote(s) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * The `files.associations` that open every file a `languages` entry gives a
+ * module as `vyrn-dsl`. `manifests` holds each `vyrn.json`'s text and its
+ * directory relative to the workspace folder. VS Code matches a pattern with a
+ * `/` against the whole path and one without against the file name, so a glob
+ * below the folder's root is written under `**` and a root one as it is. An
+ * entry with `"module": null` serves no module and gets no association.
+ *
+ * @param {{ dir: string, text: string }[]} manifests
+ * @returns {Record<string, string>}
+ */
+function languageAssociations(manifests) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const { dir, text } of manifests) {
+    let languages;
+    try {
+      languages = JSON.parse(text).languages;
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(languages)) continue;
+    const base = dir.split(path.sep).join("/");
+    for (const l of languages) {
+      if (!l || typeof l.files !== "string" || l.module == null) continue;
+      const glob = base ? `${base}/${l.files}` : l.files;
+      const key = !glob.includes("/") || glob.startsWith("**/") ? glob : `**/${glob}`;
+      out[key] = "vyrn-dsl";
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether a module reads `doc`: the last `languages` entry of its nearest
+ * `vyrn.json` whose glob matches it names one. VS Code matches each glob
+ * relative to the manifest, as it matches the patterns the server registers.
+ *
+ * @param {typeof import("vscode")} vsc
+ * @param {import("vscode").TextDocument} doc
+ */
+function readByModule(vsc, doc) {
+  const dir = doc.uri.scheme === "file" ? findManifestDir(path.dirname(doc.uri.fsPath)) : null;
+  if (!dir) return false;
+  let languages;
+  try {
+    languages = JSON.parse(fs.readFileSync(path.join(dir, "vyrn.json"), "utf8")).languages;
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(languages)) return false;
+  const matches = (l) =>
+    l && typeof l.files === "string" &&
+    vsc.languages.match({ pattern: new vsc.RelativePattern(dir, l.files) }, doc) > 0;
+  const last = languages.findLast(matches);
+  return Boolean(last && last.module != null);
+}
+
+/**
+ * Writes the associations of every `vyrn.json` in each workspace folder into
+ * that folder's `.vscode/settings.json`, beside the ones already there.
+ *
+ * @param {typeof import("vscode")} vsc
+ */
+async function associateLanguages(vsc) {
+  let written = 0;
+  for (const folder of vsc.workspace.workspaceFolders || []) {
+    const pattern = new vsc.RelativePattern(folder, "**/vyrn.json");
+    const found = await vsc.workspace.findFiles(pattern, "**/node_modules/**");
+    const manifests = found.map((u) => ({
+      dir: path.relative(folder.uri.fsPath, path.dirname(u.fsPath)),
+      text: fs.readFileSync(u.fsPath, "utf8"),
+    }));
+    const add = languageAssociations(manifests);
+    if (!Object.keys(add).length) continue;
+    const files = vsc.workspace.getConfiguration("files", folder.uri);
+    const have = files.inspect("associations")?.workspaceFolderValue || {};
+    await files.update("associations", { ...have, ...add }, vsc.ConfigurationTarget.WorkspaceFolder);
+    written += Object.keys(add).length;
+  }
+  vsc.window.showInformationMessage(`Vyrn: ${written} language association(s) written.`);
+}
+
 function deactivate() {}
 
 // `onPath` and `beside` are exported for `test/resolve.test.mjs`. VS Code reads
 // `activate`/`deactivate` and ignores the rest.
-module.exports = { activate, deactivate, onPath, beside };
+module.exports = { activate, deactivate, onPath, beside, languageAssociations };
