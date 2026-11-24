@@ -14,7 +14,7 @@ globalThis.location = {
   search: "",
 };
 
-const { pinLinks } = await import("../vyrn-nav.js");
+const { pinLinks, onNavEnd } = await import("../vyrn-nav.js");
 
 const anchor = (href) => {
   const attrs = { href };
@@ -46,4 +46,15 @@ test("a fragment and an absolute link stay as written", () => {
 
 test("an empty page has nothing to pin", () => {
   pinLinks(root([]), "https://vyrn-lang.github.io/docs.html");
+});
+
+test("a painted page's links name the URL it was painted for, wherever the address bar is", () => {
+  const links = [anchor("install.html"), anchor("#main")];
+  globalThis.document = root(links);
+  location.href = "https://vyrn-lang.github.io/docs/std/strings.html";
+  onNavEnd({ detail: { url: "https://vyrn-lang.github.io/" } });
+  assert.deepEqual(
+    links.map((a) => a.getAttribute("href")),
+    ["https://vyrn-lang.github.io/install.html", "#main"]
+  );
 });
