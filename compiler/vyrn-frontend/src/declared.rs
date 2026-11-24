@@ -302,11 +302,7 @@ impl Owned {
             // The stream lowering pushes its own release; answering here too
             // would release it twice.
             Type::Stream(_) => None,
-            // A task's release is `cancel`, which ends it where it waits.
-            Type::Task(_) => Some(DropKind::Release(
-                format!("{}cancel", crate::loader::TASK_PREFIX),
-                ty.clone(),
-            )),
+            t @ Type::Task(_) => builtin_release(&t).map(|f| DropKind::Release(f, ty.clone())),
             Type::Int
             | Type::IntN { .. }
             | Type::Float
@@ -351,6 +347,13 @@ impl Owned {
             | Type::App(..) => None,
         }
     }
+}
+
+/// Returns the runtime function a built-in `ty` is released by, as a declared
+/// `impl Owned` is released by its `release`. A task's release is `cancel`,
+/// which ends it where it waits.
+pub fn builtin_release(ty: &Type) -> Option<String> {
+    matches!(ty, Type::Task(_)).then(|| format!("{}cancel", crate::loader::TASK_PREFIX))
 }
 
 /// Returns the name of a type `ty` reaches from itself, if any. A structural

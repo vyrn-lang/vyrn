@@ -52,6 +52,8 @@ a `consume` parameter always takes its argument, whatever the type.
 `x.copy()` makes an independent deep copy. It is the only copy of heap the
 language makes; no assignment, call or return copies heap on its own. A type
 can replace the structural copy with `impl Copy for T { fn copy(self) -> T }`.
+A value that holds a type with a release and no `impl Copy`, such as a
+`Task<T>`, has no structural copy: the copy would release it twice.
 
 Every move diagnostic ends with a menu of `fix:` lines. `vyrn fix <file>`
 applies the one entry that is an edit, `.copy()`. It refuses the others,

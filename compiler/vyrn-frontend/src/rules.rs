@@ -548,11 +548,11 @@ rules! {
     SwapRemoveArity { got } "`swapRemove` takes 1 argument (an index), got {got}";
     ArrayOpIndex { op, i } "`{op}` index must be an Int64, found {i}";
     ToArrayReceiver { other } "`toArray` needs a SmallArray, found {other}";
-    CopyOwned { declared }
-        "`copy` cannot copy `{declared}`: it declares `impl Owned for \
-        {declared}`, so only `{declared}` knows what duplicating it means. Say what \
-        duplicating it means with `impl Copy for {declared}`, or copy the parts you \
-        need";
+    CopyOwned { owned }
+        "`copy` cannot copy `{owned}`: it has a release and no `impl Copy`, so a \
+        field-by-field copy would release it twice"
+        fix "copy the parts you need; a type's own module may declare what a copy means \
+        with `impl Copy`";
     CopyStream {}
         "`copy` cannot copy a Stream: a stream is a cursor over a \
         producer, not a container. Collect it first (`collect`), then copy the array";

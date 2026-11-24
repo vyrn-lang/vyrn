@@ -1,0 +1,2 @@
+copy_from_refuses_a_task.vyrn:13:8: `copy` cannot copy `Task<Int64>`: it has a release and no `impl Copy`, so a field-by-field copy would release it twice
+  fix: copy the parts you need; a type's own module may declare what a copy means with `impl Copy`

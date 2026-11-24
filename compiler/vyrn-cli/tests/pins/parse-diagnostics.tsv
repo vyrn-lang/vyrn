@@ -420,10 +420,12 @@ compiler/vyrn-cli/tests/check/contract_members_may_name_declared_types_and_open_
 compiler/vyrn-cli/tests/check/contract_of_rejects_a_name_that_is_not_a_contract.vyrn	0	cbf29ce484222325	20	17	0aa76822ba37d4b7
 compiler/vyrn-cli/tests/check/copy_dispatches_for_a_self_referring_type.vyrn	0	cbf29ce484222325	20	19	94d77e287110998b
 compiler/vyrn-cli/tests/check/copy_dispatches_to_a_declared_impl.vyrn	0	cbf29ce484222325	20	18	c7c0e2265627e27e
+compiler/vyrn-cli/tests/check/copy_from_refuses_a_task.vyrn	0	cbf29ce484222325	20	14	e8813f550a242ca6
 compiler/vyrn-cli/tests/check/copy_of_a_scalar_is_the_value.vyrn	0	cbf29ce484222325	20	16	9e61f459d096a522
 compiler/vyrn-cli/tests/check/copy_refuses_a_declared_container_1.vyrn	0	cbf29ce484222325	20	19	d586cac569e7fb20
 compiler/vyrn-cli/tests/check/copy_refuses_a_declared_container_2.vyrn	0	cbf29ce484222325	20	19	7860c48991c5fb39
 compiler/vyrn-cli/tests/check/copy_refuses_a_stream.vyrn	0	cbf29ce484222325	20	15	382126484927d611
+compiler/vyrn-cli/tests/check/copy_refuses_a_task.vyrn	0	cbf29ce484222325	20	14	f91a2a4607f70840
 compiler/vyrn-cli/tests/check/copy_sees_an_owned_container_behind_a_masked_sibling_option.vyrn	0	cbf29ce484222325	20	20	94ff1f14c4a61094
 compiler/vyrn-cli/tests/check/copy_takes_no_arguments.vyrn	0	cbf29ce484222325	20	16	716d74fdedff81a3
 compiler/vyrn-cli/tests/check/copy_types_as_its_receiver_1.vyrn	0	cbf29ce484222325	20	18	c17db45e1b5ec910

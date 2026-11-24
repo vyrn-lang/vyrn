@@ -2218,14 +2218,14 @@ impl<'a> Checker<'a> {
         (self.impls.get(protocol, key)).is_some_and(|i| dispatches_on(&i.ty, self.types))
     }
 
-    /// Refuses a structural copy of `t`: a type with a declared `impl Owned`
-    /// inside (a field copy would run its release twice), a `Stream` (two
-    /// consumers, one cursor) and a self-referring type, whose copy never
-    /// bottoms out (the backends overflowed the stack).
+    /// Refuses a structural copy of `t`: a type with a release inside (a field
+    /// copy would run it twice), a `Stream` (two consumers, one cursor) and a
+    /// self-referring type, whose copy never bottoms out (the backends
+    /// overflowed the stack).
     fn structural_copy(&self, t: &Type, line: usize) -> Result<(), Diagnostic> {
         let mut owned_seen = std::collections::HashSet::new();
-        if let Some(declared) = self.declared_owned_in(t, &mut owned_seen) {
-            return Err(cerr!(line, CopyOwned, declared));
+        if let Some(owned) = self.declared_owned_in(t, &mut owned_seen) {
+            return Err(cerr!(line, CopyOwned, owned));
         }
         if matches!(self.base(t), Type::Stream(_)) {
             return Err(cerr!(line, CopyStream));
@@ -2236,10 +2236,11 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
-    /// The first type in `ty`, itself or a part, that declares `impl Owned`.
-    /// A record holding one cannot be copied field by field: the
-    /// declared `release` would run over both copies. Do not bound the depth;
-    /// `copy`'s refusal has no bound.
+    /// The first type in `ty`, itself or a part, that has a release: it
+    /// declares `impl Owned`, or it is built in with one
+    /// ([`crate::declared::builtin_release`]). A record holding one cannot be
+    /// copied field by field: the release would run over both copies. Do not
+    /// bound the depth; `copy`'s refusal has no bound.
     fn declared_owned_in(
         &self,
         ty: &Type,
@@ -2255,8 +2256,12 @@ impl<'a> Checker<'a> {
         if matches!(ty, Type::Named(_) | Type::App(..)) && !seen.insert(format!("{ty:?}")) {
             return None;
         }
+        let base = self.base(ty);
+        if crate::declared::builtin_release(&base).is_some() {
+            return Some(ty.to_string());
+        }
         let mut deeper = |t: &Type| self.declared_owned_in(t, seen);
-        match self.base(ty) {
+        match base {
             Type::ArrayN(t, _)
             | Type::Array(t)
             | Type::SmallArray(t, _)
