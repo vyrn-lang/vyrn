@@ -724,6 +724,9 @@ rules! {
     AwaitMissing { callee }
         "`{callee}` waits, and its call has no `await` or `fork`"
         fix "write `await` to wait for it here, or `fork` to run it in a task of its own";
+    AwaitMissingValue { callee }
+        "`{callee}` waits, and its call has no `await`"
+        fix "write `await` before the call";
     AwaitNoWait { callee } "`await` marks a call that waits, and `{callee}` does not wait";
     ForkValue { name }
         "`fork` starts a call of a declared function or a method, and `{name}` is a \

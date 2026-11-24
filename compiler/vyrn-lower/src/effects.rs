@@ -235,6 +235,10 @@ impl Judged<'_> {
             let r = match (waits, at, c.mark) {
                 (true, Waiting::Initializer, _) => rule!(InitializerWaits, callee),
                 (false, _, Mark::Fork) => rule!(ForkNoWait, callee),
+                // `fork` starts no call through a value (ForkValue).
+                (true, Waiting::Body, Mark::None) if c.through.is_some() => {
+                    rule!(AwaitMissingValue, callee)
+                }
                 (true, Waiting::Body, Mark::None) => rule!(AwaitMissing, callee),
                 (false, _, Mark::Await) if by_value => return None,
                 (false, _, Mark::Await) => rule!(AwaitNoWait, callee),
