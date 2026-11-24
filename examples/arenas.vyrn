@@ -49,7 +49,7 @@ fn polls(n: Int64) -> Int64 {
 }
 
 fn main() -> Int64 {
-    let r = await both(worker("x", 10), worker("y", 15))
+    let r = await both(fork worker("x", 10), fork worker("y", 15))
     print("\{r.first + r.second}")
     print(await label(5))
     print("\{await polls(3)} polls")

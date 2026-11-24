@@ -1,0 +1,10 @@
+import { join } from "std/task"
+
+fn square(n: Int64) -> Int64 {
+    return n * n
+}
+
+fn main() -> Int64 {
+    let t = fork square(7)
+    return await join(t)
+}

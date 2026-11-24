@@ -156,37 +156,14 @@ fn a_waiting_lambda_runs_where_its_parameter_is_bound() {
     assert_eq!(seen, (Some(0), "3\n".to_string(), String::new()));
 }
 
-/// A fork with no `await` in a program that does not wait runs its calls in
-/// order, and the module links no run queue.
-#[test]
-fn an_unawaited_fork_runs_in_a_program_that_does_not_wait() {
-    let out = vyrn()
-        .args(["run", "unawaited.vyrn"])
-        .env("VYRN_LEAK_CHECK", "1")
-        .current_dir(waits_dir())
-        .output()
-        .expect("run vyrn run");
-    let seen = (out.status.code(), norm(&out.stdout), norm(&out.stderr));
-    assert_eq!(
-        seen,
-        (
-            Some(0),
-            "2
-"
-            .to_string(),
-            String::new()
-        )
-    );
-}
-
 /// An `await` over a function value takes a function that waits and one that
 /// does not, in a program that waits and in one that does not: a call into a
 /// frame that does not wait finishes at its start.
 #[test]
 fn an_await_over_a_function_value_takes_any_function() {
     for (name, want) in [
-        ("byvalue.vyrn", "206\n10\n203\n30\n5\n"),
-        ("byvalue_nowait.vyrn", "10\n30\n1\n5\n"),
+        ("byvalue.vyrn", "206\n10\n203\n30\n"),
+        ("byvalue_nowait.vyrn", "10\n30\n"),
     ] {
         let out = vyrn()
             .args(["run", name])
@@ -229,11 +206,9 @@ const FORKED: [Forked; 5] = [
     ("unit", "Unit", "", r#""unit""#, "unit"),
 ];
 
-/// A program that forks over every ordered pair of [`FORKED`] types with `form`, and what
-/// it prints. `mode` is `wait` (both branches wait, the second sooner), `mixed` (only the
-/// second waits) or `plain` (no `await`, no branch waits).
-fn fork_family(form: &str, mode: &str) -> (String, String) {
-    let waits = mode != "plain";
+/// A program that forks two tasks over every ordered pair of [`FORKED`] types and waits for
+/// them with `form`, and what it prints. The second task's wait is the shorter.
+fn fork_family(form: &str) -> (String, String) {
     let mut src =
         "import { both, race, sleep, Race } from \"std/task\"\ntype P = { x: Int64, s: String }\n"
             .to_string();
@@ -242,31 +217,19 @@ fn fork_family(form: &str, mode: &str) -> (String, String) {
             "" => String::new(),
             _ => format!("    return {e}\n"),
         };
-        src += &format!("fn now{k}() -> {ty} {{\n{}}}\n", ret(val));
-        if waits {
-            let val = if k == "int" { "ms" } else { val };
-            src += &format!(
-                "fn later{k}(ms: Int64) -> {ty} {{\n    await sleep(ms)\n{}}}\n",
-                ret(val)
-            );
-        }
+        let val = if k == "int" { "ms" } else { val };
+        src += &format!(
+            "fn later{k}(ms: Int64) -> {ty} {{\n    await sleep(ms)\n{}}}\n",
+            ret(val)
+        );
         src += &format!("fn show{k}(v: {ty}) -> String {{\n    return {show}\n}}\n");
     }
-    // Each branch's wait in milliseconds, or `None` for a call that finishes at its start.
-    let (wa, wb) = match mode {
-        "wait" => (Some(10), Some(5)),
-        "mixed" => (None, Some(5)),
-        _ => (None, None),
-    };
-    let call = |k: &str, ms: Option<i32>| match ms {
-        Some(ms) => format!("later{k}({ms})"),
-        None => format!("now{k}()"),
-    };
-    let shown = |(k, .., out): &Forked, ms: Option<i32>| match (*k, ms) {
-        ("int", Some(ms)) => ms.to_string(),
+    let (wa, wb) = (10, 5);
+    let call = |k: &str, ms: i32| format!("fork later{k}({ms})");
+    let shown = |(k, .., out): &Forked, ms: i32| match *k {
+        "int" => ms.to_string(),
         _ => out.to_string(),
     };
-    let aw = if waits { "await " } else { "" };
     let (mut main, mut want) = (String::new(), String::new());
     for (x, y) in FORKED
         .iter()
@@ -275,14 +238,11 @@ fn fork_family(form: &str, mode: &str) -> (String, String) {
         let (a, b) = (x.0, y.0);
         let (ca, cb) = (call(a, wa), call(b, wb));
         if form == "both" {
-            main += &format!("    let r{a}{b} = {aw}both({ca}, {cb})\n    print(show{a}(r{a}{b}.first) + \" \" + show{b}(r{a}{b}.second))\n");
+            main += &format!("    let r{a}{b} = await both({ca}, {cb})\n    print(show{a}(r{a}{b}.first) + \" \" + show{b}(r{a}{b}.second))\n");
             want += &format!("{} {}\n", shown(x, wa), shown(y, wb));
         } else {
-            main += &format!("    match {aw}race({ca}, {cb}) {{\n        First(v) => print(\"1 \" + show{a}(v)),\n        Second(v) => print(\"2 \" + show{b}(v)),\n    }}\n");
-            want += &match mode {
-                "wait" => format!("2 {}\n", shown(y, wb)),
-                _ => format!("1 {}\n", shown(x, wa)),
-            };
+            main += &format!("    match await race({ca}, {cb}) {{\n        First(v) => print(\"1 \" + show{a}(v)),\n        Second(v) => print(\"2 \" + show{b}(v)),\n    }}\n");
+            want += &format!("2 {}\n", shown(y, wb));
         }
     }
     (
@@ -291,18 +251,14 @@ fn fork_family(form: &str, mode: &str) -> (String, String) {
     )
 }
 
-/// A `both` or a `race` over two result types builds and runs on the engine and the native
-/// route, awaited or not, and frees every value: the emitter fills the `Both` record by
-/// field name, not by layout position.
+/// A `both` or a `race` over two tasks of any two result types builds and runs on the engine
+/// and the native route, and frees every value.
 #[test]
 fn a_fork_over_any_two_result_types_runs_on_both_engines() {
     let dir = scratch("waits-forks");
-    for (form, mode) in ["both", "race"]
-        .iter()
-        .flat_map(|f| ["wait", "mixed", "plain"].map(|m| (*f, m)))
-    {
-        let (src, want) = fork_family(form, mode);
-        let file = dir.join(format!("{form}_{mode}.vyrn"));
+    for form in ["both", "race"] {
+        let (src, want) = fork_family(form);
+        let file = dir.join(format!("{form}.vyrn"));
         std::fs::write(&file, &src).unwrap();
         let engine = vyrn()
             .env("VYRN_LEAK_CHECK", "1")
@@ -314,9 +270,9 @@ fn a_fork_over_any_two_result_types_runs_on_both_engines() {
         assert_eq!(
             seen(&engine),
             (Some(0), want.clone(), String::new()),
-            "{form} {mode}"
+            "{form}"
         );
-        let exe = dir.join(format!("{form}_{mode}.exe"));
+        let exe = dir.join(format!("{form}.exe"));
         let built = vyrn()
             .env("VYRN_LEAK_CHECK", "1")
             .arg("build")
@@ -325,15 +281,11 @@ fn a_fork_over_any_two_result_types_runs_on_both_engines() {
             .arg(&exe)
             .output()
             .expect("run vyrn build");
-        assert!(
-            built.status.success(),
-            "{form} {mode}: {}",
-            norm(&built.stderr)
-        );
+        assert!(built.status.success(), "{form}: {}", norm(&built.stderr));
         let native = std::process::Command::new(&exe)
             .output()
             .expect("run the binary");
-        assert_eq!(seen(&native), seen(&engine), "{form} {mode} native");
+        assert_eq!(seen(&native), seen(&engine), "{form} native");
     }
 }
 

@@ -1,0 +1,49 @@
+// Tasks are values: `fork` starts a call in a task of its own, `join` waits
+// for it, and `cancel` ends it where it waits. A task is must-use, so every
+// path joins, cancels or hands on each one.
+
+import { sleep, join, cancel, group, room, add, joinGroup, Group } from "std/task"
+
+fn pause(label: String, ms: Int64) -> Int64 {
+    print("start \{label}")
+    await sleep(ms)
+    print("end \{label}")
+    return ms
+}
+
+// Forking does not wait, so a function that only forks does not wait.
+fn start(ms: Int64) -> Task<Int64> {
+    return fork pause("started", ms)
+}
+
+// Cancelled where it waits, a task cancels the tasks it holds.
+fn holder(ms: Int64) -> Int64 {
+    let inner = fork pause("held", ms * 2)
+    await sleep(ms)
+    return ms + await join(inner)
+}
+
+fn main() -> Int64 {
+    let a = fork pause("a", 30)
+    let b = start(10)
+    let x = await join(b)
+    await sleep(10)
+    print("waited")
+    let y = await join(a)
+    let h = fork holder(5)
+    await sleep(1)
+    cancel(h)
+    print("joined \{x} \{y}")
+    // A group runs at most two of its tasks at once.
+    let mut g: Group<Int64> = group(2)
+    for ms in [5, 3, 4, 1, 2] {
+        await room(g)
+        add(g, fork pause("g\{ms}", ms))
+    }
+    let mut sum: Int64 = 0
+    for ms in await joinGroup(g) {
+        sum = sum + ms
+    }
+    print("group \{sum}")
+    return 0
+}

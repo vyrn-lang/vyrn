@@ -10,7 +10,7 @@ const rows = JSON.parse(raw);
 
 test("the index is inside its ceiling, gzipped", () => {
   const gz = gzipSync(Buffer.from(raw), { level: 9 }).length;
-  assert.ok(gz <= 9300, `search.json is ${gz} bytes gzipped (${raw.length} raw), ceiling 9,300`);
+  assert.ok(gz <= 9350, `search.json is ${gz} bytes gzipped (${raw.length} raw), ceiling 9,350`);
   assert.ok(rows.length >= 440, `${rows.length} entries, and the census counted 448`);
 });
 

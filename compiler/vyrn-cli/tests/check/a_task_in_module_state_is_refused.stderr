@@ -1,0 +1,1 @@
+a_task_in_module_state_is_refused.vyrn:3:0: `Option<Task<Int64>>` may not be module state: a task has one owner, which joins or cancels it

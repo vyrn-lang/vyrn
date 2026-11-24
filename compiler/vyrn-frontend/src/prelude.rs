@@ -450,6 +450,7 @@ fn table() -> Vec<Builtin> {
     let arr = |e: Type| Type::Array(Box::new(e));
     let opt = |e: Type| Type::option(e);
     let stm = |e: Type| Type::Stream(Box::new(e));
+    let task = |e: Type| Type::Task(Box::new(e));
     let u8_ = || Type::IntN {
         bits: 8,
         signed: false,
@@ -1053,6 +1054,37 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Effect(Unit))
             .home("std/task")
             .hover("hostDone(task, status, result) -> Unit — tell the host that the task it started as `task` ended: 0 with `result`, or 1 cancelled; only `std/task`'s run queue calls it"),
+        // A task's block, which `fork` allocates: `std/task` is the one caller, and reads
+        // the task's state before it takes or frees one.
+        b("taskId")
+            .sig(row("taskId", &["T"], &[("t", Read, task(t()))], Int, &[]))
+            .spec(Spec::Tasks)
+            .home("std/task")
+            .hover("taskId(t) -> Int64 — the run queue's id of the task `t`; only `std/task` calls it"),
+        b("taskTake")
+            .sig(row("taskTake", &["T"], &[("t", Consume, task(t()))], t(), &[]))
+            .spec(Spec::Tasks)
+            .fresh()
+            .home("std/task")
+            .hover("taskTake(t) -> T — the result of the task `t`, which returned, and its block freed; only `std/task` calls it"),
+        b("taskFree")
+            .sig(row(
+                "taskFree",
+                &["T"],
+                &[("t", Consume, task(t())), ("returned", Read, Bool)],
+                Unit,
+                &[],
+            ))
+            .spec(Spec::Tasks)
+            .home("std/task")
+            .hover("taskFree(t, returned) -> Unit — free the block of the task `t`, which ended, and its result when it returned; only `std/task` calls it"),
+        // A wait on one of the run queue's own operations, which no host starts.
+        b("taskWait")
+            .sig(row("taskWait", &[], &[("op", Read, Int)], Unit, &[]))
+            .spec(Spec::HostWait(Unit))
+            .effect(Waits)
+            .home("std/task")
+            .hover("taskWait(op) -> Unit — wait until the run queue delivers its operation `op`; only `std/task` calls it"),
         // A step of a task the host started: `std/task`'s run queue is the one caller.
         // It runs the task's code, which may trap.
         b("hostResume")
@@ -1483,6 +1515,8 @@ pub enum Spec {
     /// `hostResume(root, frame)`: one more step of the task the host started
     /// at `root`, a call of the emitter's dispatcher over the roots.
     Resumes,
+    /// `taskId`, `taskTake` and `taskFree`: the block of a task `fork` started.
+    Tasks,
 }
 
 /// Returns the seeded row for the name a call site carries.

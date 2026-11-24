@@ -26,16 +26,13 @@ compiler/vyrn-cli/tests/check/a_binding_shadows_a_variant_of_its_name.vyrn	0	cbf
 compiler/vyrn-cli/tests/check/a_block_lambda_to_a_generic_parameter_needs_its_return_type.vyrn	0	cbf29ce484222325	20	16	89dd7fc339e31d52
 compiler/vyrn-cli/tests/check/a_body_is_checked_under_each_declaration_of_its_name.vyrn	0	cbf29ce484222325	20	19	b200a2f27b6796c5
 compiler/vyrn-cli/tests/check/a_borrow_of_module_state_ends_at_an_await.vyrn	0	cbf29ce484222325	20	19	8aae02ddc1a6fff6
-compiler/vyrn-cli/tests/check/a_both_without_await_runs_its_calls_in_order.vyrn	0	cbf29ce484222325	20	17	33a1a1584eb753bd
+compiler/vyrn-cli/tests/check/a_both_without_await_is_refused.vyrn	0	cbf29ce484222325	20	17	66fa53e010c1b070
 compiler/vyrn-cli/tests/check/a_bounded_receiver_cannot_dispatch_a_projection.vyrn	0	cbf29ce484222325	20	17	b22218861c83683d
 compiler/vyrn-cli/tests/check/a_braced_enum_takes_a_trailing_comma.vyrn	0	cbf29ce484222325	20	15	f7761912d315a13f
-compiler/vyrn-cli/tests/check/a_branch_that_does_not_wait_finishes_at_its_start.vyrn	0	cbf29ce484222325	20	16	36362012c3c37236
-compiler/vyrn-cli/tests/check/a_branch_that_is_no_call_is_refused.vyrn	0	cbf29ce484222325	20	17	65db751ac582e93c
 compiler/vyrn-cli/tests/check/a_concrete_chain_dispatches.vyrn	0	cbf29ce484222325	20	19	cefbe67e9f588396
 compiler/vyrn-cli/tests/check/a_constant_outside_every_member_of_a_union_is_refused.vyrn	0	cbf29ce484222325	20	20	db51976e4a1d78df
 compiler/vyrn-cli/tests/check/a_consume_of_an_element_names_its_container_at_depth_1.vyrn	0	cbf29ce484222325	20	16	9690968e75af0554
 compiler/vyrn-cli/tests/check/a_consume_of_an_element_names_its_container_at_depth_2.vyrn	0	cbf29ce484222325	20	16	358dc6f6ff0b41cb
-compiler/vyrn-cli/tests/check/a_consume_of_one_name_in_two_branches_is_refused.vyrn	0	cbf29ce484222325	20	18	419dff1a0ccd3d9f
 compiler/vyrn-cli/tests/check/a_consume_parameter_of_an_element_names_its_container_at_depth_1.vyrn	0	cbf29ce484222325	20	19	334a2b534b4c5102
 compiler/vyrn-cli/tests/check/a_consume_parameter_of_an_element_names_its_container_at_depth_2.vyrn	0	cbf29ce484222325	20	17	ca7ed09edd50d647
 compiler/vyrn-cli/tests/check/a_consume_result_is_spelled_arrow_t.vyrn	1	9aeab586c4f85724	20	19	5d9471b6de33e929
@@ -71,6 +68,7 @@ compiler/vyrn-cli/tests/check/a_fn_field_reads_the_same_solve_in_either_literal_
 compiler/vyrn-cli/tests/check/a_fn_field_reads_the_same_solve_in_either_literal_order_2.vyrn	0	cbf29ce484222325	20	16	2949f4e74bd30027
 compiler/vyrn-cli/tests/check/a_fn_value_parameter_takes_a_wider_record.vyrn	0	cbf29ce484222325	20	17	0a37ba3d827b1d3c
 compiler/vyrn-cli/tests/check/a_for_loop_types_over_a_user_container.vyrn	0	cbf29ce484222325	20	19	74f209861c323e8d
+compiler/vyrn-cli/tests/check/a_fork_before_no_call_is_refused.vyrn	1	a75aa2934e17afba	20	20	6805d33054885a98
 compiler/vyrn-cli/tests/check/a_free_function_cannot_return_a_capability.vyrn	1	a498ffb8008f6925	20	20	169836534960f935
 compiler/vyrn-cli/tests/check/a_function_named_like_a_protocol_method_is_its_plain_call.vyrn	0	cbf29ce484222325	20	16	b33cd28d3657f30c
 compiler/vyrn-cli/tests/check/a_function_that_does_not_wait_is_a_value_of_a_waiting_type.vyrn	0	cbf29ce484222325	20	15	720abe3d460f33a4
@@ -145,7 +143,6 @@ compiler/vyrn-cli/tests/check/a_modify_field_beside_a_read_of_it_is_refused.vyrn
 compiler/vyrn-cli/tests/check/a_modify_field_beside_an_alias_of_it_is_refused.vyrn	0	cbf29ce484222325	20	19	850862f49ed2de39
 compiler/vyrn-cli/tests/check/a_modify_field_passed_twice_is_refused.vyrn	0	cbf29ce484222325	20	16	27ea802dc95de014
 compiler/vyrn-cli/tests/check/a_modify_of_module_state_beside_its_element_is_refused.vyrn	0	cbf29ce484222325	20	18	52c11ce38add5196
-compiler/vyrn-cli/tests/check/a_modify_of_one_path_in_two_branches_is_refused.vyrn	0	cbf29ce484222325	20	16	23e86c4a3238bc8d
 compiler/vyrn-cli/tests/check/a_modify_record_beside_its_field_is_refused.vyrn	0	cbf29ce484222325	20	15	7c5e81c16fd06419
 compiler/vyrn-cli/tests/check/a_module_declaring_a_len_function.vyrn	0	cbf29ce484222325	20	13	856c5fdbb72e481d
 compiler/vyrn-cli/tests/check/a_module_exporting_a_type_a_root_also_names.vyrn	0	cbf29ce484222325	20	18	44368ca7429f9404
@@ -162,6 +159,7 @@ compiler/vyrn-cli/tests/check/a_moved_builtin_names_the_module_it_moved_to_2.vyr
 compiler/vyrn-cli/tests/check/a_moved_builtin_names_the_module_it_moved_to_3.vyrn	0	cbf29ce484222325	20	14	2e9925f231bf6223
 compiler/vyrn-cli/tests/check/a_moved_builtin_names_the_module_it_moved_to_4.vyrn	0	cbf29ce484222325	20	14	320157d252540ff9
 compiler/vyrn-cli/tests/check/a_moved_name_is_declarable_again.vyrn	0	cbf29ce484222325	20	16	ab28a458b4884161
+compiler/vyrn-cli/tests/check/a_name_two_forks_take_is_refused.vyrn	0	cbf29ce484222325	20	18	23183797490b10e5
 compiler/vyrn-cli/tests/check/a_namespace_passed_as_an_argument_is_not_a_value.vyrn	0	cbf29ce484222325	20	15	d55aafde564b9dba
 compiler/vyrn-cli/tests/check/a_namespaced_variant_names_the_enum_that_declares_it.vyrn	0	cbf29ce484222325	20	13	8a4a46150f663c43
 compiler/vyrn-cli/tests/check/a_newline_escaped_in_a_hole_counts_its_line.vyrn	1	cb19a5d917a7de62	0	0	cbf29ce484222325
@@ -260,6 +258,7 @@ compiler/vyrn-cli/tests/check/a_stream_box_unboxed_twice_is_refused.vyrn	0	cbf29
 compiler/vyrn-cli/tests/check/a_stream_may_not_be_an_enum_payload.vyrn	0	cbf29ce484222325	20	18	4c160ce764400f56
 compiler/vyrn-cli/tests/check/a_strict_result_needs_the_ties_removed.vyrn	0	cbf29ce484222325	20	15	8762623d5fb6888e
 compiler/vyrn-cli/tests/check/a_struct_literal_after_self_names_a_namespace.vyrn	1	be670e4dc5da7934	20	20	e98bd56badb83da5
+compiler/vyrn-cli/tests/check/a_task_in_module_state_is_refused.vyrn	0	cbf29ce484222325	20	19	7f101c8bd45a6c73
 compiler/vyrn-cli/tests/check/a_test_word_before_no_string_is_no_declaration.vyrn	4	edc814065e1f6ced	20	20	e380fc681da56c93
 compiler/vyrn-cli/tests/check/a_type_cannot_take_the_name_of_option.vyrn	0	cbf29ce484222325	20	19	5b7c49440bc385ff
 compiler/vyrn-cli/tests/check/a_type_may_follow_a_projection_in_an_impl.vyrn	0	cbf29ce484222325	20	20	7a8292918570de0f
@@ -273,7 +272,6 @@ compiler/vyrn-cli/tests/check/a_value_in_a_nested_store_takes_its_places_type.vy
 compiler/vyrn-cli/tests/check/a_value_in_an_element_field_store_takes_its_places_type.vyrn	0	cbf29ce484222325	20	18	d645f024f71983dd
 compiler/vyrn-cli/tests/check/a_vector_does_not_mix_with_a_scalar_1.vyrn	0	cbf29ce484222325	20	16	c2c78ef4882e3caf
 compiler/vyrn-cli/tests/check/a_vector_does_not_mix_with_a_scalar_2.vyrn	0	cbf29ce484222325	20	15	7bb6cf0d89df05e0
-compiler/vyrn-cli/tests/check/a_waiting_branch_of_a_both_without_await_is_refused.vyrn	0	cbf29ce484222325	20	18	77afa206da95e2f9
 compiler/vyrn-cli/tests/check/a_waiting_call_without_await_is_refused.vyrn	0	cbf29ce484222325	20	15	77726ea7f56265f9
 compiler/vyrn-cli/tests/check/a_waiting_function_value_called_without_await_is_refused.vyrn	0	cbf29ce484222325	20	15	6ac1fcb663c330bd
 compiler/vyrn-cli/tests/check/a_waiting_value_a_std_function_calls_is_refused_at_the_call.vyrn	0	cbf29ce484222325	20	18	70bd66653c0048d0
@@ -303,7 +301,6 @@ compiler/vyrn-cli/tests/check/an_array_sorted_by_another_order_cannot_be_searche
 compiler/vyrn-cli/tests/check/an_associated_type_resolves_at_the_impl_and_not_through_a_bound_1.vyrn	0	cbf29ce484222325	20	20	1e3b7737c86696f4
 compiler/vyrn-cli/tests/check/an_associated_type_resolves_at_the_impl_and_not_through_a_bound_2.vyrn	0	cbf29ce484222325	20	16	481c36558ca6503c
 compiler/vyrn-cli/tests/check/an_await_before_no_call_is_refused.vyrn	1	3e87cb16b6050e37	20	19	6cc787a30eea5379
-compiler/vyrn-cli/tests/check/an_await_on_a_both_of_calls_that_do_not_wait_is_refused.vyrn	0	cbf29ce484222325	20	16	49caeb3295f92992
 compiler/vyrn-cli/tests/check/an_await_on_a_call_that_does_not_wait_is_refused.vyrn	0	cbf29ce484222325	20	16	4b54ccf708271395
 compiler/vyrn-cli/tests/check/an_await_on_an_element_read_is_refused.vyrn	0	cbf29ce484222325	20	17	0d6e6199198f7ab7
 compiler/vyrn-cli/tests/check/an_element_mismatch_names_the_field_it_reaches.vyrn	0	cbf29ce484222325	20	19	2402eaebcfa1d4bf
@@ -772,7 +769,6 @@ compiler/vyrn-cli/tests/check/the_region_heap_guard_terminates_on_a_recursive_re
 compiler/vyrn-cli/tests/check/the_sugar_names_cannot_be_optional.vyrn	0	cbf29ce484222325	20	17	94f106fb02e5322a
 compiler/vyrn-cli/tests/check/then_joins_orders_of_one_type.vyrn	0	cbf29ce484222325	20	19	e904c7e8bc72c88e
 compiler/vyrn-cli/tests/check/top_level_let_requires_initializer.vyrn	1	866121b1826eb2fa	20	20	e4af8102a2fa1d3e
-compiler/vyrn-cli/tests/check/two_branches_may_modify_two_fields.vyrn	0	cbf29ce484222325	20	16	80ed86b3a0aff9be
 compiler/vyrn-cli/tests/check/two_modules_cannot_implement_one_protocol_for_one_type.vyrn	0	cbf29ce484222325	20	17	3c3f72f811a9b50f
 compiler/vyrn-cli/tests/check/two_modules_cannot_share_an_extern_of_two_signatures.vyrn	0	cbf29ce484222325	20	20	8e28ab6fa3b24782
 compiler/vyrn-cli/tests/check/two_types_of_one_spelling_read_with_their_modules.vyrn	0	cbf29ce484222325	20	18	316bff69ba8fee8b
@@ -799,7 +795,7 @@ compiler/vyrn-cli/tests/cost/clauses.vyrn	0	cbf29ce484222325	20	18	ed32f46ae862d
 compiler/vyrn-cli/tests/cost/kernels.vyrn	0	cbf29ce484222325	20	17	3a3e7b1f7aff7452
 compiler/vyrn-cli/tests/cost/reasons.vyrn	0	cbf29ce484222325	20	16	fec1e876232be958
 compiler/vyrn-cli/tests/cost/traps.vyrn	0	cbf29ce484222325	20	17	8afe808dd6268f2d
-compiler/vyrn-cli/tests/fetch/roundtrip.vyrn	0	cbf29ce484222325	20	19	8c951a3e35a57e03
+compiler/vyrn-cli/tests/fetch/roundtrip.vyrn	0	cbf29ce484222325	20	17	5a311b5872ca2fc1
 compiler/vyrn-cli/tests/fetch/tls.vyrn	0	cbf29ce484222325	20	14	400cee2fd4777368
 compiler/vyrn-cli/tests/proved/core/bad.vyrn	0	cbf29ce484222325	20	16	278bf5d06d4f98e9
 compiler/vyrn-cli/tests/proved/core/scan.vyrn	0	cbf29ce484222325	20	17	3431b081d373a9fb
@@ -819,7 +815,16 @@ compiler/vyrn-cli/tests/refusals/r06_use_after_consume.vyrn	0	cbf29ce484222325	2
 compiler/vyrn-cli/tests/refusals/r07_moved_into_a_binding.vyrn	0	cbf29ce484222325	20	18	f7279700cc090516
 compiler/vyrn-cli/tests/refusals/r08_take_an_element.vyrn	0	cbf29ce484222325	20	13	76e6ca7c42758149
 compiler/vyrn-cli/tests/refusals/r09_nothing_to_take.vyrn	0	cbf29ce484222325	20	15	0d15147881574309
-compiler/vyrn-cli/tests/refusals/r100_a_variant_of_an_enum_the_module_does_not_import.vyrn	0	cbf29ce484222325	20	19	ac4c052c72b01523
+compiler/vyrn-cli/tests/refusals/r100_a_variant_of_an_enum_the_module_does_not_import.vyrn	0	cbf29ce484222325	20	15	a8584b537d3e0d1d
+compiler/vyrn-cli/tests/refusals/r101_a_fork_of_a_call_that_does_not_wait.vyrn	0	cbf29ce484222325	20	17	85adfd242e1535c5
+compiler/vyrn-cli/tests/refusals/r102_a_fork_with_a_modify_argument.vyrn	0	cbf29ce484222325	20	17	fccaf5d0730c2ab7
+compiler/vyrn-cli/tests/refusals/r103_a_drop_of_a_task.vyrn	0	cbf29ce484222325	20	17	dfae82fdb2f189d2
+compiler/vyrn-cli/tests/refusals/r104_a_task_never_joined_or_cancelled.vyrn	0	cbf29ce484222325	20	18	1a4437c1c504da73
+compiler/vyrn-cli/tests/refusals/r105_a_fork_through_a_function_value.vyrn	0	cbf29ce484222325	20	17	ff3892cfb67f39d3
+compiler/vyrn-cli/tests/refusals/r106_a_fork_inside_a_region.vyrn	0	cbf29ce484222325	20	17	19a92d4d97c19aef
+compiler/vyrn-cli/tests/refusals/r107_a_fork_of_a_call_that_answers_a_task.vyrn	0	cbf29ce484222325	20	16	bc4920078d102b0a
+compiler/vyrn-cli/tests/refusals/r108_a_fork_over_a_function_value.vyrn	0	cbf29ce484222325	20	16	f16efa678925c026
+compiler/vyrn-cli/tests/refusals/r109_an_array_of_tasks_never_joined.vyrn	0	cbf29ce484222325	20	18	2137a202624ec2a0
 compiler/vyrn-cli/tests/refusals/r10_consume_module_state.vyrn	0	cbf29ce484222325	20	16	e14dbb1f2e7c43c8
 compiler/vyrn-cli/tests/refusals/r11_consume_a_read_parameter.vyrn	0	cbf29ce484222325	20	16	b02883fcda15b8c1
 compiler/vyrn-cli/tests/refusals/r12_module_state_to_a_consume_parameter.vyrn	0	cbf29ce484222325	20	19	f1882cf2708151e9
@@ -1068,13 +1073,12 @@ compiler/vyrn-cli/tests/unlicensed/u12_module_state_to_a_consume_parameter_heapl
 compiler/vyrn-cli/tests/unlicensed/u13_an_arm_binder_to_a_consume_parameter.vyrn	0	cbf29ce484222325	20	18	72741e551ff16841
 compiler/vyrn-cli/tests/unlicensed/u25_consume_inside_a_loop_heapless.vyrn	0	cbf29ce484222325	20	17	011324d105f7c459
 compiler/vyrn-cli/tests/unlicensed/u25b_partial_take_across_iterations.vyrn	0	cbf29ce484222325	20	18	31af5e6360a6a630
-compiler/vyrn-cli/tests/waits/byvalue.vyrn	0	cbf29ce484222325	20	19	ebe7ff45301a0998
-compiler/vyrn-cli/tests/waits/byvalue_nowait.vyrn	0	cbf29ce484222325	20	18	8ea3080fe6d7bc2b
+compiler/vyrn-cli/tests/waits/byvalue.vyrn	0	cbf29ce484222325	20	18	26ba582a8bd10e65
+compiler/vyrn-cli/tests/waits/byvalue_nowait.vyrn	0	cbf29ce484222325	20	19	177f94587c670ba5
 compiler/vyrn-cli/tests/waits/lambda.vyrn	0	cbf29ce484222325	20	14	7e8a0ba1b59ddc36
 compiler/vyrn-cli/tests/waits/longsleep.vyrn	0	cbf29ce484222325	20	16	598eac905e55a826
-compiler/vyrn-cli/tests/waits/race.vyrn	0	cbf29ce484222325	20	17	5eaf328666292474
+compiler/vyrn-cli/tests/waits/race.vyrn	0	cbf29ce484222325	20	15	d06871689c622f4e
 compiler/vyrn-cli/tests/waits/result.vyrn	0	cbf29ce484222325	20	15	45a0b3aa47bcea81
-compiler/vyrn-cli/tests/waits/unawaited.vyrn	0	cbf29ce484222325	20	17	036b4dd0f4daf488
 examples/a1_afterjoin.vyrn	0	cbf29ce484222325	20	13	30f04885312703ea
 examples/a2_capture.vyrn	0	cbf29ce484222325	20	17	d14579e36e1493c2
 examples/a2_capture_escape.vyrn	0	cbf29ce484222325	20	18	aa841adb72cc068e
@@ -1082,7 +1086,7 @@ examples/a6_reassign.vyrn	0	cbf29ce484222325	20	14	febc66f93906dc6c
 examples/aliascontext.vyrn	0	cbf29ce484222325	20	17	1ef13a9892565605
 examples/appendowned.vyrn	0	cbf29ce484222325	20	19	32c76ab09f91b699
 examples/appendreserve.vyrn	0	cbf29ce484222325	20	20	c5ac3904d0dda401
-examples/arenas.vyrn	0	cbf29ce484222325	20	16	55bf46af3482d098
+examples/arenas.vyrn	0	cbf29ce484222325	20	14	71a6741258c98f22
 examples/args.vyrn	0	cbf29ce484222325	20	15	1ee5f6e19e20e3b6
 examples/argsdemo.vyrn	0	cbf29ce484222325	20	17	2864920a88dd3273
 examples/arrays.vyrn	0	cbf29ce484222325	20	17	e8cdf1fe4e63db25
@@ -1119,11 +1123,11 @@ examples/clearowned.vyrn	0	cbf29ce484222325	20	16	c78dcfc8b3c50580
 examples/clidemo.vyrn	0	cbf29ce484222325	20	19	d4ea5f478ad1eac1
 examples/clifail.vyrn	0	cbf29ce484222325	20	17	b68775e3cae3bbed
 examples/clock.vyrn	0	cbf29ce484222325	20	17	13ebe40f08c4873f
-examples/clockorder.vyrn	0	cbf29ce484222325	20	17	b73ac53a610213dc
+examples/clockorder.vyrn	0	cbf29ce484222325	20	16	b671ca69511cff1a
 examples/closures2.vyrn	0	cbf29ce484222325	20	18	7e204eb39e4e8ffd
 examples/codecbytes.vyrn	0	cbf29ce484222325	20	16	1d042fbfa63990e7
 examples/columns.vyrn	0	cbf29ce484222325	20	20	bbd30e14ad9f760d
-examples/concurrent.vyrn	0	cbf29ce484222325	20	17	2712a91321eb4a9c
+examples/concurrent.vyrn	0	cbf29ce484222325	20	18	1c91b135291271ad
 examples/consume.vyrn	0	cbf29ce484222325	20	18	d79c85e61f110245
 examples/consume_borrowed.vyrn	0	cbf29ce484222325	20	19	ce3f79cff0c1d44e
 examples/consume_handover.vyrn	0	cbf29ce484222325	20	19	8dd245edca1e3d74
@@ -1156,7 +1160,7 @@ examples/fallible.vyrn	0	cbf29ce484222325	20	19	b1948620d57ac704
 examples/falliblegeneric.vyrn	0	cbf29ce484222325	20	19	873717de4c51e5d4
 examples/fannkuch.vyrn	0	cbf29ce484222325	20	15	882e3c49e6b065d5
 examples/fannkuchperm.vyrn	0	cbf29ce484222325	20	15	5770e1e911b8677e
-examples/fanout.vyrn	0	cbf29ce484222325	20	19	cad2597b490b52ad
+examples/fanout.vyrn	0	cbf29ce484222325	20	17	21fac733b528183c
 examples/fasta.vyrn	0	cbf29ce484222325	20	18	282b624c0f9140a5
 examples/fib.vyrn	0	cbf29ce484222325	20	14	eb0897179c66da96
 examples/fieldmut.vyrn	0	cbf29ce484222325	20	17	1611f264af35da76
@@ -1187,7 +1191,7 @@ examples/genref.vyrn	0	cbf29ce484222325	20	16	80cfe38aae3c03c8
 examples/gentable.vyrn	0	cbf29ce484222325	20	16	dc558f427f79787c
 examples/gentablefail.vyrn	0	cbf29ce484222325	20	18	62a0d17aa1a948ad
 examples/graphql.vyrn	0	cbf29ce484222325	20	19	f408fcb34cd31ffc
-examples/handlers.vyrn	0	cbf29ce484222325	20	19	cec308d03c182180
+examples/handlers.vyrn	0	cbf29ce484222325	20	18	859174f33c7a0ea8
 examples/heapfieldkey.vyrn	0	cbf29ce484222325	20	18	c62e4acc87479e4b
 examples/heapkey.vyrn	0	cbf29ce484222325	20	16	c51fd6d23157e99e
 examples/herofield.vyrn	0	cbf29ce484222325	20	17	9a12f162985fac5d
@@ -1321,7 +1325,7 @@ examples/releasepayloads.vyrn	0	cbf29ce484222325	20	17	94476dbf06891b8b
 examples/renamed_apart_local.vyrn	0	cbf29ce484222325	20	17	43f96395de6d35ea
 examples/reservewrap.vyrn	0	cbf29ce484222325	20	17	44432c28677f12fa
 examples/rest.vyrn	0	cbf29ce484222325	20	19	699cac2e355e7263
-examples/results.vyrn	0	cbf29ce484222325	20	18	255ae246111fc0ee
+examples/results.vyrn	0	cbf29ce484222325	20	18	cc36829cc52b4a8d
 examples/revcomp.vyrn	0	cbf29ce484222325	20	17	59eae2904362372b
 examples/rpc.vyrn	0	cbf29ce484222325	20	19	690f44f69445b885
 examples/rpcsplit/server/api/items.vyrn	0	cbf29ce484222325	20	16	2d404077a4041497
@@ -1385,6 +1389,7 @@ examples/syntaxjson.vyrn	0	cbf29ce484222325	20	19	d34016082b390547
 examples/syntaxnest.vyrn	0	cbf29ce484222325	20	18	41d37c26a68c44ed
 examples/tagged.vyrn	0	cbf29ce484222325	20	18	89e6fc3589a5c921
 examples/tallybytes.vyrn	0	cbf29ce484222325	20	15	52bc84bfbacaedc0
+examples/tasks.vyrn	0	cbf29ce484222325	20	15	35b868f42e4ab449
 examples/templates.vyrn	0	cbf29ce484222325	20	14	3896a2e290631cf2
 examples/testing.vyrn	0	cbf29ce484222325	20	19	7a855069eb8489a1
 examples/textbytes.vyrn	0	cbf29ce484222325	20	17	5c2ee16702490e61
@@ -1517,7 +1522,7 @@ std/sum.vyrn	0	cbf29ce484222325	20	15	8c91500e0625df59
 std/symbolmap.vyrn	0	cbf29ce484222325	20	16	a2136b9a284642be
 std/syntax.vyrn	0	cbf29ce484222325	20	15	ee5f33230f1a8dc0
 std/syntaxreport.vyrn	0	cbf29ce484222325	20	13	f1876887806cf00e
-std/task.vyrn	0	cbf29ce484222325	20	15	60a812a24b4b99a6
+std/task.vyrn	0	cbf29ce484222325	20	17	daf6d46e8db36dbc
 std/text.vyrn	0	cbf29ce484222325	20	14	bc0918ce6f331d94
 std/tile.vyrn	0	cbf29ce484222325	20	18	0d5778cdb398a9d9
 std/time.vyrn	0	cbf29ce484222325	20	18	15f55a62a1512d82

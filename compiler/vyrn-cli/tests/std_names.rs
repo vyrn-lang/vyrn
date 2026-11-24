@@ -52,6 +52,10 @@ const REVIEWED: &[(&str, &str)] = &[
         "std/arrays and std/stream — the same operation on two containers",
     ),
     ("cli", "std/args' accessor and std/cli's generator"),
+    (
+        "join",
+        "std/code joins pieces and std/task joins a task; a program that needs both renames one",
+    ),
 ];
 
 #[test]

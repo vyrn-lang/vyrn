@@ -1,8 +1,8 @@
-// `both` and `race` run waiting calls at once. Each branch starts in argument
-// order and runs to its first `await`; the host's timers decide what ends
-// first. A race cancels its loser where it waits, and the loser's frame
+// `fork` runs waiting calls at once, and `both` and `race` wait for two tasks.
+// Each fork runs its task to its first `await`; the host's timers decide what
+// ends first. A race cancels its loser where it waits, and the loser's frame
 // releases what it holds.
-import { both, race, sleep, Race } from "std/task"
+import { both, race, join, sleep, Race } from "std/task"
 
 type Tally = { evens: Array<Int64>, odds: Array<Int64> }
 
@@ -19,18 +19,19 @@ fn word(label: String, ms: Int64) -> String {
     return "\{label} after \{ms}"
 }
 
-fn count(xs: modify Array<Int64>, from: Int64, ms: Int64) -> Int64 {
+fn count(from: Int64, ms: Int64) -> Array<Int64> {
+    let mut xs: Array<Int64> = []
     let mut i = from
     while i < 6 {
         await sleep(ms)
         xs.push(i)
         i = i + 2
     }
-    return xs.length
+    return xs
 }
 
 fn twice(label: String, ms: Int64) -> Int64 {
-    let r = await both(pause("\{label}.1", ms), pause("\{label}.2", ms * 2))
+    let r = await both(fork pause("\{label}.1", ms), fork pause("\{label}.2", ms * 2))
     return r.first + r.second
 }
 
@@ -39,25 +40,26 @@ fn square(n: Int64) -> Int64 {
 }
 
 fn main() -> Int64 {
-    let r = await both(pause("a", 30), pause("b", 10))
+    let r = await both(fork pause("a", 30), fork pause("b", 10))
     print("both: \{r.first} \{r.second}")
-    match await race(word("slow", 40), word("fast", 5)) {
+    match await race(fork word("slow", 40), fork word("fast", 5)) {
         First(s) => print("race: first \{s}"),
         Second(s) => print("race: second \{s}"),
     }
-    match await race(pause("work", 50), sleep(15)) {
+    match await race(fork pause("work", 50), fork sleep(15)) {
         First(ms) => print("done in \{ms}"),
         Second(_) => print("timed out"),
     }
-    let mut t = Tally { evens: [], odds: [] }
-    let c = await both(count(t.evens, 0, 4), count(t.odds, 1, 3))
-    print("counted \{c.first} \{c.second}: \{t.evens.length} evens, \{t.odds.length} odds")
-    let mixed = await both(square(7), pause("lone", 5))
-    print("mixed: \{mixed.first} \{mixed.second}")
+    let c = await both(fork count(0, 4), fork count(1, 3))
+    let t = Tally { evens: consume c.first, odds: consume c.second }
+    print("counted \{t.evens.length} \{t.odds.length}: \{t.evens.length} evens, \{t.odds.length} odds")
+    let squared = square(7)
+    let lone = await join(fork pause("lone", 5))
+    print("mixed: \{squared} \{lone}")
     let mut total: Int64 = 0
     let mut i: Int64 = 1
     while i <= 2 {
-        let n = await both(twice("t\{i}", i), word("w\{i}", 4))
+        let n = await both(fork twice("t\{i}", i), fork word("w\{i}", 4))
         print("\{n.second}")
         total = total + n.first
         i = i + 1

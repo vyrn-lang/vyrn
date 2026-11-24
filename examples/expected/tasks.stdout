@@ -1,0 +1,18 @@
+start a
+start started
+end started
+waited
+end a
+start held
+joined 10 30
+start g5
+start g3
+end g3
+start g4
+end g5
+start g1
+end g1
+start g2
+end g4
+end g2
+group 15

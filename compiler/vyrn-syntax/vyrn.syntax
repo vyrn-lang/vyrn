@@ -89,6 +89,7 @@ row ImplAssocTypeClash
 row ProjectionReceiver
 row InlineWhereBase
 row AwaitNotCall
+row ForkNotCall
 row LetPatternScrutinee
 row LetEmptyVariant
 row IndexAssignTarget
@@ -238,12 +239,13 @@ nest TypeAtom = RecordType / FnType / int / DottedType / NamedType
 FnType = 'fn' '(' list Type sep ',' until ')' ')' ('->' Type)?
 DottedType = &(ident '.') ident ('.' Ident)+ ('<' list Type sep ',' until '>' Close)?
 NamedType = Primitive
-          / &('Stream' / 'Array' / 'SmallArray' / 'Map' / 'Option' / 'Result' / 'Omit' / 'Pick' / 'Merge' / 'Partial' / 'Readonly') Constructor
+          / &('Stream' / 'Task' / 'Array' / 'SmallArray' / 'Map' / 'Option' / 'Result' / 'Omit' / 'Pick' / 'Merge' / 'Partial' / 'Readonly') Constructor
           / TypeName (?scoped / '<' list Type sep ',' until '>' Close)?
 Primitive = 'Int64' / 'Int8' / 'Int16' / 'Int32' / 'UInt8' / 'UInt16' / 'UInt32' / 'UInt64'
           / 'Float64' / 'Float32' / 'F32x4' / 'I32x4' / 'Mask32x4' / 'F64x2' / 'Mask64x2'
           / 'Bool' / 'String' / 'Unit' / 'Logger'
 Constructor = 'Stream' '<' Type Close
+            / 'Task' '<' Type Close
             / 'Array' '<' Type (',' (int / ^ArraySize))? Close
             / 'SmallArray' '<' Type (',' / ^SmallArrayNeedsCapacity) (int / ^SmallArrayCapacityType) Close
             / 'Map' '<' Type ',' Type Close
@@ -308,9 +310,11 @@ Expr = climb Unary {
 nest Unary = '-' Unary / '!' Unary / '~' Unary
            / &('consume' (ident / 'self')) 'consume' Postfix
            / &('await' (ident / 'self')) AwaitTail
+           / &('fork' (ident / 'self')) ForkTail
            / Postfix
-// The host refuses `await` over no call as this closes.
+// The host refuses `await` and `fork` over no call as these close.
 AwaitTail = 'await' Postfix
+ForkTail = 'fork' Postfix
 // Each link adds a node the later walks recurse into, so each counts toward `nest`.
 // `x::P.m(..)` calls `m` as protocol `P` declares it; `x::P` alone is no value,
 // and its refusal spells the receiver as written.

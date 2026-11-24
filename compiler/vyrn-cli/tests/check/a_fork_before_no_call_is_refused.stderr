@@ -1,0 +1,1 @@
+a_fork_before_no_call_is_refused.vyrn:3:13: `fork` starts a call in a task of its own, and `n` is no call

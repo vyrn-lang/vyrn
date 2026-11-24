@@ -1,0 +1,7 @@
+import { sleep } from "std/task"
+
+let mut pending: Option<Task<Int64>> = None
+
+fn main() -> Int64 {
+    return 0
+}

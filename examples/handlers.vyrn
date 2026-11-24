@@ -1,8 +1,7 @@
 // A function value of a type whose stored functions wait is awaited where it
 // is called. A function that does not wait is a value of that type too: its
-// call finishes where it starts. `both`, `race` and `each` take such values as
-// they take functions.
-import { both, race, each, sleep, Race } from "std/task"
+// call finishes where it starts. A task forks a function that calls the value.
+import { both, race, joinAll, sleep, Race } from "std/task"
 
 type Reply = { name: String, ms: Int64 }
 
@@ -16,6 +15,10 @@ fn fetch(ms: Int64) -> String {
 
 fn local(ms: Int64) -> String {
     return "local \{ms}"
+}
+
+fn step(s: Step, ms: Int64) -> String {
+    return await s(ms)
 }
 
 fn reply(ms: Int64) -> Reply {
@@ -34,13 +37,17 @@ fn main() -> Int64 {
     }
     let slow = steps[0]
     let quick = steps[2]
-    let r = await both(slow(30), quick(10))
+    let r = await both(fork step(slow.copy(), 30), fork step(quick.copy(), 10))
     print(r.first + ", " + r.second)
-    match await race(slow(50), quick(20)) {
+    match await race(fork step(slow.copy(), 50), fork step(quick.copy(), 20)) {
         First(a) => print("first: " + a),
         Second(b) => print("second: " + b),
     }
-    for page in await each([3, 1, 2], slow) {
+    let mut pages: Array<Task<String>> = []
+    for ms in [3, 1, 2] {
+        pages.push(fork step(slow.copy(), ms))
+    }
+    for page in await joinAll(pages) {
         print(page)
     }
     let make: fn(Int64) -> Reply = reply

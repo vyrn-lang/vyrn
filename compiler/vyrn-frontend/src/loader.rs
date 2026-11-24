@@ -377,7 +377,7 @@ fn site_stamp<'a>(file: &'a str, key: &'a str) -> impl FnMut(&mut Expr) + 'a {
     move |e: &mut Expr| {
         if let Expr::Call {
             form: _,
-            awaits: _,
+            mark: _,
             name,
             args,
             line,
@@ -1439,6 +1439,10 @@ pub const RT_MODULES: &[RtModule] = &[
             "task$payloadOf",
             "task$cancelBegin",
             "task$cancelEnd",
+            "task$cancel",
+            "task$taskFork",
+            "task$taskForked",
+            "task$waitFor",
         ]),
     },
     // The runtime, in every program. `std/mem` enters as `std/runtime`'s import;
@@ -5660,7 +5664,7 @@ impl BodyVisitMut for NsResolver<'_> {
             // sugar with the namespace as the first argument, which goes.
             Expr::Call {
                 form,
-                awaits: _,
+                mark: _,
                 name,
                 args,
                 type_args,
@@ -7095,7 +7099,7 @@ impl BodyVisit<'_> for RefNames<'_> {
             // namespaces, record the dotted spelling, not a bare `f`.
             Expr::Call {
                 form,
-                awaits: _,
+                mark: _,
                 name,
                 args,
                 line,

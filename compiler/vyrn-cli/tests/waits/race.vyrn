@@ -1,5 +1,5 @@
 // The host's deliveries decide a race: the timer it delivers first wins, and
-// the other branch is cancelled where it waits.
+// the other task is cancelled where it waits.
 import { race, sleep, Race } from "std/task"
 
 fn word(label: String, ms: Int64) -> String {
@@ -9,7 +9,7 @@ fn word(label: String, ms: Int64) -> String {
 }
 
 fn main() -> Int64 {
-    match await race(word("slow", 50), word("fast", 10)) {
+    match await race(fork word("slow", 50), fork word("fast", 10)) {
         First(s) => print("first: \{s}"),
         Second(s) => print("second: \{s}"),
     }

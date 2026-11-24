@@ -355,6 +355,8 @@ rules! {
         "extern fn `{name}` returns {ret}, which cannot cross the JS boundary \
         (allowed: Int64, sized ints, Float64, Float32, Bool, String, Unit)";
     GlobalUnit { name } "cannot bind module state `{name}` to a Unit value";
+    TaskState { ty }
+        "`{ty}` may not be module state: a task has one owner, which joins or cancels it";
     GlobalStream { name }
         "module state `{name}` may not be a `Stream`: a stream's \
         lifetime is a scope, and module state is never dropped";
@@ -720,14 +722,33 @@ rules! {
         "the `where` clause on the result of `{name}` reads `{param}`, a `{cap}` \
         parameter the body may change";
     AwaitMissing { callee }
+        "`{callee}` waits, and its call has no `await` or `fork`"
+        fix "write `await` to wait for it here, or `fork` to run it in a task of its own";
+    AwaitMissingValue { callee }
         "`{callee}` waits, and its call has no `await`"
         fix "write `await` before the call";
     AwaitNoWait { callee } "`await` marks a call that waits, and `{callee}` does not wait";
+    ForkValue { name }
+        "`fork` starts a call of a declared function or a method, and `{name}` is a \
+        function value"
+        fix "fork a function that calls `{name}`";
+    ForkTakesValue { callee }
+        "`fork` cannot start `{callee}` over a function value: the task may outlive what \
+        the value captures"
+        fix "fork a function that takes no function value, or `await` the call here";
+    ForkInRegion {}
+        "`fork` cannot start a task inside a `region`: the task may outlive the region's arena";
+    ForkTaskResult { ty }
+        "`fork` cannot start a call that answers `{ty}`, which holds a task"
+        fix "join or cancel the inner task in the call, and return its result";
+    ForkNoWait { callee } "`fork` starts a call that waits, and `{callee}` does not wait";
+    ForkModify { arg, callee, place }
+        "`fork` hands its task every argument, and argument {arg} of `{callee}` is \
+        `modify`: the task may outlive `{place}`"
+        fix "return the value from `{callee}` instead";
     AwaitInside { callee, param }
         "`{callee}` waits only because it calls `{param}` with no `await`"
         fix "pass a function that does not wait";
-    ForkBranch { form }
-        "each branch of `{form}` is a call of a function, which `{form}` starts and waits for";
     InitializerWaits { callee }
         "a module-state initializer cannot wait, and `{callee}` waits: state is set \
         before `main` runs";
@@ -913,6 +934,8 @@ rules! {
     NeedsField { name } "`{name}` needs at least one field, e.g. `{name}<T, field>`";
     NestingTooDeep { max } "nesting exceeds {max} levels";
     AwaitNotCall {} "`await` marks a call: write `await f(..)`";
+    ForkNotCall { operand }
+        "`fork` starts a call in a task of its own, and `{operand}` is no call";
     GlobalNeedsInit { name }
         "module state `{name}` needs an initializer: write `let {name} = <value>` \
         (top-level `let` has no default value)";
@@ -1164,6 +1187,12 @@ rules! {
     OwedStream { s }
         "a stream must be consumed with `for .. in`, passed to a `consume` parameter, \
         forwarded by returning it, or released with `close({s})`, on every path";
+    OwedTasks { s }
+        "`{s}` holds tasks: join or cancel each one, or hand `{s}` on, on every path";
+    DropTask { s }
+        "`drop` ends no task: wait for `{s}` with `await join({s})`, or end it with `cancel({s})`";
+    OwedTask { s }
+        "wait for `{s}` with `await join({s})`, or end it with `cancel({s})`";
     OwedDeclared { ty, s }
         "`{ty}` declares `impl MustUse`, so a value of it must be handed on by name on every \
         path: passed to a `consume` parameter, forwarded by returning it, or released with \

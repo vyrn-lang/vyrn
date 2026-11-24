@@ -1,2 +1,2 @@
-a_waiting_call_without_await_is_refused.vyrn:4:0: `sleep` waits, and its call has no `await`
-  fix: write `await` before the call
+a_waiting_call_without_await_is_refused.vyrn:4:0: `sleep` waits, and its call has no `await` or `fork`
+  fix: write `await` to wait for it here, or `fork` to run it in a task of its own

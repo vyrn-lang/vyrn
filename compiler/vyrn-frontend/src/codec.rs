@@ -338,6 +338,7 @@ mod tests {
             Type::ConstInt(8),
             Type::Map(b(Type::Str), b(Type::Int)),
             Type::Stream(b(Type::Int)),
+            Type::Task(b(Type::Int)),
             Type::Logger,
             Type::Fn(vec![Type::Int], b(Type::Unit)),
             Type::Lazy(b(Type::Int)),

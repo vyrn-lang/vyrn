@@ -1260,6 +1260,10 @@ pub enum Type {
     /// so `let a: Array<T> = s` cannot launder the obligation away. Its layout
     /// is a six-word header tagged over the producers, not `Array<T>`'s.
     Stream(Box<Type>),
+    /// A task `fork f(..)` started, whose call answers the type inside: owned
+    /// by one holder, must-use, joined or cancelled by `std/task`. Lowers to a
+    /// `ptr` to the task's block.
+    Task(Box<Type>),
     /// A handle from `logger(name)` that the five level methods are called on.
     /// Lowers to a `ptr` to its name.
     Logger,
@@ -1295,6 +1299,7 @@ macro_rules! children {
         ) = match $t {
             Type::Array(a)
             | Type::Stream(a)
+            | Type::Task(a)
             | Type::Partial(a)
             | Type::Lazy(a)
             | Type::ArrayN(a, _)
@@ -1467,6 +1472,7 @@ impl Type {
         "ConstInt",
         "Map",
         "Stream",
+        "Task",
         "Logger",
         "Fn",
         "Lazy",
@@ -1508,6 +1514,7 @@ impl Type {
             Type::ConstInt(_) => "ConstInt",
             Type::Map(..) => "Map",
             Type::Stream(_) => "Stream",
+            Type::Task(_) => "Task",
             Type::Logger => "Logger",
             Type::Fn(..) => "Fn",
             Type::Lazy(_) => "Lazy",
@@ -1612,6 +1619,7 @@ impl<'a> std::fmt::Display for Said<'a> {
             Type::ConstInt(n) => write!(f, "{n}"),
             Type::Map(k, v) => write!(f, "Map<{}, {}>", say(k), say(v)),
             Type::Stream(t) => write!(f, "Stream<{}>", say(t)),
+            Type::Task(t) => write!(f, "Task<{}>", say(t)),
             Type::Logger => write!(f, "Logger"),
             Type::Fn(params, ret) => {
                 let ps: Vec<String> = params.iter().map(|p| say(p).to_string()).collect();
@@ -1955,6 +1963,15 @@ pub enum CallForm {
     Protocol(String),
 }
 
+/// What the word before a call says of it: nothing, `await f(..)`, which waits
+/// for the call here, or `fork f(..)`, which starts it in a task of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Plain,
+    Await,
+    Fork,
+}
+
 impl CallForm {
     /// Whether `args[0]` is a written receiver.
     pub fn has_receiver(&self) -> bool {
@@ -1995,8 +2012,7 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
         form: CallForm,
-        /// Written `await f(..)`: the call waits, and the mark says so.
-        awaits: bool,
+        mark: Mark,
         /// Explicit type arguments, as in `fromJson<Shape>(s)`; usually empty.
         /// The checker seeds the solve with them and infers the rest, so a
         /// partial list is legal and an over-long one is refused. Backends read
@@ -2240,7 +2256,7 @@ impl Expr {
             name: name.into(),
             args,
             form: CallForm::Plain,
-            awaits: false,
+            mark: Mark::Plain,
             type_args: Vec::new(),
             line,
             id: Id::NEW,

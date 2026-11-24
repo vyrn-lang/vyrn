@@ -11,7 +11,7 @@ fn measure(name: String, ms: Int64) -> Reading {
 }
 
 export extern fn report(ms: Int64) -> String {
-    let r = await both(measure("a", ms), measure("b", ms + 1))
+    let r = await both(fork measure("a", ms), fork measure("b", ms + 1))
     return "\{r.first.name}=\{r.first.value} \{r.second.name}=\{r.second.value}"
 }
 

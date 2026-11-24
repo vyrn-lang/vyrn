@@ -218,14 +218,8 @@ impl Judged<'_> {
         (0..calls.len()).filter_map(move |j| {
             let c = &calls[j];
             let callee = DeclName(&c.callee);
-            let span = match c.mark {
-                Mark::Fork(n) => j + 1..j + 1 + n,
-                _ => j..j + 1,
-            };
-            let waits = span.clone().any(|b| self.waits(ks[b]));
-            let by_value = span
-                .into_iter()
-                .any(|b| self.waits_by_value(&calls[b], ks[b]));
+            let waits = self.waits(ks[j]);
+            let by_value = self.waits_by_value(c, ks[j]);
             if c.through.is_some() && c.mark == Mark::None && inside(i).is_some() {
                 return None;
             }
@@ -240,11 +234,17 @@ impl Judged<'_> {
             }
             let r = match (waits, at, c.mark) {
                 (true, Waiting::Initializer, _) => rule!(InitializerWaits, callee),
+                (false, _, Mark::Fork) => rule!(ForkNoWait, callee),
+                // `fork` starts no call through a value (ForkValue).
+                (true, Waiting::Body, Mark::None) if c.through.is_some() => {
+                    rule!(AwaitMissingValue, callee)
+                }
                 (true, Waiting::Body, Mark::None) => rule!(AwaitMissing, callee),
-                (false, _, Mark::Await | Mark::Fork(_)) if by_value => return None,
-                (false, _, Mark::Await | Mark::Fork(_)) => rule!(AwaitNoWait, callee),
-                (true, Waiting::Body, Mark::Await | Mark::Fork(_) | Mark::Branch)
-                | (false, _, Mark::None | Mark::Branch) => return None,
+                (false, _, Mark::Await) if by_value => return None,
+                (false, _, Mark::Await) => rule!(AwaitNoWait, callee),
+                (true, Waiting::Body, Mark::Await | Mark::Fork) | (false, _, Mark::None) => {
+                    return None
+                }
             };
             Some((c.line, r))
         })
@@ -279,7 +279,7 @@ impl Judged<'_> {
             u.awaits_at = u.awaits_at.or(f
                 .calls
                 .iter()
-                .find(|c| c.mark != Mark::None)
+                .find(|c| !matches!(c.mark, Mark::None | Mark::Fork))
                 .map(|c| c.line));
         }
         out
@@ -287,11 +287,15 @@ impl Judged<'_> {
 
     /// Per body, the body it reaches module state through on a shortest call
     /// path to a body whose own statements touch it. `None` for such a body
-    /// and for one that reaches no module state.
+    /// and for one that reaches no module state. The path passes no frame of
+    /// `std/task`: the run queue is each instance's scheduler, and a handler
+    /// that joins a task still runs under `--workers`.
     fn state_steps(&self) -> Vec<Option<usize>> {
-        let touches = |i: usize| self.effects[i].has(Effect::ModuleState);
-        let mut depth: Vec<Option<usize>> = (self.frames.iter())
-            .map(|f| f.own.has(Effect::ModuleState).then_some(0))
+        let queue =
+            |i: usize| (self.frames[i].name).starts_with(vyrn_frontend::loader::TASK_PREFIX);
+        let touches = |i: usize| self.effects[i].has(Effect::ModuleState) && !queue(i);
+        let mut depth: Vec<Option<usize>> = (0..self.frames.len())
+            .map(|i| (self.frames[i].own.has(Effect::ModuleState) && !queue(i)).then_some(0))
             .collect();
         let mut steps = vec![None; self.frames.len()];
         // Round `r` gives depth `r` to each touching body with an edge to depth
@@ -376,7 +380,7 @@ pub fn walk_frames(bodies: &[&Body], decls: &HashMap<String, TypeDecl>) -> Vec<W
 
 /// A frame's effect set, the globals it may store to, and whether it opens
 /// ([`StateUse::opens`]).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Fact(Effects, std::collections::BTreeSet<String>, bool);
 
 impl crate::fixpoint::Lattice for Fact {
@@ -411,6 +415,9 @@ pub fn judge<'a>(
     // The frame (plus one) whose edges last took a callee's bodies: many calls
     // to one callee add them once.
     let mut taken: Vec<usize> = Vec::new();
+    // Each fork's frame and callee: the forker takes the task's effects but `waits`.
+    let mut forks: Vec<(usize, usize)> = Vec::new();
+    let waits = Effects::of(Effect::Waits);
     for (i, f) in frames.iter().enumerate() {
         let mut e = f.own;
         let mut to: Vec<usize> = Vec::new();
@@ -439,7 +446,11 @@ pub fn judge<'a>(
             opens |=
                 c.through.is_some() || matches!(callee, Callee::Dispatched(_) | Callee::Unknown);
             match callee {
+                Callee::Atom(a) if c.mark == Mark::Fork => e = e.join(a.minus(waits)),
                 Callee::Atom(a) => e = e.join(*a),
+                Callee::Bodies(_) | Callee::Dispatched(_) if c.mark == Mark::Fork => {
+                    forks.push((i, k))
+                }
                 Callee::Bodies(idx) | Callee::Dispatched(idx) => {
                     taken.resize(taken.len().max(k + 1), 0);
                     if std::mem::replace(&mut taken[k], i + 1) != i + 1 {
@@ -469,8 +480,28 @@ pub fn judge<'a>(
         edges.push(to);
         resolved.push(ids);
     }
-    // Effect sets and the program's globals are finite, so the joins end.
-    let solved = crate::fixpoint::solve(own, &edges);
+    // Effect sets and the program's globals are finite, so the joins end. A task can
+    // reach its forker, so the solve repeats until no forker grows.
+    let solved = match forks.is_empty() {
+        true => crate::fixpoint::solve(own, &edges),
+        false => loop {
+            let solved = crate::fixpoint::solve(own.clone(), &edges);
+            let mut grew = false;
+            for &(i, k) in &forks {
+                let (Callee::Bodies(idx) | Callee::Dispatched(idx)) = &callees[k] else {
+                    continue;
+                };
+                for &j in idx {
+                    let Fact(e, writes, opens) = &solved[j];
+                    let task = Fact(e.minus(waits), writes.clone(), *opens);
+                    grew |= crate::fixpoint::Lattice::join(&mut own[i], &task);
+                }
+            }
+            if !grew {
+                break solved;
+            }
+        },
+    };
     let effects = solved.iter().map(|f| f.0).collect();
     let stores = (callees.iter())
         .map(|c| match c {
@@ -614,25 +645,14 @@ impl<'a> Walk<'a> {
                 self.place(p);
             }
         }
-        let fork = awaits.as_ref().and_then(|a| a.fork.as_ref());
-        let mark = match (awaits, fork) {
-            (_, Some(f)) => Mark::Fork(f.branches.len()),
-            (Some(_), None) => Mark::Await,
+        let mark = match (awaits, kind) {
+            (Some(_), _) => Mark::Await,
+            (None, vyrn_frontend::core::Callee::Fork(_)) => Mark::Fork,
             (None, _) => Mark::None,
         };
         // Only a mark reads whether a call passes a value (Judged::wait_rules).
         let passes = mark != Mark::None && self.passes(args, targets);
         self.call(callee, kind.value(), line, (born, passes), mark);
-        for (b, these) in fork.into_iter().flat_map(|f| f.calls(args)) {
-            let passes = self.passes(these, &b.targets);
-            self.call(
-                &b.callee,
-                b.kind.value(),
-                line,
-                (false, passes),
-                Mark::Branch,
-            );
-        }
     }
 
     /// Whether a call with `args` and `targets` passes a function value: a
@@ -1013,8 +1033,7 @@ pub(crate) fn judge_built<R>(
             return Callee::Dispatched(idx.clone());
         }
         // A program function with no judged body runs no body here: a generic
-        // only a `test` body reaches, or a fork primitive (`task$both`) the
-        // core splits into its branches.
+        // only a `test` body reaches.
         if pure.contains(name) || program.functions.iter().any(|f| f.name == name) {
             return Callee::Pure;
         }

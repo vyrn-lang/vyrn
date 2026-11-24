@@ -50,6 +50,7 @@ const HOOKS: &[&str] = &[
     "StmtExpr",
     "PlainStmt",
     "AwaitTail",
+    "ForkTail",
     "RefLet",
     "CName",
     "CLet",
