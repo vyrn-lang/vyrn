@@ -893,10 +893,9 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<Said> {
 }
 
 /// The calls in `facts` whose solved type argument fails a bound of the
-/// callee's seeded row: `@Forgettable` (`clear`, `append`, `copyFrom`),
-/// `@Decodable` (`fromJson`) and `Show` (`print`, `toString`). A type
-/// parameter of the body satisfies `Show` where `outer`, the body's bounds,
-/// gives it. A type argument that fails as written (`Array<T>`) is named as
+/// callee's seeded row: `@Decodable` (`fromJson`) and `Show` (`print`,
+/// `toString`). A type parameter of the body satisfies `Show` where `outer`,
+/// the body's bounds, gives it. A type argument that fails as written (`Array<T>`) is named as
 /// written, so every instance gives one sentence.
 fn unbound(
     facts: &NodeTypes<'_>,
@@ -905,22 +904,12 @@ fn unbound(
     outer: &HashMap<String, Vec<String>>,
     sp: &Speech,
 ) -> Vec<Said> {
-    use vyrn_frontend::prelude::{signature, DECODABLE, FORGETTABLE};
+    use vyrn_frontend::prelude::{signature, DECODABLE};
     use vyrn_frontend::types::{self, SHOW};
     let decls = own.proto.types();
-    // What a forgotten element of `t` would leave undone, if anything.
-    let owes = |t: &Type| {
-        let base = types::resolved(t, decls);
-        if vyrn_frontend::declared::owns_heap(&base, decls) {
-            Some("owns heap")
-        } else {
-            own.proto.must_use(t).then_some("is must-use")
-        }
-    };
     let fails = |t: &Type, bound: &str| {
         let base = types::resolved(t, decls);
         match bound {
-            FORGETTABLE => owes(t).is_some(),
             DECODABLE => vyrn_frontend::codec::decodable(&base, decls).is_err(),
             SHOW => match &*base {
                 Type::Param(p) => !outer.get(p).is_some_and(|bs| bs.iter().any(|b| b == SHOW)),
@@ -930,11 +919,6 @@ fn unbound(
         }
     };
     let sentence = |shown: &str, t: &Type, bound: &str| match bound {
-        FORGETTABLE => {
-            let owes = owes(t).unwrap_or_default();
-            let ([t], []) = sp.say([t], []);
-            rule!(ForgetsElements, shown, t, owes).render()
-        }
         DECODABLE => {
             // The codec names the offender by its declaration where it has one.
             let off = match vyrn_frontend::codec::decodable(t, decls) {

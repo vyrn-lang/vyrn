@@ -1,6 +1,0 @@
-// Refused on purpose: `clear` of elements that own heap.
-fn main() -> Int64 {
-    let mut a: Array<String> = ["x"]
-    a.clear()
-    return a.length
-}

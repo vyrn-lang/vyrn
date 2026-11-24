@@ -7781,6 +7781,28 @@ impl<'p> Fn_<'_, 'p> {
             }
             None => None,
         };
+        // `clear` and `copyFrom` release the elements they drop, `copyFrom` gives each copied
+        // element its own heap, and `append` frees the buffer it moved the elements out of.
+        // `a.copyFrom(a)` moves nothing, so it walks nothing.
+        let other = match (verb, arg) {
+            ("copyFrom", Some(x)) if self.walks(false, &elem) => {
+                let other = b.local(ValType::I32);
+                for h in [src, x] {
+                    b.ins(&Instruction::LocalGet(h));
+                    b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+                }
+                b.ins(&Instruction::I32Ne);
+                b.ins(&Instruction::LocalSet(other));
+                Some(other)
+            }
+            _ => None,
+        };
+        if verb == "clear" {
+            self.arr_elems(m, b, true, src, &l, stride, &elem, line)?;
+        }
+        if let Some(other) = other {
+            self.arr_elems_if(m, b, other, true, src, &l, stride, &elem, line)?;
+        }
         b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::LocalGet(src));
         if verb != "clear" {
@@ -7790,6 +7812,19 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalGet(x));
         }
         b.ins(&Instruction::Call(call));
+        match (verb, arg) {
+            ("copyFrom", _) => {
+                if let Some(other) = other {
+                    self.arr_elems_if(m, b, other, false, src, &l, stride, &elem, line)?;
+                }
+            }
+            ("append", Some(x)) => {
+                b.ins(&Instruction::LocalGet(x));
+                b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+                b.ins(&Instruction::Call(self.cx.rt.free));
+            }
+            _ => {}
+        }
         if verb == "push" {
             let stale = b.local(ValType::I32);
             b.ins(&Instruction::LocalSet(stale));
@@ -7806,6 +7841,55 @@ impl<'p> Fn_<'_, 'p> {
         }
         b.ins(&Instruction::LocalGet(src));
         Ok(Type::Array(Box::new(elem)))
+    }
+
+    /// Releases (`rel`) or copies each element of the `Array<elem>` whose header is at the
+    /// address in local `a`, as [`Fn_::each`] walks a buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn arr_elems(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        rel: bool,
+        a: u32,
+        l: &Layout,
+        stride: i32,
+        elem: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        if !self.walks(rel, elem) {
+            return Ok(());
+        }
+        let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
+        load_wrapped(b, a, l.fields[1]);
+        b.ins(&Instruction::LocalSet(n));
+        b.ins(&Instruction::LocalGet(a));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(data));
+        self.each(m, b, rel, data, n, stride as u32, elem, line)
+    }
+
+    /// [`Fn_::arr_elems`] under `if cond`, where `cond` is an `i32` local.
+    #[allow(clippy::too_many_arguments)]
+    fn arr_elems_if(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        cond: u32,
+        rel: bool,
+        a: u32,
+        l: &Layout,
+        stride: i32,
+        elem: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        b.ins(&Instruction::LocalGet(cond));
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        self.arr_elems(m, b, rel, a, l, stride, elem, line)?;
+        b.ins(&Instruction::End);
+        self.depth -= 1;
+        Ok(())
     }
 
     /// Stores `push`'s element at index `last` of the grown buffer `data`, then frees
@@ -8177,9 +8261,17 @@ impl<'p> Fn_<'_, 'p> {
         nb
     }
 
+    /// Whether [`Fn_::each`] has work for an `elem`. A release walks only an element with a
+    /// release row, the proof that the container owns it. A copy walks any element that
+    /// reaches heap, released or not.
+    fn walks(&self, rel: bool, elem: &Type) -> bool {
+        match rel {
+            true => self.cx.world.ownership.proto.release_kind(elem).is_some(),
+            false => self.owns_heap(elem),
+        }
+    }
+
     /// Releases (`rel`) or deep-copies each of the first `count` elements of `buf`.
-    /// A release walks only an element with a release row, the proof that the container
-    /// owns it. A copy walks any element that reaches heap, released or not.
     fn each(
         &mut self,
         m: &mut Log,
@@ -8191,12 +8283,7 @@ impl<'p> Fn_<'_, 'p> {
         elem: &Type,
         line: usize,
     ) -> Result<(), String> {
-        let walks = if rel {
-            self.cx.world.ownership.proto.release_kind(elem).is_some()
-        } else {
-            self.owns_heap(elem)
-        };
-        if !walks {
+        if !self.walks(rel, elem) {
             return Ok(());
         }
         let i = b.local(ValType::I32);

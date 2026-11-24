@@ -34,5 +34,5 @@ Type::Logger	0	1	3	1	3	0	8
 Type::Fn	26	3	21	12	1	0	63
 Type::Lazy	5	1	2	9	0	0	17
 Type::Never	1	2	2	3	2	0	10
-Type::Err	81	1	0	3	0	0	85
-all	453	52	412	250	58	26	1251
+Type::Err	82	1	0	3	0	0	86
+all	454	52	412	250	58	26	1252

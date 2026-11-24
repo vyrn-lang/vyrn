@@ -1382,10 +1382,6 @@ rules! {
     NoTypeParams { shown }
         "`{shown}` declares no type parameters, so it takes no type arguments";
     ReceiverType { shown, pty, aty } "the receiver of `{shown}` expects {pty}, found {aty}";
-    // `owes` is "owns heap" or "is must-use".
-    ForgetsElements { shown, t, owes }
-        "`{shown}` forgets or overwrites elements without releasing them, and `{t}` {owes}: \
-        move the elements one at a time instead";
     SchemaOfParam { name, t }
         "`{name}` reads the declaration of its type, and `{t}` is a type parameter; write the type \
         itself";

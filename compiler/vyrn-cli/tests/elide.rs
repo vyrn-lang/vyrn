@@ -2240,7 +2240,7 @@ fn a_push_in_a_loop_over_the_old_length_proves_its_index() {
 
 #[test]
 fn builtin_rows_carry_the_length_across_a_resize() {
-    let src = "fn w(xs: modify Array<Int64>, ys: Array<Int64>) -> Int64 {
+    let src = "fn w(xs: modify Array<Int64>, ys: consume Array<Int64>) -> Int64 {
                    let n = xs.length
     xs.push(1)
     let a = xs[n]
@@ -2280,7 +2280,7 @@ fn a_length_of_two_to_the_31_traps_below_itself() {
     ys.reserve(1073741823)
                      let mut i: Int64 = 0
     while i < 31 {
-        ys.append(ys)
+        ys.append(ys.copy())
                          i = i + 1
     }
     print(w(ys).toString())";
@@ -2522,7 +2522,7 @@ fn w(p: consume P) -> Int64 {
     // one.
     (
         "type P = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
-fn w(p: modify P, q: Array<Int64>) -> Int64 {
+fn w(p: modify P, q: consume Array<Int64>) -> Int64 {
     p.a.append(q)
     p.b.push(3)
     return 0
@@ -4084,7 +4084,7 @@ fn main() -> Int64 {
 "#,
     r#"fn longer(a: Array<Int64>) -> Array<Int64> {
     let mut b: Array<Int64> = []
-    b.append(a)
+    b.copyFrom(a)
     b.push(0)
     return b
 }

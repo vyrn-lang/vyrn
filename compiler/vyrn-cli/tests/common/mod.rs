@@ -16,21 +16,6 @@ pub const KNOWN_DIVERGENT: &[(&str, &str)] = &[];
 /// field is a substring the diagnostic must contain.
 pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
     (
-        "copyfromowned.vyrn",
-        "`copyFrom` overwrites by bytes, so an owning element that is          overwritten would never be released",
-        "overwrites the receiver's elements by bytes",
-    ),
-    (
-        "appendowned.vyrn",
-        "`append` is a byte copy, so an element type that owns heap          is refused — copying one by bytes gives two arrays one buffer",
-        "copies its source's elements by bytes",
-    ),
-    (
-        "clearowned.vyrn",
-        "`clear` forgets its elements, so an element type          that owns heap is refused — forgetting one leaks it",
-        "forgets its elements without releasing them",
-    ),
-    (
         "floatkey.vyrn",
         "float keys are refused by name — NaN != NaN breaks the          reflexivity a key needs",
         "holds a float",

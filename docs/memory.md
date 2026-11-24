@@ -88,8 +88,9 @@ A `modify` argument is a `mut` binding or a field of one; an element is not a
 place it reaches. A `.copy()` is a fresh value, not a read: `f(x, x.copy())` is
 accepted. So is a part that owns no heap, which the caller reads before the
 call: `f(xs, xs.length)`. The caller sees the callee's writes after the call
-returns. The receiver of a rebuilding builtin (`xs.append(xs)`) is put back,
-not consumed.
+returns. The receiver of a rebuilding builtin (`xs.copyFrom(xs)`) is put back,
+not consumed, and `xs.append(xs)` is refused, because `append` consumes its
+argument.
 
 A `consume` record parameter that the function returns on every path, changed
 only field by field, is the result. The function works in the caller's

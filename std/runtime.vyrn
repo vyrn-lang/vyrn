@@ -959,13 +959,13 @@ export fn arrReserve(dst: Int32, src: Int32, stride: Int32, n: Int64) {
 }
 
 /// `append`: the elements of the array at `xs` after the receiver's; one growth
-/// to the larger of `cap * 2` and the need. A self-append's source is
-/// retargeted to the grown buffer before the old one is freed.
+/// to the larger of `cap * 2` and the need. The caller frees `xs`'s buffer, and
+/// `xs` is never the receiver, because `append` consumes it.
 export fn arrAppend(dst: Int32, src: Int32, stride: Int32, xs: Int32) {
     let mut data = Int32(load32(src))
     let len = Int64(load64(src + 8))
     let mut cap = Int64(load64(src + 16))
-    let mut xdata = Int32(load32(xs))
+    let xdata = Int32(load32(xs))
     let xlen = Int64(load64(xs + 8))
     let need = len + xlen
     if need > cap {
@@ -975,9 +975,6 @@ export fn arrAppend(dst: Int32, src: Int32, stride: Int32, xs: Int32) {
         }
         let grown = malloc(nc * Int64(stride))
         copy(grown, data, Int32(len) * stride)
-        if xdata == data {
-            xdata = grown
-        }
         free(data)
         data = grown
         cap = nc

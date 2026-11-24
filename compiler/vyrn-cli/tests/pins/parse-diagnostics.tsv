@@ -790,7 +790,7 @@ compiler/vyrn-cli/tests/check/where_rule_element_store_computed.vyrn	0	cbf29ce48
 compiler/vyrn-cli/tests/check/where_rule_field_store_computed.vyrn	0	cbf29ce484222325	20	20	e680c3a8828c9691
 compiler/vyrn-cli/tests/check/where_rule_modify_parameter.vyrn	0	cbf29ce484222325	20	20	4056b59f0adfc59a
 compiler/vyrn-cli/tests/check/where_rule_through_atset.vyrn	0	cbf29ce484222325	20	15	9ac69eb0fd543c35
-compiler/vyrn-cli/tests/checker-rules.vyrn	0	cbf29ce484222325	20	18	e1a572509617b4d5
+compiler/vyrn-cli/tests/checker-rules.vyrn	0	cbf29ce484222325	20	18	56118dd6fe3ea39e
 compiler/vyrn-cli/tests/cost/clauses.vyrn	0	cbf29ce484222325	20	18	ed32f46ae862d5cb
 compiler/vyrn-cli/tests/cost/kernels.vyrn	0	cbf29ce484222325	20	17	3a3e7b1f7aff7452
 compiler/vyrn-cli/tests/cost/reasons.vyrn	0	cbf29ce484222325	20	16	fec1e876232be958
@@ -904,7 +904,6 @@ compiler/vyrn-cli/tests/refusals/r87_a_for_over_a_read_stream_parameter.vyrn	0	c
 compiler/vyrn-cli/tests/refusals/r88_a_must_use_temporary_in_a_read_position.vyrn	0	cbf29ce484222325	20	18	8cd8b5d57399e2bb
 compiler/vyrn-cli/tests/refusals/r89_a_store_over_a_held_must_use_value.vyrn	0	cbf29ce484222325	20	20	ad0ad2f32a8a0202
 compiler/vyrn-cli/tests/refusals/r90_a_break_out_of_a_loop_that_owns_must_use_elements.vyrn	0	cbf29ce484222325	20	18	09c3e359b39504a4
-compiler/vyrn-cli/tests/refusals/r91_clear_over_a_must_use_element.vyrn	0	cbf29ce484222325	20	17	4c42a78f62eba07e
 compiler/vyrn-cli/tests/refusals/r92_a_match_consume_binder_owns_a_must_use_payload.vyrn	0	cbf29ce484222325	20	19	54ef6d3bce0aea93
 compiler/vyrn-cli/tests/refusals/r93_a_namespace_member_the_module_does_not_export.vyrn	0	cbf29ce484222325	20	16	8d4c902e9c2f8c28
 compiler/vyrn-cli/tests/refusals/r94_an_import_of_a_name_the_module_does_not_export.vyrn	0	cbf29ce484222325	20	14	4c151817f261fc54
@@ -1084,8 +1083,7 @@ examples/a2_capture.vyrn	0	cbf29ce484222325	20	17	d14579e36e1493c2
 examples/a2_capture_escape.vyrn	0	cbf29ce484222325	20	18	aa841adb72cc068e
 examples/a6_reassign.vyrn	0	cbf29ce484222325	20	14	febc66f93906dc6c
 examples/aliascontext.vyrn	0	cbf29ce484222325	20	17	1ef13a9892565605
-examples/appendowned.vyrn	0	cbf29ce484222325	20	19	32c76ab09f91b699
-examples/appendreserve.vyrn	0	cbf29ce484222325	20	20	c5ac3904d0dda401
+examples/appendreserve.vyrn	0	cbf29ce484222325	20	19	19e7d44907554916
 examples/arenas.vyrn	0	cbf29ce484222325	20	14	71a6741258c98f22
 examples/args.vyrn	0	cbf29ce484222325	20	15	1ee5f6e19e20e3b6
 examples/argsdemo.vyrn	0	cbf29ce484222325	20	17	2864920a88dd3273
@@ -1119,7 +1117,6 @@ examples/call_parameter_apart_from_the_callers.vyrn	0	cbf29ce484222325	20	20	d7c
 examples/capture_copy.vyrn	0	cbf29ce484222325	20	16	5307e53494970324
 examples/capturefn.vyrn	0	cbf29ce484222325	20	18	ac13fec11b2e8dab
 examples/clearkeep.vyrn	0	cbf29ce484222325	20	18	ce2c43b54f66905d
-examples/clearowned.vyrn	0	cbf29ce484222325	20	16	c78dcfc8b3c50580
 examples/clidemo.vyrn	0	cbf29ce484222325	20	19	d4ea5f478ad1eac1
 examples/clifail.vyrn	0	cbf29ce484222325	20	17	b68775e3cae3bbed
 examples/clock.vyrn	0	cbf29ce484222325	20	17	13ebe40f08c4873f
@@ -1137,7 +1134,6 @@ examples/container.vyrn	0	cbf29ce484222325	20	16	348f3ea1bb6cc065
 examples/contractquery.vyrn	0	cbf29ce484222325	20	20	5b2d1e1abc1f3d69
 examples/controlflow.vyrn	0	cbf29ce484222325	20	19	e420cecf62a88ff3
 examples/copy.vyrn	0	cbf29ce484222325	20	18	ef765b647b4e21db
-examples/copyfromowned.vyrn	0	cbf29ce484222325	20	19	5a5f9fcb5ed48bad
 examples/csrcount.vyrn	0	cbf29ce484222325	20	16	a6bdcaae6a2eb08e
 examples/csrpush.vyrn	0	cbf29ce484222325	20	18	3ebf7beab8b1ffcf
 examples/derive.vyrn	0	cbf29ce484222325	20	18	c3c33474d893e732
@@ -1511,7 +1507,7 @@ std/random.vyrn	0	cbf29ce484222325	20	16	b8e97c8b736a86a6
 std/regex.vyrn	0	cbf29ce484222325	20	17	cfb07ec5985e7a67
 std/rpc.editor.vyrn	0	cbf29ce484222325	20	15	5308db71b62b6a5c
 std/rpc.vyrn	0	cbf29ce484222325	20	17	1fb054967659d958
-std/runtime.vyrn	0	cbf29ce484222325	20	14	8fe346e9e63ecc23
+std/runtime.vyrn	0	cbf29ce484222325	20	18	b61fdfd5e0a895b6
 std/scan.vyrn	0	cbf29ce484222325	20	16	fa2868ab13f061b1
 std/slots.vyrn	0	cbf29ce484222325	20	12	a359c895d32dc21a
 std/storage.vyrn	0	cbf29ce484222325	20	14	838ee66367094974

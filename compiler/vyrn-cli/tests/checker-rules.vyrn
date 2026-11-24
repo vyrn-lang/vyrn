@@ -628,25 +628,7 @@ test "arms" {
     let r = match B { B => 1 }
     assertEq(r, 1)
 }
-// The `@Forgettable` bound is the typed judgment's, at the type argument the
-// call solved: in a plain body, and in the instance of a generic that owns
-// heap and in none other.
-fn clearOwned() -> Int64 {
-    let mut a: Array<String> = ["x"]
-    a.clear()
-    return 0
-}
-fn wipe<T>(xs: modify Array<T>) -> Unit {
-    xs.clear()
-}
-fn callsWipe() -> Int64 {
-    let mut s: Array<String> = ["x"]
-    let mut n: Array<Int64> = [1]
-    wipe(s)
-    wipe(n)
-    return 0
-}
-// `Show` on `print` and `toString` is the typed judgment's too: a record
+// `Show` on `print` and `toString` is the typed judgment's: a record
 // with no `impl Show`, and a type parameter with no `Show` bound. `fromJson`
 // has no witness here: a program the checker refuses that calls it is not
 // built for the judgment.
