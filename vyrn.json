@@ -1,7 +1,7 @@
 {
     "toolchain": {
-        "wasmtime": "49.0.5",
-        "cargo-nextest": "0.9.143",
+        "wasmtime": "51.0.0",
+        "cargo-nextest": "0.9.152",
         "wabt": "1.0.41",
         "simde": "0.8.2",
         "binaryen": "133"
