@@ -456,6 +456,18 @@ fn a_trap_in_a_holder_leaves_its_held_task_running() {
     );
 }
 
+/// A fork of a call whose result crosses in its words (`Option<Int64>`, a record of two
+/// `Int64`), or in the parameter it returns, lands the result in the task's block on every host.
+#[test]
+fn a_fork_of_a_call_whose_result_crosses_in_words_runs_on_every_host() {
+    assert_eq!(
+        on_every_host("forkwords.vyrn"),
+        "exit Some(0)
+1 2 xy 3 4 8
+"
+    );
+}
+
 /// A task cancelled while it waits in `joinOr` runs on with its child's handle and cancels the
 /// child in its `Cancelled` arm. It frees every value on every host.
 #[test]

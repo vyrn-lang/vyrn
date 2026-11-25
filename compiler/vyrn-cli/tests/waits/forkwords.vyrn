@@ -1,0 +1,30 @@
+// A fork of a call whose result crosses in its words, or in the parameter it
+// returns, lands the result in the task's block.
+import { sleep, join } from "std/task"
+
+type P = { a: Int64, b: Int64, s: String }
+
+type Q = { a: Int64, b: Int64 }
+
+fn keep(p: consume P) -> P {
+    await sleep(1)
+    return p
+}
+
+fn pair(ms: Int64) -> Q {
+    await sleep(ms)
+    return Q { a: ms, b: ms + 1 }
+}
+
+fn maybe(ms: Int64) -> Option<Int64> {
+    await sleep(ms)
+    return Some(ms * 2)
+}
+
+fn main() -> Int64 {
+    let p = await join(fork keep(P { a: 1, b: 2, s: "x" + "y" }))
+    let q = await join(fork pair(3))
+    let m = await join(fork maybe(4)) ?? 0
+    print("\{p.a} \{p.b} \{p.s} \{q.a} \{q.b} \{m}")
+    return 0
+}

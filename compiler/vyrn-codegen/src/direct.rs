@@ -3571,7 +3571,7 @@ fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<F
         .ins(&Instruction::LocalGet(blk))
         .ins(&Instruction::Call(cx.task("taskFork", 0)?))
         .ins(&Instruction::LocalSet(was));
-    if sig.ret.out().is_some() {
+    if sig.ret.out().is_some() && sig.in_place.is_none() {
         b.ins(&Instruction::LocalGet(blk))
             .ins(&Instruction::I32Const(l.fields[2] as i32))
             .ins(&Instruction::I32Add);
@@ -3613,10 +3613,31 @@ fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<F
         .ins(&Instruction::LocalGet(st))
         .ins(&Instruction::I32Store(word_at(8)))
         .ins(&Instruction::Else);
-    if let [h] = held[..] {
-        b.ins(&Instruction::LocalGet(blk))
-            .ins(&Instruction::LocalGet(h))
-            .ins(&cx.store(&sig.ret_ty, l.fields[2]));
+    // A scalar result and each word of a [`Ret::Words`] one land in the block; a result the
+    // callee left in a parameter's slot moves to the result's.
+    match (&sig.ret, &held[..], sig.in_place) {
+        (Ret::Words(fl), _, _) => {
+            for ((off, ty, _), h) in fl.parts.iter().zip(&held) {
+                b.ins(&Instruction::LocalGet(blk))
+                    .ins(&Instruction::LocalGet(*h))
+                    .ins(&cx.store(ty, l.fields[2] + off));
+            }
+        }
+        (_, [h], _) => {
+            b.ins(&Instruction::LocalGet(blk))
+                .ins(&Instruction::LocalGet(*h))
+                .ins(&cx.store(&sig.ret_ty, l.fields[2]));
+        }
+        (Ret::Out(al), _, Some(i)) => {
+            b.ins(&Instruction::LocalGet(blk))
+                .ins(&Instruction::I32Const(l.fields[2] as i32))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(blk))
+                .ins(&Instruction::I32Const(l.fields[3 + i] as i32))
+                .ins(&Instruction::I32Add);
+            b.copy(al.size);
+        }
+        _ => {}
     }
     for ((p, off), _) in (sig.params.iter().zip(&l.fields[3..]))
         .zip(&r.frees)
@@ -12537,8 +12558,11 @@ impl<'a, 'p> Fn_<'a, 'p> {
             _ => return unsupported("a fork of a call through a value", line),
         };
         let (sig, args) = self.call_sig(m, callee, kind, solved, targets, args, line)?;
-        if sig.in_place.is_some() || matches!(sig.ret, Ret::Words(_)) || frees.len() != args.len() {
-            return unsupported("a fork of a call whose result crosses in its words", line);
+        if frees.len() != args.len() {
+            return unsupported(
+                "a fork whose arguments are not its callee's parameters",
+                line,
+            );
         }
         let l = task_block(self.cx, &sig)?;
         let root = self.fork_root(m, &sig, frees);

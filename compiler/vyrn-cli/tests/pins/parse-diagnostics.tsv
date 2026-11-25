@@ -1082,6 +1082,7 @@ compiler/vyrn-cli/tests/waits/aware.vyrn	0	cbf29ce484222325	20	19	6ab3f5d9815a8c
 compiler/vyrn-cli/tests/waits/byvalue.vyrn	0	cbf29ce484222325	20	18	26ba582a8bd10e65
 compiler/vyrn-cli/tests/waits/byvalue_nowait.vyrn	0	cbf29ce484222325	20	19	177f94587c670ba5
 compiler/vyrn-cli/tests/waits/cancelled.vyrn	0	cbf29ce484222325	20	16	86eca11f511a81ac
+compiler/vyrn-cli/tests/waits/forkwords.vyrn	0	cbf29ce484222325	20	20	3be289802c394ff1
 compiler/vyrn-cli/tests/waits/handles.vyrn	0	cbf29ce484222325	20	17	ed5dc34134ce908c
 compiler/vyrn-cli/tests/waits/holder.vyrn	0	cbf29ce484222325	20	16	8f89ce18aa73874b
 compiler/vyrn-cli/tests/waits/lambda.vyrn	0	cbf29ce484222325	20	14	7e8a0ba1b59ddc36
