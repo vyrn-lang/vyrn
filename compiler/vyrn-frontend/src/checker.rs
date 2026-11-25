@@ -2218,10 +2218,29 @@ impl<'a> Checker<'a> {
         (self.impls.get(protocol, key)).is_some_and(|i| dispatches_on(&i.ty, self.types))
     }
 
-    /// The first type in `ty`, itself or a part, that declares `impl Owned`.
-    /// A record holding one cannot be copied field by field: the
-    /// declared `release` would run over both copies. Do not bound the depth;
-    /// `copy`'s refusal has no bound.
+    /// Refuses a structural copy of `t`: a type with a release inside (a field
+    /// copy would run it twice), a `Stream` (two consumers, one cursor) and a
+    /// self-referring type, whose copy never bottoms out (the backends
+    /// overflowed the stack).
+    fn structural_copy(&self, t: &Type, line: usize) -> Result<(), Diagnostic> {
+        let mut owned_seen = std::collections::HashSet::new();
+        if let Some(owned) = self.declared_owned_in(t, &mut owned_seen) {
+            return Err(cerr!(line, CopyOwned, owned));
+        }
+        if matches!(self.base(t), Type::Stream(_)) {
+            return Err(cerr!(line, CopyStream));
+        }
+        if let Some(name) = crate::declared::self_referring(t, self) {
+            return Err(cerr!(line, CopyRecursive, name));
+        }
+        Ok(())
+    }
+
+    /// The first type in `ty`, itself or a part, that has a release: it
+    /// declares `impl Owned`, or it is built in with one
+    /// ([`crate::declared::builtin_release`]). A record holding one cannot be
+    /// copied field by field: the release would run over both copies. Do not
+    /// bound the depth; `copy`'s refusal has no bound.
     fn declared_owned_in(
         &self,
         ty: &Type,
@@ -2237,8 +2256,12 @@ impl<'a> Checker<'a> {
         if matches!(ty, Type::Named(_) | Type::App(..)) && !seen.insert(format!("{ty:?}")) {
             return None;
         }
+        let base = self.base(ty);
+        if crate::declared::builtin_release(&base).is_some() {
+            return Some(ty.to_string());
+        }
         let mut deeper = |t: &Type| self.declared_owned_in(t, seen);
-        match self.base(ty) {
+        match base {
             Type::ArrayN(t, _)
             | Type::Array(t)
             | Type::SmallArray(t, _)
@@ -5653,10 +5676,9 @@ impl<'a> Checker<'a> {
             };
             return Ok(Type::Array(Box::new(elem)));
         }
-        // `x.copy()`: a deep copy the caller owns. Refused for a declared
-        // `impl Owned` type (a field copy would run its release twice; `impl
-        // Copy` overrides) and for a `Stream` (two consumers, one cursor). A
-        // scalar is accepted, so one generic `x.copy()` serves every instance.
+        // `x.copy()`: a deep copy the caller owns, by `impl Copy` where the type
+        // declares one and structurally otherwise. A scalar is accepted, so one
+        // generic `x.copy()` serves every instance.
         if name == "@copy" {
             let t = self.expr(&args[0], scope, None, fn_ret)?;
             if matches!(self.base(&t), Type::Err) {
@@ -5678,19 +5700,15 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            let mut owned_seen = std::collections::HashSet::new();
-            if let Some(declared) = self.declared_owned_in(&t, &mut owned_seen) {
-                return Err(cerr!(line, CopyOwned, declared));
-            }
-            if matches!(self.base(&t), Type::Stream(_)) {
-                return Err(cerr!(line, CopyStream));
-            }
-            // A structural copy of a self-referring type never bottoms out (the
-            // backends overflowed the stack), so it needs an `impl Copy`.
-            if let Some(name) = crate::declared::self_referring(&t, self) {
-                return Err(cerr!(line, CopyRecursive, name));
-            }
+            self.structural_copy(&t, line)?;
             return Ok(t);
+        }
+        // `a.copyFrom(xs)` copies each element of `xs` as `xs.copy()` would.
+        if name == "@copyFrom" && args.len() == 2 {
+            let t = self.expr(&args[1], scope, None, fn_ret)?;
+            if !matches!(self.base(&t), Type::Err) {
+                self.structural_copy(&t, line)?;
+            }
         }
         if name == "@has" || name == "@remove" {
             let op = &name[1..];

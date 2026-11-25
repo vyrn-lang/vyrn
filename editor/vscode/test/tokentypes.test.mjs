@@ -21,3 +21,16 @@ test("every grammar entry that holds Vyrn treats a byte literal as a string", as
     }
   }
 });
+
+// An interpolation hole holds code: as the string's token type, VS Code would
+// pair no bracket and offer no suggestion as the user types inside it.
+test("every grammar entry that holds Vyrn treats an interpolation hole as code", async () => {
+  const hole = "meta.template.expression.vyrn";
+  assert.ok((await read("vyrn.tmLanguage.json")).includes(`"${hole}"`));
+  const pkg = JSON.parse(await read("package.json"));
+  for (const entry of pkg.contributes.grammars) {
+    if ((await read(entry.path)).includes("source.vyrn")) {
+      assert.equal(entry.tokenTypes?.[hole], "other", entry.language);
+    }
+  }
+});

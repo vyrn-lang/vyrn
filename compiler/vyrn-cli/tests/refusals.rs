@@ -625,13 +625,6 @@ fn census() -> Vec<Row> {
             Kernel::Its,
         ),
         row(
-            "r91_clear_over_a_must_use_element.vyrn",
-            "clear, append and copyFrom forget elements, so a must-use element is refused",
-            "`clear` forgets or overwrites elements without releasing them, and `Tok` is \
-             must-use: move the elements one at a time instead",
-            Kernel::Elsewhere,
-        ),
-        row(
             "r92_a_match_consume_binder_owns_a_must_use_payload.vyrn",
             "a binder of a match consume arm owns its payload",
             "`t` is a `Tok` and is never disposed",

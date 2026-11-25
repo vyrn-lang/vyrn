@@ -428,7 +428,7 @@ policy.
 | `hints` | per-rule severity for the hint libraries (`std/hints`, `std/vyx-hints`) |
 | `stylesheets` | globs naming the app's own CSS that no layout links, whose classes the editor offers and whose rules it shows |
 | `inputs` | globs naming the generator inputs the editor sends the language server, beside the `.vyx` files the VS Code extension sends |
-| `languages` | an array of `{ "files": glob, "module": specifier }`, read in order: the last entry whose glob names a file decides which module reads it (`[{ "files": "*.calc", "module": "./calc" }]`). The toolchain's defaults, `**/*.syntax` to `std/grammar`, are entries before the project's, so a project's entry overrides one. `"module": null` leaves the files it matches plain text, served by no module. A relative module that does not exist is refused at its entry. `vyrn check` and the editor warn of an entry that reads no file because later entries take every file it matches, naming both by index and glob |
+| `languages` | an array of `{ "files": glob, "module": specifier }`, read in order: the last entry whose glob names a file decides which module reads it (`[{ "files": "*.calc", "module": "./calc" }]`). The toolchain's defaults, `**/*.syntax` to `std/grammar`, are entries before the project's, so a project's entry overrides one. `"module": null` leaves the files it matches plain text, served by no module. An entry may name `"icon"`, an svg the playground shows on the files it reads (see The playground). A relative module that does not exist is refused at its entry. `vyrn check` and the editor warn of an entry that reads no file because later entries take every file it matches, naming both by index and glob |
 | `proved` | globs naming the modules where every check must be proved (language.md, Proofs); `vyrn check`, `build`, `run`, `why` and the editor read it, and no flag replaces it |
 
 An unknown tool name under `toolchain` is refused and the error lists the known
@@ -591,6 +591,17 @@ label, capture and operator regexes of a `.syntax` file come from
 them. Do not edit them: a test in `vyrn-syntax` holds them, and `VYRN_PIN=write`
 rewrites them.
 
+A file the server claims through a `languages` entry opens as the language
+`vyrn-dsl`, whose icon its tab shows; a generator input keeps its own language,
+and `.syntax` files have an icon of their own.
+The command "Vyrn: associate project languages" writes a `files.associations`
+entry naming `vyrn-dsl` for each `languages` glob with a module, from every
+`vyrn.json` of each workspace folder, into that folder's `.vscode/settings.json`,
+so the explorer shows the icon before a file is opened. VS Code matches a glob
+without a `/` against the file name anywhere, so a root manifest's `*.calc`
+associates every `.calc` file of the folder. The extension writes nothing until
+the command runs.
+
 CodeLenses: Run and Profile over `fn main`; Run test over each `test` block
 and Run all tests over the first; the same pair for `bench` blocks; Run dev
 server over a root module that imports `rpcServer`. Each runs `vyrn` in a shared
@@ -661,6 +672,10 @@ generator whose module calls `moduleInterface`, `moduleCode`, `contractOf` or
 `codeAt` fails with a sentence naming the call, unless the lowering refuses its
 program, which is then what the page shows.
 A diagnostic in another tab names its file.
+A `languages` entry of a tab's nearest `vyrn.json` may name `"icon"`, a path to an
+svg relative to that manifest; the tab and its explorer row show it in the text
+colour, for the last entry whose glob matches, as the compiler reads the entries.
+The compiler ignores the key.
 
 It is outside the workspace, and the build must run from its own directory,
 because `.cargo/config.toml` there sets the linker's stack size:

@@ -1,7 +1,0 @@
-// Refused on purpose: `append` of elements that own heap.
-fn main() -> Int64 {
-    let mut a: Array<String> = ["x"]
-    let b: Array<String> = ["y"]
-    a.append(b)
-    return a.length
-}

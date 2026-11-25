@@ -45,8 +45,13 @@
         "id": "syntax",
         "aliases": ["Vyrn Syntax", "syntax"],
         "extensions": [".syntax"],
-        "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
+        "icon": { "light": "./icons/syntax.svg", "dark": "./icons/syntax.svg" },
         "configuration": "./syntax-language-configuration.json"
+      },
+      {
+        "id": "vyrn-dsl",
+        "aliases": ["Vyrn language file"],
+        "icon": { "light": "./icons/dsl.svg", "dark": "./icons/dsl.svg" }
       }
     ],
     "grammars": [
@@ -54,19 +59,19 @@
         "language": "vyrn",
         "scopeName": "source.vyrn",
         "path": "./vyrn.tmLanguage.json",
-        "tokenTypes": { "constant.character.vyrn": "string" }
+        "tokenTypes": { "constant.character.vyrn": "string", "meta.template.expression.vyrn": "other" }
       },
       {
         "language": "von",
         "scopeName": "source.vyrn",
         "path": "./vyrn.tmLanguage.json",
-        "tokenTypes": { "constant.character.vyrn": "string" }
+        "tokenTypes": { "constant.character.vyrn": "string", "meta.template.expression.vyrn": "other" }
       },
       {
         "language": "vyx",
         "scopeName": "source.vyx",
         "path": "./vyx.tmLanguage.json",
-        "tokenTypes": { "constant.character.vyrn": "string" }
+        "tokenTypes": { "constant.character.vyrn": "string", "meta.template.expression.vyrn": "other" }
       },
       {
         "language": "syntax",
@@ -145,6 +150,11 @@
       {
         "command": "vyrn.profileTests",
         "title": "Vyrn: Profile Tests",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.associateLanguages",
+        "title": "Vyrn: associate project languages",
         "category": "Vyrn"
       }
     ],

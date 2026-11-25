@@ -22,7 +22,7 @@ fn main() -> Int64 {
     out.reserve(610)
     let mut j = 0
     while j < 10 {
-        out.append(one)
+        out.append(one.copy())
         out.push(UInt8(10))
         j = j + 1
     }
@@ -34,7 +34,7 @@ fn main() -> Int64 {
     print("points \{ps.length} last \{ps[2].x},\{ps[2].y}")
 
     let mut dup: Array<Int64> = [7, 8, 9]
-    dup.append(dup)
+    dup.append(dup.copy())
     print("dup \{dup.length} tail \{dup[3]}\{dup[4]}\{dup[5]}")
 
     let mut r: Array<Int64> = [1]

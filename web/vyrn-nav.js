@@ -749,10 +749,10 @@ function onClick(e) {
   navigate(url.href, { push: true });
 }
 
-// The URL the page on screen was rendered for. Back and Forward change the URL
-// before the swap, so until the next page lands its relative links would
-// resolve against the wrong directory: `docs/std/strings.html` from `/docs.html`
-// became `/tooling/docs/std/strings.html`.
+// The URL the page on screen was rendered for. Every link on screen names the
+// absolute URL it was written for, so a click never resolves against an address
+// bar that moved before or after the paint: `install.html` painted for `/` but
+// clicked under `/docs/std/strings.html` went to `/docs/std/install.html`.
 let shownUrl = typeof location !== "undefined" ? location.href : "";
 
 // Rewrites each relative link under `root` to the absolute URL it names from
@@ -764,11 +764,21 @@ export function pinLinks(root, base) {
   }
 }
 
+const withoutFragment = (url) => url.split("#")[0];
+
+// An entry this script did not stamp (a fragment the browser moved to, or a
+// page script's `replaceState(null, ..)`) is left to the browser only while it
+// names the page on screen; any other page is fetched, as a stamped one is.
 function onPopState(e) {
-  if (!e.state || !e.state.vyrnNav) return; // not one of ours
-  pinLinks(document, shownUrl);
-  pendingPopScroll = e.state.scrollY || 0;
+  const ours = Boolean(e.state && e.state.vyrnNav);
+  if (!ours && withoutFragment(location.href) === withoutFragment(shownUrl)) return;
+  pendingPopScroll = (ours && e.state.scrollY) || 0;
   navigate(location.href, { push: false });
+}
+
+export function onNavEnd(e) {
+  shownUrl = e.detail.url;
+  pinLinks(document, shownUrl);
 }
 
 // ---------------------------------------------------------------------------
@@ -871,9 +881,8 @@ export function start() {
 
   document.addEventListener("click", onClick);
   window.addEventListener("popstate", onPopState);
-  document.addEventListener("vyrn:nav-end", () => {
-    shownUrl = location.href;
-  });
+  document.addEventListener("vyrn:nav-end", onNavEnd);
+  pinLinks(document, shownUrl);
   window.addEventListener("scroll", saveScroll, { passive: true });
 
   if (CONFIG.progress) installProgressBar();

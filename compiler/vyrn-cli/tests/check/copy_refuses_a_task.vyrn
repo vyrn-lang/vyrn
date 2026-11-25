@@ -1,0 +1,16 @@
+// A task has one owner, which joins or cancels it, so a copy of one is refused.
+import { sleep, joinAll } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn main() -> Int64 {
+    let mut ts: Array<Task<Int64>> = []
+    ts.push(fork pause(10))
+    let us = ts.copy()
+    let a = await joinAll(ts)
+    let b = await joinAll(us)
+    return a.length + b.length
+}

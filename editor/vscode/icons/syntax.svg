@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="Vyrn grammar">
+  <path d="M 11 5 C 7 5 7 9 7 12 C 7 14 6 16 4 16 C 6 16 7 18 7 20 C 7 23 7 27 11 27" fill="none" stroke="#123258" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 21 5 C 25 5 25 9 25 12 C 25 14 26 16 28 16 C 26 16 25 18 25 20 C 25 23 25 27 21 27" fill="none" stroke="#123258" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 12 11 L 16 18 L 20 11" fill="none" stroke="#1c7f9c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 12.5 22 L 19.5 22" fill="none" stroke="#22b8d4" stroke-width="2.4" stroke-linecap="round"/>
+</svg>

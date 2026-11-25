@@ -344,9 +344,11 @@ impl Writer<'_> {
             self.nested.insert(word, pair);
         }
         let stem = "punctuation.definition.template-expression";
+        // TypeScript's scope name: themes reset it to the foreground, so code in a
+        // string's hole is not coloured as the string.
         let end = self.re(&E::Seq(close.to_vec()))?;
         Ok(vec![self.span(
-            "meta.interpolation",
+            "meta.template.expression",
             stem,
             begin,
             &end,

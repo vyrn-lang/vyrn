@@ -1,0 +1,17 @@
+// `copyFrom` copies each element, and a task has one owner.
+import { sleep, joinAll } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn main() -> Int64 {
+    let mut ts: Array<Task<Int64>> = []
+    let mut us: Array<Task<Int64>> = []
+    us.push(fork pause(10))
+    ts.copyFrom(us)
+    let a = await joinAll(ts)
+    let b = await joinAll(us)
+    return a.length + b.length
+}

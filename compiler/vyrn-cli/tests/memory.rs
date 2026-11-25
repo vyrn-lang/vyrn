@@ -3287,3 +3287,78 @@ Option<String>|Some("abcde".copy())|match consume v { Some(s) => s.byteLength, N
     src += &format!("fn main() -> Int64 {{\n{main}return 0\n}}\n");
     assert_eq!(audited_run("fieldmove", &src), (Some(0), want));
 }
+
+/// `clear`, `append` and `copyFrom` work for every element type: each releases what it drops and
+/// copies what it copies, so an `Array<String>` and an array of records owning heap run clean
+/// under the free audit on the engine (`vyrn run`) and on the wasm2c route (`vyrn build`).
+#[test]
+fn array_clear_append_and_copy_from_release_and_copy_their_elements() {
+    let dir = common::scratch("array-elements");
+    let rec = "type Row = { name: String, tags: Array<String> } \
+               fn row(n: consume String) -> Row { let mut t: Array<String> = [] t.push(n + \"!\") \
+               return Row { name: n, tags: t } }";
+    let cases = [
+        (
+            "strings",
+            "fn main() -> Int64 { let mut a: Array<String> = [\"a\".copy(), \"b\".copy()] \
+             let mut b: Array<String> = [\"c\".copy()] a.append(consume b) \
+             let c: Array<String> = [\"d\".copy(), \"e\".copy(), \"f\".copy()] \
+             a.append(c.copy()) print(a.length) let mut d: Array<String> = [\"x\".copy()] \
+             d.copyFrom(a) print(d[4]) a.clear() print(a.length) a.push(\"g\".copy()) \
+             print(a[0] + c[2] + d[0]) return 0 }"
+                .to_string(),
+            "6\ne\n0\ngfa",
+        ),
+        (
+            "records",
+            format!(
+                "{rec} fn main() -> Int64 {{ let mut a: Array<Row> = [] a.push(row(\"a\".copy())) \
+                 let mut b: Array<Row> = [] b.push(row(\"b\".copy())) a.append(b) \
+                 let mut d: Array<Row> = [] d.push(row(\"z\".copy())) d.copyFrom(a) \
+                 a.clear() print(a.length) print(d[1].name + d[1].tags[0]) \
+                 d.copyFrom(d) print(d.length) return 0 }}"
+            ),
+            "0\nbb!\n2",
+        ),
+    ];
+    for (name, src, prints) in cases {
+        let file = dir.join(format!("{name}.vyrn"));
+        std::fs::write(&file, &src).unwrap();
+        let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .env("VYRN_LEAK_CHECK", "1")
+            .arg("run")
+            .arg(&file)
+            .output()
+            .expect("vyrn run");
+        let out = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+        assert_eq!(
+            (run.status.code(), out.trim_end()),
+            (Some(0), prints),
+            "{name} on the engine: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let exe = dir.join(format!("{name}.exe"));
+        let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .env("VYRN_LEAK_CHECK", "1")
+            .arg("build")
+            .arg(&file)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("vyrn build");
+        assert_eq!(
+            build.status.code(),
+            Some(0),
+            "{name}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let native = Command::new(&exe).output().expect("the native program");
+        let out = String::from_utf8_lossy(&native.stdout).replace("\r\n", "\n");
+        assert_eq!(
+            (native.status.code(), out.trim_end()),
+            (Some(0), prints),
+            "{name} on the wasm2c route: {}",
+            String::from_utf8_lossy(&native.stderr)
+        );
+    }
+}

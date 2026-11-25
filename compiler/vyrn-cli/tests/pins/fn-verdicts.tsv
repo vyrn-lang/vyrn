@@ -8,7 +8,6 @@ examples/aliascontext.vyrn	describe	yes	no, its effect set is alloc
 examples/aliascontext.vyrn	main	no, it calls `derive$json$jsonEncoders$t52339b6344f7e59b`, which is not trap-free	no, its effect set is alloc, write-output, trap
 examples/aliascontext.vyrn	where$pAge	yes	yes, emulated Int64
 examples/aliascontext.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-examples/appendowned.vyrn		does not check	does not check
 examples/appendreserve.vyrn	line	yes	no, its effect set is alloc
 examples/appendreserve.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output
 examples/arenas.vyrn	worker	yes	no, its effect set is alloc, write-output, waits
@@ -274,7 +273,6 @@ examples/capturefn.vyrn	viaOnward	no, it calls `applyAll`, which is not trap-fre
 examples/capturefn.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output
 examples/clearkeep.vyrn	fill__from0	yes	no, its effect set is alloc
 examples/clearkeep.vyrn	main	yes	no, its effect set is alloc, write-output
-examples/clearowned.vyrn		does not check	does not check
 examples/clidemo.vyrn	report	yes	no, its effect set is alloc, write-output
 examples/clidemo.vyrn	main	no, it calls `parseServe`, which is not trap-free	no, its effect set is alloc, write-output, args, trap
 examples/clidemo.vyrn	where$pPort	yes	yes, emulated Int64
@@ -372,7 +370,6 @@ examples/copy.vyrn	handles__from0	no, it calls `panic`	no, its effect set is all
 examples/copy.vyrn	declaredCopies	no, it calls `emit`, which is not trap-free	no, its effect set is alloc, write-output, trap
 examples/copy.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output, module-state, trap
 examples/copy.vyrn	twice	yes	no, its effect set is alloc
-examples/copyfromowned.vyrn		does not check	does not check
 examples/csrcount.vyrn	build	no, it keeps an index check	no, its effect set is alloc
 examples/csrcount.vyrn	bfs	no, it keeps an index check	no, its effect set is alloc
 examples/csrcount.vyrn	main	no, it calls `build`, which is not trap-free	no, its effect set is alloc, write-output

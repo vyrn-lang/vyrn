@@ -708,6 +708,41 @@ fn main() -> Int64 {
     );
 }
 
+/// An interpolation hole is code: `t.` in `"\{t.name}"` completes the record's
+/// fields, hovers as outside a string, and its names are coloured by kind.
+#[test]
+fn an_interpolation_hole_completes_hovers_and_colours_as_code() {
+    let mut client = spawn_client();
+    let uri = "file:///member/hole.vyrn";
+    let src = "type User = { name: String, age: Int64 }
+
+fn onUserTagged(t: User) -> String {
+    return \"tagged \\{t.name} at \\{t.age}\"
+}
+";
+    did_open(&mut client, uri, "vyrn", src);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    let (line, name) = at(src, 4, "name}");
+    let labels = completion_labels(&mut client, uri, line, name);
+    for expected in ["name", "age"] {
+        assert!(
+            labels.iter().any(|l| l == expected),
+            "{expected} missing: {labels:?}"
+        );
+    }
+    let hover = hover_value(&mut client, uri, line, name).expect("a hover on the field");
+    assert!(hover.contains("String"), "{hover}");
+    let toks = semantic_tokens_full(&mut client, uri);
+    assert_eq!(
+        kind_at(&toks, line, name - 2),
+        Some("parameter"),
+        "{toks:?}"
+    );
+    assert_eq!(kind_at(&toks, line, name), Some("property"), "{toks:?}");
+    let (_, age) = at(src, 4, "age}");
+    assert_eq!(kind_at(&toks, line, age), Some("property"), "{toks:?}");
+}
+
 /// A fixed-size array cannot grow, so completion offers no `push` on one.
 #[test]
 fn member_completion_on_a_fixed_size_array_offers_no_growing_method() {

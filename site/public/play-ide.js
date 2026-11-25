@@ -5,6 +5,7 @@ import { zipOf } from "./play-zip.js";
 import { editorKeys } from "./play-keys.js";
 import { openMenu } from "./play-menu.js";
 import { bindIntel } from "./play-intel.js";
+import { languageIcon } from "./play-langs.js";
 
 const KEY_FILES = "vyrn.play.files.v1";
 const KEY_FOLDERS = "vyrn.play.folders.v1";
@@ -473,6 +474,10 @@ export function mountIde(root, core) {
   }
   const sendRight = (name) => sendTo(name, ensureSplit(), groups().find((g) => g.tabs.includes(name)) || null);
 
+  function paintIcon(el, name) {
+    const svg = languageIcon(userFiles, name);
+    if (svg) el.style.setProperty("--ico", `url("data:image/svg+xml,${encodeURIComponent(svg)}")`);
+  }
   function renderTabsG(g) {
     g.strip.textContent = "";
     for (const name of g.tabs) {
@@ -483,6 +488,7 @@ export function mountIde(root, core) {
       btn.type = "button";
       btn.className = "tname";
       btn.dataset.ico = name === WELCOME ? "home" : "file";
+      paintIcon(btn, name);
       btn.append(document.createTextNode(labelOf(name)));
       btn.addEventListener("pointerdown", (e) => beginDrag(e, name, g));
       btn.addEventListener("click", () => {
@@ -544,6 +550,7 @@ export function mountIde(root, core) {
         row.dataset.path = node.name;
         row.style.setProperty("--depth", depth);
         row.dataset.ico = node.dir ? (collapsed.has(node.name) ? "folder" : "folder-open") : "file";
+        if (!node.dir) paintIcon(row, node.name);
         row.append(document.createTextNode(labelOf(node.name)));
         if (!node.dir && focusedG.active === node.name) row.setAttribute("aria-current", "true");
         if (node.dir) {

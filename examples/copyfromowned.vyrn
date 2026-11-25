@@ -1,7 +1,0 @@
-// Refused on purpose: `copyFrom` of elements that own heap.
-fn main() -> Int64 {
-    let mut a: Array<String> = ["x"]
-    let b: Array<String> = ["y"]
-    a.copyFrom(b)
-    return a.length
-}
