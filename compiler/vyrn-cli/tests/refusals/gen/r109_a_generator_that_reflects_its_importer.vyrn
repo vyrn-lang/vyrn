@@ -1,0 +1,11 @@
+import { cli } from "std/cli"
+import { parseServe } from cli("./r109_a_generator_that_reflects_its_importer")
+
+export type Serve = { port: Int64, verbose: Bool }
+
+fn main() -> Int64 {
+    return match parseServe(args()) {
+        Valid(s) => s.port,
+        Invalid(issues) => 2,
+    }
+}

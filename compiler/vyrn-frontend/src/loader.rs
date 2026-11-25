@@ -652,6 +652,10 @@ pub struct Nest {
     /// writing, outermost first ([`rows_writer`]). This load takes each as
     /// written, so a runtime module that injects another writes no cycle.
     writing: Vec<String>,
+    /// The modules whose generator imports enclose this load, outermost
+    /// first. A generator that reflects one of them would load its own
+    /// importer again ([`crate::gen::gen_module_lit`]).
+    pub(crate) importers: Vec<String>,
 }
 
 /// Returns the objection, if any, to `importer` importing `imported`.
@@ -4043,6 +4047,7 @@ pub(crate) fn generator_opts(opts: &LoadOptions, caller: &str) -> Result<LoadOpt
     let mut inner = opts.clone();
     inner.nest.depth += 1;
     inner.nest.gen = None;
+    inner.nest.importers.push(caller.to_string());
     // `proved` asks the project's program to prove its checks, the generator's
     // module included; the generator's program also runs the main `vyrn-genwasm`
     // writes, whose `args()` reads no source can prove. The cache key omits it.

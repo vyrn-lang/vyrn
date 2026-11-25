@@ -884,6 +884,12 @@ fn the_generation_refusals_are_what_the_engine_says() {
             "generator imports nest more than 32 deep: a generator likely imports \
              itself with a growing argument",
         ),
+        (
+            "r109_a_generator_that_reflects_its_importer.vyrn",
+            "generator `cli(\"./r109_a_generator_that_reflects_its_importer\")` failed: \
+             `moduleInterface` cannot reflect `./r109_a_generator_that_reflects_its_importer`, \
+             because `./r109_a_generator_that_reflects_its_importer` imports this generator",
+        ),
     ];
     for (file, says) in rows {
         let (ok, text) = refusal_in(dir().join("gen"), file, false);

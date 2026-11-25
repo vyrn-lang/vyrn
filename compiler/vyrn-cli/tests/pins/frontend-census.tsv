@@ -1,9 +1,9 @@
 file	kind	lines	diagnostics
-loader.rs	the file's own job	5872	11
+loader.rs	the file's own job	5873	11
 loader.rs	a rule stated a second time	0	0
 loader.rs	a path only a deleted route reached	0	0
 loader.rs	a copy of a table another module carries	0	0
-loader.rs	shared machinery	1695	5
+loader.rs	shared machinery	1699	5
 loader.rs	tests	253	0
 symbols.rs	the file's own job	2973	0
 symbols.rs	a rule stated a second time	0	0

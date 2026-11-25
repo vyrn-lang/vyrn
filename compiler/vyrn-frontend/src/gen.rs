@@ -723,6 +723,12 @@ pub fn gen_module_lit(
         format!("{path}.vyrn")
     };
     let resolved = gen_scoped_path(importer_dir, allowed, aliased, &spec)?;
+    if opts.nest.importers.contains(&resolved) {
+        return Err(format!(
+            "`{}` cannot reflect `{path}`, because `{path}` imports this generator",
+            kind.builtin()
+        ));
+    }
     let source = resolver.read(&resolved).map_err(|e| {
         format!(
             "{} {}: {e}",
