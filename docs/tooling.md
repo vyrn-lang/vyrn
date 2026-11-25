@@ -547,15 +547,26 @@ shows the props. The module is analysed as a file beside its root, with each
 relative import respelled from there (`loader::generated_modules`).
 
 Each line that allocates, copies, grows a container, enters an allocating
-function of another file or keeps a check ends in an inlay hint of a few plain
-words per row, such as `copies String, allocates String x3` or `index checked`.
-The tooltip holds each row of `vyrn why --cost` in Markdown, with the full
-reason and the loops around it. A line with none of these has no hint. The
+function of another file or keeps a check ends in an inlay hint with one part
+per row of `vyrn why --cost`. A line with none of these has no hint. The
 hints show every row, in a loop or not.
+
+The client's `hintStyle` initialization option picks how a row reads. In the
+`compact` style, the default, a row is one glyph with its count in superscript;
+a count of one has none. The glyphs are `vyrn-lsp`'s `cost::GLYPHS`, one per
+verb: copies, allocates, enters, grows, check kept, check refused and call
+kept; `cost::LAST_RUN` precedes the blocks of the last run. Each glyph
+has its own hover: a bold title with the count, a line per noun with its
+reason, the loops around it, a fix where one is plain (`reserve` before a loop
+that grows), and a link that runs `vyrn why --cost` on the file. In the `full`
+style a row is a few plain words, such as `copies String, allocates String x3`
+or `index checked`, and the tooltip holds each row of `vyrn why --cost` in
+Markdown, with the full reason and the loops around it.
 
 If the document's last `vyrn run --profile` ran the same source and imports as
 the buffer, each hint also reads the blocks that run made there
-(`allocates String`, a middle dot, `171 blocks`), and the request
+(`allocates String`, a middle dot, `171 blocks`; in the compact style a last
+glyph with the count), and the request
 `vyrn/costLenses` answers one lens per function with an allocating row, such
 as `last run: 171 blocks`. If the buffer differs, the hints show no counts and
 one lens reads `profile stale`. With no profile there is no lens. The facts
@@ -614,6 +625,8 @@ Settings:
   beside the `vyrn` on `PATH`, then `compiler/vyrn-lsp/target/debug/`.
 - `vyrn.costHints`: the cost hints and lenses above. On by default. A change
   restarts the server.
+- `vyrn.hints.style`: `compact` (the default) or `full`, the server's
+  `hintStyle`. A change restarts the server.
 - `vyrn.path`: the compiler. When empty: `compiler/target/release/vyrn`, then
   the debug build, then `cargo run -p vyrn-cli`.
 

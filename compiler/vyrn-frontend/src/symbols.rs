@@ -201,6 +201,10 @@ pub struct CostLine {
     pub label: String,
     /// The row in full, code in backticks, as `why --cost` prints it.
     pub text: String,
+    /// Each noun of the row with its reason, code in backticks (`CostRow::items`).
+    pub items: Vec<String>,
+    /// How many facts the row joins: the sum of the counts its nouns carry.
+    pub count: usize,
 }
 
 /// One `import * as ns` binding and the exported declarations it exposes.

@@ -393,38 +393,45 @@ impl CostRow {
         }
     }
 
+    /// Each noun of the row with its count and reason, code in backticks: `` `String` x2 ``,
+    /// `` `push(..)` ``, `index check: the reason`.
+    pub fn items(&self, verb: Verb) -> Vec<String> {
+        let (say, sep): (fn(&str) -> String, &str) = match verb {
+            Verb::Copies => (|n| format!("`{n}`"), ": "),
+            Verb::Allocates => (|n| format!("`{n}`"), ""),
+            Verb::Enters => (|n| format!("`{n}(..)`"), " from "),
+            Verb::Grows => (|n| format!("`{n}(..)`"), ""),
+            Verb::Keeps => (|n| format!("{n} check"), ": "),
+            Verb::Refuses => (|n| format!("{n} check refused"), ": "),
+            Verb::Stays => (|n| format!("`{n}(..)`"), ", because "),
+        };
+        (self.nouns(say).into_iter().zip(&self.whats))
+            .map(|(noun, (_, why, _))| match why.is_empty() {
+                true => noun,
+                false => format!("{noun}{sep}{why}"),
+            })
+            .collect()
+    }
+
+    /// How many facts the row joins.
+    pub fn count(&self) -> usize {
+        self.whats.iter().map(|w| w.2).sum()
+    }
+
     /// The row in full, with code in backticks: what it does and why, for `why --cost`
     /// and a hover.
     pub fn text(&self, verb: Verb) -> String {
-        let code = |n: &str| format!("`{n}`");
-        let call = |n: &str| format!("`{n}(..)`");
-        let reasoned = |nouns: Vec<String>, sep: &str| {
-            (nouns.into_iter().zip(&self.whats))
-                .map(|(noun, (_, why, _))| match why.is_empty() {
-                    true => noun,
-                    false => format!("{noun}{sep}{why}"),
-                })
-                .collect::<Vec<_>>()
-        };
+        let items = self.items(verb);
         match verb {
-            Verb::Copies => format!("copies {}", reasoned(self.nouns(code), ": ").join("; ")),
-            Verb::Allocates => format!("allocates {}", self.nouns(code).join(", ")),
-            Verb::Enters => format!(
-                "allocates in {}",
-                reasoned(self.nouns(call), " from ").join(", ")
-            ),
+            Verb::Copies => format!("copies {}", items.join("; ")),
+            Verb::Allocates => format!("allocates {}", items.join(", ")),
+            Verb::Enters => format!("allocates in {}", items.join(", ")),
             Verb::Grows => format!(
                 "{} may allocate when it outgrows its capacity",
-                self.nouns(call).join(", ")
+                items.join(", ")
             ),
-            Verb::Keeps => reasoned(self.nouns(|n| format!("{n} check")), ": ").join("; "),
-            Verb::Refuses => {
-                reasoned(self.nouns(|n| format!("{n} check refused")), ": ").join("; ")
-            }
-            Verb::Stays => format!(
-                "call kept: {}",
-                reasoned(self.nouns(call), ", because ").join("; ")
-            ),
+            Verb::Keeps | Verb::Refuses => items.join("; "),
+            Verb::Stays => format!("call kept: {}", items.join("; ")),
         }
     }
 }
@@ -497,6 +504,8 @@ pub fn fn_costs(program: &Program, world: &World) -> Vec<FnCost> {
                 depth: row.depth,
                 label: row.label(verb),
                 text: row.text(verb),
+                items: row.items(verb),
+                count: row.count(),
             })
             .collect()
     };

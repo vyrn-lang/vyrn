@@ -1336,11 +1336,16 @@ fn spawn_client() -> LspClient {
     handshake(LspClient::spawn().expect("spawn vyrn-lsp"))
 }
 
-fn handshake(mut client: LspClient) -> LspClient {
+fn handshake(client: LspClient) -> LspClient {
+    handshake_with(client, serde_json::json!({}))
+}
+
+/// [`handshake`] with `options` as the client's initialization options.
+fn handshake_with(mut client: LspClient, options: serde_json::Value) -> LspClient {
     let init_id = serde_json::json!(1);
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": init_id, "method": "initialize",
-        "params": { "capabilities": {}, "processId": null }
+        "params": { "capabilities": {}, "processId": null, "initializationOptions": options }
     }));
     let _ = client.read_response(&init_id);
     client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
@@ -5464,7 +5469,8 @@ fn main() -> Int64 {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Every inlay hint for the whole document, as `(line, character, label)`.
+/// Every inlay hint for the whole document whose label is one string, as
+/// `(line, character, label)`. A compact cost hint's label is parts, and is left out.
 fn inlay_hints(client: &mut LspClient, uri: &str) -> Vec<(u32, u32, String)> {
     let id = serde_json::json!(format!("inlay-{uri}"));
     client.send(&serde_json::json!({
@@ -5482,12 +5488,12 @@ fn inlay_hints(client: &mut LspClient, uri: &str) -> Vec<(u32, u32, String)> {
         .and_then(|r| r.as_array())
         .expect("an inlay hint list")
         .iter()
-        .map(|h| {
-            (
+        .filter_map(|h| {
+            Some((
                 h.pointer("/position/line").unwrap().as_u64().unwrap() as u32,
                 h.pointer("/position/character").unwrap().as_u64().unwrap() as u32,
-                h["label"].as_str().unwrap().to_string(),
-            )
+                h["label"].as_str()?.to_string(),
+            ))
         })
         .collect()
 }
@@ -6256,9 +6262,16 @@ fn profile_dir() -> &'static std::path::Path {
     })
 }
 
-/// Opens `path` with `text` in a fresh server and waits for its diagnostics, which must be empty.
+/// Opens `path` with `text` in a fresh server that draws its hints in words, and waits for its
+/// diagnostics, which must be empty.
 fn open_for_cost(path: &std::path::Path, text: &str) -> (LspClient, String) {
-    let mut client = spawn_client();
+    open_with_style(path, text, "full")
+}
+
+/// [`open_for_cost`] with the `hintStyle` initialization option `style`.
+fn open_with_style(path: &std::path::Path, text: &str, style: &str) -> (LspClient, String) {
+    let spawned = LspClient::spawn().expect("spawn vyrn-lsp");
+    let mut client = handshake_with(spawned, serde_json::json!({ "hintStyle": style }));
     let uri = file_uri(path);
     did_open(&mut client, &uri, "vyrn", text);
     let diags = read_diags_for(&mut client, "");
@@ -6444,6 +6457,91 @@ fn an_edited_buffer_makes_the_profile_stale() {
     let lenses = cost_lenses(&mut client, &uri);
     assert!(lenses[0].contains("profile stale"), "{lenses:?}");
     assert!(lenses.iter().all(|l| !l.contains("last run")), "{lenses:?}");
+}
+
+/// The compact cost hints of `uri`: per hint, its line and its label parts, each with its
+/// Markdown hover.
+fn compact_hints(client: &mut LspClient, uri: &str) -> Vec<(u64, Vec<(String, String)>)> {
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 93, "method": "textDocument/inlayHint",
+        "params": { "textDocument": { "uri": uri }, "range": {
+            "start": { "line": 0, "character": 0 }, "end": { "line": 100000, "character": 0 } } }
+    }));
+    let resp = client.read_response(&serde_json::json!(93));
+    (resp["result"].as_array().expect("hints").iter())
+        .filter_map(|h| {
+            let parts = h["label"].as_array()?;
+            let line = h["position"]["line"].as_u64().unwrap() + 1;
+            let parts = (parts.iter())
+                .map(|p| {
+                    let tip = p["tooltip"]["value"].as_str().unwrap_or_default();
+                    (p["value"].as_str().unwrap().to_string(), tip.to_string())
+                })
+                .collect();
+            Some((line, parts))
+        })
+        .collect()
+}
+
+/// In the compact style each row is a glyph with its count; the rows are the full style's.
+#[test]
+fn knucleotide_lines_carry_their_cost_as_glyphs() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_with_style(&path, &text, "compact");
+    let rows: Vec<String> = (compact_hints(&mut client, &uri).into_iter())
+        .map(|(line, parts)| {
+            let values: String = parts.into_iter().map(|p| p.0).collect();
+            format!("{line} {values}")
+        })
+        .collect();
+    holds_pin("knucleotide-compact", &rows);
+}
+
+/// A glyph's hover has a bold title with the count, a line per noun with its reason, the loops
+/// around it, a plain fix and the report's link.
+#[test]
+fn a_glyph_hover_names_each_fact_and_links_the_report() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_with_style(&path, &text, "compact");
+    let hints = compact_hints(&mut client, &uri);
+    let (_, parts) = hints.iter().find(|h| h.0 == 73).expect("line 73");
+    let values: Vec<&str> = parts.iter().map(|p| p.0.as_str()).collect();
+    assert_eq!(values, ["\u{2197}", " ?"]);
+    let grows = &parts[0].1;
+    assert!(
+        grows.starts_with("**\u{2197} may grow 1**\n\n- `push(..)`"),
+        "{grows}"
+    );
+    assert!(
+        grows.contains("In a loop.") && grows.contains("Fix: `reserve`"),
+        "{grows}"
+    );
+    assert!(
+        grows.ends_with("[vyrn why --cost](command:vyrn.whyCost)"),
+        "{grows}"
+    );
+    let check = &parts[1].1;
+    assert!(check.contains("- index check: "), "{check}");
+    assert!(
+        check.contains("the result of `modulusOf(..)` at line 71"),
+        "{check}"
+    );
+}
+
+/// After a fresh profile the compact line ends in the blocks the run made there.
+#[test]
+fn a_fresh_profile_adds_a_last_run_glyph() {
+    let path = word_file("compact");
+    save_word_profile(&path, WORD);
+    let (mut client, uri) = open_with_style(&path, WORD, "compact");
+    let hints = compact_hints(&mut client, &uri);
+    let values: Vec<&str> = hints[0].1.iter().map(|p| p.0.as_str()).collect();
+    assert_eq!(
+        (hints[0].0, values),
+        (2, vec!["\u{229e}\u{b2}", " \u{d7}3"])
+    );
+    let run = &hints[0].1[1].1;
+    assert!(run.contains("3 blocks, 40 bytes"), "{run}");
 }
 
 /// Each publish names the version of the text it describes, so a client can drop one

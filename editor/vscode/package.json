@@ -153,6 +153,11 @@
         "category": "Vyrn"
       },
       {
+        "command": "vyrn.whyCost",
+        "title": "Vyrn: Explain Costs",
+        "category": "Vyrn"
+      },
+      {
         "command": "vyrn.associateLanguages",
         "title": "Vyrn: associate project languages",
         "category": "Vyrn"
@@ -170,6 +175,16 @@
           "type": "boolean",
           "default": true,
           "description": "Show what each line costs at its end (allocates Folded, copies String, index checked), with the reason in the tooltip, and the blocks of the last `vyrn run --profile` beside each line and above each function when the source has not changed since. Turning it off restarts the language server."
+        },
+        "vyrn.hints.style": {
+          "type": "string",
+          "enum": ["compact", "full"],
+          "default": "compact",
+          "enumDescriptions": [
+            "One glyph per fact with its count; hover a glyph for its causes and a link to `vyrn why --cost`.",
+            "The facts in words, as `vyrn why --cost` labels them."
+          ],
+          "description": "How the cost hints read. A change restarts the language server."
         },
         "vyrn.path": {
           "type": "string",

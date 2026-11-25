@@ -102,7 +102,10 @@ function activate(context) {
     // A function, so a restart reads the setting as it is then.
     initializationOptions: () => ({
       costHints: vsc.workspace.getConfiguration("vyrn").get("costHints", true),
+      hintStyle: vsc.workspace.getConfiguration("vyrn").get("hints.style", "compact"),
     }),
+    // A compact cost hover ends in a link to `vyrn.whyCost`; no other command runs from one.
+    markdown: { isTrusted: { enabledCommands: ["vyrn.whyCost"] } },
     // A document the server claims through a `languages` entry reopens as
     // `vyrn-dsl`, so its tab shows that language's icon; the reopened document
     // comes back here and goes to the server. A generator input the server
@@ -130,10 +133,11 @@ function activate(context) {
   // rejection that would crash the Extension Development Host.
   const started = client.start();
   context.subscriptions.push(started);
-  // The server reads `vyrn.costHints` once, at `initialize`.
+  // The server reads `vyrn.costHints` and `vyrn.hints.style` once, at `initialize`.
   context.subscriptions.push(
     vsc.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("vyrn.costHints") && lspState.client) {
+      const read = ["vyrn.costHints", "vyrn.hints.style"];
+      if (read.some((k) => e.affectsConfiguration(k)) && lspState.client) {
         lspState.client.restart();
       }
     })
@@ -375,6 +379,9 @@ function registerRun(context, vsc, lspState) {
     ),
     vsc.commands.registerCommand("vyrn.profileTests", (uri) =>
       runVyrn(vsc, uri, (file) => ["test", "--profile", file])
+    ),
+    vsc.commands.registerCommand("vyrn.whyCost", (uri) =>
+      runVyrn(vsc, uri, (file) => ["why", "--cost", file])
     ),
     // "▶ Run dev server": `vyrn dev` is manifest-driven (it reads the
     // project's `server`/`client` keys), so this runs it in the manifest

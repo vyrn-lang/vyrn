@@ -61,6 +61,14 @@ fn cost_hints() -> bool {
     COST_HINTS.get().copied().unwrap_or(true)
 }
 
+/// Whether the cost hints are glyphs ([`cost`]): the `hintStyle` initialization option is
+/// `compact`, or absent. `full` draws them as words.
+static COMPACT_HINTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn compact_hints() -> bool {
+    COMPACT_HINTS.get().copied().unwrap_or(true)
+}
+
 /// The pipeline every analysis runs. It computes the cost of each function only when a hint
 /// or a lens will show it.
 fn judge() -> &'static vyrn_frontend::Judge {
@@ -413,7 +421,7 @@ struct AnalyzedSynth {
 
 /// Answers `initialize`, and asks a client that can send file events for them
 /// under its workspace folders and the std root. Returns those directories, or
-/// none when the client cannot. Reads the `costHints` initialization option.
+/// none when the client cannot. Reads the `costHints` and `hintStyle` initialization options.
 fn handle_initialize(
     connection: &Connection,
 ) -> Result<(Vec<String>, serde_json::Value, Vec<std::path::PathBuf>), ()> {
@@ -424,6 +432,8 @@ fn handle_initialize(
     let caps = params.get("capabilities").cloned().unwrap_or_default();
     let off = params.pointer("/initializationOptions/costHints");
     let _ = COST_HINTS.set(off.and_then(|o| o.as_bool()).unwrap_or(true));
+    let style = params.pointer("/initializationOptions/hintStyle");
+    let _ = COMPACT_HINTS.set(style.and_then(|s| s.as_str()) != Some("full"));
 
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
