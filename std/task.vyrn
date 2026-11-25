@@ -171,8 +171,9 @@ export fn joinAll<T>(ts: consume Array<Task<T>>) -> Array<T> {
 /// cancels them; `ids` holds their run queue ids in the same order.
 export type Group<T> = { tasks: Array<Child<T>>, ids: Array<Int64>, limit: Int64 }
 
-/// An empty group whose tasks run at most `limit` at once.
-export fn group<T>(limit: Int64) -> Group<T> {
+/// An empty group whose tasks run at most `limit` at once. A limit below 1
+/// traps at the call, because `room` would wait forever.
+export fn group<T>(limit: Int64 where value >= 1) -> Group<T> {
     return Group { tasks: [], ids: [], limit: limit }
 }
 

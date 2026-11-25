@@ -126,10 +126,11 @@ cancels them; `ids` holds their run queue ids in the same order.
 ## group
 
 ```vyrn
-fn group<T>(limit: Int64) -> Group<T>
+fn group<T>(limit: Int64 where value >= 1) -> Group<T>
 ```
 
-An empty group whose tasks run at most `limit` at once.
+An empty group whose tasks run at most `limit` at once. A limit below 1
+traps at the call, because `room` would wait forever.
 
 ## room
 
