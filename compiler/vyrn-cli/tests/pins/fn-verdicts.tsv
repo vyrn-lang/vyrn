@@ -3336,6 +3336,9 @@ std/syntax.vyrn	syntaxReport	yes	no, its effect set is gen-only
 std/syntaxreport.vyrn	syntaxSentence	no, it keeps a slice check	no, its effect set is alloc
 std/syntaxreport.vyrn	syntaxEntry	yes	no, the loop is no counter loop
 std/task.vyrn	task$sleep	yes	no, its effect set is waits
+std/task.vyrn	task$settle	no, it calls `watch`, which is not trap-free	no, its effect set is alloc, module-state, waits
+std/task.vyrn	task$live	no, it calls `stateOf`, which is not trap-free	no, its effect set is module-state
+std/task.vyrn	task$anyCancelled	no, it calls `stateOf`, which is not trap-free	no, its effect set is module-state
 std/task.vyrn	task$taskAt	yes	no, its effect set is module-state
 std/task.vyrn	task$waitAt	yes	no, its effect set is module-state
 std/task.vyrn	task$taskEnd	no, it keeps an index check	no, its effect set is alloc, module-state

@@ -327,6 +327,7 @@ fn main() -> Int64 {
 - Forking does not wait, so a function that only forks does not wait. A forker that joins waits, by `join`.
 - A `Task<T>` is an owned value, not a must-use one. `drop t`, a store over it, `clear` and the end of its scope release it, and the task runs to its end: only `cancel(t)` ends a task early, so a task with no handle cannot be cancelled. A copy is refused, because two handles would release one task twice. Module state cannot hold a task, and a lambda cannot consume one it captures.
 - `main`'s exit waits for every task that still runs, as Node's does, and the exit code is `main`'s.
+- `child(t)` from `std/task` holds `t` as a `Child<T>`, whose release cancels the task: the code that holds a task decides whether it ends with its holder. `drop c`, a cancelled holder and scope end cancel a child's task; `detach(c)` takes the plain handle back, for `join`. A `Child` has no copy.
 - A task cancelled where it waits releases what a `return` there would, and the tasks its released handles name run on. If the host cancels a task's wait, the task ends cancelled. Its owner learns it only by waiting for it: a `join`, `both`, `race`, `joinAll` or `room` that waits for the task is cancelled where it waits, and one that starts after the task ended is cancelled at once.
 - Under `vyrn run`, a native build and the browser shim, a trap ends the program with its message, whichever task it happens in. A resident instance (`serve`, `dev`, `test`) ends the trapped task alone: its `join` is cancelled, and the trap of a task no handle owns is logged.
 - Tasks move in wake order, and a task's end readies only the task that joins it, so the same deliveries print the same bytes.
@@ -349,10 +350,10 @@ fn page(id: Int64) -> String {
 
 - The forks start in the order they are written, each to its first wait. The host's deliveries decide which task moves next, so the same deliveries print the same bytes.
 - `race` takes the first task, in argument order, that has returned once both started; after that, the first to return. A loser that returned is released.
-- If one task is cancelled, `both` cancels the other and is cancelled itself.
+- If one task is cancelled, `both` cancels the other and is cancelled itself. `both`, `race`, `timeout` and `joinAll` hold their tasks as children, so cancelling one of them, or its holder, cancels its tasks.
 - `timeout(ms, t)` is `race(t, fork sleep(ms))`: `Some` of the result, or `None`, and `t` is cancelled where it waits.
 - `joinAll(ts)` waits for an array of tasks and returns the results in index order; a `for` that forks one task per element and `joinAll` run a call per element at once.
-- A `Group<T>` holds tasks of one result type, at most `limit` running at once: `await room(g)` before each fork waits until fewer than the limit run, `add(g, fork f(x))` adds the task, and `joinGroup(g)` or `cancelGroup(g)` ends them. Releasing a group releases its handles, and its tasks run on.
+- A `Group<T>` holds tasks of one result type, at most `limit` running at once: `await room(g)` before each fork waits until fewer than the limit run, `add(g, fork f(x))` adds the task, and `joinGroup(g)` or `cancelGroup(g)` ends them. Each task is a child of the group, so releasing the group cancels them.
 - A lambda waits as a function does, and a call that passes one to a `fn` parameter calls it directly.
 - An `await` inside a `region` builds: the region has an arena of its own, so tasks that wait inside regions at once never share one ([memory.md](memory.md)).
 - A call through a function value waits when its type waits (Function types), and is marked `await` as any waiting call is: `await handler(req)`.

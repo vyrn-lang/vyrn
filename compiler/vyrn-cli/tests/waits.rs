@@ -3,7 +3,8 @@
 //! every value whichever wait the host cancels. Each prints the same bytes when
 //! the host replays what it delivered. The programs under
 //! `tests/waits/` witness `vyrn test`'s clock, a race the host's delivery order
-//! decides, a waiting export's result on every host, and released tasks on every host.
+//! decides, a waiting export's result on every host, and released tasks and children on every
+//! host.
 
 mod common;
 use common::*;
@@ -405,6 +406,36 @@ error: the released task trapped (trapped.vyrn:5)
             "exit Some(0)
 u
 joined u
+",
+        ),
+    ] {
+        assert_eq!(on_every_host(name), want, "{name}");
+    }
+}
+
+/// A `Child`'s release cancels its task, where a plain handle's leaves it running: a cancelled
+/// `timeout`, whose branch is its child, a cancelled holder of a child and a plain handle, and
+/// a dropped child. Each frees every value on every host.
+#[test]
+fn a_child_s_release_cancels_its_task_on_every_host() {
+    for (name, want) in [
+        (
+            "timedout.vyrn",
+            "exit Some(0)
+the branch printed nothing
+",
+        ),
+        (
+            "holder.vyrn",
+            "exit Some(0)
+the plain task prints
+main ends
+",
+        ),
+        (
+            "dropchild.vyrn",
+            "exit Some(0)
+dropped
 ",
         ),
     ] {
