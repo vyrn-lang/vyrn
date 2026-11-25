@@ -82,92 +82,53 @@ fn release<T>(t: consume Task<T>) {
     taskFree(t, returned)
 }
 
-/// A task's handle whose release cancels the task, where a plain handle's
-/// release leaves it running: the code that holds a `Child` decides that the
-/// task ends with it. `detach(c)` takes the plain handle back, for `join`.
-export type Child<T> = enum { Held(Task<T>) }
-
-impl<T> Owned for Child<T> {
-    fn release(consume self) {
-        match consume self {
-            Held(t) => {
-                stop(taskId(t))
-                release(t)
-            }
-        }
-    }
-}
-
-/// Holds `t` as a child: releasing the child cancels `t`.
-export fn child<T>(t: consume Task<T>) -> Child<T> {
-    return Held(t)
-}
-
-/// The plain handle `c` holds.
-export fn detach<T>(c: consume Child<T>) -> Task<T> {
-    return match consume c {
-        Held(t) => t,
-    }
-}
-
-/// The result of `c`'s task, which ended; the caller is cancelled where it
-/// waits here when the task was cancelled.
-fn resultOf<T>(c: consume Child<T>) -> T {
-    let t = match consume c {
-        Held(h) => h,
-    }
-    let id = taskId(t)
-    if stateOf(id) == 1 {
-        await cancelled()
-    }
-    forget(id)
-    return taskTake(t)
-}
-
 /// Waits for both tasks: their results, in argument order. If one is
-/// cancelled, `both` is cancelled, and so is the other, a child of `both`.
+/// cancelled, `both` cancels the other and is cancelled. If the caller is
+/// cancelled while it waits here, `both` cancels both tasks.
 export fn both<A, B>(first: consume Task<A>, second: consume Task<B>) -> Both<A, B> {
     let a = taskId(first)
     let b = taskId(second)
-    let x = Held(first)
-    let y = Held(second)
     while (stateOf(a) == 2 || stateOf(b) == 2) && stateOf(a) != 1 && stateOf(b) != 1 {
         let op = newOp()
         watch(a, op)
         watch(b, op)
-        await taskWait(op)
+        if await waitAware(op) {
+            stop(a)
+            stop(b)
+        }
     }
-    if stateOf(b) == 1 {
-        let s = await resultOf(y)
-        let f = await resultOf(x)
-        return Both { first: f, second: s }
+    if stateOf(a) == 1 || stateOf(b) == 1 {
+        stop(a)
+        stop(b)
     }
-    let f = await resultOf(x)
-    let s = await resultOf(y)
+    let f = await join(first)
+    let s = await join(second)
     return Both { first: f, second: s }
 }
 
 /// The first task to return, in argument order once both started, and its
-/// result: `await race(fork f(a), fork sleep(500))`. The other, a child of
-/// `race`, is cancelled where it waits, or released if it returned. If the
-/// first to end was cancelled, `race` is cancelled.
+/// result: `await race(fork f(a), fork sleep(500))`. The other is cancelled
+/// where it waits, or released if it returned. If the first to end was
+/// cancelled, `race` is cancelled. If the caller is cancelled while it waits
+/// here, `race` cancels both tasks.
 export fn race<A, B>(first: consume Task<A>, second: consume Task<B>) -> Race<A, B> {
     let a = taskId(first)
     let b = taskId(second)
-    let x = Held(first)
-    let y = Held(second)
     if stateOf(a) == 2 && stateOf(b) == 2 {
         let op = newOp()
         watch(a, op)
         watch(b, op)
-        await taskWait(op)
+        if await waitAware(op) {
+            stop(a)
+            stop(b)
+        }
     }
     if stateOf(a) == 0 || stateOf(b) == 2 {
-        drop y
-        return First(await resultOf(x))
+        cancel(second)
+        return First(await join(first))
     }
-    drop x
-    return Second(await resultOf(y))
+    cancel(first)
+    return Second(await join(second))
 }
 
 /// `Some` of `t`'s result if it returns within `ms` milliseconds, else `None`,
@@ -180,21 +141,19 @@ export fn timeout<T>(ms: Int64, t: consume Task<T>) -> Option<T> {
 }
 
 /// Waits for every task: the results, in index order. If one is cancelled,
-/// `joinAll` is cancelled, and so are the rest, its children.
+/// or the caller is cancelled while it waits here, `joinAll` cancels the rest
+/// and is cancelled.
 export fn joinAll<T>(ts: consume Array<Task<T>>) -> Array<T> {
     let mut ids: Array<Int64> = []
-    let mut kids: Array<Child<T>> = []
-    for t in consume ts {
+    for t in ts {
         ids.push(taskId(t))
-        kids.push(Held(t))
     }
-    return await joinKids(kids, ids)
+    return await joinTasks(ts, ids)
 }
 
 /// Tasks of one result type, at most `limit` of them running at once, joined
-/// or cancelled together. Each is a child of the group, so releasing the group
-/// cancels them; `ids` holds their run queue ids in the same order.
-export type Group<T> = { tasks: Array<Child<T>>, ids: Array<Int64>, limit: Int64 }
+/// or cancelled together; `ids` holds their run queue ids in the same order.
+export type Group<T> = { tasks: Array<Task<T>>, ids: Array<Int64>, limit: Int64 }
 
 /// An empty group whose tasks run at most `limit` at once. A limit below 1
 /// traps at the call, because `room` would wait forever.
@@ -203,22 +162,28 @@ export fn group<T>(limit: Int64 where value >= 1) -> Group<T> {
 }
 
 /// Waits until fewer than the limit of `g`'s tasks run: call it before each
-/// `fork` the group will hold. If one was cancelled, `room` is cancelled.
+/// `fork` the group will hold. If one was cancelled, or the caller is
+/// cancelled while it waits here, `room` cancels the group's tasks and is
+/// cancelled.
 export fn room<T>(g: modify Group<T>) {
     await settle(g.ids, g.limit)
 }
 
 /// Waits while at least `limit` of the tasks `ids` names run and none was
-/// cancelled; if one was, the caller is cancelled.
+/// cancelled. If one was, or the caller is cancelled while it waits here,
+/// cancels them all, and the caller is cancelled.
 fn settle(ids: Array<Int64>, limit: Int64) {
     while live(ids) >= limit && !anyCancelled(ids) {
         let op = newOp()
         for id in ids {
             watch(id, op)
         }
-        await taskWait(op)
+        if await waitAware(op) {
+            stopAll(ids)
+        }
     }
     if anyCancelled(ids) {
+        stopAll(ids)
         await cancelled()
     }
 }
@@ -226,38 +191,39 @@ fn settle(ids: Array<Int64>, limit: Int64) {
 /// Adds `t` to `g`.
 export fn add<T>(g: modify Group<T>, t: consume Task<T>) {
     g.ids.push(taskId(t))
-    g.tasks.push(Held(t))
+    g.tasks.push(t)
 }
 
 /// Waits for every task of `g`: the results, in the order they were added.
 export fn joinGroup<T>(g: consume Group<T>) -> Array<T> {
-    return await joinKids(consume g.tasks, consume g.ids)
+    return await joinTasks(consume g.tasks, consume g.ids)
 }
 
-/// Waits until none of `kids`, whose run queue ids are `ids`, runs, and
-/// returns their results in index order.
-fn joinKids<T>(kids: consume Array<Child<T>>, ids: consume Array<Int64>) -> Array<T> {
+/// Waits until none of `ts`, whose run queue ids are `ids`, runs, and returns
+/// their results in index order.
+fn joinTasks<T>(ts: consume Array<Task<T>>, ids: consume Array<Int64>) -> Array<T> {
     await settle(ids, 1)
     drop ids
-    // Popped twice so the joins run in index order.
-    let mut rest = kids
-    let mut ahead: Array<Child<T>> = []
-    while let Some(k) = rest.pop() {
-        ahead.push(k)
-    }
-    drop rest
     let mut out: Array<T> = []
-    while let Some(k) = ahead.pop() {
-        out.push(await resultOf(k))
+    for t in consume ts {
+        out.push(await join(t))
     }
-    drop ahead
     return out
 }
 
 /// Cancels every task of `g` where it waits.
 export fn cancelGroup<T>(g: consume Group<T>) {
     let ts = consume g.tasks
-    drop ts
+    for t in consume ts {
+        cancel(t)
+    }
+}
+
+/// Cancels each of the tasks `ids` names where it waits.
+fn stopAll(ids: Array<Int64>) {
+    for id in ids {
+        stop(id)
+    }
 }
 
 /// How many of the tasks `ids` names run.
