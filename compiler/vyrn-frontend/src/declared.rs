@@ -278,6 +278,23 @@ impl Owned {
         out
     }
 
+    /// Returns `ty` when it declares its release in a module other than
+    /// `module`: a body of `module` cannot take a value of it apart.
+    pub fn released_elsewhere(&self, ty: &Type, module: Option<&str>) -> Option<Type> {
+        let k = self.declares_release(ty)?;
+        let home = self.types.get(k).map(|d| d.module.as_deref());
+        (home != Some(module)).then(|| ty.clone())
+    }
+
+    /// Returns the key of `ty` when it declares its release by `impl Owned`.
+    /// It allocates nothing, so a walk may ask it of every part.
+    pub fn declares_release<'t>(&self, ty: &'t Type) -> Option<&'t str> {
+        let (Type::Named(k) | Type::App(k, _)) = ty else {
+            return None;
+        };
+        self.impls.contains_key(k.as_str()).then_some(k.as_str())
+    }
+
     /// Returns the declared `release` row of `ty`, which [`Owned::release_kind`]
     /// tries first. It resolves nothing, so its cost does not grow with `ty`.
     fn declared_release(&self, ty: &Type) -> Option<DropKind> {
@@ -486,33 +503,44 @@ pub fn owns_heap(ty: &Type, types: &dyn Decls) -> bool {
 }
 
 /// Whether the release walk of `ty` can skip every one of `paths` (the holes
-/// a `consume` left). A path is a chain of record fields and enum payloads spelled
-/// `Variant.i`. A declared `release` or a container on the chain answers
-/// false: a user function cannot skip a field, and the walk has no index.
-/// The core states no hole this refuses (`r22_drop_with_a_hole.vyrn`).
-pub fn skippable(proto: &Owned, ty: &Type, paths: &[String]) -> bool {
-    paths.iter().all(|p| {
-        let mut cur = ty.clone();
-        let mut segs = p.split('.');
-        while let Some(seg) = segs.next() {
-            if proto.declared_release(&proto.standing(&cur)).is_some() {
-                return false;
-            }
-            let next = match &*crate::types::resolved(&cur, &*proto.types) {
-                Type::Record(fields) => fields.iter().find(|f| f.name == seg).map(|f| f.ty.clone()),
-                Type::Enum(vs) => segs.next().and_then(|i| {
-                    let v = vs.iter().find(|v| v.name == seg)?;
-                    v.payload.get(i.parse::<usize>().ok()?).cloned()
-                }),
-                _ => None,
-            };
-            let Some(next) = next else {
-                return false;
-            };
-            cur = next;
+/// a `consume` left) in a body of `module`. A path is a chain of record fields
+/// and enum payloads spelled `Variant.i`. A path that names no part answers
+/// false, and so does a type on the chain that declares its release in another
+/// module ([`hole_walk`]). The walk is structural under a type `module`
+/// declares: the module that declares a type takes it apart.
+pub fn skippable(proto: &Owned, ty: &Type, paths: &[String], module: Option<&str>) -> bool {
+    paths
+        .iter()
+        .all(|p| hole_walk(proto, ty, p, module) == Ok(()))
+}
+
+/// Walks the hole `path` under `ty` for a body of `module`: `Ok` where the
+/// release walk skips it, `Err(Some(t))` at the first type `t` on the chain
+/// that declares its release in another module, which a body of `module` may
+/// not take apart, and `Err(None)` where `path` names no part.
+pub fn hole_walk(
+    proto: &Owned,
+    ty: &Type,
+    path: &str,
+    module: Option<&str>,
+) -> Result<(), Option<Type>> {
+    let mut cur = std::borrow::Cow::Borrowed(ty);
+    let mut segs = path.split('.').filter(|s| !s.is_empty());
+    while let Some(seg) = segs.next() {
+        if let Some(t) = proto.released_elsewhere(&cur, module) {
+            return Err(Some(t));
         }
-        true
-    })
+        let next = match &*crate::types::resolved(&cur, &*proto.types) {
+            Type::Record(fields) => fields.iter().find(|f| f.name == seg).map(|f| f.ty.clone()),
+            Type::Enum(vs) => segs.next().and_then(|i| {
+                let v = vs.iter().find(|v| v.name == seg)?;
+                v.payload.get(i.parse::<usize>().ok()?).cloned()
+            }),
+            _ => None,
+        };
+        cur = std::borrow::Cow::Owned(next.ok_or(None)?);
+    }
+    Ok(())
 }
 
 /// Returns the holes inside field `name`, with its hop removed: `head.err`

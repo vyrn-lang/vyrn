@@ -36,13 +36,28 @@ fn first(src: &str) -> Option<vyrn_frontend::diagnostics::Diagnostic> {
         .next()
 }
 
+/// The first diagnostic the editor gives for `src`, read from `path`, so an
+/// import beside it resolves.
+fn first_at(src: &str, path: &Path) -> Option<vyrn_frontend::diagnostics::Diagnostic> {
+    let opts = vyrn_frontend::loader::LoadOptions {
+        std_root: vyrn_frontend::manifest::std_root(),
+        ..Default::default()
+    };
+    let path = path.to_string_lossy();
+    let linker = (&*path, &opts, &vyrn_frontend::loader::DiskResolver as _);
+    vyrn_frontend::analyze_judged(src, Some(linker), None, &vyrn_lower::JUDGE)
+        .diagnostics
+        .into_iter()
+        .next()
+}
+
 #[test]
 fn every_refusal_the_editor_shows_is_pinned_to_a_token() {
     let mut bad: Vec<String> = Vec::new();
     for p in programs() {
         let name = p.file_name().unwrap().to_string_lossy().to_string();
         let src = std::fs::read_to_string(&p).expect("read the program");
-        let Some(d) = first(&src) else {
+        let Some(d) = first_at(&src, &p) else {
             bad.push(format!("{name}: the editor shows nothing"));
             continue;
         };

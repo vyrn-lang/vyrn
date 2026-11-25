@@ -1,0 +1,11 @@
+// A `match` that takes its scrutinee takes it apart, as a field take does.
+import { Slot, full } from "./apart/kid"
+
+fn main() -> Int64 {
+    let s = full("a" + "b")
+    match consume s {
+        Full(x) => print(x),
+        Empty => {}
+    }
+    return 0
+}

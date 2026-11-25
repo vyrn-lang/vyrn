@@ -4257,9 +4257,10 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         // A declared release runs instead of a field walk, which would skip its order and
-        // side effects.
-        if let Some(DropKind::Release(f, _)) = self.cx.world.ownership.proto.release_kind(ty) {
-            self.rel_holes.clear();
+        // side effects. A value with a hole was taken apart by the module that declares its
+        // type, so the walk releases the parts left.
+        let declared = self.cx.world.ownership.proto.release_kind(ty);
+        if let (Some(DropKind::Release(f, _)), true) = (declared, self.rel_holes.is_empty()) {
             // `a` addresses the value; a scalar receiver (a `Task<T>`) crosses as the value.
             let at = match self.cx.repr(ty, line)? {
                 Repr::Scalar(v) => {
@@ -16534,10 +16535,12 @@ fn core_switched(s: &St, ons: bool, out: &mut Vec<Name>) {
 }
 
 /// `rel`, walking around the holes a core row names. The row spells a hole
-/// with the leading dot a path has, and a walk names the field.
+/// with the leading dot a path has, and a walk names the field. A declared
+/// release takes its value whole, so a value with a hole, which only its
+/// type's module takes apart, is walked instead.
 fn around(rel: Rel, holes: &[String]) -> Rel {
     match rel {
-        Rel::Deep(ty, _) => Rel::Deep(
+        Rel::Call(_, ty) | Rel::Deep(ty, _) if !holes.is_empty() => Rel::Deep(
             ty,
             holes
                 .iter()

@@ -1138,7 +1138,7 @@ rules! {
         "`{s}` may not be dropped: `{s}{h}` was taken out of it on line {l}, and `drop` \
         releases the whole binding"
         fix "write `{s}{h}` back before the `drop`, so the binding is whole again"
-        fix "delete the `drop`: the parts still here are released when the block exits";
+        fix "delete the `drop`: the block's exit releases each part still here, and not the whole";
     ReleasedWithHole { info, h }
         "{info} is released whole although a `consume` took `{h}` out of it";
     ReleasedAround { info, h } "{info} is released around `{h}` on a path that did not take it";
@@ -1287,6 +1287,12 @@ rules! {
         place to leave a hole in"
         fix "drop the `consume`: the value is already owned";
     ConsumedBorrow { root, what } "`{root}` may not be consumed: it is {what}";
+    // A declared release takes its value whole, so only the module that
+    // declares the type takes one apart.
+    TakenApart { what, t }
+        "{what} takes apart a `{t}`, and another module declares the release of `{t}`"
+        fix "take the part out through a function of the module that declares `{t}`"
+        fix "move the release onto the part, so `{t}` declares none";
     HandedOutOfLoopArm { a }
         "`{a}` may not be handed out of an arm inside a loop: the result is released on \
         every turn, and `{a}` is bound outside the loop"

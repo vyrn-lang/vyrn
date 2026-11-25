@@ -1,0 +1,35 @@
+// Types whose module declares their release, for the take-apart refusals.
+
+export type Kid = { name: String, note: String }
+
+impl Owned for Kid {
+    fn release(consume self) {
+        print("kid released")
+        let s = consume self.name
+        drop s
+        let t = consume self.note
+        drop t
+    }
+}
+
+export type Slot = enum { Full(String), Empty }
+
+impl Owned for Slot {
+    fn release(consume self) {
+        print("slot released")
+        match consume self {
+            Full(s) => {
+                drop s
+            }
+            Empty => {}
+        }
+    }
+}
+
+export fn kid(name: consume String) -> Kid {
+    return Kid { name: name, note: "" }
+}
+
+export fn full(s: consume String) -> Slot {
+    return Full(s)
+}

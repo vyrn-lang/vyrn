@@ -272,17 +272,17 @@ fn a_payload_that_leaves_its_arm_leaves_the_scrutinee_unreclaimed() {
     assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr]);
 }
 
-/// A declared `release` is a user function, and a function cannot be told to
-/// leave one field alone.
+/// The module that declares a release takes its type apart: the record is
+/// reclaimed part by part around the hole, and the declared release does not run.
 #[test]
-fn a_declared_release_keeps_leaking_its_hole() {
+fn a_type_its_module_takes_apart_is_reclaimed_around_its_hole() {
     let src = "protocol Owned { fn release(self) } \
                type Box = { name: String, n: Int64 } \
                impl Owned for Box { fn release(self) { print(1) } } \
                fn mk(a: String) -> Box { return Box { name: a + \"n\", n: 1 } } \
                fn main() -> Int64 { let b = mk(\"x\"); let t = consume b.name; \
                return Int64(t.byteLength) + b.n; }";
-    assert!(!reclaims(src, "b"), "{:?}", kepts(src, "main"));
+    assert!(reclaims(src, "b"), "{:?}", kepts(src, "main"));
 }
 
 #[test]

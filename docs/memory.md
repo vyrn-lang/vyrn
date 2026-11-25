@@ -108,9 +108,7 @@ A receiver follows the same rule: `read self`, `modify self`, `consume self`.
 A prefix `consume` at an argument takes a field out of a value the caller
 holds: `take(consume p.name)` moves `p.name` and leaves `p` with a hole at
 `.name`. The rest of `p` stays usable. A use of `p` as a whole, or a `drop p`,
-is refused while the hole is open, and so is the end of `p`'s scope when `p`'s
-type declares `release`, which takes `p` whole. A store into `p.name` fills
-the hole. An element is not a place a take reaches: `consume xs[0]` is
+is refused while the hole is open. A store into `p.name` fills the hole. An element is not a place a take reaches: `consume xs[0]` is
 refused. A part read as a statement, `p.name` or `xs[0].s`, takes nothing and
 leaves no hole.
 
@@ -199,6 +197,13 @@ release. A type without one is released part by part, a type that reaches
 itself included: the compiler writes one release walk per type, and the walk
 of a part on the cycle calls it again. Declare a release only when it does more
 than release the parts.
+
+A declared release takes its value whole, so only the module that declares
+the type takes a value of it apart. There, `consume x.field` and a `match`
+that takes `x` are allowed, and the block's exit releases the parts left one
+by one, without the declared release. Elsewhere both are refused: take the
+part out through a function of the type's module, or move the release onto the
+part.
 
 A release takes `self` apart: `consume self.field` takes a part, and one
 `match consume self` takes an enum. Every other move of `self` is refused, and
