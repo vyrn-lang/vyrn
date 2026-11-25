@@ -44,18 +44,6 @@ impl Copy for Pool {
 
 type Chain = { next: Option<Chain>, tag: Int64 }
 
-impl Owned for Chain {
-    fn release(consume self) {
-        let n = consume self.next
-        match consume n {
-            Some(c) => {
-                drop c
-            }
-            None => {}
-        }
-    }
-}
-
 impl Copy for Chain {
     fn copy(self) -> Chain {
         if let Some(rest) = self.next {

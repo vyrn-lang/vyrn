@@ -324,12 +324,15 @@ fn an_unannotated_array_literal_is_not_released() {
 }
 
 #[test]
-fn a_self_referring_array_element_is_not_walked() {
-    // `type L = Array<L>` has no bottom to a structural walk. The row answers
-    // the buffer alone, so the elements leak: where the plan cannot prove a
-    // release, it leaks.
+fn a_self_referring_array_element_is_walked() {
+    // `type L = Array<L>` reaches itself through its element, which owns heap,
+    // so the row walks each element with `L`'s own walk.
     let src = "type L = Array<L>; fn main() -> Int64 { let xs: L = []; return xs.length; }";
-    assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeArr]);
+    let l = Type::Named("L".into());
+    assert_eq!(
+        drop_kinds(src, "main"),
+        vec![DropKind::Deep(Type::Array(Box::new(l)))]
+    );
 }
 
 #[test]
@@ -457,20 +460,17 @@ fn a_record_of_scalars_is_reclaimed_by_nothing() {
     assert_eq!(drop_count(src, "main"), 0);
 }
 
-/// The `Array` row's guard, one shape over: a structural release walk of
-/// `type Node = { kids: Array<Node> }` has no bottom, so it answers nothing and
-/// its places leak.
+/// `type Node = { kids: Array<Node> }` is released part by part, as any record.
 #[test]
-fn a_self_referring_record_is_not_walked() {
+fn a_self_referring_record_is_walked() {
     let src = "type Node = { name: String, kids: Array<Node> } \
                fn main() -> Int64 { let n = Node { name: \"a\", kids: [] }; \
                return n.kids.length; }";
-    assert_eq!(drop_count(src, "main"), 0);
+    assert_eq!(drop_count(src, "main"), 1);
 }
 
-/// A declaration on the cycle gives the walk its bottom: the release
-/// emits a call at `Node`. A record that only reaches the self-referring type
-/// gets its row back with it.
+/// A declaration on the cycle wins: the release emits a call at `Node`, and a
+/// record that only reaches the self-referring type keeps its walk.
 #[test]
 fn a_declaration_on_the_cycle_gives_the_types_above_it_their_row_back() {
     let decl = "type Node = { name: String, kids: Array<Node> } \

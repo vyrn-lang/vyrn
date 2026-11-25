@@ -175,7 +175,9 @@ impl<T> Iterate for Slots<T> {
     }
 }
 
-/// Releases the four buffers. `drop vals` also releases every live payload:
+/// Releases the four buffers, declared so that a holder may `drop` a
+/// `Slots`: `drop` takes a record only by its declared release. `drop vals`
+/// also releases every live payload:
 /// `insert` consumes each and `remove` hands each back. Do not add a loop over
 /// `vals` as well: it frees each payload twice.
 impl<T> Owned for Slots<T> {

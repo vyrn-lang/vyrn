@@ -348,6 +348,10 @@ export type VyxSpan = { text: String, line: Int64, col: Int64 }
 /// - `VNIf(conds, bodies, elseBody, hasElse)`: a `v-if` chain, one body per condition.
 /// - `VNFor(var, iter, key, body, line, col)`: `v-for` with its `:key`, where `iter` is
 ///   the iterable with its position, and `line` and `col` are the header's.
+///
+/// A release recurses once per nesting level. With the default 1 MiB stack on
+/// Windows it overflows between 10,000 and 11,000 levels, far above real
+/// template depth.
 type VyxFlow = enum {
     VNText(String),
     VNInterp(VyxSpan),
@@ -360,55 +364,6 @@ type VyxFlow = enum {
 /// One branch of a `VNIf`: a node list, so bodies nest in a payload without
 /// `Array<Array<VyxFlow>>`.
 type VyxBody = { nodes: Array<VyxFlow> }
-
-/// A node owns its subtree. `VyxFlow` reaches itself through `VNElem`'s children, so
-/// the structural release walk needs this declared bottom; every type that reaches
-/// `VyxFlow` relies on it too.
-///
-/// A release recurses once per nesting level. With the default 1 MiB stack on
-/// Windows it overflows between 10,000 and 11,000 levels, far above real
-/// template depth.
-impl Owned for VyxFlow {
-    fn release(consume self) {
-        // Each payload is dropped in its arm; the recursion lives in the
-        // `Array<VyxFlow>` releases.
-        match consume self {
-            VNText(s) => {
-                drop s
-            }
-            VNInterp(x) => {
-                let text = consume x.text
-                drop text
-            }
-            VNRaw(x) => {
-                let text = consume x.text
-                drop text
-            }
-            VNChildren => {}
-            VNElem(tag, isComp, attrs, kids, l) => {
-                drop tag
-                drop attrs
-                drop kids
-            }
-            VNIf(conds, bodies, els, has) => {
-                drop conds
-                drop bodies
-                // `drop` names bindings, not a record without `impl Owned`, so
-                // take the one heap field and drop it.
-                let elsNodes = consume els.nodes
-                drop elsNodes
-            }
-            VNFor(v, it, key, body, l, c) => {
-                drop v
-                let itText = consume it.text
-                drop itText
-                let keyText = consume key.text
-                drop keyText
-                drop body
-            }
-        }
-    }
-}
 
 /// The index just past the `"` closing the string literal whose `"` is at `q`.
 fn vyxScanQuote(ba: Array<UInt8>, q: Int64, e: Int64) -> Int64 {

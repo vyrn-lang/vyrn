@@ -1207,18 +1207,19 @@ pub(crate) fn dispatched<'f>(
 ) -> Vec<(&'f str, HashMap<String, Type>)> {
     let mut out = Vec::new();
     for r in releases {
-        released(&r.kind, proto, by_name, &mut out);
+        released(&r.kind, proto, by_name, &mut Vec::new(), &mut out);
     }
     out
 }
 
 /// [`dispatched`] for one release: the call of a declared release, or the
-/// calls a deep walk makes over the parts of its type. The walk ends because
-/// `release_kind` answers `Deep` only for a type with no unbounded part.
+/// calls a deep walk makes over the parts of its type. A type on a cycle is
+/// walked once: `seen` holds the deep types this walk entered.
 fn released<'f>(
     kind: &DropKind,
     proto: &vyrn_frontend::declared::Owned,
     by_name: &HashMap<&str, (FnId, &'f Function)>,
+    seen: &mut Vec<Type>,
     out: &mut Vec<(&'f str, HashMap<String, Type>)>,
 ) {
     match kind {
@@ -1236,10 +1237,11 @@ fn released<'f>(
             }
             out.push((target.name.as_str(), solved));
         }
-        DropKind::Deep(t) if proto.may_hold_generic_release(t) => {
+        DropKind::Deep(t) if !seen.contains(t) && proto.may_hold_generic_release(t) => {
+            seen.push(t.clone());
             let mut part = |p: &Type| {
                 if let Some(k) = proto.release_kind(p) {
-                    released(&k, proto, by_name, out);
+                    released(&k, proto, by_name, seen, out);
                 }
             };
             match t {

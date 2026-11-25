@@ -346,8 +346,8 @@ fn reaches(
 }
 
 /// Refuses a rule that reaches itself through its one reference alone: no type stands
-/// on that cycle. Any other cycle holds a record or a choice, and [`releases`] gives
-/// it a release.
+/// on that cycle. Any other cycle holds a record or a choice, whose release the
+/// compiler writes.
 fn refuse_endless(g: &Grammar, shapes: &[Shape], rules: &[RuleId]) -> Result<(), Refused> {
     let same = |r: RuleId| matches!(shapes[r.0 as usize], Shape::Same(_));
     for &r in rules {
@@ -361,60 +361,6 @@ fn refuse_endless(g: &Grammar, shapes: &[Shape], rules: &[RuleId]) -> Result<(),
         }
     }
     Ok(())
-}
-
-/// How a type that declares its release takes itself apart.
-pub(crate) enum Release {
-    /// A record's fields, by name.
-    Fields(Vec<Rc<str>>),
-    /// A choice's variants, each once.
-    Arms(Vec<String>),
-}
-
-/// The types that declare their release, with how each takes itself apart. The
-/// compiler's release walk stops at a declared release, so each cycle of the types
-/// needs one, and a `climb` rule's binary node is on a cycle of its own. Records come
-/// first, then choices, then the types of `climb` rules, each in file order: each
-/// value of a type that declares its release costs a call, and a record is rarer
-/// than a choice that holds it. A type declares its release when it reaches itself
-/// past every type that declares one before it.
-pub(crate) fn releases(g: &Grammar, shapes: &[Shape], rules: &[RuleId]) -> Vec<(String, Release)> {
-    let mut declared: Vec<RuleId> = Vec::new();
-    let mut out = Vec::new();
-    for pass in 0..3 {
-        for &r in rules {
-            let name = type_name(&g.body(r).name);
-            let release = match (&shapes[r.0 as usize], pass) {
-                (Shape::Record(fields), 0) => {
-                    Release::Fields(fields.iter().map(|f| f.name.clone()).collect())
-                }
-                (Shape::Climb(_), 0) => {
-                    let fields = ["left", "op", "right"].map(Rc::from).to_vec();
-                    out.push((format!("{name}Binary"), Release::Fields(fields)));
-                    continue;
-                }
-                (Shape::Choice(names), 1) => {
-                    let mut arms: Vec<String> = Vec::new();
-                    for (v, _) in variants(g, names, r) {
-                        if !arms.iter().any(|a| a == v) {
-                            arms.push(v.to_string());
-                        }
-                    }
-                    Release::Arms(arms)
-                }
-                (Shape::Climb(operand), 2) => {
-                    let operand = type_name(&g.body(*operand).name);
-                    Release::Arms(vec![format!("{name}{operand}"), format!("{name}Op")])
-                }
-                _ => continue,
-            };
-            if reaches(g, shapes, r, r, &|x| !declared.contains(&x)) {
-                declared.push(r);
-                out.push((name, release));
-            }
-        }
-    }
-    out
 }
 
 /// The labels `e` binds outside a predicate.

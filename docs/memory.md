@@ -195,10 +195,10 @@ Vyrn.
 ## A type can say how it is released and that it must be used
 
 `impl Owned for T { fn release(consume self) { .. } }` gives `T` its own
-release. A type that reaches itself needs one: the structural release walk has
-no bottom on a cycle, so without a declared release its values are never
-freed. The editor's hover names such a binding, "nothing releases the type
-Tree yet". `examples/binarytrees.vyrn` shows the declaration.
+release. A type without one is released part by part, a type that reaches
+itself included: the compiler writes one release walk per type, and the walk
+of a part on the cycle calls it again. Declare a release only when it does more
+than release the parts.
 
 A release takes `self` apart: `consume self.field` takes a part, and one
 `match consume self` takes an enum. Every other move of `self` is refused, and
@@ -338,9 +338,7 @@ one owner is not enough:
 Each sentence is followed by `fix:` lines. `compiler/vyrn-cli/tests/refusals.rs`
 holds one minimal program per refusal and pins its whole sentence.
 
-One leak is not refused: a recursive type with no `impl Owned`. The hover
-reports it. Module state is not released at exit; it lives until
-the process ends.
+Module state is not released at exit; it lives until the process ends.
 
 ## The run-time layout
 

@@ -496,23 +496,6 @@ export type GqlSel = {
     subs: Array<GqlSel>,
 }
 
-/// `GqlSel` reaches itself through `subs`, so the structural release has no
-/// bottom; this release is the bottom, and `drop subs` recurses. Each
-/// field is taken, not read, or its buffer would be given back twice.
-/// `args` releases its buffer only: `Json` declares no release.
-impl Owned for GqlSel {
-    fn release(consume self) {
-        let key = consume self.key
-        drop key
-        let name = consume self.name
-        drop name
-        let args = consume self.args
-        drop args
-        let subs = consume self.subs
-        drop subs
-    }
-}
-
 /// A parsed operation: its root (`"query"` or `"mutation"`), its fields, and `err != ""` when it did not parse.
 export type GqlQuery = { root: String, sels: Array<GqlSel>, err: String }
 

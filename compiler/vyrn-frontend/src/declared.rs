@@ -223,17 +223,9 @@ impl Owned {
 
     /// Whether `ty` transitively owns heap. Differs from
     /// [`Owned::release_kind`] being `Some` where a type owns heap but has no
-    /// release row, such as a `Stream` or an unbounded self-referring type.
+    /// release row, such as a `Stream`.
     pub fn owns_heap(&self, ty: &Type) -> bool {
         owns_heap(&self.standing(ty), &*self.types)
-    }
-
-    /// Returns the name `ty` reaches from itself with no declared release in
-    /// between: the self-reference a structural release walk cannot bottom out
-    /// in. Unlike [`self_referring`], the walk stops at a type with
-    /// `impl Owned`, which is released by a call.
-    pub fn unbounded(&self, ty: &Type) -> Option<String> {
-        self_referring_past(ty, &*self.types, &|n| self.impls.contains_key(n))
     }
 
     /// Whether `name` is a declared `release` body. A consume-match inside one
@@ -293,25 +285,41 @@ impl Owned {
         Some(DropKind::Release(f.clone(), ty.clone()))
     }
 
-    /// Returns how a value of `ty` is reclaimed, or `None` when it owns no heap
-    /// or cannot be walked. A declared row wins; otherwise the resolved type
-    /// answers. The match has no `_` arm, so a new [`Type`] variant must decide.
+    /// Returns how a value of `ty` is reclaimed, or `None` when it owns no heap.
+    /// A declared row wins; otherwise the resolved type answers. A type that
+    /// reaches itself answers `Deep` as any aggregate does: the emitter writes
+    /// one walk per type, and the walk of a part on the cycle calls it again.
+    /// The match has no `_` arm, so a new [`Type`] variant must decide.
     pub fn release_kind(&self, ty: &Type) -> Option<DropKind> {
-        let ty = &*self.standing(ty);
+        self.kind_within(&self.standing(ty), None)
+    }
+
+    /// [`Owned::release_kind`] under the names `up` is resolving: a name met
+    /// again is an array of itself, which owns heap, so it answers `Deep`.
+    fn kind_within(&self, ty: &Type, up: Option<&Walked<'_>>) -> Option<DropKind> {
         if let Some(r) = self.declared_release(ty) {
             return Some(r);
         }
-        match crate::types::resolve(ty, &*self.types) {
+        let here;
+        let up = match ty {
+            Type::Named(n) | Type::App(n, _) => {
+                if std::iter::successors(up, |w| w.up).any(|w| w.name == n.as_str()) {
+                    return Some(DropKind::Deep(ty.clone()));
+                }
+                here = Walked { name: n, up };
+                Some(&here)
+            }
+            _ => up,
+        };
+        let part = |e: &Type| self.kind_within(e, up).is_some();
+        let kind = match crate::types::resolve(ty, &*self.types) {
             Type::Str => Some(DropKind::FreeStr),
             // An array owns its elements (every route into one is a store), so
             // an element with a row makes it `Deep`, the release walk. A
-            // self-referring element without a declared release gets the buffer
-            // alone and its elements leak. A `Param` element is `Deep` too: the
-            // emitters substitute the instance before walking.
+            // `Param` element is `Deep` too: the emitters substitute the
+            // instance before walking.
             Type::Array(e) => Some(
-                if self.unbounded(&e).is_none()
-                    && (self.release_kind(&e).is_some()
-                        || matches!(&*crate::types::resolved(&e, &*self.types), Type::Param(_)))
+                if part(&e) || matches!(&*crate::types::resolved(&e, &*self.types), Type::Param(_))
                 {
                     DropKind::Deep(Type::Array(e))
                 } else {
@@ -322,25 +330,19 @@ impl Owned {
             // and values.
             Type::SmallArray(e, n) => {
                 let t = Type::SmallArray(e.clone(), n);
-                Some(
-                    if self.unbounded(&t).is_none() && self.release_kind(&e).is_some() {
-                        DropKind::Deep(t)
-                    } else {
-                        DropKind::FreeSmallArr
-                    },
-                )
+                Some(if part(&e) {
+                    DropKind::Deep(t)
+                } else {
+                    DropKind::FreeSmallArr
+                })
             }
             Type::Map(k, v) => {
                 let t = Type::Map(k.clone(), v.clone());
-                Some(
-                    if self.unbounded(&t).is_none()
-                        && (self.release_kind(&k).is_some() || self.release_kind(&v).is_some())
-                    {
-                        DropKind::Deep(t)
-                    } else {
-                        DropKind::FreeMap
-                    },
-                )
+                Some(if part(&k) || part(&v) {
+                    DropKind::Deep(t)
+                } else {
+                    DropKind::FreeMap
+                })
             }
             // The stream lowering pushes its own release; answering here too
             // would release it twice.
@@ -366,12 +368,10 @@ impl Owned {
             // release walks the captures the tag names (`lower_fnval_free`).
             t @ Type::Fn(..) => Some(DropKind::Deep(t)),
             // An aggregate owns its places (a store into one is a move), so
-            // releasing it releases them. A self-referring type with no
-            // declared release on the cycle answers `None` and leaks.
-            // `Option` and `Result` resolve to enums and take this arm.
+            // releasing it releases them. `Option` and `Result` resolve to
+            // enums and take this arm.
             t @ (Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)) => {
-                (self.unbounded(ty).is_none() && owns_heap(&t, &*self.types))
-                    .then(|| DropKind::Deep(t))
+                owns_heap(&t, &*self.types).then_some(DropKind::Deep(t))
             }
             // `resolve` answers `lazy T` as `fn() -> T`; this is its
             // depth-limited fallback.
@@ -388,7 +388,8 @@ impl Owned {
             | Type::Order(_)
             | Type::Named(_)
             | Type::App(..) => None,
-        }
+        };
+        kind
     }
 }
 
@@ -403,25 +404,8 @@ pub fn builtin_release(ty: &Type) -> Option<String> {
 /// walk such as `copy` has no bottom there, so a caller refuses the type by name
 /// instead of overflowing the stack; the type declares its own `Copy`.
 pub fn self_referring(ty: &Type, types: &dyn Decls) -> Option<String> {
-    self_referring_past(ty, types, &|_| false)
-}
-
-/// [`self_referring`], with the walk stopping at every name `stops` accepts.
-fn self_referring_past(
-    ty: &Type,
-    types: &dyn Decls,
-    stops: &dyn Fn(&str) -> bool,
-) -> Option<String> {
-    fn go(
-        ty: &Type,
-        types: &dyn Decls,
-        stops: &dyn Fn(&str) -> bool,
-        seen: &mut Vec<String>,
-    ) -> Option<String> {
+    fn go(ty: &Type, types: &dyn Decls, seen: &mut Vec<String>) -> Option<String> {
         if let Type::Named(n) | Type::App(n, _) = ty {
-            if stops(n) {
-                return None;
-            }
             if seen.iter().any(|s| s == n) {
                 return Some(n.clone());
             }
@@ -429,11 +413,11 @@ fn self_referring_past(
                 return None;
             }
             seen.push(n.clone());
-            let r = go(&crate::types::resolved(ty, types), types, stops, seen);
+            let r = go(&crate::types::resolved(ty, types), types, seen);
             seen.pop();
             return r;
         }
-        let mut deeper = |t: &Type| go(t, types, stops, seen);
+        let mut deeper = |t: &Type| go(t, types, seen);
         match ty {
             Type::Array(t)
             | Type::ArrayN(t, _)
@@ -442,14 +426,14 @@ fn self_referring_past(
             | Type::Stream(t)
             | Type::Task(t) => deeper(t),
             Type::Map(a, b) => deeper(a).or_else(|| deeper(b)),
-            Type::Record(fs) => fs.iter().find_map(|f| go(&f.ty, types, stops, seen)),
+            Type::Record(fs) => fs.iter().find_map(|f| go(&f.ty, types, seen)),
             Type::Enum(vs) => vs
                 .iter()
-                .find_map(|v| v.payload.iter().find_map(|p| go(p, types, stops, seen))),
+                .find_map(|v| v.payload.iter().find_map(|p| go(p, types, seen))),
             _ => None,
         }
     }
-    go(ty, types, stops, &mut Vec::new())
+    go(ty, types, &mut Vec::new())
 }
 
 /// Whether a value of `ty` transitively owns heap, so it

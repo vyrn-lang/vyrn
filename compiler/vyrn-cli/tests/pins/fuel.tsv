@@ -2,11 +2,11 @@ program	fuel
 nbody	4114858
 spectralnorm	23397798
 fannkuch	5547919
-binarytrees	35516609
+binarytrees	28027787
 fasta	2103218
 revcomp	1844016
 knucleotide	16756843
 pidigits	395573
 mandelbrot	49649864
-regexredux	32963069
-jsondecode	85101926
+regexredux	32962529
+jsondecode	85060372

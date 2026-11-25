@@ -452,8 +452,7 @@ const ROWS: &[Row] = &[
         why: "an aggregate releases its PLACES. A record hands its insides out as \
               projections, and rule 2 refuses all three spellings of that, so the row is \
               sayable, and a record built per call gives its two Strings back with \
-              it. A type that reaches ITSELF is still left alone: the walk is structural and \
-              has no bottom, which is the guard the `Array` row already carried",
+              it",
     },
     Row {
         export: "takenField",
@@ -584,32 +583,26 @@ const ROWS: &[Row] = &[
     Row {
         export: "selfReferring",
         today: Shape::Steady,
-        why: "a type that reaches ITSELF is released by DECLARATION. The release walk \
-              is structural, so `type Twig = enum { Fork(String, Array<Twig>) }` has no bottom to stop \
-              at, and `release_kind` answered `None` — for the type, for `Array<Twig>`, and for \
-              every record that merely REACHES one. That was 63 of the corpus's unreclaimed \
-              bindings, all of them in `std/vyx` and `std/graphql`. A declared `release` IS the \
-              bottom: the walk emits a call there rather than expanding, so the guard now asks \
-              whether the cycle has a declaration ON it rather than whether a cycle exists, and \
-              the rows above the declaration come back with it. Two `impl`s closed all 63. The \
-              row is four ~900-byte Strings a call in a tree, under a record that only reaches \
-              one: removing the `impl` makes it grow, and so does removing the declared stop \
-              from the guard — verified by removing each. The depth is the language's own: a \
-              release of a chain 10,000 deep is 10,000 native frames, measured to overflow the \
-              default 1 MiB Windows stack at 11,000, where an ordinary recursive Vyrn walk over \
-              the same chain overflows at 20,000",
+        why: "a type that reaches ITSELF is released part by part, as any type is. \
+              `type Twig = enum { Fork(String, Array<Twig>) }` has no bottom to a walk the \
+              emitter expands in place, so the emitter writes one release function per type, \
+              and the walk of `Array<Twig>` calls `Twig`'s again. The row is four ~900-byte \
+              Strings a call in a tree, under a record that only reaches one. The depth is \
+              the language's own: a release of a chain 10,000 deep is 10,000 native frames, \
+              measured to overflow the default 1 MiB Windows stack at 11,000, where an \
+              ordinary recursive Vyrn walk over the same chain overflows at 20,000",
     },
     Row {
         export: "injectedJson",
         today: Shape::Steady,
-        why: "the declaration is in an INJECTED module. `std/json` is linked by \
+        why: "the type is in an INJECTED module. `std/json` is linked by \
               the `toJson` desugar rather than by an import, and the linker renames its every \
               declaration by prefix — so the type key this row's bindings carry is \
-              `json$Json`, and the declared row has to be keyed by the renamed spelling too. \
+              `json$Json`, and its declared `Copy` has to be keyed by the renamed spelling too. \
               It is: the impl \
               method follows its TYPE's rename, and `rewrite_module_refs` rewrites the impl \
-              HEAD, so one link has one key. The row also runs the composition of a declared \
-              release and a declared copy: `Json` declares `Copy` as well, and a copy \
+              HEAD, so one link has one key. The row also runs the composition of the \
+              structural release and a declared copy: a copy \
               shares nothing, so the tree and its copy are released once each. It builds one \
               object of two ~900-byte Strings a turn, copies it, and emits both — a leak \
               grows it, and a double free traps rather than reading steady, which is why \
@@ -797,36 +790,14 @@ type Row = {{ name: String, n: Int64 }}
 
 type Doc = {{ title: String, body: String }}
 
-/// A type that reaches ITSELF — `Twig` holds `Array<Twig>`. The shape the
-/// release walk needs a declaration to enter, and the shape `std/vyx.syntax`'s
-/// `VyxNode` and `std/graphql`'s `GqlSel` have.
+/// A type that reaches ITSELF — `Twig` holds `Array<Twig>`, the shape
+/// `std/vyx.syntax`'s `VyxNode` and `std/graphql`'s `GqlSel` have.
 type Twig = enum {{
     Tip(String),
     Fork(String, Array<Twig>) }}
 
-/// A record that merely REACHES the self-referring type. It had no row either,
-/// for the same missing bottom, and gets its structural one back with the
-/// declaration below.
+/// A record that merely REACHES the self-referring type.
 type Bough = {{ root: Twig, label: String }}
-
-/// The declaration that IS the bottom. The walk emits a call here rather than
-/// expanding, and this function makes the recursion the walk cannot. Block
-/// arms: `drop` stands in the arm itself, not in a generic trampoline —
-/// `drop` on a bare `T` is refused, for laundering
-/// the record rule.
-impl Owned for Twig {{
-    fn release(consume self) {{
-        match consume self {{
-            Tip(s) => {{
-                drop s
-            }}
-            Fork(s, kids) => {{
-                drop s
-                drop kids
-            }}
-        }}
-    }}
-}}
 
 let mut row: Row = Row {{ name: "", n: 0 }}
 
@@ -1156,14 +1127,6 @@ export extern fn regionRebind() {{
 
 /// Four ~900-byte Strings a call, in a tree that refers to itself,
 /// under a record that only reaches one.
-///
-/// Without the declaration nothing releases them: `release_kind` answers
-/// `None` for `Twig` because a structural walk of a self-referring type has no
-/// bottom, and `None` for `Bough` and for `Array<Twig>` for the same reason one
-/// hop away. `impl Owned for Twig` supplies the bottom — the walk emits a CALL
-/// there — and the three rows above it come back with it. Removing the `impl`
-/// makes this row grow; so does removing the declared stop from the guard, and
-/// then only `label` is reclaimed.
 export extern fn selfReferring() {{
     let mut kids: Array<Twig> = []
     kids.push(Tip(tag() + "a"))
@@ -1172,8 +1135,8 @@ export extern fn selfReferring() {{
     seen = seen + Int64(b.label.byteLength)
 }}
 
-/// The declared release of a type declared in an INJECTED module,
-/// reached through the reserved spelling the linker renames it to.
+/// The release of a type declared in an INJECTED module, under the reserved
+/// spelling the linker renames it to.
 ///
 /// `toJson` below is what injects `std/json`, and the import beside it is a HAND
 /// import of the same module — both link modes in one program, which is the
@@ -1229,10 +1192,10 @@ export extern fn injectedJson() {{
     let mut fs: Array<JsonField> = []
     fs.push(JsonField {{ key: tag() + "k", value: JStr(tag() + "v") }})
     // Sixteen short nodes beside the two ~900-byte ones. A `Json` payload is
-    // WIDE, so it travels in a heap block no Vyrn surface names, and a declared
-    // release leaks one block per node unless `free_declared_boxes` runs after
-    // the call. Two nodes would be 32 bytes a call and hide
-    // inside a page; thirty-six are a kilobyte a call and do not.
+    // WIDE, so it travels in a heap block no Vyrn surface names, and a release
+    // that skips the boxes leaks one block per node. Two nodes would be 32
+    // bytes a call and hide inside a page; thirty-six are a kilobyte a call
+    // and do not.
     let mut xs: Array<Json> = []
     let mut i = 0
     while i < 16 {{
