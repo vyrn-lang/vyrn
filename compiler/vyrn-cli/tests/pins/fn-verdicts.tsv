@@ -3349,6 +3349,7 @@ std/task.vyrn	task$forget	no, it keeps an index check	no, its effect set is modu
 std/task.vyrn	task$stop	no, it keeps an index check	no, its effect set is alloc, module-state, trap
 std/task.vyrn	task$waitFor	no, it calls `delivery`, which is not trap-free	no, its effect set is alloc, module-state
 std/task.vyrn	task$cancelled	yes	no, its effect set is alloc, module-state, waits
+std/task.vyrn	task$waitAware	yes	no, its effect set is alloc, module-state, waits
 std/task.vyrn	task$taskResult	no, it keeps an index check	no, its effect set is module-state
 std/task.vyrn	task$taskSettle	no, it keeps an index check	no, its effect set is alloc, module-state
 std/task.vyrn	task$taskFinish	no, it calls `taskEnd`, which is not trap-free	no, its effect set is alloc, module-state

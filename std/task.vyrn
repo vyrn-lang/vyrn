@@ -18,6 +18,10 @@ export type Both<A, B> = { first: A, second: B }
 /// The task of a `race` that returned first, and its result.
 export type Race<A, B> = enum { First(A), Second(B) }
 
+/// What `joinOr` answers: the task's result, or its handle when the caller was
+/// cancelled while it waited.
+export type Joined<T> = enum { Done(T), Cancelled(Task<T>) }
+
 /// Waits for `t` to end and returns its result. If `t` is cancelled, the
 /// caller is cancelled where it waits.
 export fn join<T>(t: consume Task<T>) -> T {
@@ -32,6 +36,27 @@ export fn join<T>(t: consume Task<T>) -> T {
     }
     forget(id)
     return taskTake(t)
+}
+
+/// Waits for `t` as `join` does, but a cancellation of the caller while it
+/// waits here answers `Cancelled(t)`, and the caller runs on: it decides to
+/// cancel, keep or hand on `t`, and returns. Any other wait the caller reaches
+/// after that ends it there. If `t` is cancelled, the caller is cancelled
+/// where it waits.
+export fn joinOr<T>(t: consume Task<T>) -> Joined<T> {
+    let id = taskId(t)
+    if stateOf(id) == 2 {
+        let op = newOp()
+        watch(id, op)
+        if await waitAware(op) {
+            return Cancelled(t)
+        }
+    }
+    if stateOf(id) == 1 {
+        await cancelled()
+    }
+    forget(id)
+    return Done(taskTake(t))
 }
 
 /// Ends `t` where it waits, releasing what it holds, or releases its result
@@ -282,10 +307,11 @@ type Run = {
     watch: Int64,
 }
 
-/// An operation a task waits on: its id, the task, and what the wake
-/// delivered: a status, 2 until it came, 0 completed and 1 cancelled, and a
-/// payload. A task waits on one operation at a time.
-type Wait = { id: Int64, task: Int64, status: Int32, payload: Int64 }
+/// An operation a task waits on: its id, the task, what the wake delivered (a
+/// status, 2 until it came, 0 completed and 1 cancelled, and a payload), and
+/// whether a cancellation of the task completes the wait instead of ending the
+/// task there. A task waits on one operation at a time.
+type Wait = { id: Int64, task: Int64, status: Int32, payload: Int64, aware: Bool }
 
 /// The tasks that run or wait.
 let mut runs: Array<Run> = []
@@ -456,8 +482,19 @@ fn waitFor(op: Int64) -> Int32 {
 /// Cancels the running task where it waits here.
 fn cancelled() {
     let op = newOp()
-    waits.push(Wait { id: op, task: running, status: 1, payload: 0 })
+    waits.push(Wait { id: op, task: running, status: 1, payload: 0, aware: false })
     await taskWait(op)
+}
+
+/// Waits on the run queue's operation `op`, and answers whether the running
+/// task was cancelled: a cancellation completes this wait, where it ends the
+/// task at any other.
+fn waitAware(op: Int64) -> Bool {
+    if cancelling == 0 {
+        waits.push(Wait { id: op, task: running, status: 2, payload: 0, aware: true })
+        await taskWait(op)
+    }
+    return cancelling > 0
 }
 
 /// The running task's root returned `result`, one word, as `hostDone` passes
@@ -494,12 +531,13 @@ fn taskFinish() {
 
 /// The running task waits on the host's operation `id`.
 fn waitOn(id: Int64) {
-    waits.push(Wait { id: id, task: running, status: 2, payload: 0 })
+    waits.push(Wait { id: id, task: running, status: 2, payload: 0, aware: false })
 }
 
 /// The wait on `id`: 2 until its wake came, then the status the wake
 /// delivered, and the wait ends. While a cancellation runs, a wait that has
-/// not come ends cancelled, 1, and the host drops its operation.
+/// not come ends cancelled, 1, and the host drops its operation; an aware wait
+/// ends completed, 0.
 fn delivery(id: Int64) -> Int32 {
     let i = waitAt(id)
     if i == waits.length {
@@ -511,6 +549,9 @@ fn delivery(id: Int64) -> Int32 {
             hostCancel(id)
         }
         st = 1
+        if waits[i].aware {
+            st = 0
+        }
     }
     if st != 2 {
         waits.swapRemove(i)

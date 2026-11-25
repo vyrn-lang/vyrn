@@ -1,0 +1,30 @@
+// A task cancelled while it waits in `joinOr` runs on with its child's handle,
+// and cancels the child in its `Cancelled` arm.
+import { sleep, cancel, joinOr, Joined } from "std/task"
+
+fn later(ms: Int64, s: consume String) -> String {
+    await sleep(ms)
+    print(s)
+    return s
+}
+
+fn parent() -> Int64 {
+    let c = fork later(20, "never printed")
+    match await joinOr(c) {
+        Done(s) => print(s),
+        Cancelled(c) => {
+            cancel(c)
+            print("the parent cancelled its child")
+        }
+    }
+    return 0
+}
+
+fn main() -> Int64 {
+    let p = fork parent()
+    await sleep(5)
+    cancel(p)
+    await sleep(50)
+    print("main ends")
+    return 0
+}

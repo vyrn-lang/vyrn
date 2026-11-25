@@ -31,6 +31,15 @@ type Race = enum { First(A), Second(B) }
 
 The task of a `race` that returned first, and its result.
 
+## Joined
+
+```vyrn
+type Joined = enum { Done(T), Cancelled(Task<T>) }
+```
+
+What `joinOr` answers: the task's result, or its handle when the caller was
+cancelled while it waited.
+
 ## join
 
 ```vyrn
@@ -39,6 +48,18 @@ fn join<T>(t: consume Task<T>) -> T
 
 Waits for `t` to end and returns its result. If `t` is cancelled, the
 caller is cancelled where it waits.
+
+## joinOr
+
+```vyrn
+fn joinOr<T>(t: consume Task<T>) -> Joined<T>
+```
+
+Waits for `t` as `join` does, but a cancellation of the caller while it
+waits here answers `Cancelled(t)`, and the caller runs on: it decides to
+cancel, keep or hand on `t`, and returns. Any other wait the caller reaches
+after that ends it there. If `t` is cancelled, the caller is cancelled
+where it waits.
 
 ## cancel
 

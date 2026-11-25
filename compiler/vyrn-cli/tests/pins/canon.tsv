@@ -2,7 +2,7 @@ census	count
 roots	453
 roots that do not check	32
 members BoolLambda	5
-members Condition	4095
+members Condition	4097
 members KeyBlockLambda	3
 members KeyLambda	57
 members MoreStatements	22
@@ -11,7 +11,7 @@ unfit Bool functions Budget	1
 unfit Bool functions Effect	13
 unfit Bool functions Loop	83
 unfit Bool functions Switch	30
-unfit Bool functions Writes	12
+unfit Bool functions Writes	13
 unfit lambdas Effect	1
 predicates as 4.5 counts them, across the corpus: members	72
 predicates as 4.5 counts them, across the corpus: L0 identities	67
@@ -79,16 +79,16 @@ key and other lambdas, across the corpus: L2 pairs	14
 key and other lambdas, across the corpus: most atoms at L2	0
 key and other lambdas, across the corpus: most diagram nodes at L2	0
 key and other lambdas, across the corpus: decided at L2 by step Whole	60
-conditions, within one function: members	4095
-conditions, within one function: L0 identities	3950
+conditions, within one function: members	4097
+conditions, within one function: L0 identities	3952
 conditions, within one function: L0 pairs	194
 conditions, within one function: L0 complement pairs	2
-conditions, within one function: L1 identities	3950
+conditions, within one function: L1 identities	3952
 conditions, within one function: L1 pairs	194
 conditions, within one function: L1 complement pairs	23
-conditions, within one function: L2 identities	3950
+conditions, within one function: L2 identities	3952
 conditions, within one function: L2 pairs	194
 conditions, within one function: L2 complement pairs	39
 conditions, within one function: most atoms at L2	14
 conditions, within one function: most diagram nodes at L2	38
-conditions, within one function: decided at L2 by step Whole	4095
+conditions, within one function: decided at L2 by step Whole	4097

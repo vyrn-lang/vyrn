@@ -443,6 +443,19 @@ dropped
     }
 }
 
+/// A task cancelled while it waits in `joinOr` runs on with its child's handle and cancels the
+/// child in its `Cancelled` arm. It frees every value on every host.
+#[test]
+fn a_cancel_aware_wait_answers_cancelled_on_every_host() {
+    assert_eq!(
+        on_every_host("aware.vyrn"),
+        "exit Some(0)
+the parent cancelled its child
+main ends
+"
+    );
+}
+
 const SHIM_RUN: &str = r#"import { readFile } from "node:fs/promises";
 import { runVyrn } from "./wasi-min.mjs";
 

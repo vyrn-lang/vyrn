@@ -1079,6 +1079,7 @@ compiler/vyrn-cli/tests/unlicensed/u12_module_state_to_a_consume_parameter_heapl
 compiler/vyrn-cli/tests/unlicensed/u13_an_arm_binder_to_a_consume_parameter.vyrn	0	cbf29ce484222325	20	18	72741e551ff16841
 compiler/vyrn-cli/tests/unlicensed/u25_consume_inside_a_loop_heapless.vyrn	0	cbf29ce484222325	20	17	011324d105f7c459
 compiler/vyrn-cli/tests/unlicensed/u25b_partial_take_across_iterations.vyrn	0	cbf29ce484222325	20	18	31af5e6360a6a630
+compiler/vyrn-cli/tests/waits/aware.vyrn	0	cbf29ce484222325	20	19	6ab3f5d9815a8c33
 compiler/vyrn-cli/tests/waits/byvalue.vyrn	0	cbf29ce484222325	20	18	26ba582a8bd10e65
 compiler/vyrn-cli/tests/waits/byvalue_nowait.vyrn	0	cbf29ce484222325	20	19	177f94587c670ba5
 compiler/vyrn-cli/tests/waits/cancelled.vyrn	0	cbf29ce484222325	20	16	86eca11f511a81ac
@@ -1535,7 +1536,7 @@ std/sum.vyrn	0	cbf29ce484222325	20	15	8c91500e0625df59
 std/symbolmap.vyrn	0	cbf29ce484222325	20	16	a2136b9a284642be
 std/syntax.vyrn	0	cbf29ce484222325	20	15	ee5f33230f1a8dc0
 std/syntaxreport.vyrn	0	cbf29ce484222325	20	13	f1876887806cf00e
-std/task.vyrn	0	cbf29ce484222325	20	16	24bc0af00e793dc8
+std/task.vyrn	0	cbf29ce484222325	20	18	f9f8cf7edbbd3d0c
 std/text.vyrn	0	cbf29ce484222325	20	14	bc0918ce6f331d94
 std/tile.vyrn	0	cbf29ce484222325	20	18	0d5778cdb398a9d9
 std/time.vyrn	0	cbf29ce484222325	20	18	15f55a62a1512d82
