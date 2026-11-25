@@ -743,11 +743,10 @@ fn member_completion_offers_record_fields() {
     );
 }
 
-/// A hole is re-lexed as its own source, so its positions count from the hole.
-/// `Build::binder_pos` answers `(0, 0)` there and such a binder is not
-/// indexed, or the editor would point at an unrelated token.
+/// A hole's tokens stand where the hole does, so a binder inside it is a local at the
+/// place its name is spelled, not at the place it would have counted from the hole.
 #[test]
-fn a_binder_inside_an_interpolation_is_not_a_local() {
+fn a_binder_inside_an_interpolation_is_a_local_where_it_is_spelled() {
     let src = "fn twice(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
     return f(f(x))
 }
@@ -767,11 +766,11 @@ fn main() -> Int64 {
     let names: Vec<&str> = a.locals.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(
         names,
-        ["f", "x", "s"],
-        "the hole's `q` and `t` are not locals"
+        ["f", "x", "s", "q", "t"],
+        "the hole's `q` and `t` are locals"
     );
-    // Without the rule above, the hole's `let t` lands at line 1, column 18,
-    // inside `twice`'s signature.
+    // Counted from the hole, `let t` would land at line 1, column 18, inside
+    // `twice`'s signature.
     let lines: Vec<&str> = src.lines().collect();
     for b in &a.locals {
         let at = &lines[b.line - 1][b.col - 1..];

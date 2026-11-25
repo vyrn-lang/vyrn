@@ -201,6 +201,10 @@ pub struct CostLine {
     pub label: String,
     /// The row in full, code in backticks, as `why --cost` prints it.
     pub text: String,
+    /// Each noun of the row with its reason, code in backticks (`CostRow::items`).
+    pub items: Vec<String>,
+    /// How many facts the row joins: the sum of the counts its nouns carry.
+    pub count: usize,
 }
 
 /// One `import * as ns` binding and the exported declarations it exposes.
@@ -334,9 +338,10 @@ pub fn analyze_judged(
 }
 
 /// Rewrites a foreign-file diagnostic so it shows in the root document without
-/// a wrong anchor.
+/// a wrong anchor. A generated module is named as a reader sees its key.
 fn adopt_foreign(mut d: Diagnostic) -> Diagnostic {
     if let Some(file) = d.file.take() {
+        let file = crate::loader::shown_key(&file, None);
         d.message = format!("in {file}: {}", d.message);
         d.line = 0;
         d.col = 0;
