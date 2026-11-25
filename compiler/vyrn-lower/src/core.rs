@@ -9140,7 +9140,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         lowered.instances.iter().map(Instance::spelling).collect();
     as_declared(program, own, &w.fns, &mut names, &mut added);
     let placed: Vec<Release> = added.values().flatten().cloned().collect();
-    let mut dispatches = crate::dispatches_new(&placed, &by_name, &had);
+    let mut dispatches = crate::dispatches_new(&placed, &own.proto, &by_name, &had);
     w.late = dispatches;
     for (f, rows) in added {
         touched.insert(f);
@@ -9269,7 +9269,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             let tops = std::slice::from_mut(&mut top);
             fold_frames(program, tops, own, &mut facts, &mut w.fns, &mut w.bodies);
         }
-        dispatches = crate::dispatches_new(&placed, &by_name, &had);
+        dispatches = crate::dispatches_new(&placed, &own.proto, &by_name, &had);
     }
     w.calls.replace(calls);
     if folds {

@@ -24,6 +24,8 @@ pub struct Owned {
     types: std::sync::Arc<HashMap<String, TypeDecl>>,
     /// Whether a type parameter answers as a String does ([`Owned::as_written`]).
     params_own: bool,
+    /// The type keys whose `impl Owned` is generic, as `impl<T> Owned for Slots<T>` is.
+    generic: std::collections::HashSet<String>,
 }
 
 /// What a binding of a type needs from its release: whether it owns heap,
@@ -65,7 +67,49 @@ impl Owned {
                 .collect(),
             types: std::sync::Arc::new(crate::types::decl_map(program)),
             params_own: false,
+            generic: (program.impls.iter())
+                .filter(|i| {
+                    i.protocol == crate::types::OWNED && crate::types::mentions_param(&i.ty)
+                })
+                .filter_map(|i| crate::types::type_key(&i.ty))
+                .collect(),
         }
+    }
+
+    /// Whether a value of `ty` may hold a type with a generic `impl Owned`, whose
+    /// release is instantiated per type: false only where no part can. It reads
+    /// the declarations in place and allocates nothing. A name already on the
+    /// walk adds nothing; past sixteen nested names it answers true.
+    pub fn may_hold_generic_release(&self, ty: &Type) -> bool {
+        fn go<'t>(o: &'t Owned, ty: &'t Type, up: &mut [&'t str; 16], n_up: usize) -> bool {
+            match ty {
+                Type::Named(n) | Type::App(n, _) if o.generic.contains(n) => true,
+                Type::Named(n) | Type::App(n, _) => {
+                    if let Type::App(_, args) = ty {
+                        if args.iter().any(|a| go(o, a, up, n_up)) {
+                            return true;
+                        }
+                    }
+                    if up[..n_up].contains(&n.as_str()) {
+                        return false;
+                    }
+                    let Some(d) = o.types.get(n) else {
+                        return false;
+                    };
+                    if n_up == up.len() {
+                        return true;
+                    }
+                    up[n_up] = n;
+                    go(o, &d.base, up, n_up + 1)
+                }
+                Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) => go(o, t, up, n_up),
+                Type::Map(a, b) => go(o, a, up, n_up) || go(o, b, up, n_up),
+                Type::Record(fs) => fs.iter().any(|f| go(o, &f.ty, up, n_up)),
+                Type::Enum(vs) => (vs.iter().flat_map(|v| &v.payload)).any(|t| go(o, t, up, n_up)),
+                _ => false,
+            }
+        }
+        !self.generic.is_empty() && go(self, ty, &mut [""; 16], 0)
     }
 
     /// Returns this table with every type parameter owning heap, for judging a

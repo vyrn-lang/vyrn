@@ -1103,7 +1103,7 @@ fn build<'a>(
 
         let mut calls = w.calls;
         calls.extend(
-            dispatched(&releases, &by_name)
+            dispatched(&releases, &ownership.proto, &by_name)
                 .into_iter()
                 .map(|(f, s)| (f.to_string(), s)),
         );
@@ -1196,35 +1196,65 @@ pub fn as_written<'a>(
 /// The generic calls the language writes at this body's exits: a placed
 /// [`DropKind::Release`] step calls a declared release, and a generic one is
 /// instantiated at the step's receiver, solved by
-/// [`vyrn_frontend::types::solve_param`] like a written call. The lowering,
-/// not the emitter, owns the worklist.
-///
-/// A generic release reached only inside a [`DropKind::Deep`] walk, as in
-/// `Array<Slots<Int64>>`, is not seen here: that walk is the encoder's. The
-/// corpus has none; one fails `tests/lowered.rs` as a missing instantiation.
+/// [`vyrn_frontend::types::solve_param`] like a written call. A
+/// [`DropKind::Deep`] step calls the release of each part that declares one,
+/// as in `Array<Slots<String>>`, so its parts are walked for the same calls.
+/// The lowering, not the emitter, owns the worklist.
 pub(crate) fn dispatched<'f>(
     releases: &[Release],
+    proto: &vyrn_frontend::declared::Owned,
     by_name: &HashMap<&str, (FnId, &'f Function)>,
 ) -> Vec<(&'f str, HashMap<String, Type>)> {
     let mut out = Vec::new();
     for r in releases {
-        let DropKind::Release(f, recv) = &r.kind else {
-            continue;
-        };
-        let Some((_, target)) = by_name.get(f.as_str()) else {
-            continue;
-        };
-        if target.type_params.is_empty() {
-            // A root of the worklist already.
-            continue;
-        }
-        let mut solved: HashMap<String, Type> = HashMap::new();
-        if let Some(p) = target.params.first() {
-            vyrn_frontend::types::solve_param(&p.ty, recv, &mut solved);
-        }
-        out.push((target.name.as_str(), solved));
+        released(&r.kind, proto, by_name, &mut out);
     }
     out
+}
+
+/// [`dispatched`] for one release: the call of a declared release, or the
+/// calls a deep walk makes over the parts of its type. The walk ends because
+/// `release_kind` answers `Deep` only for a type with no unbounded part.
+fn released<'f>(
+    kind: &DropKind,
+    proto: &vyrn_frontend::declared::Owned,
+    by_name: &HashMap<&str, (FnId, &'f Function)>,
+    out: &mut Vec<(&'f str, HashMap<String, Type>)>,
+) {
+    match kind {
+        DropKind::Release(f, recv) => {
+            let Some((_, target)) = by_name.get(f.as_str()) else {
+                return;
+            };
+            if target.type_params.is_empty() {
+                // A root of the worklist already.
+                return;
+            }
+            let mut solved: HashMap<String, Type> = HashMap::new();
+            if let Some(p) = target.params.first() {
+                vyrn_frontend::types::solve_param(&p.ty, recv, &mut solved);
+            }
+            out.push((target.name.as_str(), solved));
+        }
+        DropKind::Deep(t) if proto.may_hold_generic_release(t) => {
+            let mut part = |p: &Type| {
+                if let Some(k) = proto.release_kind(p) {
+                    released(&k, proto, by_name, out);
+                }
+            };
+            match t {
+                Type::Array(e) | Type::SmallArray(e, _) | Type::ArrayN(e, _) => part(e),
+                Type::Map(k, v) => {
+                    part(k);
+                    part(v);
+                }
+                Type::Record(fs) => fs.iter().for_each(|f| part(&f.ty)),
+                Type::Enum(vs) => vs.iter().flat_map(|v| &v.payload).for_each(part),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Whether `releases` dispatch to an instance of a generic declared release
@@ -1233,14 +1263,17 @@ pub(crate) fn dispatched<'f>(
 /// parameter, spells no instance, so it counts as new.
 pub(crate) fn dispatches_new(
     releases: &[Release],
+    proto: &vyrn_frontend::declared::Owned,
     by_name: &HashMap<&str, (FnId, &Function)>,
     had: &std::collections::HashSet<String>,
 ) -> bool {
-    dispatched(releases, by_name).iter().any(|(name, solved)| {
-        let params = &by_name[name].1.type_params;
-        let args: Option<Vec<Type>> = params.iter().map(|p| solved.get(p).cloned()).collect();
-        args.is_none_or(|args| !had.contains(&spell(name, &args)))
-    })
+    dispatched(releases, proto, by_name)
+        .iter()
+        .any(|(name, solved)| {
+            let params = &by_name[name].1.type_params;
+            let args: Option<Vec<Type>> = params.iter().map(|p| solved.get(p).cloned()).collect();
+            args.is_none_or(|args| !had.contains(&spell(name, &args)))
+        })
 }
 
 /// Adds the `isSuccess` twin of every `Fallible$Key$success` call: `?` on a

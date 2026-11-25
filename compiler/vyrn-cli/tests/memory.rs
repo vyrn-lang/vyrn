@@ -3322,43 +3322,58 @@ fn array_clear_append_and_copy_from_release_and_copy_their_elements() {
         ),
     ];
     for (name, src, prints) in cases {
-        let file = dir.join(format!("{name}.vyrn"));
-        std::fs::write(&file, &src).unwrap();
-        let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-            .env("VYRN_LEAK_CHECK", "1")
-            .arg("run")
-            .arg(&file)
-            .output()
-            .expect("vyrn run");
-        let out = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
-        assert_eq!(
-            (run.status.code(), out.trim_end()),
-            (Some(0), prints),
-            "{name} on the engine: {}",
-            String::from_utf8_lossy(&run.stderr)
-        );
-        let exe = dir.join(format!("{name}.exe"));
-        let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-            .env("VYRN_LEAK_CHECK", "1")
-            .arg("build")
-            .arg(&file)
-            .arg("-o")
-            .arg(&exe)
-            .output()
-            .expect("vyrn build");
-        assert_eq!(
-            build.status.code(),
-            Some(0),
-            "{name}: {}",
-            String::from_utf8_lossy(&build.stderr)
-        );
-        let native = Command::new(&exe).output().expect("the native program");
-        let out = String::from_utf8_lossy(&native.stdout).replace("\r\n", "\n");
-        assert_eq!(
-            (native.status.code(), out.trim_end()),
-            (Some(0), prints),
-            "{name} on the wasm2c route: {}",
-            String::from_utf8_lossy(&native.stderr)
-        );
+        clean_on_both_routes(&dir, name, &src, prints);
     }
+}
+
+/// Runs `src` as `name` under the free audit on the engine (`vyrn run`) and on the wasm2c route
+/// (`vyrn build`), and asserts that each exits 0 and prints `prints`.
+fn clean_on_both_routes(dir: &Path, name: &str, src: &str, prints: &str) {
+    let file = dir.join(format!("{name}.vyrn"));
+    std::fs::write(&file, &src).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let out = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+    assert_eq!(
+        (run.status.code(), out.trim_end()),
+        (Some(0), prints),
+        "{name} on the engine: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let exe = dir.join(format!("{name}.exe"));
+    let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("vyrn build");
+    assert_eq!(
+        build.status.code(),
+        Some(0),
+        "{name}: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&exe).output().expect("the native program");
+    let out = String::from_utf8_lossy(&native.stdout).replace("\r\n", "\n");
+    assert_eq!(
+        (native.status.code(), out.trim_end()),
+        (Some(0), prints),
+        "{name} on the wasm2c route: {}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+}
+
+/// An array of a generic type with a declared release, `Array<Slots<String>>`, releases each
+/// element through that release at the element's type, which the lowering instantiates from
+/// the array's deep release.
+#[test]
+fn an_array_of_a_generic_owned_type_releases_each_element() {
+    let src = "import { Slots, newSlots, insert } from \"std/slots\"                fn main() -> Int64 { let mut s: Slots<String> = newSlots()                let h = insert(s, \"a\" + \"b\") let mut xs: Array<Slots<String>> = []                xs.push(s) print(xs.length) return 0 }";
+    clean_on_both_routes(&common::scratch("slots-array"), "slots", src, "1");
 }
