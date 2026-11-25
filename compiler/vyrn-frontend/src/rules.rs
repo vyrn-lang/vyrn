@@ -752,11 +752,6 @@ rules! {
     InitializerWaits { callee }
         "a module-state initializer cannot wait, and `{callee}` waits: state is set \
         before `main` runs";
-    ProveValue {}
-        "`prove` cannot be used as a function value: a call through a value proves \
-        nothing";
-    ProveForm {}
-        "`prove` takes one comparison, or comparisons joined by `&&`";
     ModifyNotMut { fname, arg, vn }
         "`{fname}` argument {arg} is `modify`, so `{vn}` must be \
         declared `mut`";
@@ -1318,7 +1313,6 @@ rules! {
         than `{name}.{short}`, which breaks the `where` rule of `{n}`"
         fix "store into `{name}.{short}` before any statement after line {k} that does not \
             store into `{name}`";
-    ProveUnshown { why } "`prove` cannot show its comparison here: {why}";
     ProvedKept { what, why }
         "the {what} check stays at run time, and this module is in `proved` (vyrn.json): {why}";
     RemoveNotMut { op, name } "cannot `{op}` from `{name}` (declared without `mut`)";

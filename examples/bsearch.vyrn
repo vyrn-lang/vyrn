@@ -1,13 +1,13 @@
-// A binary search whose index reads the compiler proves: two `prove` rows
-// and the result clause of `mid` state what the prover cannot find, and the
-// emitter removes each `prove` call, so no check and no call runs for them.
+// A binary search whose index reads the compiler proves. `half` bounds half
+// a positive width by the width and by the array's length, and `mid` states
+// that its `lo` is in range, so `lo + q` is an exact sum the prover reads.
 
-import { prove } from "std/proof"
+fn half(d: Int64 where value >= 1, n: Int64 where value >= d) -> Int64 where value >= 0 && value < d && value < n {
+    return d / 2
+}
 
-fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64 where value >= lo && value < hi && value < xs.length {
-    prove(lo < xs.length)
-    let q = (hi - lo) / 2
-    prove(q < xs.length)
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0 && value < xs.length, hi: Int64 where value > lo && value <= xs.length) -> Int64 where value >= lo && value < hi && value < xs.length {
+    let q = half(hi - lo, xs.length)
     return lo + q
 }
 

@@ -48,7 +48,7 @@ use vyrn_frontend::prim::Cmp;
 use crate::effects::StateUse;
 use crate::facts::{Fact, Lin, Sides, State, Term, EXACT};
 use vyrn_frontend::core::check::{
-    scalar_rule, Atom, Check, Ensures, Guard, Operand, Raises, Site, Verdict, Why,
+    scalar_rule, Atom, Check, Ensures, Guard, Operand, Site, Verdict, Why,
 };
 use vyrn_frontend::core::{
     rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, NameInfo, Op, Place, Rhs, St,
@@ -3400,7 +3400,7 @@ struct Walk<'a> {
     /// so far holds its `result` row and its `own` row ([`Frame`]).
     rows: Option<(Vec<bool>, Vec<bool>)>,
     /// The names a sum or difference binds that a recording walk could not
-    /// show exact ([`Walk::fits`]), which a `prove` row's reason names.
+    /// show exact ([`Walk::fits`]), which a kept check's reason names.
     wraps: BTreeSet<Name>,
     /// Per name, the last row of its `let`'s list that names it
     /// ([`extents`]): after that row the walk drops the name's conditions,
@@ -6561,9 +6561,7 @@ impl<'a> Walk<'a> {
             Term::Val(n) if self.wraps.contains(n) => Some(*n),
             _ => None,
         };
-        if let Some(n) = terms().find_map(wraps).filter(|_| c.rule == Raises::Prove) {
-            return Why::Wraps(n);
-        }
+        let wrapped = terms().find_map(wraps);
         let operands = match (failing, &c.guard) {
             (Some(_), _) => [None, None],
             (None, Guard::Range(s, a, b)) => {
@@ -6592,7 +6590,17 @@ impl<'a> Walk<'a> {
         let origin = names().fold(Origin::Local, |o, n| o.join(self.slot[n.index()].origin));
         match origin {
             Origin::Input(n) => return Why::Input(n),
-            Origin::Call(n, f) => return Why::Callee(n, f, goal()),
+            // A callee that states a result clause is not the cause: a sum
+            // over its result that may wrap is.
+            Origin::Call(n, f) => {
+                let stated = f
+                    .and_then(|f| self.sums.get(f))
+                    .is_some_and(|(_, s)| s.ensures.is_some());
+                return match wrapped.filter(|_| stated) {
+                    Some(w) => Why::Wraps(w),
+                    None => Why::Callee(n, f, goal()),
+                };
+            }
             Origin::Place(n) => return Why::Place(Some(n)),
             _ => {}
         }
@@ -6622,7 +6630,10 @@ impl<'a> Walk<'a> {
                 let (says, clause) = self.goal(st, g, Some(n));
                 Why::Caller(n, says, clause)
             }
-            (_, Some(g)) => Why::Unproved(self.goal(st, g, None).0),
+            (_, Some(g)) => match wrapped {
+                Some(w) => Why::Wraps(w),
+                None => Why::Unproved(self.goal(st, g, None).0),
+            },
             (_, None) if matches!(c.guard, Guard::Rule(_)) => Why::Rule,
             (_, None) => Why::Nonlinear,
         }

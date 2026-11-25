@@ -195,19 +195,18 @@ export fn get(xs: Array<Int64>, i: Int64) -> Int64 {
     );
 }
 
-/// `prove(c)` is a check of `c` that no build runs: the prover shows it, and
-/// every row after it assumes `c`. The binary search of the manual-proofs
-/// research proves every check of `mid` and `bsearch` with two `prove` rows
-/// and `mid`'s result clause, which `bsearch` reads at the call.
+/// A chain longer than the search is split by a helper's result clause:
+/// `half` bounds half a width by the array's length, so `lo + q` is an exact
+/// sum, and `mid`'s result clause proves every check of `bsearch`.
 #[test]
-fn prove_rows_and_a_result_clause_prove_a_binary_search() {
-    let src = "import { prove } from \"std/proof\"
-fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64
+fn helper_clauses_prove_a_binary_search() {
+    let src = "fn half(d: Int64 where value >= 1, n: Int64 where value >= d) -> Int64 where value >= 0 && value < d && value < n {
+    return d / 2
+}
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0 && value < xs.length, hi: Int64 where value > lo && value <= xs.length) -> Int64
     where value >= lo && value < hi && value < xs.length
 {
-    prove(lo < xs.length)
-    let q = (hi - lo) / 2
-    prove(q < xs.length)
+    let q = half(hi - lo, xs.length)
     return lo + q
 }
 export fn bsearch(xs: Array<Int64>, v: Int64) -> Int64 {
@@ -225,34 +224,49 @@ export fn bsearch(xs: Array<Int64>, v: Int64) -> Int64 {
 }
 ";
     let mid = [
-        "proved prove",
-        "proved int-div-zero",
-        "proved int-div-overflow",
-        "proved prove",
+        "proved where-arg",
+        "proved where-arg",
         "proved where-result",
     ];
     assert_eq!(verdicts(src, "mid"), mid);
     let bsearch = ["proved where-arg", "proved where-arg", "proved array-index"];
     assert_eq!(verdicts(src, "bsearch"), bsearch);
     let (err, rows) = oracle(src, "    print(bsearch(xs, 20).toString())", "mid");
-    assert_eq!((err.as_str(), rows.len()), ("", 5));
+    assert_eq!((err.as_str(), rows.len()), ("", 3));
+}
+
+/// A kept check over a sum that may wrap names the sum, not the callee whose
+/// result is one addend, where that callee states a result clause.
+#[test]
+fn a_sum_that_may_wrap_is_named_before_a_callee_that_states_a_clause() {
+    let src = "fn half(d: Int64 where value >= 1) -> Int64 where value >= 0 && value < d {
+    return d / 2
+}
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64
+    where value >= lo && value < hi && value < xs.length
+{
+    let q = half(hi - lo)
+    return lo + q
+}
+";
+    let (_dir, file) = program(src, "    print(mid(xs, 0, 3).toString())");
+    let why = vyrn().args(["why", "--cost"]).arg(&file).output().unwrap();
+    let out = norm(&why.stdout);
+    assert!(out.contains("where clause check: the sum `lo + q` may wrap"), "{out}");
 }
 
 /// A quotient by a literal of `d >= 1` is at most `d - 1` (`facts::divided`),
-/// so the research's `goalQd` proves its `prove` and the read it bounds.
+/// so the research's `goalQd` proves the read it bounds.
 #[test]
-fn a_prove_of_a_quotient_bound_holds() {
-    let src = "import { prove } from \"std/proof\"
-export fn goalQd(d: Int64 where value >= 1, xs: Array<Int64> where value.length >= d) -> Int64 {
+fn a_quotient_bound_proves_a_read() {
+    let src = "export fn goalQd(d: Int64 where value >= 1, xs: Array<Int64> where value.length >= d) -> Int64 {
     let q = d / 2
-    prove(q <= d - 1)
     return xs[d - 1 - q]
 }
 ";
     let rows = [
         "proved int-div-zero",
         "proved int-div-overflow",
-        "proved prove",
         "proved array-index",
     ];
     assert_eq!(verdicts(src, "goalQd"), rows);
@@ -7919,6 +7933,24 @@ fn a_proved_module_refuses_a_kept_check_with_its_fix() {
         .unwrap();
     assert_eq!(why.status.code(), Some(0));
     assert!(norm(&why.stdout).contains("    3           index check refused: it needs `i >= 0`"));
+}
+
+/// A proved module reads a callee's declared result clause and not its
+/// inferred summary, so only the call through the unstated clamp is refused.
+#[test]
+fn a_proved_module_reads_a_declared_result_clause_not_an_inferred_summary() {
+    let out = vyrn()
+        .arg("check")
+        .arg(proved("core/locality.vyrn"))
+        .output()
+        .unwrap();
+    let err = norm(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    let says = "core/locality.vyrn:27:0: the where clause check stays at run time, and this \
+                module is in `proved` (vyrn.json): it needs the value of line 27 >= 0, and that \
+                value is the result of `clampInferred(..)` at line 27, whose signature does not \
+                state it\n";
+    assert!(err.ends_with(says), "{err}");
 }
 
 /// A proved module's own checks are proved, its call rows' clause checks

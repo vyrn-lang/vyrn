@@ -1,0 +1,28 @@
+/// A proved module reads a callee's declared result clause, never its
+/// inferred summary: the call in `inferred` is refused, the one in `declared`
+/// is proved.
+fn clampDeclared(n: Int64) -> Int64 where value >= 0 {
+    if n < 0 {
+        return 0
+    }
+    return n
+}
+
+fn clampInferred(n: Int64) -> Int64 {
+    if n < 0 {
+        return 0
+    }
+    return n
+}
+
+fn need(c: Int64 where value >= 0) -> Int64 {
+    return c
+}
+
+export fn declared(n: Int64) -> Int64 {
+    return need(clampDeclared(n))
+}
+
+export fn inferred(n: Int64) -> Int64 {
+    return need(clampInferred(n))
+}

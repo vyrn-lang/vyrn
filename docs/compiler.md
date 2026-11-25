@@ -335,10 +335,8 @@ function any row spells by name). A refusal reads the demanded walk
 names' refinement types and the declared result clauses of its direct callees
 (`elide::Summaries::declared`), and no inferred summary or entry fact, which
 the judgment memo does not key. The typed judgment states and walks its own
-copy of a body with a group or a `prove` call by it. `typed::groups` refuses
-a group whose rule check the facts prove false at its first store, and a
-`prove` row the walk keeps (`check::Raises::Prove`, a clause check of the
-comparison the call's argument computes) is refused with its `Check::why`. In
+copy of a body with a group by it. `typed::groups` refuses
+a group whose rule check the facts prove false at its first store. In
 a module the manifest's `proved` key names (`Program::proved`, from
 `manifest::Proved`) every kept row is refused, and `World::body_at` decides
 the module's bodies by the same walk, so the emitter and `vyrn why --cost`

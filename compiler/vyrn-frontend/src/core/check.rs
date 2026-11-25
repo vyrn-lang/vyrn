@@ -75,10 +75,6 @@ pub enum Raises {
     /// The failure of a `let`'s `where` clause after a write of its binding
     /// ([`crate::trap::let_clause`]), which [`Guard::Clause`] carries.
     Let,
-    /// The failure of a `prove` comparison ([`crate::trap::prove`]), which
-    /// [`Guard::Clause`] carries. A program with a kept one is refused, so
-    /// only a build that keeps every check runs it.
-    Prove,
 }
 
 impl Raises {
@@ -90,7 +86,6 @@ impl Raises {
             Raises::Clause => "where-arg",
             Raises::Result => "where-result",
             Raises::Let => "where-let",
-            Raises::Prove => "prove",
         }
     }
 }
@@ -131,9 +126,8 @@ pub enum Guard {
     Scalar(Name, String),
     /// The arguments of the call row after the check satisfy one parameter's
     /// `where` clause, the value of the `return` after it satisfies the
-    /// function's result clause, the binding the row before it wrote
-    /// satisfies its `let`'s clause, or the `prove` call after it holds:
-    /// each comparison holds. `says` is the sentence a failure prints.
+    /// function's result clause, or the binding the row before it wrote
+    /// satisfies its `let`'s clause: each comparison holds. `says` is the sentence a failure prints.
     /// Unlike every other check, it runs where it stands: its operands are
     /// names and literals the row after it reads.
     Clause {
