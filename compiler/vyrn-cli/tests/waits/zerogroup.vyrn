@@ -1,0 +1,15 @@
+import { Group, group, room, add, joinGroup, sleep } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn main() -> Int64 {
+    let mut g: Group<Int64> = group(0)
+    await room(g)
+    add(g, fork pause(3))
+    let rs = await joinGroup(g)
+    print("done")
+    return rs.length
+}

@@ -1597,6 +1597,7 @@ impl<'a> Builder<'a> {
                 mistyped,
                 ends: HashMap::new(),
                 consumes: HashMap::new(),
+                sealed: Vec::new(),
             },
             frame: Frame::default(),
             temps: 0,
@@ -1628,6 +1629,7 @@ impl<'a> Builder<'a> {
             borrow_kind: None,
             line,
             binder: None,
+            value_col: 0,
             stmt: self.frame.stmt,
             binding: None,
             receiver: None,
@@ -3281,6 +3283,7 @@ impl<'a> Builder<'a> {
     /// keyed by its value's node: the emitter tells a binding from an operand
     /// temporary by the key.
     fn keyed_binding(&mut self, n: Name, s: Option<&Stmt>, value: &Expr) {
+        self.body.names[n.index()].value_col = start_col(value);
         match s {
             Some(s) => self.keyed_let(n, s),
             None => {
@@ -3737,13 +3740,15 @@ impl<'a> Builder<'a> {
                         (Val::Name(c), Val::Name(c))
                     }
                 };
+                // The exit is a `break` keyed by the loop's node, as a
+                // `while`'s is, so the join after the loop states its drops.
+                let mut stop = Vec::new();
+                self.edge_drops(sid, 0, &mut stop)?;
+                stop.push(St::Break { site: sid, line: 0 });
                 l.push(St::If {
                     cond,
                     then: Vec::new(),
-                    els: vec![St::Break {
-                        site: NodeId::NONE,
-                        line: 0,
-                    }],
+                    els: stop,
                     site: NodeId::NONE,
                 });
                 // Each turn owns its element where the element type owns heap
@@ -3887,6 +3892,7 @@ impl<'a> Builder<'a> {
                     let owns = self.owns(&ty);
                     let t = self.temp(ty, e.line());
                     self.quote(t, e);
+                    self.body.names[t.index()].value_col = start_col(e);
                     self.bind(t, rhs, out);
                     if owns && self.discards(e) {
                         out.push(St::Drop(t, Site::Node(sid), 0, None));
@@ -5706,6 +5712,7 @@ impl<'a> Builder<'a> {
                 mistyped: Vec::new(),
                 ends: HashMap::new(),
                 consumes: HashMap::new(),
+                sealed: Vec::new(),
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);
@@ -5940,20 +5947,24 @@ impl<'a> Builder<'a> {
                 // A hole the walk cannot skip is not stated: a declared
                 // `release` cannot be told to leave a field alone, so it would
                 // free the field twice (`refusals/r22_drop_with_a_hole.vyrn`).
+                // It is sealed instead, and the kernel refuses its release.
                 let bty = self.body.names[n.index()].ty.clone();
                 let rel = path.trim_start_matches('.').to_string();
-                if !rel.is_empty()
-                    && vyrn_frontend::declared::skippable(
-                        self.proto,
-                        &bty,
-                        std::slice::from_ref(&rel),
-                    )
-                {
-                    let hs = &mut self.body.names[n.index()].holes;
-                    if !hs.contains(&path) {
-                        hs.push(path);
-                        hs.sort();
+                let skips = vyrn_frontend::declared::skippable(
+                    self.proto,
+                    &bty,
+                    std::slice::from_ref(&rel),
+                );
+                match (rel.is_empty(), skips) {
+                    (true, _) => {}
+                    (false, true) => {
+                        let hs = &mut self.body.names[n.index()].holes;
+                        if !hs.contains(&path) {
+                            hs.push(path);
+                            hs.sort();
+                        }
                     }
+                    (false, false) => self.body.sealed.push((n, path)),
                 }
             }
         }

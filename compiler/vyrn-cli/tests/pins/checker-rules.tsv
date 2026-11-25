@@ -55,7 +55,7 @@ checker-rules.vyrn:300:8: `if` condition must be Bool, found Int64
 checker-rules.vyrn:314:5: cannot assign to `x` (declared without `mut`)
 checker-rules.vyrn:326:5: cannot mutate a field of `h` (declared without `mut`)
 checker-rules.vyrn:331:5: cannot store into `k` (declared without `mut`)
-checker-rules.vyrn:336:0: cannot mutate a field of `h` (declared without `mut`)
+checker-rules.vyrn:336:13: cannot mutate a field of `h` (declared without `mut`)
 checker-rules.vyrn:340:5: cannot store into `untyped` (declared without `mut`)
 checker-rules.vyrn:346:5: cannot assign to `x` (declared without `mut`)
 checker-rules.vyrn:352:5: cannot assign to `x` (declared without `mut`)
@@ -107,8 +107,8 @@ checker-rules.vyrn:543:13: missing field `hi` for `Span`
 checker-rules.vyrn:551:17: missing field `hi` for `Span`
 checker-rules.vyrn:559:13: `Age` construction takes 1 argument, got 2
 checker-rules.vyrn:567:13: `Age` is built from Int64, but the argument is String
-checker-rules.vyrn:578:0: cannot `pop` from `xs` (declared without `mut`)
-checker-rules.vyrn:583:0: cannot `swapRemove` from `xs` (declared without `mut`)
+checker-rules.vyrn:578:13: cannot `pop` from `xs` (declared without `mut`)
+checker-rules.vyrn:583:13: cannot `swapRemove` from `xs` (declared without `mut`)
 checker-rules.vyrn:588:5: cannot `remove` from `m` (declared without `mut`)
 checker-rules.vyrn:592:13: unknown variable `zz`
 checker-rules.vyrn:599:13: duplicate `B` arm

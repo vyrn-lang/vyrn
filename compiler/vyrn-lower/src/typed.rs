@@ -170,7 +170,7 @@ pub(crate) fn row_stores(
             let info = &names[n.index()];
             modified(rhs)
                 .iter()
-                .for_each(|(p, r)| f(p, info.line, 0, info.binding, *r))
+                .for_each(|(p, r)| f(p, info.line, info.value_col, info.binding, *r))
         }
         _ => {}
     }

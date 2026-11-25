@@ -1,0 +1,1 @@
+mut_a_removal_bound_by_let.vyrn:4:13: cannot `pop` from `xs` (declared without `mut`)

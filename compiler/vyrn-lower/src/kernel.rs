@@ -1716,6 +1716,15 @@ impl<'b> Kernel<'b> {
             self.unbind(st, n);
             return Ok(());
         }
+        // A declared `release` takes the value whole, so no row walks around
+        // a hole under one ([`Body::sealed`]).
+        let sealed = |h: &&String| (self.body.sealed.iter()).any(|(m, r)| *m == n && covers(r, h));
+        if let Some(h) = st.holes(n).iter().find(sealed) {
+            let r = rule!(ReleasedWithHole, info = self.info(n), h);
+            self.refusals.push(self.refuse(self.here, r));
+            self.unbind(st, n);
+            return Ok(());
+        }
         let row = match (self.mode, end) {
             (Mode::Judge, _) | (_, End::Arm(NodeId::NONE, _)) => None,
             (Mode::Place, End::Arm(site, arm)) => {

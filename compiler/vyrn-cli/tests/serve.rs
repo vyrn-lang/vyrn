@@ -150,6 +150,29 @@ fn module_state_persists_across_requests() {
     assert_eq!(b3, "hits=3", "third request (state persisted)");
 }
 
+/// The loader renames the root's `handle` apart from an imported one; the
+/// server still finds the root's by the name it wrote.
+#[test]
+fn handle_is_found_when_an_import_also_declares_one() {
+    let lib = format!("vyrn-serve-lib-{}", std::process::id());
+    let lib_file = TempFile {
+        path: std::env::temp_dir().join(format!("{lib}.vyrn")),
+    };
+    let lib_src = r#"
+export fn twice(n: Int64) -> Int64 { return n * 2 }
+export fn handle<T>(x: consume T) -> T { return x }
+"#;
+    std::fs::write(&lib_file.path, lib_src).expect("write lib");
+    let src = r#"
+import { twice } from "./LIB"
+fn handle(req: Request) -> Response {
+    return Response { status: 200, contentType: "text/plain", body: "\{twice(2)}", vary: "", headers: [:] }
+}
+"#;
+    let s = start_server_on(&src.replace("LIB", &lib), &[]);
+    assert_eq!(get(s.server.port, "/").1, "4");
+}
+
 #[test]
 fn handler_trap_yields_500_and_server_survives() {
     let s = start_server();

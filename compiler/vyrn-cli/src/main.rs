@@ -4140,7 +4140,7 @@ fn vyrnServeMain() -> Int64 {
 /// signature (`vyrnServePark` and `serveStream`: `consume Stream<String>` to
 /// `Unit`). The stand-ins are renamed in the shim's own functions only, which
 /// no program can declare again, so no call the program writes reaches a box.
-fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
+fn serve_rewrite(program: &mut vyrn_frontend::ast::Program, handle: &str) {
     use vyrn_frontend::ast::Expr;
     const BOXES: [(&str, &str); 3] = [
         ("vyrnServeBox", "boxStream"),
@@ -4164,7 +4164,7 @@ fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
                     *name = "vyrnServePark".to_string();
                 }
                 if door && name == "vyrnServeCall" {
-                    *name = "handle".to_string();
+                    *name = handle.to_string();
                 }
                 if let Some((_, b)) = BOXES.iter().find(|(s, _)| shim && *s == name.as_str()) {
                     *name = b.to_string();
@@ -4177,10 +4177,13 @@ fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
 /// The World of a served program after [`serve_rewrite`]: when `handle`
 /// waits, the door's call of it is marked `await` first, and the program is
 /// analysed again with the mark.
-fn serve_world(program: &mut vyrn_frontend::ast::Program) -> std::sync::Arc<vyrn_lower::World> {
+fn serve_world(
+    program: &mut vyrn_frontend::ast::Program,
+    handle: &str,
+) -> std::sync::Arc<vyrn_lower::World> {
     use vyrn_frontend::ast::Expr;
     let world = vyrn_lower::analyze(program);
-    let waits = (world.fn_id("handle"))
+    let waits = (world.fn_id(handle))
         .and_then(|f| world.state_use(f))
         .is_some_and(|u| u.effects.has(vyrn_frontend::effects::Effect::Waits));
     if !waits {
@@ -4191,7 +4194,7 @@ fn serve_world(program: &mut vyrn_frontend::ast::Program) -> std::sync::Arc<vyrn
     {
         vyrn_frontend::project::walk_block(f.block_mut(), &mut |e| {
             if let Expr::Call { name, mark, .. } = e {
-                if name == "handle" {
+                if name == handle {
                     *mark = vyrn_frontend::ast::Mark::Await;
                 }
             }
@@ -4293,17 +4296,20 @@ fn serve_cmd(call: &Call) -> Outcome {
     })
 }
 
-/// Whether the program has `fn handle(req: Request) -> Response`, exactly. The
-/// checker states the rule again over its own signature table.
-fn has_served_handle(program: &vyrn_frontend::ast::Program) -> bool {
+/// The linked name of the root's `fn handle(req: Request) -> Response`,
+/// exactly. The loader renames it apart when an import also declares `handle`.
+/// The checker states the rule again over its own signature table.
+fn served_handle(program: &vyrn_frontend::ast::Program) -> Option<String> {
     use vyrn_frontend::ast::Type;
-    program.functions.iter().any(|f| {
-        f.name == "handle"
+    let f = program.functions.iter().find(|f| {
+        f.module.is_none()
+            && program.spellings.written(&f.name) == "handle"
             && !f.is_extern
             && f.params.len() == 1
             && f.params[0].ty == Type::Named("Request".to_string())
             && f.ret == Type::Named("Response".to_string())
-    })
+    })?;
+    Some(f.name.clone())
 }
 
 /// A served root, built: its `main` has run once.
@@ -4349,15 +4355,15 @@ fn serve_build(
     // Appended before the load, so it is checked and every program line keeps
     // its number.
     let (mut program, _) = p.checked_said(root, &format!("{source}\n{SERVE_SHIM}"), &[])?;
-    if !has_served_handle(&program) {
+    let Some(handle) = served_handle(&program) else {
         return Err(said(format!(
             "`vyrn {what}` needs `fn handle(req: Request) -> Response` in {root}"
         )));
-    }
-    serve_rewrite(&mut program);
-    let world = serve_world(&mut program);
+    };
+    serve_rewrite(&mut program, &handle);
+    let world = serve_world(&mut program, &handle);
     if workers {
-        if let Some(refusal) = refuse_workers_if_stateful(&program, &world) {
+        if let Some(refusal) = refuse_workers_if_stateful(&program, &world, &handle) {
             return Err(said(refusal));
         }
     }
@@ -4656,8 +4662,9 @@ fn serve_pool(
 fn refuse_workers_if_stateful(
     program: &vyrn_frontend::ast::Program,
     world: &vyrn_lower::World,
+    handle: &str,
 ) -> Option<String> {
-    let (path, global) = world.state_path(world.fn_id("handle")?)?;
+    let (path, global) = world.state_path(world.fn_id(handle)?)?;
     let rows = world.fn_rows();
     let written = |n: &str| program.spellings.written(n).to_string();
     let path = (path.iter())
@@ -6957,8 +6964,8 @@ fn handle(req: Request) -> Response {
         let (mut program, _) = Project::of(Some(&key), GlobalFlags::default())
             .and_then(|p| p.checked(&key, &source))
             .expect("the doors load and check");
-        serve_rewrite(&mut program);
-        let world = serve_world(&mut program);
+        serve_rewrite(&mut program, "handle");
+        let world = serve_world(&mut program, "handle");
         let bytes = vyrn_codegen::direct::compile(&program, world).expect("the doors compile");
         let run = wasmrun::Run {
             argv: vec![key.clone()],

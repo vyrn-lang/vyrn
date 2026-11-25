@@ -59,6 +59,7 @@ fn main() -> Int64 {
     print(say(readFile("vyrn.syntax") ?? ""))
     print(say("expect ^E\na = ( 'x'\n"))
     print(say("expect ^E\na = ^\n"))
+    print(say("syntax S // c\nexpect ^E\n"))
     return 0
 }
 "#;
@@ -66,7 +67,7 @@ fn main() -> Int64 {
 #[test]
 fn the_format_grammar_reads_itself_and_vyrn_and_refuses_two_errors() {
     let got = run_beside_the_grammars("self", SELF);
-    let want = "accepted\naccepted\nrefused at line 2\nrefused at line 2\n";
+    let want = "accepted\naccepted\nrefused at line 2\nrefused at line 2\naccepted\n";
     assert_eq!(got, (Some(0), want.to_string()));
 }
 

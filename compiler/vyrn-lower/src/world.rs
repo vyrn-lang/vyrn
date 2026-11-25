@@ -363,6 +363,16 @@ pub(crate) fn add_callees(top: &Body, fns: &HashMap<&str, (FnId, &Function)>, ou
 /// type's check, an instance, a lambda frame. A gen fn is none: it runs only
 /// in its own load. Empty where `program.lazy` is `None`.
 pub(crate) fn unreached(program: &Program, w: &World) -> HashSet<FnId> {
+    unreached_from(program, w, |_| true)
+}
+
+/// [`unreached`], where a function of a module `lazy` does not name is an
+/// entry only when `enters` holds for it.
+fn unreached_from(
+    program: &Program,
+    w: &World,
+    enters: impl Fn(&Function) -> bool,
+) -> HashSet<FnId> {
     let Some(lazy) = &program.lazy else {
         return HashSet::new();
     };
@@ -371,7 +381,9 @@ pub(crate) fn unreached(program: &Program, w: &World) -> HashSet<FnId> {
     let queued = w.waits(program);
     let reserved = |n: &str| n.contains('$') && (queued || !n.starts_with(TASK_PREFIX));
     let entry = |f: &Function| {
-        (!f.is_gen && (!lazy(&f.module) || reserved(&f.name))) || f.is_extern || f.is_export_extern
+        (!f.is_gen && ((!lazy(&f.module) && enters(f)) || reserved(&f.name)))
+            || f.is_extern
+            || f.is_export_extern
     };
     let mut work: Vec<FnId> = (0..fns)
         .filter(|&i| entry(&program.functions[i]))
@@ -656,6 +668,14 @@ impl World {
     /// allocate: its effect set holds `alloc`.
     pub fn allocating_file(&self, f: FnId) -> Option<&str> {
         self.allocating.get(&f).map(|f| &**f)
+    }
+
+    /// The functions no run of a module emitted from this World enters: those
+    /// [`unreached`] names, and those of every other module that no `main`,
+    /// export or other [`unreached`] entry reaches. Each is still lowered, so
+    /// a build refuses what it cannot lower.
+    pub fn unentered(&self, program: &Program) -> HashSet<FnId> {
+        unreached_from(program, self, |f| f.name == "main" || f.exported)
     }
 
     /// Whether the module emitted from this World may run the function

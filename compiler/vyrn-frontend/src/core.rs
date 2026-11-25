@@ -50,6 +50,10 @@ pub struct NameInfo {
     /// where a must-use temporary's expression starts; `None` for any other
     /// name. An obligation row names it.
     pub binder: Option<Spelled>,
+    /// The 1-based column where the expression a `let` or a statement binds
+    /// this name to starts, where a removal's refusal sits; 0 for any other
+    /// name.
+    pub value_col: usize,
     /// The statement the name was made under, [`NodeId::NONE`] outside one.
     /// With the name, it keys [`Body::ends`].
     pub stmt: NodeId,
@@ -1317,6 +1321,10 @@ pub struct Body {
     /// the statement, the root name and the hole path the take leaves: empty
     /// where the reader's text does not place the take on one line.
     pub consumes: std::collections::HashMap<(NodeId, Name, String), Vec<crate::diagnostics::Fix>>,
+    /// The holes a take opens that the release walk cannot skip, by root
+    /// name: a declared `release` on the path takes the value whole, so the
+    /// kernel refuses a release while one is open.
+    pub sealed: Vec<(Name, String)>,
 }
 
 /// The shape of a candidate construct, which `vyrn_lower::core::last_owner` asks.

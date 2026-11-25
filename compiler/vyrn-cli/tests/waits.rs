@@ -492,3 +492,20 @@ fn the_host_reads_the_result_of_a_task_it_started() {
         "{got:?}"
     );
 }
+
+/// A group whose limit is below 1 traps where it is made, because `room`
+/// would wait forever.
+#[test]
+fn a_group_with_no_room_traps_at_its_making() {
+    let out = vyrn()
+        .args(["run", "zerogroup.vyrn"])
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn run");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(norm(&out.stdout), "");
+    assert_eq!(
+        norm(&out.stderr),
+        "error: validation failed for parameter `limit` of `group`\n"
+    );
+}

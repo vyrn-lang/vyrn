@@ -7,7 +7,7 @@ expect ^SyntaxExpected(token=token)
 file = (blank / comment ('\n' / eof) / def)* (eof / ^SyntaxStray)
 blank = [ \t\r]* '\n'
 comment = '//' (!'\n' .)*
-def = !ws (directive / rule) [ \t\r]* (comment ('\n' / eof))? ('\n' / eof)
+def = !ws (directive / rule) [ \t\r]* comment? ('\n' / eof)
 
 directive = 'syntax' gap name
           / ('keyword' / 'token') gap name gap string
