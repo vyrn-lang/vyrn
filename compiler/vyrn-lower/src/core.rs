@@ -1629,6 +1629,7 @@ impl<'a> Builder<'a> {
             borrow_kind: None,
             line,
             binder: None,
+            value_col: 0,
             stmt: self.frame.stmt,
             binding: None,
             receiver: None,
@@ -3282,6 +3283,7 @@ impl<'a> Builder<'a> {
     /// keyed by its value's node: the emitter tells a binding from an operand
     /// temporary by the key.
     fn keyed_binding(&mut self, n: Name, s: Option<&Stmt>, value: &Expr) {
+        self.body.names[n.index()].value_col = start_col(value);
         match s {
             Some(s) => self.keyed_let(n, s),
             None => {
@@ -3888,6 +3890,7 @@ impl<'a> Builder<'a> {
                     let owns = self.owns(&ty);
                     let t = self.temp(ty, e.line());
                     self.quote(t, e);
+                    self.body.names[t.index()].value_col = start_col(e);
                     self.bind(t, rhs, out);
                     if owns && self.discards(e) {
                         out.push(St::Drop(t, Site::Node(sid), 0, None));

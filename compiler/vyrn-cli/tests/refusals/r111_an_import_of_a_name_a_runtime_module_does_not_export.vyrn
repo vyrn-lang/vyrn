@@ -1,0 +1,7 @@
+// A sentence names a declaration as its module wrote it, never by its linked
+// name.
+import { settle } from "std/task"
+
+fn main() -> Int64 {
+    return 0
+}

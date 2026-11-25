@@ -6056,15 +6056,18 @@ fn link(
                 // `resolve_aliases` made every import a bare import of a real
                 // decl name.
                 let name = &imp_name.original;
+                // At the name as written: a prefixed module's import names
+                // carry its prefix (`task$First`).
+                let at_name = |rule: Rule| {
+                    let d = Diagnostic::refusal(imp.line, imp_name.col, "load", rule);
+                    in_module(d, &m.key, root_key)
+                };
+                let written = unprefixed(name);
                 match owner.get(name) {
                     Some((def_module, exported)) if def_module == target => {
                         if !exported {
-                            errors.push(load_error(
-                                &m.key,
-                                root_key,
-                                imp.line,
-                                rule!(NotExported, name, target = spoken(&m.key, target, opts)),
-                            ));
+                            let target = spoken(&m.key, target, opts);
+                            errors.push(at_name(rule!(NotExported, name = written, target)));
                         } else if let Some(to) = shut_out(name, target, m, (imp.line, imp.col)) {
                             let rule = exported_only_to(name, to, target, &m.key, opts);
                             errors.push(refused_import(m, imp, imp.line, rule));
@@ -6074,17 +6077,12 @@ fn link(
                         visible.insert(name.clone());
                     }
                     Some((def_module, _)) if !clashed.contains(name.as_str()) => {
-                        errors.push(load_error(
-                            &m.key,
-                            root_key,
-                            imp.line,
-                            rule!(
-                                NotDefinedIn,
-                                name,
-                                target = spoken(&m.key, target, opts),
-                                def_module = spoken(&m.key, def_module, opts)
-                            ),
-                        ));
+                        errors.push(at_name(rule!(
+                            NotDefinedIn,
+                            name = written,
+                            target = spoken(&m.key, target, opts),
+                            def_module = spoken(&m.key, def_module, opts)
+                        )));
                     }
                     // A clashed name: `clash_diagnostics` reported the pair. It
                     // stays visible, so the check below does not blame the module
@@ -6093,12 +6091,8 @@ fn link(
                         visible.insert(name.clone());
                     }
                     None => {
-                        // The name as written: a prefixed module's import
-                        // names carry its prefix (`task$First`).
-                        let (target, name) = (spoken(&m.key, target, opts), unprefixed(name));
-                        let rule = rule!(TargetLacks, target, name);
-                        let d = Diagnostic::refusal(imp.line, imp_name.col, "load", rule);
-                        errors.push(in_module(d, &m.key, root_key));
+                        let target = spoken(&m.key, target, opts);
+                        errors.push(at_name(rule!(TargetLacks, target, name = written)));
                     }
                 }
             }

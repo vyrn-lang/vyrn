@@ -50,6 +50,10 @@ pub struct NameInfo {
     /// where a must-use temporary's expression starts; `None` for any other
     /// name. An obligation row names it.
     pub binder: Option<Spelled>,
+    /// The 1-based column where the expression a `let` or a statement binds
+    /// this name to starts, where a removal's refusal sits; 0 for any other
+    /// name.
+    pub value_col: usize,
     /// The statement the name was made under, [`NodeId::NONE`] outside one.
     /// With the name, it keys [`Body::ends`].
     pub stmt: NodeId,

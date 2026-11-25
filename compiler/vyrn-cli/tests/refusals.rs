@@ -726,6 +726,12 @@ fn census() -> Vec<Row> {
             "`k` (line 11) is released whole although a `consume` took `.name` out of it",
             Kernel::Its,
         ),
+        row(
+            "r111_an_import_of_a_name_a_runtime_module_does_not_export.vyrn",
+            "an import names a declaration as its module wrote it",
+            "`settle` exists in `std/task` but is not exported: add `export` to its declaration",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 
@@ -734,6 +740,14 @@ fn census() -> Vec<Row> {
 #[test]
 fn a_refusal_sits_where_its_subject_is_spelled() {
     for (file, at) in [
+        (
+            "r94_an_import_of_a_name_the_module_does_not_export.vyrn",
+            "3:10",
+        ),
+        (
+            "r95_an_import_of_a_name_another_module_defines.vyrn",
+            "4:10",
+        ),
         ("r99_a_dropped_must_use_method_call_result.vyrn", "9:5"),
         (
             "r100_a_variant_of_an_enum_the_module_does_not_import.vyrn",
