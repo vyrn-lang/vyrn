@@ -338,9 +338,10 @@ pub fn analyze_judged(
 }
 
 /// Rewrites a foreign-file diagnostic so it shows in the root document without
-/// a wrong anchor.
+/// a wrong anchor. A generated module is named as a reader sees its key.
 fn adopt_foreign(mut d: Diagnostic) -> Diagnostic {
     if let Some(file) = d.file.take() {
+        let file = crate::loader::shown_key(&file, None);
         d.message = format!("in {file}: {}", d.message);
         d.line = 0;
         d.col = 0;
