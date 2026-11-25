@@ -1142,6 +1142,7 @@ examples/consume.vyrn	0	cbf29ce484222325	20	18	d79c85e61f110245
 examples/consume_borrowed.vyrn	0	cbf29ce484222325	20	19	ce3f79cff0c1d44e
 examples/consume_handover.vyrn	0	cbf29ce484222325	20	19	8dd245edca1e3d74
 examples/consume_hole_break.vyrn	0	cbf29ce484222325	20	17	b61f2e9dbe37daec
+examples/consume_hole_for_break.vyrn	0	cbf29ce484222325	20	19	9d1f29cfe71e9869
 examples/consumeloop.vyrn	0	cbf29ce484222325	20	16	7c356fa43bec952d
 examples/container.vyrn	0	cbf29ce484222325	20	16	348f3ea1bb6cc065
 examples/contractquery.vyrn	0	cbf29ce484222325	20	20	5b2d1e1abc1f3d69

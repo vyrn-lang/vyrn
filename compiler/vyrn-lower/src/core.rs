@@ -3740,13 +3740,15 @@ impl<'a> Builder<'a> {
                         (Val::Name(c), Val::Name(c))
                     }
                 };
+                // The exit is a `break` keyed by the loop's node, as a
+                // `while`'s is, so the join after the loop states its drops.
+                let mut stop = Vec::new();
+                self.edge_drops(sid, 0, &mut stop)?;
+                stop.push(St::Break { site: sid, line: 0 });
                 l.push(St::If {
                     cond,
                     then: Vec::new(),
-                    els: vec![St::Break {
-                        site: NodeId::NONE,
-                        line: 0,
-                    }],
+                    els: stop,
                     site: NodeId::NONE,
                 });
                 // Each turn owns its element where the element type owns heap
