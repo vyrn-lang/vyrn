@@ -37,8 +37,21 @@ export fn join<T>(t: consume Task<T>) -> T {
 /// Ends `t` where it waits, releasing what it holds, or releases its result
 /// when it returned. Does not wait.
 export fn cancel<T>(t: consume Task<T>) {
+    stop(taskId(t))
+    release(t)
+}
+
+/// The release of a handle: gives up the right to `t`'s result. A task that
+/// runs goes on without an owner, and its root frees its block when it ends; a
+/// task that ended is forgotten, with its result.
+fn release<T>(t: consume Task<T>) {
     let id = taskId(t)
-    stop(id)
+    let i = taskAt(id)
+    if i < runs.length && runs[i].state == 2 {
+        runs[i].owned = false
+        taskLeave(t)
+        return
+    }
     let returned = stateOf(id) == 0
     forget(id)
     taskFree(t, returned)
@@ -54,6 +67,11 @@ export fn both<A, B>(first: consume Task<A>, second: consume Task<B>) -> Both<A,
         watch(a, op)
         watch(b, op)
         await taskWait(op)
+    }
+    // A released handle leaves its task running, so the other is stopped here.
+    if stateOf(a) == 1 || stateOf(b) == 1 {
+        stop(a)
+        stop(b)
     }
     if stateOf(b) == 1 {
         let y = await join(second)
@@ -105,8 +123,13 @@ export fn joinAll<T>(ts: consume Array<Task<T>>) -> Array<T> {
         }
         await taskWait(op)
     }
+    if anyCancelled(ts) {
+        for t in ts {
+            stop(taskId(t))
+        }
+    }
     // Popped twice so the joins run in index order: a cancelled join releases
-    // the tasks still held, which cancels them.
+    // the tasks still held, which ended.
     let mut rest = ts
     let mut ahead: Array<Task<T>> = []
     while let Some(t) = rest.pop() {
@@ -125,22 +148,27 @@ export fn joinAll<T>(ts: consume Array<Task<T>>) -> Array<T> {
 /// or cancelled together.
 export type Group<T> = { tasks: Array<Task<T>>, limit: Int64 }
 
-impl MustUse for Group<T> {}
-
 /// An empty group whose tasks run at most `limit` at once.
 export fn group<T>(limit: Int64) -> Group<T> {
     return Group { tasks: [], limit: limit }
 }
 
 /// Waits until fewer than the limit of `g`'s tasks run: call it before each
-/// `fork` the group will hold.
+/// `fork` the group will hold. If one was cancelled, `room` cancels the rest
+/// and is cancelled.
 export fn room<T>(g: modify Group<T>) {
-    while live(g.tasks) >= g.limit {
+    while live(g.tasks) >= g.limit && !anyCancelled(g.tasks) {
         let op = newOp()
         for t in g.tasks {
             watch(taskId(t), op)
         }
         await taskWait(op)
+    }
+    if anyCancelled(g.tasks) {
+        for t in g.tasks {
+            stop(taskId(t))
+        }
+        await cancelled()
     }
 }
 
@@ -151,15 +179,12 @@ export fn add<T>(g: modify Group<T>, t: consume Task<T>) {
 
 /// Waits for every task of `g`: the results, in the order they were added.
 export fn joinGroup<T>(g: consume Group<T>) -> Array<T> {
-    let ts = consume g.tasks
-    drop g
-    return await joinAll(ts)
+    return await joinAll(consume g.tasks)
 }
 
 /// Cancels every task of `g` where it waits.
 export fn cancelGroup<T>(g: consume Group<T>) {
     let ts = consume g.tasks
-    drop g
     for t in consume ts {
         cancel(t)
     }
@@ -197,17 +222,17 @@ fn anyCancelled<T>(ts: Array<Task<T>>) -> Bool {
 /// A task: its number from 1 in start order, the emitter's number of the root
 /// that started it, the root's frame while it waits (a forked task's block),
 /// the host's id for it (0 for `main` and a forked task, which no host names),
-/// the root's result once it returned, whether `fork` started it, its state, 2
+/// the root's result once it returned, whether a handle owns it, its state, 2
 /// while it runs, 0 returned and 1 cancelled, and the operation its end
-/// delivers to its owner, 0 for none. A forked task stays until its owner
-/// takes or frees it.
+/// delivers to its owner, 0 for none. An owned task stays until its owner
+/// takes or frees it; `release` makes a running one unowned.
 type Run = {
     id: Int64,
     root: Int32,
     frame: Int32,
     host: Int64,
     result: Int64,
-    forked: Bool,
+    owned: Bool,
     state: Int32,
     watch: Int64,
 }
@@ -259,16 +284,17 @@ fn waitAt(id: Int64) -> Int64 {
     return i
 }
 
-/// Task `id` ended with status `st`, 0 returned or 1 cancelled. A forked
-/// task keeps its row, and its end is delivered to its owner's watch. Any
+/// Task `id` ended with status `st`, 0 returned or 1 cancelled. An owned
+/// task keeps its row, and its end completes its owner's watch, so the owner
+/// wakes and reads the state: a released handle cancels nothing. Any
 /// other leaves, and a host that named it learns its end, with the result of a
 /// task that returned.
 fn taskEnd(id: Int64, st: Int32) {
     let i = taskAt(id)
     if i < runs.length {
-        if runs[i].forked {
+        if runs[i].owned {
             runs[i].state = st
-            deliver(runs[i].watch, st, 0)
+            deliver(runs[i].watch, 0, 0)
             return
         }
         if runs[i].host != 0 {
@@ -287,7 +313,7 @@ fn taskBegin(root: Int32, host: Int64) -> Int64 {
         frame: 0,
         host: host,
         result: 0,
-        forked: false,
+        owned: false,
         state: 2,
         watch: 0,
     })
@@ -307,7 +333,7 @@ fn taskFork(root: Int32, block: Int32) -> Int64 {
         frame: block,
         host: 0,
         result: 0,
-        forked: true,
+        owned: true,
         state: 2,
         watch: 0,
     })
@@ -473,6 +499,11 @@ fn cancelEnd() {
 fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
     deliver(id, status, payload)
     drain()
+    return pending()
+}
+
+/// How many tasks run or wait.
+fn pending() -> Int32 {
     let mut n: Int32 = 0
     for r in runs {
         if r.state == 2 {
@@ -480,6 +511,37 @@ fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
         }
     }
     return n
+}
+
+/// Whether the running task has no owner: its root then frees its block.
+fn taskUnowned() -> Bool {
+    let i = taskAt(running)
+    return i < runs.length && !runs[i].owned
+}
+
+/// `main`'s exit code, 0 to 255, once it ended while a task ran.
+let mut exitCode: Int64 = 0
+
+let mut exiting: Bool = false
+
+/// `main` ended with exit code `code`, 0 to 255. Answers whether a task still
+/// runs: the exit then waits until `exitDue` answers the code.
+fn mainEnd(code: Int64) -> Bool {
+    if pending() == 0 {
+        return false
+    }
+    exitCode = code
+    exiting = true
+    return true
+}
+
+/// `main`'s exit code once it ended and no task runs, else -1. The emitter's
+/// `__vyrn_wake` asks after each wake.
+fn exitDue() -> Int64 {
+    if !exiting || pending() > 0 {
+        return -1
+    }
+    return exitCode
 }
 
 /// Operation `id` ended with `status` and `payload`: the task that waits on
@@ -533,7 +595,7 @@ fn taskTrapped() -> Int64 {
         return 0
     }
     let host = runs[i].host
-    let forked = runs[i].forked
+    let owned = runs[i].owned
     let watching = runs[i].watch
     runs.swapRemove(i)
     let mut j: Int64 = 0
@@ -547,10 +609,9 @@ fn taskTrapped() -> Int64 {
             j = j + 1
         }
     }
-    // A trap ends a forked task alone, and its owner is cancelled where it
-    // waits for it.
-    if forked {
-        deliver(watching, 1, 0)
+    // A trap ends an owned task alone, and its owner wakes to find it ended.
+    if owned {
+        deliver(watching, 0, 0)
         drain()
     }
     return host

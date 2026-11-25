@@ -374,6 +374,7 @@ pub const RESERVED: &[&str] = &[
     "taskId",
     "taskTake",
     "taskFree",
+    "taskLeave",
     "taskWait",
     "orderBefore",
     "Int64",
@@ -3692,15 +3693,8 @@ impl<'a> Checker<'a> {
             }
             // The dropped binding's type, which the lowering instantiates a
             // generic declared `release` at.
-            Stmt::Drop { name, id, line } => {
+            Stmt::Drop { name, id, .. } => {
                 let b = self.lookup(scope, name);
-                // A task ends by `join` or `cancel`, so a silent cancellation is written. A
-                // generic body's `drop` of a `T` is no task's, whatever `T` an instance is.
-                if b.as_ref()
-                    .is_some_and(|b| matches!(self.base(&b.ty), Type::Task(_)))
-                {
-                    return Err(cerr!(*line, DropTask, s = name.as_str()));
-                }
                 if let (Some(b), Some(r)) = (b, &mut self.acc.borrow_mut().record) {
                     r.node_types.insert(id.0, b.ty);
                 }

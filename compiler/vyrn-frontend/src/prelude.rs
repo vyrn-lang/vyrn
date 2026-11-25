@@ -1060,6 +1060,11 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Tasks)
             .home("std/task")
             .hover("taskFree(t, returned) -> Unit — free the block of the task `t`, which ended, and its result when it returned; only `std/task` calls it"),
+        b("taskLeave")
+            .sig(row("taskLeave", &["T"], &[("t", Consume, task(t()))], Unit, &[]))
+            .spec(Spec::Tasks)
+            .home("std/task")
+            .hover("taskLeave(t) -> Unit — give the block of the task `t`, which runs, to its root, which frees it when the task ends; only `std/task` calls it"),
         // A wait on one of the run queue's own operations, which no host starts.
         b("taskWait")
             .sig(row("taskWait", &[], &[("op", Read, Int)], Unit, &[]))
@@ -1497,7 +1502,8 @@ pub enum Spec {
     /// `hostResume(root, frame)`: one more step of the task the host started
     /// at `root`, a call of the emitter's dispatcher over the roots.
     Resumes,
-    /// `taskId`, `taskTake` and `taskFree`: the block of a task `fork` started.
+    /// `taskId`, `taskTake`, `taskFree` and `taskLeave`: the block of a task
+    /// `fork` started.
     Tasks,
 }
 

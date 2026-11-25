@@ -77,8 +77,8 @@ while the program loads.
 ### `vyrn run [file] [args...]`
 
 Compiles the file and runs it. Arguments after the file reach the program's
-`args()`. The process exits with `main`'s return value; a trap prints one
-`error: ...` line on stderr and exits 1.
+`args()`. The process exits with `main`'s return value once every task has
+ended; a trap prints one `error: ...` line on stderr and exits 1.
 
 `vyrn run --profile [file] [args...]` prints to stderr the operations the guest
 executed, the blocks it made, freed and held live at its peak, the lines of the

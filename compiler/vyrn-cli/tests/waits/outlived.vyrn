@@ -1,0 +1,14 @@
+import { sleep } from "std/task"
+
+fn later(ms: Int64, s: consume String) -> String {
+    await sleep(ms)
+    print(s)
+    return s
+}
+
+fn main() -> Int64 {
+    let t = fork later(10, "after main")
+    await sleep(1)
+    print("main ends")
+    return 0
+}

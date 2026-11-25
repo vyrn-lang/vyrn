@@ -95,9 +95,6 @@ pub enum Linear {
     /// A `Stream<T>`: consumed with `for ... in`, returned, or `close(s)`d.
     /// `drop s` reclaims nothing: [`Owned::release_kind`] answers `None` for it.
     Stream,
-    /// A `Task<T>`: joined, cancelled, handed to a `consume` parameter, or
-    /// returned. `drop t` is refused: a task ends by `join` or `cancel`.
-    Task,
     /// An `impl MustUse for T` row: handed on by name, or released with
     /// `drop t`. Carries the type key that declared the row, which differs from
     /// the type asked about for `Array<Txn>`.

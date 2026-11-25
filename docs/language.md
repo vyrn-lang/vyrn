@@ -296,12 +296,12 @@ fn twice(ms: Int64) -> Result<Int64, String> {
 
 Waiting code runs the same on every engine. A `main` that waits is the first task, and each call of an `export extern fn` that waits starts one more, whose result the host reads once the task ends; a call from Vyrn code is an ordinary awaited call. The host delivers each completion through the module's `__vyrn_wake`, and the module resumes the task that waited on it, in the order the completions arrive. So the same deliveries print the same bytes everywhere.
 
-- A cancelled wait ends its task where it waited. Each function on the task's path releases what a `return` there would release, its callers do the same, and a cancelled `main` exits 1.
+- A cancelled wait ends its task where it waited. Each function on the task's path releases what a `return` there would release, its callers do the same, and a cancelled `main` exits 1 once every task that still runs has ended.
 - `fetch(req)` from `std/fetch` sends an HTTP request and waits for the whole response: `Ok` of the prelude `Response`, or `Err` of a `FetchError` (`BadUrl`, `Unreachable`, `Untrusted`, `BadResponse`). A fetch that a `race` or `timeout` cancels is aborted on the host and, as any cancelled wait, yields no value. `fetchText(url)` is the body of a `GET`.
 
 #### Tasks
 
-`fork f(x)` starts the call in a task of its own and yields a `Task<T>`, where `T` is the call's result. The fork runs the task to its first wait, then the caller goes on. `join(t)` from `std/task` waits for the task and returns its result; `cancel(t)` ends it where it waits, releasing what it holds, and does not wait.
+`fork f(x)` starts the call in a task of its own and yields a `Task<T>`, where `T` is the call's result. The fork runs the task to its first wait, then the caller goes on. `join(t)` from `std/task` waits for the task and returns its result; `cancel(t)` ends it where it waits, releasing what it holds, and does not wait. The handle is the right to the result: releasing it gives up the result, and the task runs on.
 
 ```vyrn
 import { sleep, join, cancel } from "std/task"
@@ -325,9 +325,10 @@ fn main() -> Int64 {
 - The task owns every argument, as a `consume` parameter does: a named heap argument moves into it, and a `modify` argument is refused, because the task may outlive the place.
 - A call that does not wait is refused: ``fork` starts a call that waits, and `square` does not wait``.
 - Forking does not wait, so a function that only forks does not wait. A forker that joins waits, by `join`.
-- A `Task<T>` is must-use: every path joins it, cancels it, hands it to a `consume` parameter or returns it. `drop t` is refused, because a task ends by `join` or `cancel`. Module state cannot hold a task, and a lambda cannot consume one it captures.
-- A task cancelled where it waits releases what a `return` there would, and so cancels every task it holds. If the host cancels a task's wait, the task ends cancelled. Its owner learns it only by waiting for it: a `join`, `both`, `race`, `joinAll` or `room` that waits for the task is cancelled where it waits, and one that starts after the task ended is cancelled at once.
-- A trap ends the task it happens in, and its `join` is cancelled.
+- A `Task<T>` is an owned value, not a must-use one. `drop t`, a store over it, `clear` and the end of its scope release it, and the task runs to its end: only `cancel(t)` ends a task early, so a task with no handle cannot be cancelled. A copy is refused, because two handles would release one task twice. Module state cannot hold a task, and a lambda cannot consume one it captures.
+- `main`'s exit waits for every task that still runs, as Node's does, and the exit code is `main`'s.
+- A task cancelled where it waits releases what a `return` there would, and the tasks its released handles name run on. If the host cancels a task's wait, the task ends cancelled. Its owner learns it only by waiting for it: a `join`, `both`, `race`, `joinAll` or `room` that waits for the task is cancelled where it waits, and one that starts after the task ended is cancelled at once.
+- Under `vyrn run`, a native build and the browser shim, a trap ends the program with its message, whichever task it happens in. A resident instance (`serve`, `dev`, `test`) ends the trapped task alone: its `join` is cancelled, and the trap of a task no handle owns is logged.
 - Tasks move in wake order, and a task's end readies only the task that joins it, so the same deliveries print the same bytes.
 
 #### Running calls at once
@@ -351,7 +352,7 @@ fn page(id: Int64) -> String {
 - If one task is cancelled, `both` cancels the other and is cancelled itself.
 - `timeout(ms, t)` is `race(t, fork sleep(ms))`: `Some` of the result, or `None`, and `t` is cancelled where it waits.
 - `joinAll(ts)` waits for an array of tasks and returns the results in index order; a `for` that forks one task per element and `joinAll` run a call per element at once.
-- A `Group<T>` holds tasks of one result type, at most `limit` running at once: `await room(g)` before each fork waits until fewer than the limit run, `add(g, fork f(x))` adds the task, and `joinGroup(g)` or `cancelGroup(g)` ends them. A group is must-use.
+- A `Group<T>` holds tasks of one result type, at most `limit` running at once: `await room(g)` before each fork waits until fewer than the limit run, `add(g, fork f(x))` adds the task, and `joinGroup(g)` or `cancelGroup(g)` ends them. Releasing a group releases its handles, and its tasks run on.
 - A lambda waits as a function does, and a call that passes one to a `fn` parameter calls it directly.
 - An `await` inside a `region` builds: the region has an arena of its own, so tasks that wait inside regions at once never share one ([memory.md](memory.md)).
 - A call through a function value waits when its type waits (Function types), and is marked `await` as any waiting call is: `await handler(req)`.
@@ -833,7 +834,7 @@ Each line is a program the compiler refuses, and the reason.
 - Arithmetic on two different number types: nothing widens by itself.
 - A value used after it moved or was consumed: it has one owner.
 - A `fork` of a call that does not wait, with a `modify` argument, through a function value, or inside a `region`: a task may outlive its forker, so it owns everything it holds.
-- A `Task<T>` dropped, kept in module state or never joined or cancelled: a task ends by `join` or `cancel`.
+- A `Task<T>` kept in module state: a task has one owner, which joins or cancels it.
 - A constant that breaks a `where` clause: the type cannot hold it.
 - A parameter's `where` clause that names a later or a `modify` parameter: it would not hold for the whole call.
 - A call whose argument the flow does not show sorted, by the order a fact clause names: a fact has no run-time check.

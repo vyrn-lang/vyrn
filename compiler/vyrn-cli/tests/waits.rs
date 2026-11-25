@@ -3,7 +3,7 @@
 //! every value whichever wait the host cancels. Each prints the same bytes when
 //! the host replays what it delivered. The programs under
 //! `tests/waits/` witness `vyrn test`'s clock, a race the host's delivery order
-//! decides, and a waiting export's result on every host.
+//! decides, a waiting export's result on every host, and released tasks on every host.
 
 mod common;
 use common::*;
@@ -51,10 +51,11 @@ fn a_waiting_program_resumes_at_each_await() {
     }
 }
 
-/// Each cancellation ends `main` at that wait with exit 1, after the output
-/// before it, and the free audit finds nothing left: every frame on the path,
-/// every branch a fork cancelled with it, and every value they held took the
-/// cancellation edge.
+/// Each cancellation ends the task at that wait, and the free audit finds nothing
+/// left: every frame on the path took the cancellation edge, and every released
+/// task freed its own. A cancelled `main` exits 1 once the tasks its released
+/// handles left running end; a cancelled task no handle owns ends alone, and
+/// `main` exits 0. Each line printed is a line of the full run.
 #[test]
 fn a_cancelled_wait_releases_every_frame_on_its_path() {
     for name in &waiting() {
@@ -66,11 +67,16 @@ fn a_cancelled_wait_releases_every_frame_on_its_path() {
             wakes[k].status = 1;
             let out = run(&bytes, quiet(name, Some(wakes))).expect("the module runs");
             let printed = norm(&out.stdout);
-            assert!(all.starts_with(&printed), "{name} wake {k}: {printed}");
-            assert_eq!(
-                (out.code, norm(&out.stderr)),
-                (1, String::new()),
-                "{name} wake {k}"
+            let full: Vec<&str> = all.lines().collect();
+            assert!(
+                printed.lines().all(|l| full.contains(&l)),
+                "{name} wake {k}: {printed}"
+            );
+            assert_eq!(norm(&out.stderr), "", "{name} wake {k}");
+            assert!(
+                matches!(out.code, 0 | 1),
+                "{name} wake {k}: exit {}",
+                out.code
             );
         }
     }
@@ -289,46 +295,49 @@ fn a_fork_over_any_two_result_types_runs_on_both_engines() {
     }
 }
 
-/// What `tests/waits/result.vyrn` prints on each host: `vyrn run`, the native build and, where
-/// node runs, the browser shim, each with its exit code.
-#[test]
-fn a_waiting_export_s_result_prints_the_same_bytes_on_every_host() {
-    let dir = scratch("waits-result");
+/// What `tests/waits/<name>` prints under `vyrn run`, with its exit code, once the native build
+/// and, where node runs, the browser shim printed the same. Every build carries the free audit.
+fn on_every_host(name: &str) -> String {
+    let dir = scratch(&format!("waits-{}", name.trim_end_matches(".vyrn")));
     let say = |o: &std::process::Output| {
         let out = (o.status.code(), norm(&o.stdout), norm(&o.stderr));
-        format!("exit {:?}\n{}{}", out.0, out.1, out.2)
+        format!(
+            "exit {:?}
+{}{}",
+            out.0, out.1, out.2
+        )
+    };
+    let build = |target: &[&str], out: &std::path::Path| {
+        let built = vyrn()
+            .arg("build")
+            .args(target)
+            .args([name, "-o"])
+            .arg(out)
+            .env("VYRN_LEAK_CHECK", "1")
+            .current_dir(waits_dir())
+            .output()
+            .expect("run vyrn build");
+        assert!(built.status.success(), "{name}: {}", norm(&built.stderr));
     };
     let engine = vyrn()
-        .args(["run", "result.vyrn"])
+        .args(["run", name])
         .env("VYRN_LEAK_CHECK", "1")
         .current_dir(waits_dir())
         .output()
         .expect("run vyrn run");
-    assert_eq!(say(&engine), "exit Some(0)\n10\nafter 3\n0.500000\n");
-    let exe = dir.join("result.exe");
-    let built = vyrn()
-        .args(["build", "result.vyrn", "-o"])
-        .arg(&exe)
-        .current_dir(waits_dir())
-        .output()
-        .expect("run vyrn build");
-    assert!(built.status.success(), "{}", norm(&built.stderr));
+    let engine = say(&engine);
+    let exe = dir.join("native.exe");
+    build(&[], &exe);
     let native = std::process::Command::new(&exe)
         .output()
         .expect("run the binary");
-    assert_eq!(say(&native), say(&engine), "native");
+    assert_eq!(say(&native), engine, "{name} native");
     let Some(node) = node() else {
-        eprintln!("NOTE: no node, so the shim's run of result.vyrn is unverified on this machine");
-        return;
+        eprintln!("NOTE: no node, so the shim's run of {name} is unverified on this machine");
+        return engine;
     };
-    let wasm = dir.join("result.wasm");
-    let built = vyrn()
-        .args(["build", "--target", "wasm", "result.vyrn", "-o"])
-        .arg(&wasm)
-        .current_dir(waits_dir())
-        .output()
-        .expect("run vyrn build");
-    assert!(built.status.success(), "{}", norm(&built.stderr));
+    let wasm = dir.join("module.wasm");
+    build(&["--target", "wasm"], &wasm);
     let web = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/wasi-min.js");
     std::fs::copy(web, dir.join("wasi-min.mjs")).expect("copy the shim");
     std::fs::write(dir.join("run.mjs"), SHIM_RUN).expect("write the runner");
@@ -337,7 +346,70 @@ fn a_waiting_export_s_result_prints_the_same_bytes_on_every_host() {
         .arg(&wasm)
         .output()
         .expect("node");
-    assert_eq!(say(&shim), say(&engine), "shim");
+    assert_eq!(say(&shim), engine, "{name} shim");
+    engine
+}
+
+/// A waiting export's result prints the same bytes on every host.
+#[test]
+fn a_waiting_export_s_result_prints_the_same_bytes_on_every_host() {
+    assert_eq!(
+        on_every_host("result.vyrn"),
+        "exit Some(0)
+10
+after 3
+0.500000
+"
+    );
+}
+
+/// A released handle leaves its task running, and `main`'s exit waits for it: a dropped
+/// handle, a cleared array and a store over a handle, a `main` that ends while a task runs,
+/// and a trap in a task no handle owns, which ends the program. `cancel` of a held handle
+/// ends its task. Each frees every value on every host.
+#[test]
+fn a_released_task_runs_to_its_end_on_every_host() {
+    for (name, want) in [
+        (
+            "released.vyrn",
+            "exit Some(3)
+main ends
+the task runs on
+",
+        ),
+        (
+            "handles.vyrn",
+            "exit Some(0)
+d
+joined d
+b
+a
+c
+",
+        ),
+        (
+            "outlived.vyrn",
+            "exit Some(0)
+main ends
+after main
+",
+        ),
+        (
+            "trapped.vyrn",
+            "exit Some(1)
+error: the released task trapped (trapped.vyrn:5)
+",
+        ),
+        (
+            "cancelled.vyrn",
+            "exit Some(0)
+u
+joined u
+",
+        ),
+    ] {
+        assert_eq!(on_every_host(name), want, "{name}");
+    }
 }
 
 const SHIM_RUN: &str = r#"import { readFile } from "node:fs/promises";

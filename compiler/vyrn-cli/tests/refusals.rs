@@ -696,18 +696,6 @@ fn census() -> Vec<Row> {
             Kernel::Elsewhere,
         ),
         row(
-            "r103_a_drop_of_a_task.vyrn",
-            "a task ends by `join` or `cancel`",
-            "`drop` ends no task: wait for `t` with `await join(t)`, or end it with `cancel(t)`",
-            Kernel::Elsewhere,
-        ),
-        row(
-            "r104_a_task_never_joined_or_cancelled.vyrn",
-            "a task is must-use",
-            "`t` is a `Task<Int64>` and is never disposed",
-            Kernel::Its,
-        ),
-        row(
             "r105_a_fork_through_a_function_value.vyrn",
             "`fork` starts a call of a declared function or a method",
             "`fork` starts a call of a declared function or a method, and `f` is a function value",
@@ -731,12 +719,6 @@ fn census() -> Vec<Row> {
             "`fork` cannot start `call` over a function value: the task may outlive what the \
              value captures",
             Kernel::Elsewhere,
-        ),
-        row(
-            "r109_an_array_of_tasks_never_joined.vyrn",
-            "a value that holds tasks is must-use",
-            "`ts` is an `Array<Task<Int64>>` and is never disposed",
-            Kernel::Its,
         ),
     ]
 }

@@ -10,7 +10,7 @@ Type::Mask32x4	4	1	6	1	0	0	12
 Type::Mask64x2	4	1	7	1	0	0	13
 Type::Bool	20	1	31	7	0	1	60
 Type::Str	29	1	69	10	1	2	112
-Type::Unit	18	1	18	10	1	0	48
+Type::Unit	18	1	19	10	1	0	49
 Type::Named	36	2	12	17	10	6	83
 Type::Union	2	1	0	6	0	0	9
 Type::Record	9	1	5	21	1	4	41
@@ -29,10 +29,10 @@ Type::SmallArray	13	2	20	6	2	1	44
 Type::ConstInt	2	1	0	1	0	0	4
 Type::Map	15	1	20	9	8	2	55
 Type::Stream	13	1	9	4	2	0	29
-Type::Task	9	1	1	4	1	0	16
+Type::Task	8	1	1	4	1	0	15
 Type::Logger	0	1	3	1	3	0	8
 Type::Fn	26	3	21	12	1	0	63
 Type::Lazy	5	1	2	9	0	0	17
 Type::Never	1	2	2	3	2	0	10
 Type::Err	82	1	0	3	0	0	86
-all	454	52	412	250	58	26	1252
+all	453	52	413	250	58	26	1252

@@ -13,7 +13,7 @@ examples/appendreserve.vyrn	main	no, it keeps an index check	no, its effect set 
 examples/arenas.vyrn	worker	yes	no, its effect set is alloc, write-output, waits
 examples/arenas.vyrn	label	yes	no, its effect set is alloc, waits
 examples/arenas.vyrn	polls	yes	no, its effect set is alloc, write-output, waits
-examples/arenas.vyrn	main	no, it calls `worker`, which has no body to judge	no, its effect set is alloc, write-output, module-state, waits
+examples/arenas.vyrn	main	no, it calls `worker`, which has no body to judge	no, its effect set is alloc, write-output, module-state, trap, waits
 examples/args.vyrn	main	yes	no, its effect set is alloc, write-output, args
 examples/argsdemo.vyrn	showOpt	yes	no, its effect set is alloc, write-output
 examples/argsdemo.vyrn	main	no, it calls `flag`, which is not trap-free	no, its effect set is alloc, write-output, args, trap
@@ -292,7 +292,7 @@ examples/clock.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is tr
 examples/clockorder.vyrn	work	yes	yes, emulated Int64
 examples/clockorder.vyrn	late	yes	no, its effect set is write-output, waits
 examples/clockorder.vyrn	busy	yes	no, its effect set is write-output, waits
-examples/clockorder.vyrn	main	no, it calls `late`, which has no body to judge	no, its effect set is alloc, write-output, module-state, waits
+examples/clockorder.vyrn	main	no, it calls `late`, which has no body to judge	no, its effect set is alloc, write-output, module-state, trap, waits
 examples/closures2.vyrn	double	yes	yes, emulated Int64
 examples/closures2.vyrn	apply	no, it calls a function value	no, its effect set is alloc
 examples/closures2.vyrn	makeAdder	yes	no, its effect set is alloc
@@ -319,7 +319,7 @@ examples/columns.vyrn	where$cParticleColumns	no, it calls `panic`	no, its effect
 examples/concurrent.vyrn	pause	yes	no, its effect set is alloc, write-output, waits
 examples/concurrent.vyrn	word	yes	no, its effect set is alloc, waits
 examples/concurrent.vyrn	count	yes	no, its effect set is alloc, waits
-examples/concurrent.vyrn	twice	no, it calls `pause`, which has no body to judge	no, its effect set is alloc, write-output, module-state, waits
+examples/concurrent.vyrn	twice	no, it calls `pause`, which has no body to judge	no, its effect set is alloc, write-output, module-state, trap, waits
 examples/concurrent.vyrn	square	yes	yes, emulated Int64
 examples/concurrent.vyrn	main	no, it calls `pause`, which has no body to judge	no, its effect set is alloc, write-output, module-state, trap, waits
 examples/consume.vyrn	redeem	yes	no, `t` is Token, not an integer, Bool or a read array of one
@@ -1224,10 +1224,10 @@ examples/rest.vyrn	where$cPathDel	no, it calls `panic`	no, its effect set is tra
 examples/rest.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/rest.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
 examples/results.vyrn	measure	yes	no, its effect set is alloc, waits
-examples/results.vyrn	report	no, it calls `measure`, which has no body to judge	no, its effect set is alloc, module-state, waits
+examples/results.vyrn	report	no, it calls `measure`, which has no body to judge	no, its effect set is alloc, module-state, trap, waits
 examples/results.vyrn	total	yes	no, its effect set is alloc, waits
 examples/results.vyrn	ready	yes	no, its effect set is waits
-examples/results.vyrn	main	no, it calls `report`, which is not trap-free	no, its effect set is alloc, write-output, module-state, waits
+examples/results.vyrn	main	no, it calls `report`, which is not trap-free	no, its effect set is alloc, write-output, module-state, trap, waits
 examples/revcomp.vyrn	complementTable	yes	no, its effect set is alloc
 examples/revcomp.vyrn	reverseComplement	yes	no, its effect set is alloc
 examples/revcomp.vyrn	writeReverseComplement	yes	no, its effect set is alloc, write-output
@@ -3358,6 +3358,10 @@ std/task.vyrn	task$payloadOf	no, it keeps an index check	no, its effect set is m
 std/task.vyrn	task$cancelBegin	yes	no, its effect set is module-state
 std/task.vyrn	task$cancelEnd	yes	no, its effect set is module-state
 std/task.vyrn	task$wake	no, it calls `deliver`, which is not trap-free	no, its effect set is alloc, module-state, trap
+std/task.vyrn	task$pending	yes	no, its effect set is module-state
+std/task.vyrn	task$taskUnowned	no, it keeps an index check	no, its effect set is module-state
+std/task.vyrn	task$mainEnd	yes	no, its effect set is module-state
+std/task.vyrn	task$exitDue	yes	no, its effect set is module-state
 std/task.vyrn	task$deliver	no, it keeps an index check	no, its effect set is alloc, module-state
 std/task.vyrn	task$drain	no, it keeps an index check	no, its effect set is alloc, module-state, trap
 std/task.vyrn	task$taskTrapped	no, it keeps an index check	no, its effect set is alloc, module-state, trap
