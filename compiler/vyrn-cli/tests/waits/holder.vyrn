@@ -1,0 +1,23 @@
+import { sleep, cancel, child } from "std/task"
+
+fn later(ms: Int64, s: consume String) -> String {
+    await sleep(ms)
+    print(s)
+    return s
+}
+
+fn holder() -> Int64 {
+    let c = child(fork later(10, "the child printed"))
+    let p = fork later(10, "the plain task prints")
+    await sleep(20)
+    return 0
+}
+
+fn main() -> Int64 {
+    let h = fork holder()
+    await sleep(1)
+    cancel(h)
+    await sleep(30)
+    print("main ends")
+    return 0
+}

@@ -2226,7 +2226,7 @@ impl<'a> Checker<'a> {
     fn structural_copy(&self, t: &Type, line: usize) -> Result<(), Diagnostic> {
         let mut owned_seen = std::collections::HashSet::new();
         if let Some(owned) = self.declared_owned_in(t, &mut owned_seen) {
-            return Err(cerr!(line, CopyOwned, owned));
+            return Err(cerr!(line, CopyOwned, owned = &owned));
         }
         if matches!(self.base(t), Type::Stream(_)) {
             return Err(cerr!(line, CopyStream));
@@ -2241,15 +2241,16 @@ impl<'a> Checker<'a> {
     /// declares `impl Owned`, or it is built in with one
     /// ([`crate::declared::builtin_release`]). A record holding one cannot be
     /// copied field by field: the release would run over both copies. Do not
-    /// bound the depth; `copy`'s refusal has no bound.
+    /// bound the depth; `copy`'s refusal has no bound. A declared type answers
+    /// its key as a named type, so a sentence spells it as its module wrote it.
     fn declared_owned_in(
         &self,
         ty: &Type,
         seen: &mut std::collections::HashSet<String>,
-    ) -> Option<String> {
+    ) -> Option<Type> {
         if let Some(k) = crate::types::type_key(ty) {
             if self.implements(crate::types::OWNED, &k) {
-                return Some(k);
+                return Some(Type::Named(k));
             }
         }
         // Only a declaration head can close a cycle. Key it by its full shape:
@@ -2259,7 +2260,7 @@ impl<'a> Checker<'a> {
         }
         let base = self.base(ty);
         if crate::declared::builtin_release(&base).is_some() {
-            return Some(ty.to_string());
+            return Some(ty.clone());
         }
         let mut deeper = |t: &Type| self.declared_owned_in(t, seen);
         match base {

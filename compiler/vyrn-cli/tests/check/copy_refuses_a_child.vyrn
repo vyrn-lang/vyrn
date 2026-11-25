@@ -1,0 +1,13 @@
+// A child cancels its task when it is released, so a copy of one is refused.
+import { sleep, child, detach, join } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn main() -> Int64 {
+    let c = child(fork pause(10))
+    let d = c.copy()
+    return await join(detach(c)) + await join(detach(d))
+}

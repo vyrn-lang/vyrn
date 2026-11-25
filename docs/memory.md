@@ -225,7 +225,8 @@ A `Task<T>` is an owned value with a release and no obligation. Its release,
 `std/task`'s `release`, gives up the right to the result and leaves the task
 running; the task's root frees the task's block when it ends. `drop`, a
 store, `clear`, a cancellation edge and the release of a holder place it as
-any release.
+any release. `std/task`'s `Child<T>` holds a handle and declares
+`impl Owned`, whose release cancels the task.
 
 ## A region frees a group at once
 

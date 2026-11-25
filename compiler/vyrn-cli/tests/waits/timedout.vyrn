@@ -1,0 +1,20 @@
+import { sleep, timeout, cancel } from "std/task"
+
+fn slow() -> String {
+    await sleep(20)
+    print("never printed")
+    return "slow"
+}
+
+fn guarded() -> String {
+    return await timeout(1000, fork slow()) ?? "timed out"
+}
+
+fn main() -> Int64 {
+    let t = fork guarded()
+    await sleep(5)
+    cancel(t)
+    await sleep(50)
+    print("the branch printed nothing")
+    return 0
+}
