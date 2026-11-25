@@ -149,7 +149,7 @@ export function markOf(d, text) {
 }
 
 // The hover box's markup at 1-based (line, col) of `text`: each diagnostic marking that cell, then the hover of the
-// name there. Empty when there is neither.
+// name there, which a null `play` has none of. Empty when there is neither.
 export function hoverHtml(play, text, line, col, diags) {
   const row = text.split("\n")[line - 1];
   if (row === undefined || col < 1) return "";
@@ -160,7 +160,7 @@ export function hoverHtml(play, text, line, col, diags) {
       html += '<div class="diag ' + d.severity + '">' + proseHtml(d.message) + (d.note ? '<span class="note">' + proseHtml(d.note) + "</span>" : "") + "</div>";
     }
   }
-  if (IDENT.test([...row][col - 1] || "")) {
+  if (play && IDENT.test([...row][col - 1] || "")) {
     try {
       html += infoHtml(play, play.hover(text, line, col));
     } catch (err) {
@@ -178,7 +178,9 @@ export function squiggle(t, diags) {
   s.draw();
 }
 
-export function bindIntel(t, editorEl, api) {
+// `kind()` is the kind of the tab `t` shows; completion, signature and hover read only a "vyrn" tab.
+export function bindIntel(t, editorEl, api, kind) {
+  const vyrn = () => (kind() === "vyrn" ? api() : null);
   const box = document.createElement("div");
   box.className = "squig";
   box.setAttribute("aria-hidden", "true");
@@ -261,7 +263,7 @@ export function bindIntel(t, editorEl, api) {
   }
 
   function openMenu() {
-    const play = api();
+    const play = vyrn();
     if (!play) return;
     const { line, col } = lineCol(t.value, t.selectionStart);
     try {
@@ -288,7 +290,7 @@ export function bindIntel(t, editorEl, api) {
   }
 
   function showSignature() {
-    const play = api();
+    const play = vyrn();
     if (!play) return;
     const { line, col } = lineCol(t.value, t.selectionStart);
     let info = {};
@@ -370,10 +372,8 @@ export function bindIntel(t, editorEl, api) {
   });
 
   function hoverAt(x, y) {
-    const play = api();
-    if (!play) return;
     const { line, col } = cellAt(t, x, y);
-    const html = hoverHtml(play, t.value, line, col, state.diags);
+    const html = hoverHtml(vyrn(), t.value, line, col, state.diags);
     if (!html) return;
     tip.innerHTML = html;
     const p = pointOf(t, line, col);

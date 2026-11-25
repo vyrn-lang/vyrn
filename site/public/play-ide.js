@@ -302,7 +302,7 @@ export function mountIde(root, core) {
   }
 
   function bindGroup(g) {
-    bindIntel(g.input, g.editorEl, api);
+    bindIntel(g.input, g.editorEl, api, () => kindOf(g.active));
     g.input.addEventListener("focus", () => {
       focusedG = g;
       syncG(g);

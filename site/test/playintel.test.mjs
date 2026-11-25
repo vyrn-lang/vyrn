@@ -100,6 +100,12 @@ test("a diagnostic without a column marks its line's text and hovers there", () 
   assert.match(hoverHtml(play, PUSHED, 4, 6, [d]), /^<div class="diag error">.*needs an Array/);
 });
 
+test("without a Vyrn reader a hover shows the diagnostic and no name", () => {
+  const d = { line: 1, col: 1, endCol: 7, severity: "error", message: "a grammar refusal" };
+  assert.equal(hoverHtml(null, "syntax T\n", 1, 2, [d]), '<div class="diag error">a grammar refusal</div>');
+  assert.equal(hoverHtml(null, "fn main\n", 1, 2, []), "");
+});
+
 test("a fixed-size array is not offered push", () => {
   const src = "fn main() -> Int64 {\n    let xs = [1, 2]; xs.\n    return 0\n}\n";
   const got = labels(play.complete(src, 2, 25));
