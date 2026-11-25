@@ -1,0 +1,21 @@
+import { sleep, joinAll } from "std/task"
+
+fn later(ms: Int64, s: consume String) -> String {
+    await sleep(ms)
+    print(s)
+    return s
+}
+
+fn main() -> Int64 {
+    let mut ts: Array<Task<String>> = []
+    ts.push(fork later(4, "a"))
+    ts.push(fork later(2, "b"))
+    ts.clear()
+    let mut t = fork later(6, "c")
+    t = fork later(1, "d")
+    ts.push(t)
+    for s in await joinAll(ts) {
+        print("joined \{s}")
+    }
+    return 0
+}

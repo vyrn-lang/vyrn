@@ -1,6 +1,6 @@
 // Tasks are values: `fork` starts a call in a task of its own, `join` waits
-// for it, and `cancel` ends it where it waits. A task is must-use, so every
-// path joins, cancels or hands on each one.
+// for it, and `cancel` ends it where it waits. Releasing a handle gives up the
+// result, and the task runs on: `main`'s exit waits for it.
 
 import { sleep, join, cancel, group, room, add, joinGroup, Group } from "std/task"
 
@@ -16,7 +16,8 @@ fn start(ms: Int64) -> Task<Int64> {
     return fork pause("started", ms)
 }
 
-// Cancelled where it waits, a task cancels the tasks it holds.
+// Cancelled where it waits, a task releases the handles it holds, and those
+// tasks run on.
 fn holder(ms: Int64) -> Int64 {
     let inner = fork pause("held", ms * 2)
     await sleep(ms)

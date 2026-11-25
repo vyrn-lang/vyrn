@@ -1260,9 +1260,9 @@ pub enum Type {
     /// so `let a: Array<T> = s` cannot launder the obligation away. Its layout
     /// is a six-word header tagged over the producers, not `Array<T>`'s.
     Stream(Box<Type>),
-    /// A task `fork f(..)` started, whose call answers the type inside: owned
-    /// by one holder, must-use, joined or cancelled by `std/task`. Lowers to a
-    /// `ptr` to the task's block.
+    /// The handle of a task `fork f(..)` started, whose call answers the type
+    /// inside: the right to its result, owned by one holder and joined,
+    /// cancelled or released by `std/task`. Lowers to a `ptr` to the task's block.
     Task(Box<Type>),
     /// A handle from `logger(name)` that the five level methods are called on.
     /// Lowers to a `ptr` to its name.

@@ -737,6 +737,26 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         Some(_) => Some(run_queue("taskFinish")?),
         None => None,
     };
+    // The end of `main`, with its exit code on the stack. While a task runs, the exit waits
+    // for `__vyrn_wake` to find that none does.
+    let main_end = match queue {
+        Some(_) => Some(run_queue("mainEnd")?),
+        None => None,
+    };
+    let ended = |b: &mut Frame| {
+        if let Some(end) = main_end {
+            let code = b.local(ValType::I64);
+            b.ins(&Instruction::I64Const(255))
+                .ins(&Instruction::I64And)
+                .ins(&Instruction::LocalTee(code))
+                .ins(&Instruction::Call(end))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::Return)
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(code));
+        }
+        tail(b);
+    };
     let main_done = (finish.filter(|_| main_waits)).map(|finish| {
         m.func(&[ValType::I64, ValType::I32], &[], &[], 0, |b| {
             b.ins(&Instruction::Call(finish))
@@ -746,7 +766,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Eq)
                 .ins(&Instruction::Select);
-            tail(b);
+            ended(b);
         })
     });
     let start = m.func(&[], &[], &[], 0, |b| {
@@ -804,7 +824,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             }
             _ => {
                 b.ins(&Instruction::Call(main));
-                tail(b);
+                ended(b);
             }
         }
     });
@@ -949,7 +969,26 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         }
         b.ins(&Instruction::Unreachable).ins(&Instruction::End);
         m.fill(w.resume, b)?;
-        m.export("__vyrn_wake", run_queue("wake")?);
+        // `std/task`'s `wake`, then the exit `main` left once no task runs.
+        let (wake, due) = (run_queue("wake")?, run_queue("exitDue")?);
+        let params = [ValType::I64, ValType::I32, ValType::I64];
+        let export = m.func(&params, &[ValType::I32], &[], 0, |b| {
+            let (n, code) = (b.local(ValType::I32), b.local(ValType::I64));
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::Call(wake))
+                .ins(&Instruction::LocalSet(n))
+                .ins(&Instruction::Call(due))
+                .ins(&Instruction::LocalTee(code))
+                .ins(&Instruction::I64Const(0))
+                .ins(&Instruction::I64GeS)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(code));
+            tail(b);
+            b.ins(&Instruction::End).ins(&Instruction::LocalGet(n));
+        });
+        m.export("__vyrn_wake", export);
         m.export(TRAPPED_EXPORT, run_queue("taskTrapped")?);
     }
     if user.iter().any(|f| f.is_export_extern) {
@@ -3580,6 +3619,24 @@ fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<F
             .ins(&Instruction::I32Add)
             .ins(&Instruction::LocalSet(a));
         f.rel_at(m, &mut b, a, p, 0)?;
+    }
+    // A task whose handle was released frees its block, and its result if it returned.
+    if sig.waits {
+        let a = b.local(ValType::I32);
+        b.ins(&Instruction::Call(cx.task("taskUnowned", 0)?))
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::LocalGet(st))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::LocalGet(blk))
+            .ins(&Instruction::I32Const(l.fields[2] as i32))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(a));
+        f.rel_at(m, &mut b, a, &sig.ret_ty, 0)?;
+        b.ins(&Instruction::End)
+            .ins(&Instruction::LocalGet(blk))
+            .ins(&Instruction::Call(cx.rt.free))
+            .ins(&Instruction::End);
     }
     b.ins(&Instruction::End)
         .ins(&Instruction::LocalGet(start))
@@ -12524,7 +12581,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
         index
     }
 
-    /// `taskId`, `taskTake` and `taskFree` of a task's block ([`task_block`]). A take copies
+    /// `taskId`, `taskTake`, `taskFree` and `taskLeave` of a task's block ([`task_block`]). A
+    /// leave hands the block to the running task's root ([`lower_fork_root`]). A take copies
     /// the result out, into `hint`'s storage where it holds the type, before it frees the
     /// block; a free releases the result of a task that returned first.
     fn task_op(
@@ -12543,10 +12601,14 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let blk = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(blk));
         let at = task_result_at(self.cx, &t)?;
-        if callee == "taskId" {
-            b.ins(&Instruction::LocalGet(blk))
-                .ins(&Instruction::I64Load(mem_arg(0, 3)));
-            return Ok(Type::Int);
+        match callee {
+            "taskId" => {
+                b.ins(&Instruction::LocalGet(blk))
+                    .ins(&Instruction::I64Load(mem_arg(0, 3)));
+                return Ok(Type::Int);
+            }
+            "taskLeave" => return Ok(Type::Unit),
+            _ => {}
         }
         let ret = match callee {
             "taskFree" => {

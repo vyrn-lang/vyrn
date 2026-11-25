@@ -9659,11 +9659,6 @@ fn discharged(l: &Linear, sp: &Speech) -> String {
         Linear::Stream => "discharged, not leaked — a stream is consumed, forwarded or closed \
              on every path, and that lowering frees it"
             .to_string(),
-        Linear::Task => {
-            "discharged, not leaked — a task is joined, cancelled or forwarded on every \
-             path, and that ends it"
-                .to_string()
-        }
         Linear::Declared(by) => format!(
             "discharged, not leaked — `{}` declares `impl MustUse`, so it is handed on or \
              dropped on every path",

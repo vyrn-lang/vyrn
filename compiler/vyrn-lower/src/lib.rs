@@ -361,6 +361,7 @@ struct Walk<'a, 'r> {
     recorded: &'r checker::Recorded,
     impls: &'a vyrn_frontend::types::Impls,
     expansions: &'a vyrn_frontend::project::Expansions,
+    functions: &'a [Function],
     facts: NodeTypes<'a>,
     /// `(callee, its solved type arguments by name)`, already concrete.
     calls: Vec<(String, HashMap<String, Type>)>,
@@ -390,6 +391,7 @@ impl<'a, 'r> Walk<'a, 'r> {
             recorded,
             impls: &program.impls,
             expansions: &program.expansions,
+            functions: &program.functions,
             facts: NodeTypes::default(),
             calls: Vec::new(),
             lambda_bodies: Default::default(),
@@ -463,6 +465,15 @@ impl<'a, 'r> Walk<'a, 'r> {
         else {
             return;
         };
+        if let Some(f) = vyrn_frontend::declared::builtin_release(&ty) {
+            let target = self.functions.iter().find(|g| g.name == f);
+            let mut solved = HashMap::new();
+            if let Some(p) = target.and_then(|g| g.params.first()) {
+                vyrn_frontend::types::solve_param(&p.ty, &ty, &mut solved);
+            }
+            self.calls.push((f, solved));
+            return;
+        }
         let imp = vyrn_frontend::types::type_key(&ty).and_then(|k| self.impls.get(OWNED, &k));
         let (Some(f), Some(imp)) = (self.impls.method(OWNED, &ty, OWNED_RELEASE), imp) else {
             return;

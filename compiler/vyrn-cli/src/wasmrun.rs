@@ -210,8 +210,8 @@ impl Waits {
     /// the wall clock, and once a reply came; `None` when no timer is pending and no reply came.
     fn due_in(&mut self) -> Option<std::time::Duration> {
         let zero = std::time::Duration::ZERO;
-        if let Some(r) = &self.replay {
-            return (!r.is_empty()).then_some(zero);
+        if self.replay.as_ref().is_some_and(|r| !r.is_empty()) {
+            return Some(zero);
         }
         if !self.fetches.is_empty() && (!self.wall || self.net.arrived()) {
             return Some(zero);
@@ -227,12 +227,10 @@ impl Waits {
 
     /// The next completion to deliver: the next one to replay, or else the earliest pending
     /// timer, ties by id, its deadline waited out on the wall clock. `now` moves to the
-    /// deadline.
+    /// deadline. Past a replay's end the clock delivers, because `main`'s exit waits for every
+    /// task that runs.
     fn fire(&mut self) -> Result<Option<Wake>, String> {
-        if let Some(r) = &mut self.replay {
-            let Some(w) = r.pop() else {
-                return Ok(None);
-            };
+        if let Some(w) = self.replay.as_mut().and_then(|r| r.pop()) {
             if let Some(i) = self.due.iter().position(|d| d.1 == w.id) {
                 self.now = self.due.remove(i).0;
             } else if let Some(i) = self.fetches.iter().position(|&f| f == w.id) {

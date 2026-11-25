@@ -139,7 +139,6 @@ impl Owned {
         };
         match &*crate::types::resolved(ty, &*self.types) {
             Type::Stream(_) => Some(Linear::Stream),
-            Type::Task(_) => Some(Linear::Task),
             Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => {
                 any(&mut std::iter::once(&**e))
             }
@@ -350,10 +349,10 @@ impl Owned {
 }
 
 /// Returns the runtime function a built-in `ty` is released by, as a declared
-/// `impl Owned` is released by its `release`. A task's release is `cancel`,
-/// which ends it where it waits.
+/// `impl Owned` is released by its `release`. A task's handle is released by
+/// `std/task`'s `release`, which gives up the result and leaves the task running.
 pub fn builtin_release(ty: &Type) -> Option<String> {
-    matches!(ty, Type::Task(_)).then(|| format!("{}cancel", crate::loader::TASK_PREFIX))
+    matches!(ty, Type::Task(_)).then(|| format!("{}release", crate::loader::TASK_PREFIX))
 }
 
 /// Returns the name of a type `ty` reaches from itself, if any. A structural

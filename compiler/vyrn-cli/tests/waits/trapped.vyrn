@@ -1,0 +1,15 @@
+import { sleep } from "std/task"
+
+fn boom(ms: Int64) -> Int64 {
+    await sleep(ms)
+    panic("the released task trapped")
+    return ms
+}
+
+fn main() -> Int64 {
+    let t = fork boom(2)
+    drop t
+    await sleep(5)
+    print("never printed")
+    return 0
+}

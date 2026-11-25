@@ -557,13 +557,15 @@ The module's shape:
   per operation a task waits on, found by the operation's id: a host's count
   up from 1 and the queue's own down from -1. `wake` is `deliver`, which
   readies the task that waits, then `drain`, which runs the ready tasks in
-  wake order. A forked task's end delivers to the operation its owner
-  watches. A task's root is `main` (0) or a waiting export (from 1),
+  wake order. An owned task's end completes the operation its owner
+  watches; a task whose handle was released has no owner, and its root frees
+  its block (`taskUnowned`). A task's root is `main` (0) or a waiting export (from 1),
   whose export is a step that begins the task. The step takes the host's id
   for the task first; the root's end hands its result word to `taskResult`,
   and `taskEnd` calls `hostDone`, the import `vyrn_wait.done`, with the host's
-  id, the status and the result. `__vyrn_wake` is `std/task`'s
-  `wake`, whose `hostResume` call is the emitter's `$resumeRoot` dispatcher
+  id, the status and the result. `__vyrn_wake` calls `std/task`'s `wake`,
+  then exits with `main`'s code once `main` ended and no task runs
+  (`mainEnd`, `exitDue`); `wake`'s `hostResume` call is the emitter's `$resumeRoot` dispatcher
   over the roots. `hostSleep` is the import `vyrn_wait.sleep`, `hostFetch` the
   import `vyrn_wait.fetch`, whose wake's payload `payloadOf` reads, and `hostCancel`
   the import `vyrn_wait.cancel`, which drops a cancelled wait's operation.

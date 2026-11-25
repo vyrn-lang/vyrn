@@ -1187,12 +1187,6 @@ rules! {
     OwedStream { s }
         "a stream must be consumed with `for .. in`, passed to a `consume` parameter, \
         forwarded by returning it, or released with `close({s})`, on every path";
-    OwedTasks { s }
-        "`{s}` holds tasks: join or cancel each one, or hand `{s}` on, on every path";
-    DropTask { s }
-        "`drop` ends no task: wait for `{s}` with `await join({s})`, or end it with `cancel({s})`";
-    OwedTask { s }
-        "wait for `{s}` with `await join({s})`, or end it with `cancel({s})`";
     OwedDeclared { ty, s }
         "`{ty}` declares `impl MustUse`, so a value of it must be handed on by name on every \
         path: passed to a `consume` parameter, forwarded by returning it, or released with \

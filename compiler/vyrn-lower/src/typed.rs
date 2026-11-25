@@ -513,7 +513,7 @@ pub fn drops(
             let t = types::resolve(&info.ty, decls);
             let heap = matches!(
                 t,
-                Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
+                Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..) | Type::Task(_)
             ) || (types::is_sum_alias(&t)
                 && vyrn_frontend::declared::owns_heap(&t, decls));
             // A must-use value's last owner has no other way to discharge

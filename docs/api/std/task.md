@@ -111,7 +111,8 @@ fn room<T>(g: modify Group<T>) -> Unit
 ```
 
 Waits until fewer than the limit of `g`'s tasks run: call it before each
-`fork` the group will hold.
+`fork` the group will hold. If one was cancelled, `room` cancels the rest
+and is cancelled.
 
 ## add
 

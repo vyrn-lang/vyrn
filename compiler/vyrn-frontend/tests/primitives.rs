@@ -81,6 +81,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("taskId", Compiler, "a load from the block of a task `fork` started, whose layout the emitter owns"),
     ("taskTake", Compiler, "a copy of a task's result out of its block, which it frees"),
     ("taskFree", Compiler, "the release of a task's result and the free of its block"),
+    ("taskLeave", Compiler, "the hand-off of a running task's block to its root, which frees it"),
     ("taskWait", Compiler, "a wait on one of the run queue's own operations, which no host starts"),
     ("print", Syscall, "fd_write on stdout"),
     ("logger", Syscall, "the handle for the five level methods below"),
