@@ -720,6 +720,12 @@ fn census() -> Vec<Row> {
              value captures",
             Kernel::Elsewhere,
         ),
+        row(
+            "r110_a_field_taken_out_of_a_value_whose_type_declares_release.vyrn",
+            "a declared release takes the value whole",
+            "`k` (line 11) is released whole although a `consume` took `.name` out of it",
+            Kernel::Its,
+        ),
     ]
 }
 

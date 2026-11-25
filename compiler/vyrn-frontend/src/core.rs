@@ -1317,6 +1317,10 @@ pub struct Body {
     /// the statement, the root name and the hole path the take leaves: empty
     /// where the reader's text does not place the take on one line.
     pub consumes: std::collections::HashMap<(NodeId, Name, String), Vec<crate::diagnostics::Fix>>,
+    /// The holes a take opens that the release walk cannot skip, by root
+    /// name: a declared `release` on the path takes the value whole, so the
+    /// kernel refuses a release while one is open.
+    pub sealed: Vec<(Name, String)>,
 }
 
 /// The shape of a candidate construct, which `vyrn_lower::core::last_owner` asks.

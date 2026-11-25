@@ -1597,6 +1597,7 @@ impl<'a> Builder<'a> {
                 mistyped,
                 ends: HashMap::new(),
                 consumes: HashMap::new(),
+                sealed: Vec::new(),
             },
             frame: Frame::default(),
             temps: 0,
@@ -5706,6 +5707,7 @@ impl<'a> Builder<'a> {
                 mistyped: Vec::new(),
                 ends: HashMap::new(),
                 consumes: HashMap::new(),
+                sealed: Vec::new(),
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);
@@ -5940,20 +5942,24 @@ impl<'a> Builder<'a> {
                 // A hole the walk cannot skip is not stated: a declared
                 // `release` cannot be told to leave a field alone, so it would
                 // free the field twice (`refusals/r22_drop_with_a_hole.vyrn`).
+                // It is sealed instead, and the kernel refuses its release.
                 let bty = self.body.names[n.index()].ty.clone();
                 let rel = path.trim_start_matches('.').to_string();
-                if !rel.is_empty()
-                    && vyrn_frontend::declared::skippable(
-                        self.proto,
-                        &bty,
-                        std::slice::from_ref(&rel),
-                    )
-                {
-                    let hs = &mut self.body.names[n.index()].holes;
-                    if !hs.contains(&path) {
-                        hs.push(path);
-                        hs.sort();
+                let skips = vyrn_frontend::declared::skippable(
+                    self.proto,
+                    &bty,
+                    std::slice::from_ref(&rel),
+                );
+                match (rel.is_empty(), skips) {
+                    (true, _) => {}
+                    (false, true) => {
+                        let hs = &mut self.body.names[n.index()].holes;
+                        if !hs.contains(&path) {
+                            hs.push(path);
+                            hs.sort();
+                        }
                     }
+                    (false, false) => self.body.sealed.push((n, path)),
                 }
             }
         }
