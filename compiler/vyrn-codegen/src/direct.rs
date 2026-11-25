@@ -507,7 +507,16 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         |w, f| crate::observe::following(observing, || emit(w, |log| lower_fn(log, f, w))),
         |w| cx.caches.get_mut().absorb(w.caches.into_inner()),
     );
-    for (f, e) in user.iter().zip(emitted) {
+    // A body no entry reaches is applied after every other, so the data its
+    // literals reserve ends the pool, where the sweep cuts it off.
+    let unentered = cx.world.unentered(program);
+    let enters = |f: &&Function| {
+        cx.world
+            .fn_id(&f.name)
+            .is_none_or(|i| !unentered.contains(&i))
+    };
+    let (entered, rest): (Vec<_>, Vec<_>) = user.iter().zip(emitted).partition(|(f, _)| enters(f));
+    for (f, e) in entered.into_iter().chain(rest) {
         crate::observe::note_inst(&f.name, &[]);
         let frame = match merge(&mut m, &cx, e) {
             Some(frame) => frame,
