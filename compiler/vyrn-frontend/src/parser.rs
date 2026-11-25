@@ -611,9 +611,6 @@ struct Build<'a> {
     src: Src<'a>,
     events: &'a [Event],
     at: usize,
-    /// Whether this reads an interpolation hole rather than the file: a binder
-    /// parsed here carries no position ([`crate::ast::Binder`]).
-    in_hole: bool,
     answers: &'a HashSet<String>,
     /// What an `impl` body's `type Output = ..` bound. Resolving here means an impl
     /// method leaves the builder as an ordinary generic function. The cost: a `type`
@@ -657,7 +654,6 @@ impl<'a> Build<'a> {
             src: Src::Take(toks, holes),
             events,
             at: 0,
-            in_hole: false,
             answers,
             aliases: Default::default(),
             field_preds: None,
@@ -671,7 +667,6 @@ impl<'a> Build<'a> {
             src: Src::Read(view.toks, view.holes),
             events: view.events,
             at,
-            in_hole: false,
             answers,
             aliases: Default::default(),
             field_preds: None,
@@ -792,23 +787,16 @@ impl<'a> Build<'a> {
         }
     }
 
-    /// Where the token here is spelled in the file, or `(0, 0)` inside a hole
-    /// ([`Build::in_hole`]). Every binder's position comes from here.
+    /// Where the token here is spelled in the file; a hole's tokens stand where the
+    /// hole does ([`crate::recognizer`]). Every binder's position comes from here.
     fn binder_pos(&self) -> (usize, usize) {
-        if self.in_hole {
-            (0, 0)
-        } else {
-            (self.line(), self.col())
-        }
+        (self.line(), self.col())
     }
 
-    /// The slot of a node that spells the name here: its column, or none inside a
-    /// hole, as [`Build::binder_pos`] places a binder.
+    /// The slot of a node that spells the name here: its column, as
+    /// [`Build::binder_pos`] places a binder.
     fn spelled(&self) -> Id {
-        match self.in_hole {
-            true => Id::NEW,
-            false => Id::at(self.col()),
-        }
+        Id::at(self.col())
     }
 
     fn binder(&mut self) -> Binder {
@@ -2513,10 +2501,7 @@ impl<'a> Build<'a> {
     fn primary(&mut self) -> Expr {
         let first = self.token();
         let (line, col) = (first.line, first.col);
-        let spelled = match self.in_hole {
-            true => Id::NEW,
-            false => Id::at(col),
-        };
+        let spelled = Id::at(col);
         match self.event() {
             Event::Open(Kind::Lambda, _) => return self.lambda(line),
             // `ns.Type { .. }`: a `Field` followed by `{` has no other reading, so the head
@@ -2712,7 +2697,6 @@ impl<'a> Build<'a> {
             src,
             events,
             at: 0,
-            in_hole: true,
             answers: self.answers,
             aliases: std::mem::take(&mut self.aliases),
             field_preds: None,

@@ -384,3 +384,17 @@ fn it_copies_the_first_of_two_takes_of_one_name_in_a_statement() {
         );
     }
 }
+
+#[test]
+fn it_replaces_the_consume_inside_an_interpolation() {
+    let src = format!(
+        "{PERSON}type Held = {{ p: Person }}\n\
+         fn main() -> Int64 {{\n    let h = Held {{ p: Person {{ name: \"n\", age: 1 }} }}\n    \
+         let p = h.p\n    print(\"\\{{keep(consume p)}}\")\n    return 0\n}}\n"
+    );
+    assert!(!checks("hole-take-before", &src));
+    let (log, after) = fix("hole-take", &src);
+    assert!(after.contains("\"\\{keep(p.copy())}\""), "{after}");
+    assert!(log.contains("2 fix(es) applied, 0 left"), "{log}");
+    assert!(checks("hole-take-after", &after), "{after}");
+}
