@@ -1,9 +1,10 @@
-import { Opt, Skip } from "./annotations_lib"
+import { Opt, Skip, reads } from "./annotations_lib"
 import * as a from "./annotations_lib"
 
 /// A record a field annotation reads.
 @Skip
 @a.Skip
+@reads
 export type Serve = {
     @Opt { short: "p", hidden: false, rank: 0 - 1 }
     port: Int64,
@@ -13,4 +14,5 @@ export type Serve = {
 }
 
 @Skip
+@a.reads
 export type Color = enum { @Skip Red, Green(Int64) }

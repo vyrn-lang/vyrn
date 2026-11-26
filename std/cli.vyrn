@@ -1,12 +1,14 @@
-/// The command line is a record type, and `cli` writes its parser and help.
+/// The command line is a record type, and `@cli` writes its parser and help.
 ///
 ///   import { cli } from "std/cli"
-///   import { parseServe, helpServe } from cli("./serve")
 ///
-/// `cli` is a `gen fn` that reflects a module of type declarations and returns a
-/// module exporting, for every exported record type, `parse<Name>(argv) ->
-/// Validation<Name>` and `help<Name>() -> String`. The compiler knows nothing
-/// about command lines. The mapping is a rule over the declaration:
+///   @cli
+///   export type Serve = { port: Port, verbose: Bool }
+///
+/// `@cli` on a record type writes beside it `parse<Name>(argv) ->
+/// Validation<Name>` and `help<Name>() -> String`, exported when the record is.
+/// The compiler knows nothing about command lines. The mapping is a rule over
+/// the declaration:
 ///
 /// | field type | surface | missing |
 /// |---|---|---|
@@ -37,7 +39,6 @@
 
 import { includes } from "std/arrays"
 import { join } from "std/code"
-import { importBlock, procImports } from "std/imports"
 import { fromBytesOr, indexOf, joinWith, padEnd, substring } from "std/strings"
 import { endsWith, startsWith } from "std/strpred"
 
@@ -543,7 +544,7 @@ fn cliHelpText(t: TypeInfo, plans: Array<CliPlan>) -> String {
 /// backslash cannot become code.
 gen fn cliEmitHelp(n: Name, text: String) -> Code {
     return vyrn"""
-        export fn help\{n}() -> String {
+        fn help\{n}() -> String {
             return \{text}
         }
         """
@@ -687,7 +688,7 @@ gen fn cliCommand(t: TypeInfo, iface: ModuleInterface) -> Code {
     }
     return vyrn"""
         \{cliEmitSpec(n, plans)}
-        export fn parse\{n}(argv: Array<String>) -> Validation<\{n}> {
+        fn parse\{n}(argv: Array<String>) -> Validation<\{n}> {
             let r = readArgv(cliSpec\{n}(), argv)
             let mut iss: Array<Issue> = cliIssues(r)
             \{join(steps, vyrn"\n")}
@@ -700,27 +701,18 @@ gen fn cliCommand(t: TypeInfo, iface: ModuleInterface) -> Code {
         """
 }
 
-/// Emits a module exporting `parse<Name>` and `help<Name>` for every exported
-/// record type `module` declares.
-export gen fn cli(module: String) -> Code {
-    let iface = moduleInterface(module)
-    let mut commands: Array<Code> = []
-    for t in iface.types {
-        if t.schema.base == "record" {
-            commands.push(cliCommand(t, iface))
-        }
-    }
-    if commands.length == 0 {
+/// Writes `parse<Name>` and `help<Name>` for the record type it annotates.
+export gen fn cli(t: TypeCode, iface: ModuleInterface) -> Code {
+    if t.info.schema.base != "record" {
         panic(
-            "std/cli: `" + module + "` exports no record type, so there is no command to derive. Export a record whose fields are the options.",
+            "std/cli: `@cli` sits on `" + t.info.name + "`, which is no record type. Its fields are the options, so annotate a record.",
         )
     }
     // The import of this module's helpers is quote text, so it is judged as
     // `std/cli`, which they are exported to.
     return vyrn"""
         import { CliOpt, readArgv, cliFlag, cliValue, cliIssues, cliMissing, cliNotNumber, cliRefused, cliUnexpected } from "std/cli"
-        \{importBlock(iface, "", [])}
-        \{join(commands, vyrn"\n")}
+        \{cliCommand(t.info, iface)}
         """
 }
 

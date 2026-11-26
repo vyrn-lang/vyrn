@@ -1,14 +1,16 @@
 # std/cli
 
-The command line is a record type, and `cli` writes its parser and help.
+The command line is a record type, and `@cli` writes its parser and help.
 
   import { cli } from "std/cli"
-  import { parseServe, helpServe } from cli("./serve")
 
-`cli` is a `gen fn` that reflects a module of type declarations and returns a
-module exporting, for every exported record type, `parse<Name>(argv) ->
-Validation<Name>` and `help<Name>() -> String`. The compiler knows nothing
-about command lines. The mapping is a rule over the declaration:
+  @cli
+  export type Serve = { port: Port, verbose: Bool }
+
+`@cli` on a record type writes beside it `parse<Name>(argv) ->
+Validation<Name>` and `help<Name>() -> String`, exported when the record is.
+The compiler knows nothing about command lines. The mapping is a rule over
+the declaration:
 
 | field type | surface | missing |
 |---|---|---|
@@ -76,8 +78,7 @@ parsing: a program asked for help has not given the required options.
 ## cli
 
 ```vyrn
-fn cli(module: String) -> Code
+fn cli(t: TypeCode, iface: ModuleInterface) -> Code
 ```
 
-Emits a module exporting `parse<Name>` and `help<Name>` for every exported
-record type `module` declares.
+Writes `parse<Name>` and `help<Name>` for the record type it annotates.

@@ -1,1 +1,1 @@
-a_generator_annotation_that_traps_fails_at_the_annotation.vyrn:3:0: generator `traps()` failed: traps writes nothing (annotation_gens_lib.vyrn:35)
+a_generator_annotation_that_traps_fails_at_the_annotation.vyrn:3:0: generator `traps()` failed: traps writes nothing (annotation_gens_lib.vyrn:38)

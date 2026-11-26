@@ -96,7 +96,7 @@ The compiler injects these declarations into every program, so a file names them
 |---|---|
 | `std/arrays` | `map`, `filter`, `fold`, `any`, `all`, `includes`, `sortWith` (a comparator), `sortBy` (an `Int64` key). |
 | `std/order` | Orders as types: `Asc<T, field..>`, `Desc<O>`, `Then<A, B>`, the `Order` bound and `Elem<O>`, the type an order compares. `before<O>(a, b)` compares under one. `sort`, `insertSorted`, `mergeSorted` and `dedupSorted` establish `sorted<O>` or `strict<O>` facts the flow proves, and `lowerBound` requires one. Each is an insertion or push-and-pop body, quadratic or linear, not in place. |
-| `std/columns` | `columns("./module")`, a generator: each exported record type `T` gets `TColumns`, one array per field under a `where` rule of equal lengths, with `tColumns(capacity)`, `pushT(c, v)` (an in-place push onto every column) and `tAt(c, i)`. `c.f[i]` reads and writes one field in place, and a loop bounded by `c.f.length` indexes every column with no check. |
+| `std/columns` | `@columns`, a generator annotation: the record type `T` it sits on gets `TColumns`, one array per field under a `where` rule of equal lengths, with `tColumns(capacity)`, `pushT(c, v)` (an in-place push onto every column) and `tAt(c, i)`. `c.f[i]` reads and writes one field in place, and a loop bounded by `c.f.length` indexes every column with no check. |
 | `std/slots` | `Slots<T>` and `Handle<T>`: a generational slab. `insert`, `remove` (which hands the element back), `get`, `alive`, `count`, `capacity`, `handles`. `s[h]` and `s[h] = v` index it, `for x in s` visits the live elements, and `s.tryAt(h)` reads in place. A stale or foreign handle is dead, never plausible. |
 | `std/stream` | `unfold(seed, step)` over a `Cursor` (`cursorGet`, `cursorSet`), and the lazy combinators `map`, `filter`, `take`, `merge`. Each takes a stream and returns one the caller must dispose. |
 | `std/fallible` | The `Fallible` protocol that `?` resolves through for a user enum. |
@@ -117,7 +117,7 @@ The compiler injects these declarations into every program, so a file names them
 | Module | Provides |
 |---|---|
 | `std/args` | `cli()`, `cliOf(list)`, `flag`, `opt`, `positionals`, `rest`: four probes over the argument list. No spec, no help text. |
-| `std/cli` | `cli("./module")`, a generator: every exported record type becomes `parse<Name>(argv) -> Validation<Name>` and `help<Name>()`. Field types decide the flags, and each value is validated by its own type. |
+| `std/cli` | `@cli`, a generator annotation: the record type it sits on gets `parse<Name>(argv) -> Validation<Name>` and `help<Name>()`. Field types decide the flags, `@Opt { short }` names a short flag, and each value is validated by its own type. |
 | `std/bench` | The harness `vyrn bench` links; no program imports it. |
 | `std/fetch` | `fetch(req)` sends a `FetchRequest` and waits for the `Response` or a `FetchError`; `fetchText(url)` is the body of a `GET`. A cancelled fetch is aborted on the host. HTTP/1.1, no redirect followed. |
 | `std/task` | `sleep(ms)` waits `ms` milliseconds while the host runs other tasks. A function that calls it waits, and each call is marked `await` (language.md, Waiting). `join(t)` waits for a task `fork` started and `cancel(t)` ends it; `both`, `race`, `timeout`, `joinAll` and `Group` wait for several tasks at once (language.md, Tasks and Running calls at once). |

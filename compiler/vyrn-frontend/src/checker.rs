@@ -2946,20 +2946,30 @@ impl<'a> Checker<'a> {
                     .iter()
                     .find(|(_, e)| consteval::eval(e, &HashMap::new()).is_none())
                 {
-                    Some((field, e)) => Err(cerr!(
-                        e.line().max(a.line),
-                        AnnotationNotConstant,
-                        name,
-                        field
-                    )),
-                    None => Ok(()),
+                    Some((field, e)) => {
+                        let line = e.line().max(a.line);
+                        return Err(cerr!(line, AnnotationNotConstant, name, field));
+                    }
+                    None => {}
                 }
             }
-            Expr::Var { .. } => match fields.first() {
-                Some(f) => refuse(rule!(MissingField, field = f.name, name)),
-                None => Ok(()),
-            },
-            _ => refuse(rule!(AnnotationArgs, name)),
+            Expr::Var { .. } => {
+                if let Some(f) = fields.first() {
+                    return refuse(rule!(MissingField, field = f.name, name));
+                }
+            }
+            _ => return refuse(rule!(AnnotationArgs, name)),
+        }
+        // A reader is a generator annotation of `t` whose `gen fn` the module
+        // declaring the record declares too.
+        let read = (t.annotations.iter()).any(|g| {
+            g.generator
+                .as_ref()
+                .is_some_and(|g| Some(&g.module) == d.module.as_ref())
+        });
+        match read {
+            true => Ok(()),
+            false => refuse(rule!(AnnotationUnread, name)),
         }
     }
 

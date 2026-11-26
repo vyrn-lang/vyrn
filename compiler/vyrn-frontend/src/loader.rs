@@ -3270,9 +3270,11 @@ fn unlinked_import(
             .map(|i| by_name(i) + by_ns(i))
             .sum::<usize>()
     };
+    // An annotation's generator runs in its own load too ([`annotate`]).
     let on_a_generator_line = |n: &str| {
         (program.imports.iter())
             .any(|i| matches!(&i.source, ImportSource::Generator { name, .. } if name == n))
+            || (program.type_decls.iter().flat_map(|t| &t.annotations)).any(|a| a.name() == n)
     };
     let only_named = imp.names.iter().all(|n| {
         let name = n.original.as_str();
@@ -3529,10 +3531,11 @@ fn annotate(
             let Some((target, name)) = imported else {
                 continue;
             };
-            let Some((params, ret)) = (w.modules.iter())
-                .find(|m| m.key == *target)
-                .and_then(|m| gen_signature(m, &name))
-            else {
+            let signature = match w.modules.iter().find(|m| m.key == *target) {
+                Some(m) => gen_signature(m, &name),
+                None => unlinked_signature(target, &name, root_key, opts, resolver),
+            };
+            let Some((params, ret)) = signature else {
                 continue;
             };
             if a.member.is_some() {
@@ -3719,6 +3722,21 @@ fn gen_signature(m: &Module, name: &str) -> Option<(Vec<Param>, Type)> {
     let (b, ri) = gen_row(m, name)?;
     let f = b.declarations(&[ri], &m.key, "").ok()?.pop()?;
     Some((f.params, f.ret))
+}
+
+/// [`gen_signature`] of the std module `target` that [`unlinked_import`] left
+/// out of the load, read from its parse.
+fn unlinked_signature(
+    target: &str,
+    name: &str,
+    root_key: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Option<(Vec<Param>, Type)> {
+    let text = resolver.read(target).ok()?;
+    let found = module_parse(target, &text, &text_hash(&text), root_key, opts).ok()?;
+    let f = exported_gen(&found.program, name)?;
+    Some((f.params.clone(), f.ret.clone()))
 }
 
 /// The constants of a generator call as its banner spells them.
@@ -7776,10 +7794,6 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
     }
     for t in &p.type_decls {
         add_type(&t.base, &mut out, &mut totals);
-        for a in t.annotations.iter().filter(|a| !a.name().is_empty()) {
-            *totals.entry(a.name().to_string()).or_default() += 1;
-            out.insert(a.name().to_string());
-        }
     }
     for g in &p.globals {
         if let Some(t) = &g.ty {

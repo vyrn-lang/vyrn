@@ -2430,19 +2430,16 @@ fn hover_on_import_specifier_shows_signature() {
 }
 
 /// A std generator the root only runs is no part of the linked program, and
-/// its name still hovers, in the import list and in the generator call.
+/// its name still hovers, in the import list and in the annotation.
 #[test]
-fn hover_on_a_generator_shows_its_signature_in_the_import_and_the_call() {
+fn hover_on_a_generator_shows_its_signature_in_the_import_and_the_annotation() {
     let dir = std::env::temp_dir().join(format!("vyrn-lsp-genhover-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("opts.vyrn"),
-        "export type Opts = {\n    port: Int64,\n}\n",
-    )
-    .unwrap();
     let main_src = "import { cli } from \"std/cli\"\n\
-        import { parseOpts, helpOpts } from cli(\"./opts\")\n\
+        \n\
+        @cli\n\
+        type Opts = { port: Int64 }\n\
         \n\
         fn main() -> Int64 {\n    print(helpOpts())\n    return 0\n}\n";
     let root_path = dir.join("main.vyrn");
@@ -2452,14 +2449,14 @@ fn hover_on_a_generator_shows_its_signature_in_the_import_and_the_call() {
     let mut client = spawn_client();
     did_open(&mut client, &uri, "vyrn", main_src);
     let _ = client.read_notification("textDocument/publishDiagnostics");
-    for line in [1, 2] {
+    for line in [1, 3] {
         let (l, c) = at(main_src, line, "cli");
         let v = hover_value(&mut client, &uri, l, c).expect("hover on `cli`");
         assert!(
-            v.contains("fn cli(module: String) -> Code"),
+            v.contains("fn cli(t: TypeCode, iface: ModuleInterface) -> Code"),
             "line {line}: {v}"
         );
-        assert!(v.contains("Emits a module"), "line {line}: {v}");
+        assert!(v.contains("Writes `parse<Name>`"), "line {line}: {v}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

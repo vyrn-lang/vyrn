@@ -818,6 +818,10 @@ examples/leak/server/main.vyrn	main	yes	no, its effect set is alloc, write-outpu
 examples/leak/shared/format.vyrn	title	yes	no, its effect set is alloc
 examples/leak/shared/format.vyrn	titleOf	yes	no, its effect set is alloc, fs-read
 examples/lib/area_spelling.vyrn	Area__Pt__area	yes	no, `p` is Pt, not an integer, Bool or a read array of one
+examples/lib/bodies.vyrn	where$pBodyColumns	yes	no, `x` is Array<Float64>, and WGSL has no 64-bit float
+examples/lib/bodies.vyrn	where$cBodyColumns	no, it calls `panic`	no, its effect set is trap
+examples/lib/bodies.vyrn	where$pParticleColumns	yes	no, `x` is Array<Float64>, and WGSL has no 64-bit float
+examples/lib/bodies.vyrn	where$cParticleColumns	no, it calls `panic`	no, its effect set is trap
 examples/lib/gen_palette.vyrn	palette	yes	no, its effect set is alloc, fs-read, fs-list, gen-only
 examples/lib/gen_projection_site.vyrn	d1	yes	no, its effect set is write-output
 examples/lib/gen_projection_site.vyrn	probe	yes	no, `q` is Q, not an integer, Bool or a read array of one
@@ -987,7 +991,7 @@ examples/nbody.vyrn	advance	yes	no, `bodies` is Array<Body>, not an integer, Boo
 examples/nbody.vyrn	integrate	no, it calls `offsetMomentum`, which is not trap-free	no, its effect set is alloc
 examples/nbody.vyrn	main	no, it calls `offsetMomentum`, which is not trap-free	no, its effect set is alloc, write-output, module-state
 examples/nbodycols.vyrn	fixed9	yes	no, its effect set is alloc
-examples/nbodycols.vyrn	solarMass	yes	no, the value of line 26 is Float64, and WGSL has no 64-bit float
+examples/nbodycols.vyrn	solarMass	yes	no, the value of line 24 is Float64, and WGSL has no 64-bit float
 examples/nbodycols.vyrn	system	no, it calls `bodyColumns`, which is not trap-free	no, its effect set is alloc
 examples/nbodycols.vyrn	offsetMomentum	no, it keeps an index check	no, it is not trap-free
 examples/nbodycols.vyrn	energy	yes	no, `b` is BodyColumns, not an integer, Bool or a read array of one

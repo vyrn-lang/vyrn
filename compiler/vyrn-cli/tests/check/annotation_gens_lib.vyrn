@@ -1,5 +1,8 @@
 import { Opt } from "./annotations_lib"
 
+/// A note `describe` lists.
+export type Tag = { text: String }
+
 /// Writes `describe<Name>(v) -> String`: the tag, the fields and the annotations.
 export gen fn describe(t: TypeCode, iface: ModuleInterface, tag: String) -> Code {
     let f = name("describe" + t.info.name)

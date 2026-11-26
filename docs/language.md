@@ -91,7 +91,7 @@ fn main() -> Int64 {
 - `t` is the declaration as written, its annotations included, and `iface.types` holds every type its shape names, transitively, as the module and its imports declare them. A generator reads its own module as written and each imported module whole.
 - What it writes joins the declaration's module: that module's code and its importers see the names as the module's own, and the output sees the module's names and its imports. Everything it writes takes the declaration's visibility, so `@describe export type Point` exports `describePoint`.
 - The output writes no `export`, no annotation and no name its module or another annotation of it declares; each is refused at the annotation. So a module generates in one round, after its imports.
-- A generator reads data annotations through `t.info.annotations`, by name and module.
+- A generator reads data annotations through `t.info.annotations`, by name and module. A data annotation needs a reader: a generator annotation on the same declaration whose `gen fn` the data type's module declares. Without one it is refused, because nothing would read it.
 
 ## Bindings
 

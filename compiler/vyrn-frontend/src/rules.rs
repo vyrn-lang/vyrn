@@ -367,6 +367,8 @@ rules! {
         "`@{name}` wrote an `export`: what an annotation writes takes its declaration's visibility";
     AnnotationWroteAnnotation { name }
         "`@{name}` wrote an annotation: generated code holds none, so a module generates in one round";
+    AnnotationUnread { name }
+        "no generator reads `@{name}`: annotate the declaration with a generator of the module that declares `{name}`";
     AnnotationWroteTwice { name, other, line }
         "`@{name}` writes `{other}`, which line {line} declares already";
     ValidatedBaseNotScalar { name }
