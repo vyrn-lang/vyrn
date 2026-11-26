@@ -118,22 +118,8 @@ impl Build<'_> {
 impl Hooks for Build<'_> {
     fn refuse(&mut self, _at: usize, rule: Rule) -> String {
         self.in_grammar = true;
-        match rule {
-            Rule::ClassBackslash {} => "dangling `\\` in character class",
-            Rule::ClassUnclosed {} => "unterminated character class `[`",
-            Rule::CountForm {} => "malformed counted repetition (expected `}` or `,`)",
-            Rule::CountNumber {} => "counted repetition needs a number (`{m}`, `{m,}`, `{m,n}`)",
-            Rule::CountUnclosed {} => "unclosed counted repetition `{`",
-            Rule::EmptyClass {} => "empty character class `[]`",
-            Rule::GroupUnclosed {} => "unclosed group `(`",
-            Rule::NoCountTerm {} => "nothing to repeat before counted repetition `{..}`",
-            Rule::NoTerm {} | Rule::NonGreedy { .. } => "nothing to repeat before quantifier",
-            Rule::PatternBackslash {} => "dangling `\\` in pattern",
-            Rule::StrayBrace {} => "unmatched `}` (a literal brace is `\\}`)",
-            Rule::StrayParen {} => "unmatched `)` in pattern",
-            Rule::TooDeep {} => "pattern nests more than 250 levels deep",
-        }
-        .to_string()
+        let (row, holes) = rule.row();
+        say(row, &holes)
     }
 
     fn _regex_literal(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -185,10 +171,7 @@ impl Hooks for Build<'_> {
         };
         let (lo, hi) = (self.b[dash - 1], self.b[dash + 1]);
         if lo > hi {
-            return Err(format!(
-                "reversed range `{}-{}` in character class",
-                lo as char, hi as char
-            ));
+            return Err(say("Backwards", &[]));
         }
         self.members(start, dash - 1);
         self.class.add_range(lo, hi);
@@ -221,13 +204,11 @@ impl Hooks for Build<'_> {
 
     /// A count, at most 255.
     fn regex_int(&mut self, start: usize, end: usize) -> Result<(), String> {
-        let text = String::from_utf8_lossy(&self.b[start..end]);
-        let v: u32 = text
-            .parse()
-            .map_err(|_| format!("repetition count `{text}` too large"))?;
-        if v > 255 {
-            return Err(format!("repetition count {v} exceeds the maximum (255)"));
-        }
+        let v = String::from_utf8_lossy(&self.b[start..end])
+            .parse::<u32>()
+            .ok()
+            .filter(|&v| v <= 255)
+            .ok_or_else(|| say("CountLarge", &[]))?;
         self.counts.push(v);
         Ok(())
     }
@@ -244,7 +225,7 @@ impl Hooks for Build<'_> {
         };
         if let Some(n) = n {
             if n < m {
-                return Err(format!("counted repetition `{{{m},{n}}}` has max < min"));
+                return Err(say("CountOrder", &[]));
             }
         }
         let (at, atom) = self.last();
@@ -256,9 +237,7 @@ impl Hooks for Build<'_> {
             };
         let cost = copies.saturating_mul(re_size(&atom));
         if self.expanded + cost > EXPANSION_BUDGET {
-            return Err(format!(
-                "counted repetition expands the pattern past the maximum ({EXPANSION_BUDGET} nodes)"
-            ));
+            return Err(say("CountBudget", &[]));
         }
         self.expanded += cost;
         let mut parts: Vec<Re> = std::iter::repeat_with(|| atom.clone())
@@ -301,9 +280,32 @@ fn concat(mut parts: Vec<Re>) -> Re {
     }
 }
 
-/// Why a pattern does not compile: a row of `std/regex.syntax`, which the
-/// island check of a `=~` literal states in the grammar's sentence, or a limit
-/// of this builder, which only the builder states.
+/// The sentence of `row` in `std/regex.errors/en.json`, which `std/regex` states too,
+/// with each `{$hole}` filled from `holes`. A backslash takes the character after it.
+fn say(row: &str, holes: &[(&str, &str)]) -> String {
+    let catalogue = crate::schema::parse_json(include_str!("../../../std/regex.errors/en.json"))
+        .expect("std/regex.errors/en.json is JSON");
+    let key = row[..1].to_ascii_lowercase() + &row[1..];
+    let text = catalogue.get(&key).and_then(crate::schema::Json::as_str);
+    let mut chars = text.expect("every row has a sentence").chars();
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.extend(chars.next()),
+            '{' => {
+                let hole: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                let name = hole.trim_start_matches('$');
+                out.extend(holes.iter().filter(|h| h.0 == name).map(|h| h.1));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Why a pattern does not compile, in the catalogue's sentence: a row the grammar
+/// refuses with, which the island check of a `=~` literal states, or one the builder
+/// raises from the tree. The builder alone states its DFA state limit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     Grammar(String),
@@ -1286,13 +1288,32 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_is_the_catalogues_sentence() {
+        assert_eq!(
+            compile("[z-a]").err(),
+            Some(Refusal::Builder(
+                "a character range that runs backwards".to_string()
+            ))
+        );
+        assert_eq!(
+            compile("a}").err(),
+            Some(Refusal::Grammar(
+                "a `}` with no `{` before it (a literal brace is `\\}`)".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn nested_counted_repetition_hits_the_expansion_budget() {
         // Hash-shaped patterns stay fine.
         assert!(compile("[0-9a-f]{40}").is_ok());
         assert!(compile("([0-9a-f]{2}){10}").is_ok());
         // Nesting multiplies the counts: a compile error, not a hang.
         let e = compile("(a{200}){200}").unwrap_err().to_string();
-        assert!(e.contains("past the maximum"), "message: {e}");
+        assert_eq!(
+            e,
+            "counted repetition that expands the pattern past 16384 terms"
+        );
         // Just inside the budget still compiles.
         assert!(compile("(a{200}){40}").is_ok());
     }
@@ -1315,7 +1336,7 @@ mod tests {
         assert_eq!(
             compile(&past).err(),
             Some(Refusal::Grammar(
-                "pattern nests more than 250 levels deep".to_string()
+                "a pattern that nests more than 250 levels deep".to_string()
             ))
         );
     }

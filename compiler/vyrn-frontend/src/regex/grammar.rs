@@ -24,6 +24,28 @@ pub enum Rule {
     TooDeep {  },
 }
 
+impl Rule {
+    /// The row's name and the text of each of its holes, as a catalogue keys them.
+    pub fn row(&self) -> (&'static str, Vec<(&'static str, &str)>) {
+        match self {
+            Rule::ClassBackslash {  } => ("ClassBackslash", vec![]),
+            Rule::ClassUnclosed {  } => ("ClassUnclosed", vec![]),
+            Rule::CountForm {  } => ("CountForm", vec![]),
+            Rule::CountNumber {  } => ("CountNumber", vec![]),
+            Rule::CountUnclosed {  } => ("CountUnclosed", vec![]),
+            Rule::EmptyClass {  } => ("EmptyClass", vec![]),
+            Rule::GroupUnclosed {  } => ("GroupUnclosed", vec![]),
+            Rule::NoCountTerm {  } => ("NoCountTerm", vec![]),
+            Rule::NoTerm {  } => ("NoTerm", vec![]),
+            Rule::NonGreedy { op } => ("NonGreedy", vec![("op", op.as_str())]),
+            Rule::PatternBackslash {  } => ("PatternBackslash", vec![]),
+            Rule::StrayBrace {  } => ("StrayBrace", vec![]),
+            Rule::StrayParen {  } => ("StrayParen", vec![]),
+            Rule::TooDeep {  } => ("TooDeep", vec![]),
+        }
+    }
+}
+
 macro_rules! rule {
     ($row:ident $(, $hole:ident = $text:expr)*) => {
         Rule::$row { $($hole: $text.to_string()),* }
