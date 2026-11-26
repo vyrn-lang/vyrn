@@ -70,6 +70,15 @@ fn compact_hints() -> bool {
     COMPACT_HINTS.get().copied().unwrap_or(true)
 }
 
+/// Whether the client draws the cost rows itself from `vyrn/costRows`: the
+/// `costRendering` initialization option is `decorations`. Such a client gets no cost
+/// inlay hints.
+static COST_DECORATIONS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn cost_decorations() -> bool {
+    COST_DECORATIONS.get().copied().unwrap_or(false)
+}
+
 /// The pipeline every analysis runs. It computes the cost of each function only when a hint
 /// or a lens will show it.
 fn judge() -> &'static vyrn_frontend::Judge {
@@ -433,7 +442,8 @@ struct AnalyzedSynth {
 
 /// Answers `initialize`, and asks a client that can send file events for them
 /// under its workspace folders and the std root. Returns those directories, or
-/// none when the client cannot. Reads the `costHints` and `hintStyle` initialization options.
+/// none when the client cannot. Reads the `costHints`, `hintStyle` and `costRendering`
+/// initialization options.
 fn handle_initialize(
     connection: &Connection,
 ) -> Result<(Vec<String>, serde_json::Value, Vec<std::path::PathBuf>), ()> {
@@ -446,6 +456,8 @@ fn handle_initialize(
     let _ = COST_HINTS.set(off.and_then(|o| o.as_bool()).unwrap_or(true));
     let style = params.pointer("/initializationOptions/hintStyle");
     let _ = COMPACT_HINTS.set(style.and_then(|s| s.as_str()) != Some("full"));
+    let rendering = params.pointer("/initializationOptions/costRendering");
+    let _ = COST_DECORATIONS.set(rendering.and_then(|s| s.as_str()) == Some("decorations"));
 
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -483,6 +495,8 @@ fn handle_initialize(
                 full: Some(SemanticTokensFullOptions::Bool(true)),
             },
         )),
+        // The richer layer: a client that draws the cost rows asks `vyrn/costRows`.
+        experimental: Some(serde_json::json!({ "vyrn/costRows": true })),
         ..Default::default()
     };
     let result = InitializeResult {
@@ -841,6 +855,7 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
             Response::new_ok(req.id, Some(handle_is_dev_entry(server, req.params)))
         }
         "vyrn/costLenses" => Response::new_ok(req.id, Some(handle_cost_lenses(server, req.params))),
+        "vyrn/costRows" => Response::new_ok(req.id, Some(handle_cost_rows(server, req.params))),
         // A custom request, not `code_lens_provider`: `extension.js` builds
         // every lens from answers like this one.
         "vyrn/routeLenses" => {
@@ -887,6 +902,37 @@ fn handle_cost_lenses(server: &Server, params: serde_json::Value) -> Vec<serde_j
         return Vec::new();
     };
     cost::lenses(analysis, uri_path(&uri).as_deref(), &src)
+}
+
+/// `vyrn/costRows`: the cost rows of the document `uri` ([`cost::rows`]), each
+/// `{ line, glyph, count, spans, hover }`, `line` 0-based and `spans` LSP ranges, `hover`
+/// ending with the report's link. Empty when the client turned cost hints off, and for a
+/// document that does not check. The line hints and the expression hover read the same rows.
+fn handle_cost_rows(server: &Server, params: serde_json::Value) -> Vec<serde_json::Value> {
+    let uri = (params.get("uri"))
+        .and_then(|v| v.as_str())
+        .and_then(|u| Url::parse(u).ok());
+    let Some(uri) = uri.filter(|u| cost_hints() && is_vyrn_uri(u)) else {
+        return Vec::new();
+    };
+    let (Some((analysis, _)), Some(src)) = (lookup(server, &uri), doc_text(server, &uri)) else {
+        return Vec::new();
+    };
+    let path = uri_path(&uri);
+    let rows = cost::rows(analysis, uri.as_str(), path.as_deref(), &src, 1, usize::MAX);
+    (rows.into_iter())
+        .map(|r| {
+            serde_json::json!({
+                "line": r.line - 1,
+                "glyph": r.glyph,
+                "count": r.count,
+                "spans": r.spans,
+                "hover": format!("{}
+
+{}", r.hover, cost::WHY_COST),
+            })
+        })
+        .collect()
 }
 
 /// `vyrn/routeLenses`: one `{ line, title, method, path, source }` per mounted
@@ -2086,7 +2132,7 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
         let home = &p.text_document.uri;
         let locate = |name: &str| type_location(server, analysis, Some(home), name);
         hints.extend(type_hints(analysis, src, from, to, &locate));
-        if cost_hints() {
+        if cost_hints() && !cost_decorations() {
             let path = uri_path(&p.text_document.uri);
             let uri = p.text_document.uri.as_str();
             hints.extend(cost::hints(analysis, uri, path.as_deref(), src, from, to));

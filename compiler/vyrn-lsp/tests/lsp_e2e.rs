@@ -6673,6 +6673,68 @@ fn a_hover_on_a_costly_expression_answers_its_row_with_its_range() {
     assert!(value.contains("**\u{2197} may grow 1**"), "{value}");
 }
 
+/// `vyrn/costRows` of `uri`.
+fn cost_rows(client: &mut LspClient, uri: &str) -> Vec<serde_json::Value> {
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 96, "method": "vyrn/costRows", "params": { "uri": uri }
+    }));
+    let resp = client.read_response(&serde_json::json!(96));
+    resp["result"].as_array().expect("cost rows").clone()
+}
+
+/// The rows of `vyrn/costRows` over knucleotide, one JSON object a line, the document's URI
+/// written `URI`.
+#[test]
+fn knucleotide_cost_rows_hold_their_pin() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_with_style(&path, &text, "compact");
+    let rows: Vec<String> = (cost_rows(&mut client, &uri).iter())
+        .map(|r| r.to_string().replace(uri.as_str(), "URI"))
+        .collect();
+    holds_pin("knucleotide-rows", &rows);
+}
+
+/// A client that draws decorations gets the rows and the capability, and no cost hint.
+#[test]
+fn a_decorations_client_gets_cost_rows_and_no_cost_hints() {
+    let (path, text) = knucleotide();
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null,
+                    "initializationOptions": { "costRendering": "decorations" } }
+    }));
+    let init = client.read_response(&serde_json::json!(1));
+    assert_eq!(
+        init["result"]["capabilities"]["experimental"]["vyrn/costRows"],
+        true
+    );
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    let uri = file_uri(&path);
+    did_open(&mut client, &uri, "vyrn", &text);
+    let _ = read_diags_for(&mut client, "");
+    assert_eq!(compact_hints(&mut client, &uri), Vec::new());
+    let rows = cost_rows(&mut client, &uri);
+    let row = (rows.iter())
+        .find(|r| r["line"] == 72 && r["glyph"] == "?")
+        .expect("the kept check");
+    assert_eq!(row["count"], 1);
+    let span = &row["spans"][0];
+    let line = text.lines().nth(72).unwrap();
+    let (a, b) = (
+        span["start"]["character"].as_u64().unwrap(),
+        span["end"]["character"].as_u64().unwrap(),
+    );
+    assert_eq!(&line[a as usize..b as usize], "alphabet[(key / d) % 4]");
+    assert!(
+        row["hover"]
+            .as_str()
+            .unwrap()
+            .ends_with("(command:vyrn.whyCost)"),
+        "{row}"
+    );
+}
+
 /// After a fresh profile the compact line ends in the blocks the run made there.
 #[test]
 fn a_fresh_profile_adds_a_last_run_glyph() {
