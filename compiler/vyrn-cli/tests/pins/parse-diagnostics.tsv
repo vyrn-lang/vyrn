@@ -345,11 +345,16 @@ compiler/vyrn-cli/tests/check/an_imported_type_name_is_not_a_value.vyrn	0	cbf29c
 compiler/vyrn-cli/tests/check/an_index_store_takes_the_key_type_a_lookup_takes.vyrn	0	cbf29ce484222325	20	17	8b1133f337c7bbe0
 compiler/vyrn-cli/tests/check/an_inline_refinement_in_an_enum_variant_is_a_diagnostic_not_a_panic.vyrn	1	6e235062bdc853a0	20	20	f7349759da5a9686
 compiler/vyrn-cli/tests/check/an_inline_refinement_on_a_merged_record_is_a_diagnostic_not_a_panic.vyrn	1	6e235062bdc853a0	20	20	14de1ed4b0093f51
+compiler/vyrn-cli/tests/check/an_interpolated_island_is_checked_at_run_time.vyrn	0	cbf29ce484222325	20	15	2a740d81826ca39b
 compiler/vyrn-cli/tests/check/an_invariant_a_turn_may_break_is_refused.vyrn	0	cbf29ce484222325	20	16	b80dfba4fad80398
 compiler/vyrn-cli/tests/check/an_invariant_compares_names_joined_by_and.vyrn	0	cbf29ce484222325	20	18	9706175ee886c4d6
 compiler/vyrn-cli/tests/check/an_invariant_names_no_binding_of_the_loop.vyrn	0	cbf29ce484222325	20	16	989b0591de8bdaf6
 compiler/vyrn-cli/tests/check/an_invariant_names_only_locals_in_scope.vyrn	0	cbf29ce484222325	20	14	86bb10319a96c72d
 compiler/vyrn-cli/tests/check/an_invariant_that_fails_where_the_loop_starts_is_refused.vyrn	0	cbf29ce484222325	20	17	82de57d9c47be927
+compiler/vyrn-cli/tests/check/an_island_literal_is_read_with_its_grammar.vyrn	0	cbf29ce484222325	20	19	8c11cba4ccef2310
+compiler/vyrn-cli/tests/check/an_island_literal_refusal_stands_inside_it.vyrn	0	cbf29ce484222325	20	19	8c11cba4ccef2310
+compiler/vyrn-cli/tests/check/an_island_refusal_after_an_escape_stands_at_its_source_column.vyrn	0	cbf29ce484222325	20	19	8c11cba4ccef2310
+compiler/vyrn-cli/tests/check/an_island_refusal_in_a_multi_line_literal_stands_on_its_line.vyrn	0	cbf29ce484222325	20	19	2ec6d502546dbe74
 compiler/vyrn-cli/tests/check/an_optional_projection_answers_a_place_not_a_value.vyrn	0	cbf29ce484222325	20	16	ec6e2b22948560d8
 compiler/vyrn-cli/tests/check/an_optional_projection_must_take_read_self.vyrn	0	cbf29ce484222325	20	16	0cf1387765f7e2d3
 compiler/vyrn-cli/tests/check/an_optional_projection_needs_its_shape.vyrn	0	cbf29ce484222325	20	16	862baf9ca971ded5
@@ -837,6 +842,7 @@ compiler/vyrn-cli/tests/refusals/gen/badcopy.vyrn	0	cbf29ce484222325	20	18	c4282
 compiler/vyrn-cli/tests/refusals/gen/badname.vyrn	0	cbf29ce484222325	20	14	19b5c5dc40e07a7c
 compiler/vyrn-cli/tests/refusals/gen/deep.vyrn	0	cbf29ce484222325	20	18	13c8e604a978ebab
 compiler/vyrn-cli/tests/refusals/gen/r109_a_generator_that_reflects_its_importer.vyrn	0	cbf29ce484222325	20	18	b92111c68512b8fd
+compiler/vyrn-cli/tests/refusals/gen/r113_an_island_literal_the_grammar_refuses.vyrn	0	cbf29ce484222325	20	19	8c11cba4ccef2310
 compiler/vyrn-cli/tests/refusals/gen/r74_a_name_that_is_no_identifier.vyrn	0	cbf29ce484222325	20	17	75704bf4405ec6f4
 compiler/vyrn-cli/tests/refusals/gen/r75_code_at_text_the_input_does_not_hold.vyrn	0	cbf29ce484222325	20	17	fbd3ed1628601e84
 compiler/vyrn-cli/tests/refusals/gen/r84_a_generator_output_that_calls_its_generator_deeper.vyrn	0	cbf29ce484222325	20	17	f775e94def6266cd

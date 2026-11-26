@@ -1835,6 +1835,12 @@ pub(crate) fn island_type(rule: &str) -> String {
     format!("{}Text", type_name(rule))
 }
 
+/// The name of the `gen fn` [`report`] writes for start rule `rule` that reports
+/// the refusals of a text: `report<Start>Text(path, text) -> Code`.
+pub fn island_report_fn(rule: &str) -> String {
+    format!("{}Text", report_fn(rule))
+}
+
 /// The name of the reporting `gen fn` of start rule `rule`.
 pub(crate) fn report_fn(rule: &str) -> String {
     format!("report{}", type_name(rule))
@@ -1875,12 +1881,12 @@ pub fn report(
             "/// The refusals `parse{name}` gives the text at `path`, each a report at its
 /// line and column.
 export gen fn {report}(path: String) -> Code {{
-    return {report}Text(path, readFile(path) ?? \"\")
+    return {text_report}(path, readFile(path) ?? \"\")
 }}
 
 /// The refusals `parse{name}` gives `text`, each a report at its line and column
 /// in the file `path`.
-export gen fn {report}Text(path: String, text: String) -> Code {{
+export gen fn {text_report}(path: String, text: String) -> Code {{
     let mut out = vyrn\"\"
     match parsed.parse{name}(text) {{
         Ok(tree) => {{}}
@@ -1897,6 +1903,7 @@ export gen fn {report}Text(path: String, text: String) -> Code {{
 ",
             name = type_name(rule),
             report = report_fn(rule),
+            text_report = island_report_fn(rule),
         );
     }
     o.push_str("/// A refusal's row as text, for `syntaxSentence`.\ngen fn rowParts(row: parsed.Row) -> SyntaxRow {\n    return match row {\n");

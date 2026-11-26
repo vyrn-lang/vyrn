@@ -979,6 +979,109 @@ pub fn derived_name(g: &str, ty: &crate::ast::Type) -> String {
 /// renamed under `derive$g$`, which no source can spell.
 pub type Derived = (Vec<crate::ast::Function>, Vec<crate::ast::TypeDecl>);
 
+/// A string literal that crosses into an island type: the module it is
+/// written in (`None` the root), the line and column of its opening quote,
+/// its decoded text, and the island.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IslandSite {
+    pub module: Option<String>,
+    pub line: usize,
+    pub col: usize,
+    pub text: String,
+    pub island: Island,
+}
+
+/// The key of the root an island's report runs from, beside its grammar. No
+/// file holds it: a key the loader serves from a string.
+const ISLAND_ROOT: &str = ".vyrn-island.vyrn";
+
+/// Reads the text of each island literal of `sites` with its grammar's written
+/// report, `report<Start>Text("", text)`, and returns one refusal per report at
+/// the place in the literal's source that the report names, in the
+/// catalogue's sentence. A site typed twice is read once. A reader's `row`
+/// refusals stay out: the written parser raises only the grammar's own.
+pub fn island_verdicts(
+    sites: &[IslandSite],
+    engine: Option<&GenEngine>,
+    linker: Option<crate::symbols::Linker<'_>>,
+) -> Vec<Diagnostic> {
+    use crate::consteval::ConstVal;
+    let mut out = Vec::new();
+    let Some((root, opts, resolver)) = linker else {
+        return out;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut maps: HashMap<Option<String>, Vec<crate::lexer::LiteralMap>> = HashMap::new();
+    for site in sites {
+        if !seen.insert((&site.module, site.line, site.col)) {
+            continue;
+        }
+        let g = &site.island.grammar;
+        let (dir, file) = g.rsplit_once('/').unwrap_or(("", g));
+        let at = format!("{dir}/{ISLAND_ROOT}");
+        let source = format!(
+            "import {{ syntaxReport }} from \"std/syntax\"\nimport * as reported from syntaxReport(\"./{file}\")\n"
+        );
+        let with = crate::loader::WithRoot::new(&at, &source, resolver);
+        let name = vyrn_syntax::island_report_fn(&site.island.start);
+        let args = [
+            ConstVal::Str(String::new()),
+            ConstVal::Str(site.text.clone()),
+        ];
+        let run = crate::loader::run_gen_fn(&at, &at, &name, &args, true, opts, &with, engine);
+        let written = match run {
+            Ok(w) => w,
+            Err(ds) => {
+                out.extend(ds.into_iter().take(1));
+                continue;
+            }
+        };
+        let src = resolver.read(site.module.as_deref().unwrap_or(root)).ok();
+        let map = maps.entry(site.module.clone()).or_insert_with(|| {
+            (src.as_deref()).map_or(Vec::new(), |s| {
+                crate::lexer::literal_maps(s).unwrap_or_default()
+            })
+        });
+        let map = map
+            .iter()
+            .find(|m| (m.line, m.col) == (site.line, site.col));
+        for r in &written.reports {
+            let Some((at, sentence)) = report_place(&r.line) else {
+                continue;
+            };
+            let place = match (decoded_offset(&site.text, at), map, &src) {
+                (Some(d), Some(m), Some(s)) => crate::lexer::line_col(s, m.source(d)),
+                _ => (site.line, site.col),
+            };
+            let rule = crate::rules::rule!(IslandRow, sentence);
+            let d = Diagnostic::refusal(place.0, place.1, "check", rule);
+            out.push(d.in_file(site.module.clone()));
+        }
+    }
+    out
+}
+
+/// The 1-based line and byte column, and the sentence, of a report line
+/// `error :<line>:<col> <sentence>` that a report with an empty path writes.
+fn report_place(line: &str) -> Option<((usize, usize), String)> {
+    let (_, rest) = line.split_once(' ')?;
+    let (anchor, sentence) = rest.split_once(' ')?;
+    let mut parts = anchor.rsplitn(3, ':');
+    let col = parts.next()?.parse().ok()?;
+    let line = parts.next()?.parse().ok()?;
+    Some(((line, col), sentence.to_string()))
+}
+
+/// The byte offset of 1-based `line` and byte column `col` of `text`, or
+/// `None` past its end.
+fn decoded_offset(text: &str, (line, col): (usize, usize)) -> Option<usize> {
+    let start: usize = (text.split_inclusive('\n').take(line.checked_sub(1)?))
+        .map(str::len)
+        .sum();
+    let at = start + col.checked_sub(1)?;
+    (at <= text.len()).then_some(at)
+}
+
 /// A `toJson` or `fromJson` site: `std/json`'s or `std/jsondec`'s generator
 /// `g` writes an entry for `ty`.
 #[derive(Clone)]

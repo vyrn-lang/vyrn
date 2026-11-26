@@ -1049,6 +1049,7 @@ fn check_accum_inner(
         shadows: &program.surface_shadows,
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
+        islands: &program.islands[..],
         orders: &program.orders,
         record_reads: recording && program.session.get().is_some(),
         record_uses: USES.with(|u| u.get()),
@@ -1640,6 +1641,9 @@ pub struct Recorded {
     /// with the entry's serial. A serial names one record of one body, so a
     /// reader keyed by it may reuse what it derived from that record.
     pub entries: Vec<(SourceBody, u64)>,
+    /// Each string literal that crosses into an island type, in the order
+    /// typed; a body typed twice repeats its sites.
+    pub islands: Vec<crate::gen::IslandSite>,
     /// Each statement whose refusal the checker states, the innermost that
     /// states it. The core builds it as a trap and binds its name `Err`, so
     /// the typed judgment judges the rest of the body.
@@ -1660,6 +1664,7 @@ impl Recorded {
         self.stored.extend(tail.stored);
         self.reads.extend(tail.reads);
         self.entries.extend(tail.entries);
+        self.islands.extend(tail.islands);
         self.trapped.extend(tail.trapped);
     }
 }
@@ -1731,6 +1736,8 @@ struct Cx<'a> {
     extern_fns: &'a std::collections::HashSet<String>,
     /// `gen fn`s, which cannot be function values.
     gen_fns: &'a std::collections::HashSet<String>,
+    /// [`Program::islands`].
+    islands: &'a [crate::gen::Island],
     /// `std/order`'s compiler-known declarations.
     orders: &'a crate::order::Names,
     /// Whether a recording check records read rows ([`Recorded::reads`]): yes
@@ -2426,10 +2433,30 @@ impl<'a> Checker<'a> {
         crate::types::coercible(from, to, self)
     }
 
+    /// Records a string literal that flows into an island type as a site the
+    /// island verdict reads ([`crate::gen::island_verdicts`]).
+    fn note_island(&self, expr: &Expr, to: &Type) {
+        let (Expr::Str(text, _), Type::Named(n)) = (expr, to) else {
+            return;
+        };
+        let island = self.islands.iter().find(|i| &i.ty == n);
+        if let (Some(island), Some(r)) = (island, self.acc.borrow_mut().record.as_mut()) {
+            let (line, col) = expr.start();
+            r.islands.push(crate::gen::IslandSite {
+                module: self.frame.borrow().here.clone(),
+                line,
+                col,
+                text: text.clone(),
+                island: island.clone(),
+            });
+        }
+    }
+
     /// Refuses a constant, or a record literal of constants, that fails the
     /// predicate of the named type it flows into. Other values keep the
-    /// runtime check.
+    /// runtime check; a string literal into an island type is noted.
     fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {
+        self.note_island(expr, to);
         let decl = match to {
             Type::Named(n) => match self.decl(n) {
                 Some(d) if d.predicate.is_some() => d,

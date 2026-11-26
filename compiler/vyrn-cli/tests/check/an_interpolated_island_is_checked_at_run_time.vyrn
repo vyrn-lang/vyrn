@@ -1,0 +1,11 @@
+import { syntax } from "std/syntax"
+import * as ledger from syntax("./island.syntax")
+
+fn lines(text: ledger.LedgerText) -> Int64 {
+    return ledger.parsedLedger(text).lines.length
+}
+
+fn main() -> Int64 {
+    let amount = "x"
+    return lines("pay rent \{amount}")
+}

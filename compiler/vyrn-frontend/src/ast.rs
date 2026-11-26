@@ -396,6 +396,9 @@ pub struct Program {
     /// want of a fresh closed entry (`loader::read_closed`): their own loads
     /// write one (`vyrn_lower::stdrows`). Empty for a program no load linked.
     pub unclosed: std::collections::BTreeSet<String>,
+    /// The island types of the program's written parsers, each under its
+    /// linked name. Empty for a program no load linked.
+    pub islands: std::sync::Arc<[crate::gen::Island]>,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only

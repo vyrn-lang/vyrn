@@ -451,6 +451,7 @@ fn in_unit(r: &Recorded, unit: u32) -> Recorded {
         stored: r.stored.clone(),
         reads: r.reads.clone(),
         entries: Vec::new(),
+        islands: r.islands.clone(),
         trapped: r.trapped.iter().map(at).collect(),
     }
 }
@@ -461,7 +462,7 @@ fn world(p: &Program) -> u64 {
     let mut shadows: Vec<_> = p.surface_shadows.iter().collect();
     shadows.sort();
     let (hashes, host) = (&p.module_hashes, p.host);
-    let _ = write!(h, "{hashes:?}|{host:?}|{shadows:?}|");
+    let _ = write!(h, "{hashes:?}|{host:?}|{shadows:?}|{:?}|", p.islands);
     for x in &p.protocols {
         let _ = match x.module {
             Some(_) => write!(h, "{}|", x.name),

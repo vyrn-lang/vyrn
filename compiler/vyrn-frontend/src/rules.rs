@@ -1104,6 +1104,7 @@ rules! {
     GenImportArity { name, want, got } "generator `{name}` takes {want} argument(s), got {got}";
     GenImportNotCode { name, ret } "generator `{name}` returns `{ret}`; an imported generator returns `Code`";
     GenModuleReread { module, why } "cannot re-read generator module `{module}`: {why}";
+    IslandRow { sentence } "{sentence}";
     GenFailed { name, args, trap } "generator `{name}({args})` failed: {trap}";
     NamespaceBoundTwice { ns } "namespace `{ns}` is bound twice in this module";
     NamespaceCollides { ns }

@@ -169,6 +169,13 @@ pub fn check_and_synthesize(
             Err(d) => diags.push(d),
         }
     }
+    // Each string literal that crosses into an island type is read with its
+    // grammar, after the check, as the derive generators run.
+    if diags.is_empty() {
+        if let Some(sites) = record.as_ref().map(|r| &r.islands[..]) {
+            diags.extend(gen::island_verdicts(sites, engine, linker));
+        }
+    }
     drop(check_span);
     let synth_span = prof::phase("synthesize");
     let from = program.functions.len();

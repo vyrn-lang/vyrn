@@ -1683,6 +1683,8 @@ pub struct GenModule {
     pub inputs: GenDeps,
     /// [`crate::gen::Written::grammars`].
     pub grammars: Vec<String>,
+    /// [`crate::gen::Written::islands`].
+    pub islands: Vec<Island>,
 }
 
 /// What a generation's output depends on: each input its run read and each source of
@@ -1934,6 +1936,7 @@ fn load_modules(
                     lazy: None,
                     seen: Default::default(),
                     unclosed: Default::default(),
+                    islands: Default::default(),
                 },
                 import_targets: Vec::new(),
                 generated: None,
@@ -2158,6 +2161,7 @@ fn load_modules(
                 source: text.clone(),
                 inputs: g.inputs.clone(),
                 grammars: g.written.grammars.clone(),
+                islands: g.written.islands.clone(),
             }),
             spans: written.map(|g| Rc::from(g.spans.as_slice())),
             injected: None,
@@ -6577,6 +6581,26 @@ fn link(
         named.extend(imports.map(|n| n.original.clone()));
     }
     let generators: HashSet<String> = generator_calls(&modules).map(str::to_string).collect();
+    // An island type keeps its tag under the name the link gave it.
+    let linked = |key: &str, ty: &str| {
+        let renamed = spellings
+            .decls
+            .iter()
+            .find(|(_, (w, k))| w == ty && k == key);
+        renamed.map_or(ty.to_string(), |(l, _)| l.clone())
+    };
+    let islands: Vec<Island> = (modules.iter())
+        .flat_map(|m| {
+            m.generated
+                .iter()
+                .flat_map(|g| &g.islands)
+                .map(|i| (&m.key, i))
+        })
+        .map(|(key, i)| Island {
+            ty: linked(key, &i.ty),
+            ..i.clone()
+        })
+        .collect();
     // Merge. The root goes last so its injected builtins and log config win;
     // imported modules' injected decls are dropped.
     let mut merged: Option<Program> = None;
@@ -6612,6 +6636,7 @@ fn link(
     }
     let mut program = merged.expect("root module was loaded");
     program.type_decls.extend(extra_types);
+    program.islands = islands.into();
     // Which modules can see a declaration of a surface builtin. The
     // checker cannot compute it, because `imports` are consumed here.
     program.surface_shadows = surface_shadows;
