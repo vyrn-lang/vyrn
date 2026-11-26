@@ -48,7 +48,7 @@ use vyrn_frontend::prim::Cmp;
 use crate::effects::StateUse;
 use crate::facts::{Cert, Fact, Lin, Node, Premise, Said, Sides, Src, State, Tags, Term, EXACT};
 use vyrn_frontend::core::check::{
-    scalar_rule, Atom, Check, Ensures, Guard, Operand, Site, Verdict, Why,
+    scalar_rule, Atom, Check, Ensures, Guard, Operand, Side, Site, Verdict, Why,
 };
 use vyrn_frontend::core::{
     rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, NameInfo, Op, Place, Rhs, St,
@@ -2335,11 +2335,14 @@ fn needed_lengths(b: &Body, decls: &HashMap<String, TypeDecl>) -> Vec<(Place, i6
             Guard::Clause { atoms, .. } => {
                 for a in atoms {
                     // `n.length >= c` or `n.length > c`, either way round.
-                    let (len, k, strict) = match (&a.l.part, &a.r.part, a.op) {
-                        (Some(_), None, BinOp::GtEq) => (&a.l, &a.r, false),
-                        (Some(_), None, BinOp::Gt) => (&a.l, &a.r, true),
-                        (None, Some(_), BinOp::LtEq) => (&a.r, &a.l, false),
-                        (None, Some(_), BinOp::Lt) => (&a.r, &a.l, true),
+                    let (Some(l), Some(r)) = (a.l.alone(), a.r.alone()) else {
+                        continue;
+                    };
+                    let (len, k, strict) = match (&l.part, &r.part, a.op) {
+                        (Some(_), None, BinOp::GtEq) => (l, r, false),
+                        (Some(_), None, BinOp::Gt) => (l, r, true),
+                        (None, Some(_), BinOp::LtEq) => (r, l, false),
+                        (None, Some(_), BinOp::Lt) => (r, l, true),
                         _ => continue,
                     };
                     let (Val::Name(n), Some("length" | "byteLength")) =
@@ -4188,7 +4191,7 @@ impl<'a> Walk<'a> {
         if !kind_of(&a.ty, self.decls).is_int() {
             return None;
         }
-        let d = self.operand(&a.l)?.sub(&self.operand(&a.r)?)?;
+        let d = self.side(&a.l)?.sub(&self.side(&a.r)?)?;
         Some(match a.op.compare()? {
             Cmp::Order { strict, flipped } => {
                 let d = if flipped { d.scale(-1)? } else { d };
@@ -4196,6 +4199,13 @@ impl<'a> Walk<'a> {
             }
             Cmp::Equal { negated: false } => vec![Fact::Ge(d.scale(-1)?), Fact::Ge(d)],
             Cmp::Equal { negated: true } => vec![Fact::Ne(d)],
+        })
+    }
+
+    /// A side of a clause as a sum of terms.
+    fn side(&self, s: &Side) -> Option<Lin> {
+        (s.0.iter()).try_fold(Lin::k(0), |sum, (k, o)| {
+            sum.add(&self.operand(o)?.scale(*k)?)
         })
     }
 
@@ -6907,9 +6917,9 @@ impl<'a> Walk<'a> {
     }
 
     /// Whether a `where` clause on the parameter `p` states `l >= 0`. The
-    /// clause grammar (`docs/language.md`) wants a `read` parameter, sides of
-    /// one atom or a literal, and atoms over `p` and the `read` parameters
-    /// before it.
+    /// clause grammar (`docs/language.md`) wants a `read` parameter, terms
+    /// over `p` and the `read` parameters before it, and sides of one term or
+    /// a literal unless every integer term is an `Int64`.
     fn states(&self, l: &Lin, p: Name) -> bool {
         let at = |n: Name| self.body.params.iter().position(|q| *q == n);
         let read = |n: Name| {
@@ -6924,12 +6934,19 @@ impl<'a> Walk<'a> {
         let (pos, neg) = (l.terms.iter()).partition::<Vec<&(Term, i64)>, _>(|(_, k)| *k > 0);
         let atoms = pos.len() <= 1
             && neg.len() <= 1
-            && (pos.is_empty() || neg.is_empty() || l.c == 0 || l.c == -1);
-        atoms
+            && (pos.is_empty() || neg.is_empty() || l.c == 0 || l.c == -1)
+            && l.terms.iter().all(|(_, k)| k.unsigned_abs() == 1);
+        let int64 = (l.terms.iter()).all(|(t, _)| match t {
+            Term::Val(n) => {
+                vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, self.decls)
+                    == Type::Int
+            }
+            _ => true,
+        });
+        (atoms || int64)
             && l.terms.iter().any(|(t, _)| t.name() == Some(p))
-            && (l.terms.iter()).all(|(t, k)| {
-                k.unsigned_abs() == 1
-                    && !matches!(t, Term::Col(..) | Term::Inner(..))
+            && (l.terms.iter()).all(|(t, _)| {
+                !matches!(t, Term::Col(..) | Term::Inner(..))
                     && t.name()
                         .is_some_and(|n| n == p || (read(n) && at(n).is_some_and(|i| i < own)))
             })
@@ -7052,10 +7069,13 @@ fn row_line(body: &Body, s: &St) -> Option<u32> {
 /// The parameter a parameter clause's atom constrains: its left side, which
 /// the clause grammar spells `value`.
 fn clause_of(a: &Atom) -> Name {
-    match (&a.l.of, &a.r.of) {
-        (Val::Name(n), _) | (_, Val::Name(n)) => *n,
-        _ => Name(0),
-    }
+    let name = |(_, o): &(i64, Operand)| match o.of {
+        Val::Name(n) => Some(n),
+        _ => None,
+    };
+    (a.l.0.iter().chain(&a.r.0))
+        .find_map(name)
+        .unwrap_or(Name(0))
 }
 
 /// The array or String field `f` of the record type `ty`, by its own index and
@@ -7694,10 +7714,9 @@ fn guard_names(g: &Guard, f: &mut dyn FnMut(Name)) {
         Guard::Shift(k, _) | Guard::NonZero(k) | Guard::NoOverflow(_, k, _) => val(k),
         Guard::Range(s, a, b) => [s, a, b].into_iter().for_each(val),
         Guard::Rule(r) | Guard::Scalar(r, _) => val(&Val::Name(*r)),
-        Guard::Clause { atoms, .. } => atoms.iter().for_each(|a| {
-            val(&a.l.of);
-            val(&a.r.of);
-        }),
+        Guard::Clause { atoms, .. } => (atoms.iter())
+            .flat_map(|a| a.l.0.iter().chain(&a.r.0))
+            .for_each(|(_, o)| val(&o.of)),
     }
 }
 

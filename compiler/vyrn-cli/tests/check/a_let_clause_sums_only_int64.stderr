@@ -1,0 +1,1 @@
+a_let_clause_sums_only_int64.vyrn:2:13: the `where` clause of `i` may compare only `value`, its `.length`, `.byteLength` or integer field, the `.length` of its field, and integer literals, of one integer type, or sums and literal multiples of them over `Int64`, and state facts of `value`, joined by `&&`

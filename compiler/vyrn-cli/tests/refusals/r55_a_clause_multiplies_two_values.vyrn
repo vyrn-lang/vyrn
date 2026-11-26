@@ -1,0 +1,8 @@
+// A clause side is a sum of literal multiples: `value * n` multiplies two
+// values, and a comparison over a product is no linear fact.
+fn next(b: Array<Int64>, n: Int64, i: Int64 where value * n < b.length) -> Int64 {
+    return b[i]
+}
+fn main() -> Int64 {
+    return next([1, 2], 1, 0)
+}

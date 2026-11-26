@@ -1,0 +1,8 @@
+// A sum in a clause is over Int64: a narrower type has no exact check of it.
+fn half(n: Int32) -> Int32 where value + value <= n {
+    return n / 2
+}
+fn main() -> Int64 {
+    let h = half(4)
+    return 0
+}

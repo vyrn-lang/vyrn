@@ -166,13 +166,34 @@ pub struct Ensures {
 }
 
 /// One comparison a parameter's `where` clause states, `l op r`: `op` is a
-/// comparison operator, and both operands are of the integer type `ty`.
+/// comparison operator, and both sides are of the integer type `ty`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Atom {
-    pub l: Operand,
+    pub l: Side,
     pub op: BinOp,
-    pub r: Operand,
+    pub r: Side,
     pub ty: Type,
+}
+
+/// A side of an [`Atom`]: the sum of its operands, each times its literal
+/// factor. A clause states a fact of mathematical integers, so a run-time
+/// check of a side that is no lone operand fails where the sum leaves
+/// `Int64`, the only type such a side has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Side(pub Vec<(i64, Operand)>);
+
+impl Side {
+    /// The side's operand when it is one operand with factor 1.
+    pub fn alone(&self) -> Option<&Operand> {
+        match self.0.as_slice() {
+            [(1, o)] => Some(o),
+            _ => None,
+        }
+    }
+
+    fn one(o: Operand) -> Side {
+        Side(vec![(1, o)])
+    }
 }
 
 /// An operand of an [`Atom`]: the value `of`, or the `part` of it a read
@@ -189,15 +210,16 @@ impl Atom {
     /// `by(k)`: a call's argument or a body's parameter. `None` when `by`
     /// has none.
     pub fn with(&self, by: &dyn Fn(usize) -> Option<Val>) -> Option<Atom> {
-        let put = |o: &Operand| {
-            let of = match &o.of {
-                Val::Name(k) => by(k.index())?,
-                lit => lit.clone(),
+        let put = |s: &Side| {
+            let each = |(f, o): &(i64, Operand)| {
+                let of = match &o.of {
+                    Val::Name(k) => by(k.index())?,
+                    lit => lit.clone(),
+                };
+                let part = o.part.clone();
+                Some((*f, Operand { of, part }))
             };
-            Some(Operand {
-                of,
-                part: o.part.clone(),
-            })
+            Some(Side(s.0.iter().map(each).collect::<Option<_>>()?))
         };
         Some(Atom {
             l: put(&self.l)?,
@@ -544,16 +566,84 @@ fn conjuncts(
         return conjuncts(of, rhs, decls, out, facts);
     }
     op.compare().ok_or_else(form)?;
-    let (l, lt) = operand(of, lhs, decls)?;
-    let (r, rt) = operand(of, rhs, decls)?;
-    let ty = match (lt, rt) {
-        (Some(a), Some(b)) if a == b => a,
-        (Some(a), None) | (None, Some(a)) => a,
-        (None, None) => Type::Int,
-        _ => return Err(of.form()),
-    };
+    let (mut l, mut r, mut tys) = (Vec::new(), Vec::new(), Vec::new());
+    side(of, lhs, 1, decls, &mut l, &mut tys)?;
+    side(of, rhs, 1, decls, &mut r, &mut tys)?;
+    let ty = tys.first().cloned().unwrap_or(Type::Int);
+    let (l, r) = (Side(l), Side(r));
+    let sum = |s: &Side| s.alone().is_none();
+    if tys.iter().any(|t| *t != ty) || (ty != Type::Int && (sum(&l) || sum(&r))) {
+        return Err(of.form());
+    }
     out.push(Atom { l, op: *op, r, ty });
     Ok(())
+}
+
+/// Appends to `out` the operands of `e`, one side of a comparison in the
+/// clause `of` states, each times `factor`, and to `tys` the integer type of
+/// each that is no literal. A side is a sum of differences of terms; a term
+/// is an operand, a literal multiple of a term, or a negated term.
+fn side(
+    of: Of,
+    e: &Expr,
+    factor: i64,
+    decls: &dyn Decls,
+    out: &mut Vec<(i64, Operand)>,
+    tys: &mut Vec<Type>,
+) -> Result<(), crate::rules::Rule> {
+    let lit = |e: &Expr| match e {
+        Expr::Int(n, _) => Some(*n),
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } => match &**expr {
+            Expr::Int(n, _) => n.checked_neg(),
+            _ => None,
+        },
+        _ => None,
+    };
+    let times = |k: i64| factor.checked_mul(k).ok_or_else(|| of.form());
+    match e {
+        Expr::Binary { op, lhs, rhs, .. } => match op {
+            BinOp::Add => {
+                side(of, lhs, factor, decls, out, tys)?;
+                side(of, rhs, factor, decls, out, tys)
+            }
+            BinOp::Sub => {
+                side(of, lhs, factor, decls, out, tys)?;
+                side(of, rhs, times(-1)?, decls, out, tys)
+            }
+            BinOp::Mul => match (lit(lhs), lit(rhs)) {
+                (Some(k), _) => side(of, rhs, times(k)?, decls, out, tys),
+                (None, Some(k)) => side(of, lhs, times(k)?, decls, out, tys),
+                (None, None) => Err(rule!(ClauseProduct, a = spelled(lhs), b = spelled(rhs))),
+            },
+            _ => Err(of.form()),
+        },
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } if lit(e).is_none() => side(of, expr, times(-1)?, decls, out, tys),
+        _ => {
+            let (o, ty) = operand(of, e, decls)?;
+            tys.extend(ty);
+            out.push((factor, o));
+            Ok(())
+        }
+    }
+}
+
+/// A factor of a product in source form: a name, a part of one, a literal,
+/// or `a sum` for any other expression.
+fn spelled(e: &Expr) -> String {
+    match e {
+        Expr::Var { name, .. } => name.clone(),
+        Expr::Field { expr, field, .. } => format!("{}.{field}", spelled(expr)),
+        Expr::Int(n, _) => n.to_string(),
+        _ => "a sum".into(),
+    }
 }
 
 /// The first fact word `e` calls, at any depth.
@@ -707,9 +797,9 @@ fn scalar_conjuncts(e: &Expr, ty: &Type, out: &mut Vec<Atom>) -> bool {
     match (op.compare(), operand(lhs), operand(rhs)) {
         (Some(_), Some(l), Some(r)) => {
             out.push(Atom {
-                l,
+                l: Side::one(l),
                 op: *op,
-                r,
+                r: Side::one(r),
                 ty: ty.clone(),
             });
             true

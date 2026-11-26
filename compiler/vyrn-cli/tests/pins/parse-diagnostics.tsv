@@ -117,8 +117,8 @@ compiler/vyrn-cli/tests/check/a_lazy_field_may_not_hold_a_stream.vyrn	0	cbf29ce4
 compiler/vyrn-cli/tests/check/a_lazy_field_must_name_a_real_type.vyrn	0	cbf29ce484222325	20	19	830a1f83ccd3bd3b
 compiler/vyrn-cli/tests/check/a_lazy_field_names_a_namespaced_type.vyrn	0	cbf29ce484222325	20	15	6166785808df1374
 compiler/vyrn-cli/tests/check/a_lazy_initializer_writes_the_state_a_loop_reads.vyrn	0	cbf29ce484222325	20	18	c5aac5f94cb6aada
-compiler/vyrn-cli/tests/check/a_let_clause_compares_without_arithmetic.vyrn	0	cbf29ce484222325	20	19	017c83c7ddc34246
 compiler/vyrn-cli/tests/check/a_let_clause_states_a_rule_of_value_alone.vyrn	0	cbf29ce484222325	20	15	c101750e54e928da
+compiler/vyrn-cli/tests/check/a_let_clause_sums_only_int64.vyrn	0	cbf29ce484222325	20	19	5bae51efc3adbe88
 compiler/vyrn-cli/tests/check/a_let_may_promise_again_while_the_facts_hold.vyrn	0	cbf29ce484222325	20	19	4ecf2bb98b70347f
 compiler/vyrn-cli/tests/check/a_let_promise_holds_of_the_value_it_binds.vyrn	0	cbf29ce484222325	20	20	225980e4a6247bb7
 compiler/vyrn-cli/tests/check/a_linked_type_assigned_as_a_variable_is_named_as_written.vyrn	0	cbf29ce484222325	20	19	7536ffb8bdf2eb26
@@ -873,7 +873,7 @@ compiler/vyrn-cli/tests/refusals/r51_a_map_key_the_value_changes.vyrn	0	cbf29ce4
 compiler/vyrn-cli/tests/refusals/r52_an_element_stored_from_its_sibling.vyrn	0	cbf29ce484222325	20	15	21648c41bee59385
 compiler/vyrn-cli/tests/refusals/r53_a_clause_names_a_later_parameter.vyrn	0	cbf29ce484222325	20	17	eb3c36fa33801619
 compiler/vyrn-cli/tests/refusals/r54_a_clause_names_a_modify_parameter.vyrn	0	cbf29ce484222325	20	18	de9922a9aa0e14ce
-compiler/vyrn-cli/tests/refusals/r55_a_clause_with_arithmetic.vyrn	0	cbf29ce484222325	20	19	6a464551de19daa7
+compiler/vyrn-cli/tests/refusals/r55_a_clause_multiplies_two_values.vyrn	0	cbf29ce484222325	20	18	5905b76b8c6a75a5
 compiler/vyrn-cli/tests/refusals/r56_a_function_value_with_a_clause.vyrn	0	cbf29ce484222325	20	14	f7aa6220631cc1d3
 compiler/vyrn-cli/tests/refusals/r57_a_clause_on_a_gen_fn.vyrn	0	cbf29ce484222325	20	17	a49b0ff8838490d1
 compiler/vyrn-cli/tests/refusals/r58_a_clause_on_an_export_extern_fn.vyrn	0	cbf29ce484222325	20	19	f26cf450b8309057
@@ -886,7 +886,7 @@ compiler/vyrn-cli/tests/refusals/r64_a_wider_record_a_function_value_takes.vyrn	
 compiler/vyrn-cli/tests/refusals/r65_a_wider_record_inside_a_record_field.vyrn	0	cbf29ce484222325	20	19	8aef736cbc17b61c
 compiler/vyrn-cli/tests/refusals/r66_a_function_argument_whose_result_misfits.vyrn	0	cbf29ce484222325	20	20	2c4d0a2d9be913b9
 compiler/vyrn-cli/tests/refusals/r67_a_type_argument_no_field_mentions.vyrn	0	cbf29ce484222325	20	19	4eaf5285b4903558
-compiler/vyrn-cli/tests/refusals/r68_a_result_clause_with_arithmetic.vyrn	0	cbf29ce484222325	20	18	a13b4135992461a9
+compiler/vyrn-cli/tests/refusals/r68_a_result_clause_sums_only_int64.vyrn	0	cbf29ce484222325	20	17	fae136720d11fef5
 compiler/vyrn-cli/tests/refusals/r69_a_result_clause_names_no_parameter.vyrn	0	cbf29ce484222325	20	16	298e9c89f4de9e85
 compiler/vyrn-cli/tests/refusals/r70_a_result_clause_names_a_modify_parameter.vyrn	0	cbf29ce484222325	20	15	8f3cd7ab0660df60
 compiler/vyrn-cli/tests/refusals/r71_a_glued_hole_takes_a_name.vyrn	0	cbf29ce484222325	20	15	e41f5aa1b7b135bb

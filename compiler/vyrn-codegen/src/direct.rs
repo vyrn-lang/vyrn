@@ -7479,23 +7479,28 @@ impl<'p> Fn_<'_, 'p> {
         for a in atoms {
             let n = Num::of(&self.cx.resolve(&a.ty))
                 .ok_or_else(|| gap("a clause over no integer", line))?;
-            for o in [&a.l, &a.r] {
-                match (&o.of, o.part.as_deref()) {
-                    (v, None) => self.core_val(m, b, v, &a.ty, line)?,
-                    (Val::Lit(Lit::Str(s)), Some("byteLength")) => {
-                        b.ins(&Instruction::I64Const(s.len() as i64));
+            let exact = a.l.alone().is_some() && a.r.alone().is_some();
+            // An exact atom takes no local, so its module is the one sums left alone.
+            let wrapped = (!exact).then(|| self.scratch(b, ValType::I32, 9));
+            if let Some(w) = wrapped {
+                b.ins(&Instruction::I32Const(0));
+                b.ins(&Instruction::LocalSet(w));
+            }
+            for side in [&a.l, &a.r] {
+                match side.alone() {
+                    Some(o) => self.clause_operand(m, b, o, &a.ty, line)?,
+                    None => {
+                        let w = wrapped.ok_or_else(|| gap("a sum in an exact clause", line))?;
+                        self.clause_sum(m, b, side, w, line)?
                     }
-                    (Val::Name(x), Some(path)) => {
-                        let at = (path.split('.'))
-                            .fold(vyrn_frontend::core::Place::Name(*x), |p, f| {
-                                vyrn_frontend::core::Place::Field(Box::new(p), f.to_string())
-                            });
-                        self.core_read(m, b, &at, line)?;
-                    }
-                    _ => return unsupported("a clause operand of a literal", line),
                 }
             }
             b.ins(&int_op(a.op, n).ok_or_else(|| gap("a clause with no comparison", line))?);
+            if let Some(w) = wrapped {
+                b.ins(&Instruction::LocalGet(w));
+                b.ins(&Instruction::I32Eqz);
+                b.ins(&Instruction::I32And);
+            }
             b.ins(&Instruction::I32Eqz);
             b.ins(&Instruction::If(BlockType::Empty));
             self.depth += 1;
@@ -7511,6 +7516,92 @@ impl<'p> Fn_<'_, 'p> {
             self.depth -= 1;
             b.ins(&Instruction::End);
         }
+        Ok(())
+    }
+
+    /// Pushes the operand `o` of a clause of type `ty`.
+    fn clause_operand(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        o: &vyrn_frontend::core::check::Operand,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        match (&o.of, o.part.as_deref()) {
+            (v, None) => self.core_val(m, b, v, ty, line),
+            (Val::Lit(Lit::Str(s)), Some("byteLength")) => {
+                b.ins(&Instruction::I64Const(s.len() as i64));
+                Ok(())
+            }
+            (Val::Name(x), Some(path)) => {
+                let at = (path.split('.')).fold(vyrn_frontend::core::Place::Name(*x), |p, f| {
+                    vyrn_frontend::core::Place::Field(Box::new(p), f.to_string())
+                });
+                self.core_read(m, b, &at, line).map(drop)
+            }
+            _ => unsupported("a clause operand of a literal", line),
+        }
+    }
+
+    /// Pushes the `Int64` sum `side` of a clause, and sets `wrapped` where a product or a
+    /// partial sum leaves `Int64`: the clause states a fact of mathematical integers, so a
+    /// sum that wraps fails it.
+    fn clause_sum(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        side: &vyrn_frontend::core::check::Side,
+        wrapped: u32,
+        line: usize,
+    ) -> Result<(), String> {
+        let (sum, t, next) = (
+            self.scratch(b, ValType::I64, 0),
+            self.scratch(b, ValType::I64, 1),
+            self.scratch(b, ValType::I64, 2),
+        );
+        let flag = |b: &mut Frame| {
+            b.ins(&Instruction::LocalGet(wrapped));
+            b.ins(&Instruction::I32Or);
+            b.ins(&Instruction::LocalSet(wrapped));
+        };
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::LocalSet(sum));
+        for (k, o) in &side.0 {
+            self.clause_operand(m, b, o, &Type::Int, line)?;
+            b.ins(&Instruction::LocalSet(t));
+            if *k != 1 {
+                // `t * k` stays in `Int64` exactly where `lo <= t <= hi`.
+                let (lo, hi) = factor_range(*k);
+                for (bound, out) in [(lo, Instruction::I64LtS), (hi, Instruction::I64GtS)] {
+                    b.ins(&Instruction::LocalGet(t));
+                    b.ins(&Instruction::I64Const(bound));
+                    b.ins(&out);
+                    flag(b);
+                }
+                b.ins(&Instruction::LocalGet(t));
+                b.ins(&Instruction::I64Const(*k));
+                b.ins(&Instruction::I64Mul);
+                b.ins(&Instruction::LocalSet(t));
+            }
+            // `sum + t` wraps exactly where both differ in sign from the result.
+            b.ins(&Instruction::LocalGet(sum));
+            b.ins(&Instruction::LocalGet(t));
+            b.ins(&Instruction::I64Add);
+            b.ins(&Instruction::LocalSet(next));
+            for x in [sum, t] {
+                b.ins(&Instruction::LocalGet(x));
+                b.ins(&Instruction::LocalGet(next));
+                b.ins(&Instruction::I64Xor);
+            }
+            b.ins(&Instruction::I64And);
+            b.ins(&Instruction::I64Const(0));
+            b.ins(&Instruction::I64LtS);
+            flag(b);
+            b.ins(&Instruction::LocalGet(next));
+            b.ins(&Instruction::LocalSet(sum));
+        }
+        b.ins(&Instruction::LocalGet(sum));
         Ok(())
     }
 
@@ -10373,6 +10464,19 @@ fn widen(b: &mut Frame, n: Num) {
             &Instruction::I64ExtendI32U
         });
     }
+}
+
+/// The least and the greatest `t` whose product `t * k` is an `Int64`; `k` is not zero.
+fn factor_range(k: i64) -> (i64, i64) {
+    let floor = |a: i128, d: i128| a.div_euclid(d) - i128::from(d < 0 && a.rem_euclid(d) != 0);
+    let ceil = |a: i128, d: i128| -floor(-a, d);
+    let (min, max, k) = (i128::from(i64::MIN), i128::from(i64::MAX), i128::from(k));
+    let (lo, hi) = match k > 0 {
+        true => (ceil(min, k), floor(max, k)),
+        false => (ceil(max, k), floor(min, k)),
+    };
+    let clamp = |v: i128| v.clamp(min, max) as i64;
+    (clamp(lo), clamp(hi))
 }
 
 /// The wasm opcode for `op` at width `n`, or `None` for a non-arithmetic operator.
