@@ -7273,6 +7273,25 @@ fn a_generator_path_jumps_to_its_file() {
     assert!(target.ends_with("/calc.syntax"), "{link}");
 }
 
+/// A namespace's hover lists each member's signature.
+#[test]
+fn a_namespace_hover_lists_its_members_signatures() {
+    let (text, uri, mut client) = open_calc_editor("genhover");
+    let line = text
+        .lines()
+        .position(|l| l.contains("as reported"))
+        .unwrap() as u32;
+    let col = text
+        .lines()
+        .nth(line as usize)
+        .unwrap()
+        .find("reported")
+        .unwrap() as u32;
+    let v = hover_value(&mut client, &uri, line, col + 1).expect("a hover");
+    assert!(v.contains("reportLedger(path: String) -> Code"), "{v}");
+    assert!(!v.contains("exported member(s)"), "{v}");
+}
+
 /// A language module's companion replaces the default check: `calc.editor.vyrn`
 /// refuses an account the ledger does not know, keeps the grammar's own
 /// refusal, and gives an account's hover.

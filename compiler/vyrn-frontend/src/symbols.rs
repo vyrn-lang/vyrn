@@ -1051,17 +1051,22 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
                 None => nowhere(&c.label, c.kind, hover),
             })
         }
-        // The namespace binding itself, a compile-time name, not a value. A generated one's
-        // definition is its module's first line.
+        // The namespace binding itself, a compile-time name, not a value: its hover lists
+        // each member's signature, and a generated one's definition is its module's first line.
         Some(Named::Namespace(ns)) => {
-            let hover = hover_of(
-                &format!(
-                    "namespace `{}` — {} exported member(s) (a compile-time name, not a value)",
-                    ns.name,
-                    ns.members.len()
-                ),
-                &[],
-            );
+            let members: Vec<&str> = ns.members.iter().map(|m| m.detail.as_str()).collect();
+            let doc = format!("namespace `{}` (a compile-time name, not a value)", ns.name);
+            let signature = (!members.is_empty()).then(|| members.join("\n"));
+            let hover = Hover {
+                text: signature
+                    .iter()
+                    .chain([&doc])
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+                signature,
+                doc,
+            };
             Some(Resolution {
                 target_line: 1,
                 definition: ns.generated.is_some(),

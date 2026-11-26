@@ -630,7 +630,7 @@ request `vyrn/generatedSource` takes `{ uri }` with such a URI and answers the
 module's text, as `vyrn emit-gen` prints it, or `null` when the root does not
 generate it. The VS Code extension serves the scheme as a read-only Vyrn
 document. The definition of the generator's path string opens the file it
-names.
+names. The namespace's hover lists each member's signature.
 
 The server is outside the Cargo workspace. Build and test it explicitly:
 
