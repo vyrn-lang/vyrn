@@ -15,6 +15,9 @@ pub struct Check {
     pub rule: Raises,
     pub guard: Guard,
     pub site: Site,
+    /// The expression of the row it guards; [`super::Span::NONE`] for a check of no one
+    /// expression, such as a loop invariant's or a result clause's.
+    pub span: super::Span,
     pub verdict: Verdict,
     /// Why a [`Verdict::Kept`] row stays, written with the verdict
     /// (`vyrn_lower::elide`); [`Why::Unsaid`] for a proved row.

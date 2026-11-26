@@ -19,12 +19,24 @@ pub struct Hole {
     pub col: usize,
 }
 
-/// A token and the 1-based line and column it starts on.
+impl Hole {
+    /// The line and column just past the hole's closing `}`, which follows its source.
+    pub fn end(&self) -> (usize, usize) {
+        let mut lines = LineCol::START;
+        let past = lines.of(&self.src, self.src.len());
+        let (line, col) = moved(past, (self.line, self.col));
+        (line, col + 1)
+    }
+}
+
+/// A token, the 1-based line and column it starts on, and the line and column just past its
+/// last character. A token no source spells ends where it starts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub tok: Tok,
     pub line: usize,
     pub col: usize,
+    pub end: (usize, usize),
 }
 
 /// Drops a `vyrn"""` quote's closing indentation, Swift's rule: when the text
@@ -102,6 +114,8 @@ pub struct Triv {
     pub col: usize,
     /// 1-based end line; it differs from `start_line` only for a multi-line string.
     pub end_line: usize,
+    /// 1-based column on `end_line` just past the item's last character.
+    pub end_col: usize,
     /// Whether whitespace, a newline or a comment precedes this item. It tells a
     /// generic `<`/`>`, which is tight, from a comparison.
     pub space_before: bool,
@@ -270,20 +284,21 @@ enum Escape {
 /// [`Token`], which drops a comment. One scan builds either, so [`lex`] copies
 /// no item.
 trait Item: Sized {
-    /// The item `kind` makes, starting at `at`, ending on `end_line` and
-    /// printed as `span`; `None` where this output keeps no such item.
+    /// The item `kind` makes, starting at `at`, its last character before `stop`, and printed
+    /// as `span`; `None` where this output keeps no such item.
     fn of(
         kind: TrivKind,
         at: (usize, usize),
-        end_line: usize,
+        stop: (usize, usize),
         span: std::ops::Range<usize>,
         space_before: bool,
     ) -> Option<Self>;
     /// The item's token where it is an identifier or a keyword, which lies on
     /// one line, and that line.
     fn word(&self) -> Option<(&Tok, usize)>;
-    /// Makes the item the identifier `text`, which a splice grew to end at `end`.
-    fn grow(&mut self, text: String, end: usize);
+    /// Makes the item the identifier `text`, which a splice grew to end at byte `end`, the
+    /// line and column `stop`.
+    fn grow(&mut self, text: String, end: usize, stop: (usize, usize));
 }
 
 fn is_word(t: &Tok) -> bool {
@@ -294,7 +309,7 @@ impl Item for Triv {
     fn of(
         kind: TrivKind,
         (start_line, col): (usize, usize),
-        end_line: usize,
+        (end_line, end_col): (usize, usize),
         span: std::ops::Range<usize>,
         space_before: bool,
     ) -> Option<Self> {
@@ -304,6 +319,7 @@ impl Item for Triv {
             start_line,
             col,
             end_line,
+            end_col,
             space_before,
         })
     }
@@ -315,8 +331,9 @@ impl Item for Triv {
         }
     }
 
-    fn grow(&mut self, text: String, end: usize) {
+    fn grow(&mut self, text: String, end: usize, stop: (usize, usize)) {
         self.span.end = end;
+        self.end_col = stop.1;
         self.kind = TrivKind::Tok(Tok::Ident(text));
     }
 }
@@ -325,7 +342,7 @@ impl Item for Token {
     fn of(
         kind: TrivKind,
         (line, col): (usize, usize),
-        _: usize,
+        end: (usize, usize),
         _: std::ops::Range<usize>,
         _: bool,
     ) -> Option<Self> {
@@ -334,14 +351,20 @@ impl Item for Token {
             TrivKind::Doc(text) => Tok::Doc(text),
             TrivKind::Tok(t) => t,
         };
-        Some(Token { tok, line, col })
+        Some(Token {
+            tok,
+            line,
+            col,
+            end,
+        })
     }
 
     fn word(&self) -> Option<(&Tok, usize)> {
         is_word(&self.tok).then_some((&self.tok, self.line))
     }
 
-    fn grow(&mut self, text: String, _: usize) {
+    fn grow(&mut self, text: String, _: usize, stop: (usize, usize)) {
+        self.end = stop;
         self.tok = Tok::Ident(text);
     }
 }
@@ -365,20 +388,19 @@ struct Items<'s, I> {
 }
 
 impl<I: Item> Items<'_, I> {
-    /// Pushes an item that starts at `at`, a line and column, and ends on
-    /// `end_line`. `span` is its printed text, and its rule matched up to `end`.
+    /// Pushes an item that starts at `at`, a line and column. `span` is its printed text, and
+    /// its rule matched up to `end`.
     fn push(
         &mut self,
         kind: TrivKind,
         at: (usize, usize),
-        end_line: usize,
         span: std::ops::Range<usize>,
         end: usize,
     ) {
         let space_before = self.items.is_empty() || self.end < span.start;
         self.start = span.start;
-        self.items
-            .extend(I::of(kind, at, end_line, span, space_before));
+        let stop = self.lines.of(self.src, span.end);
+        self.items.extend(I::of(kind, at, stop, span, space_before));
         self.end = end;
     }
 
@@ -387,7 +409,7 @@ impl<I: Item> Items<'_, I> {
     fn push_line(&mut self, kind: TrivKind, start: usize, end: usize) {
         let at = self.lines.of(self.src, start);
         let text = self.src[start..end].trim_end_matches(['\r', ' ', '\t']);
-        self.push(kind, at, at.0, start..start + text.len(), end);
+        self.push(kind, at, start..start + text.len(), end);
     }
 }
 
@@ -399,7 +421,7 @@ impl<I: Item> grammar::Hooks for Items<'_, I> {
 
     fn punct(&mut self, start: usize, end: usize, tok: Tok) -> Result<(), Box<Diagnostic>> {
         let at = self.lines.of(self.src, start);
-        self.push(TrivKind::Tok(tok), at, at.0, start..end, end);
+        self.push(TrivKind::Tok(tok), at, start..end, end);
         Ok(())
     }
 
@@ -421,7 +443,7 @@ impl<I: Item> grammar::Hooks for Items<'_, I> {
         let at = self.lines.of(self.src, start);
         let text = &self.src[start..end];
         let tok = grammar::keyword(text).unwrap_or_else(|| Tok::Ident(text.to_string()));
-        self.push(TrivKind::Tok(tok), at, at.0, start..end, end);
+        self.push(TrivKind::Tok(tok), at, start..end, end);
         Ok(())
     }
 
@@ -434,13 +456,14 @@ impl<I: Item> grammar::Hooks for Items<'_, I> {
         // last item touches a kept one.
         match self.items.last_mut() {
             Some(last) if self.end == start && last.word().is_some() => {
-                last.grow(src[self.start..end].to_string(), end);
+                let stop = self.lines.of(src, end);
+                last.grow(src[self.start..end].to_string(), end, stop);
                 self.end = end;
             }
             _ => {
                 let at = self.lines.of(src, start);
                 let tok = TrivKind::Tok(Tok::Ident(src[start..end].to_string()));
-                self.push(tok, at, at.0, start..end, end);
+                self.push(tok, at, start..end, end);
             }
         }
         Ok(())
@@ -465,7 +488,7 @@ impl<I: Item> grammar::Hooks for Items<'_, I> {
                 ),
             }
         };
-        self.push(TrivKind::Tok(tok), at, at.0, start..end, end);
+        self.push(TrivKind::Tok(tok), at, start..end, end);
         Ok(())
     }
 
@@ -481,7 +504,7 @@ impl<I: Item> grammar::Hooks for Items<'_, I> {
             _ => None,
         };
         let value = value.expect("vyrn.syntax's byteBody admits one byte or one escape");
-        self.push(TrivKind::Tok(Tok::Byte(value)), at, at.0, start..end, end);
+        self.push(TrivKind::Tok(Tok::Byte(value)), at, start..end, end);
         Ok(())
     }
 
@@ -582,8 +605,7 @@ impl<I: Item> grammar::Hooks for Items<'_, I> {
         };
         // The token sits at the opening quote, so a diagnostic on a multi-line
         // string points where it starts. Only a string spans lines.
-        let (end_line, _) = self.lines.of(src, end);
-        self.push(TrivKind::Tok(tok), at, end_line, start..end, end);
+        self.push(TrivKind::Tok(tok), at, start..end, end);
         Ok(())
     }
 }
@@ -632,6 +654,7 @@ pub fn lex_at(src: &str, (line, col): (usize, usize)) -> Result<Vec<Token>, Diag
         Ok(mut toks) => {
             for t in &mut toks {
                 (t.line, t.col) = moved((t.line, t.col), (line, col));
+                t.end = moved(t.end, (line, col));
             }
             return Ok(toks);
         }
@@ -661,10 +684,15 @@ pub(crate) fn lex_quote(src: &str) -> Result<Vec<Token>, Diagnostic> {
 /// that also reads the items' spans.
 pub fn tokens(scanned: Scan) -> Vec<Token> {
     let mut items = Vec::with_capacity(scanned.items.len() + 1);
-    items.extend(
-        (scanned.items.into_iter())
-            .filter_map(|t| Token::of(t.kind, (t.start_line, t.col), 0, t.span, false)),
-    );
+    items.extend((scanned.items.into_iter()).filter_map(|t| {
+        Token::of(
+            t.kind,
+            (t.start_line, t.col),
+            (t.end_line, t.end_col),
+            t.span,
+            false,
+        )
+    }));
     let (end_line, end_col) = (scanned.end_line, scanned.end_col);
     with_eof(Scan {
         items,
@@ -680,6 +708,7 @@ fn with_eof(scanned: Scan<Token>) -> Vec<Token> {
         tok: Tok::Eof,
         line: scanned.end_line,
         col: scanned.end_col,
+        end: (scanned.end_line, scanned.end_col),
     });
     out
 }

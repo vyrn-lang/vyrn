@@ -866,6 +866,7 @@ compiler/vyrn-cli/tests/refusals/r10_consume_module_state.vyrn	0	cbf29ce48422232
 compiler/vyrn-cli/tests/refusals/r110_a_field_taken_out_of_a_type_another_module_releases.vyrn	0	cbf29ce484222325	20	16	df16107af9aca75f
 compiler/vyrn-cli/tests/refusals/r111_an_import_of_a_name_a_runtime_module_does_not_export.vyrn	0	cbf29ce484222325	20	14	bd350ad73a5f6ef3
 compiler/vyrn-cli/tests/refusals/r112_a_match_that_takes_apart_a_type_another_module_releases.vyrn	0	cbf29ce484222325	20	17	c0fef93f6b291647
+compiler/vyrn-cli/tests/refusals/r113_an_interpolated_value_with_no_to_string.vyrn	0	cbf29ce484222325	20	18	fbf7f33b63f22b3a
 compiler/vyrn-cli/tests/refusals/r11_consume_a_read_parameter.vyrn	0	cbf29ce484222325	20	16	b02883fcda15b8c1
 compiler/vyrn-cli/tests/refusals/r12_module_state_to_a_consume_parameter.vyrn	0	cbf29ce484222325	20	19	f1882cf2708151e9
 compiler/vyrn-cli/tests/refusals/r13_read_parameter_to_a_consume_parameter.vyrn	0	cbf29ce484222325	20	19	a63348b6dc947dbc

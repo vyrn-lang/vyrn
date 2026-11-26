@@ -12,7 +12,7 @@ use vyrn_frontend::ast::BinOp;
 use vyrn_frontend::ast::{FnId, Program};
 use vyrn_frontend::core::check::{Guard, Verdict, Why};
 use vyrn_frontend::core::{
-    rows, Body, BorrowKind, Callee, Copied, Ctor, Lit, Made, Name, NameInfo, Op, Rhs, St, Val,
+    rows, Body, BorrowKind, Callee, Copied, Ctor, Lit, Made, Name, NameInfo, Op, Rhs, Span, St, Val,
 };
 
 use vyrn_frontend::symbols::{CostLine, FnCost};
@@ -30,6 +30,10 @@ pub struct Fact {
     pub ordinal: u32,
     /// How many loops enclose the row.
     pub depth: u32,
+    /// The expression the fact costs at ([`St::span`]; a check's is [`Check::span`]).
+    ///
+    /// [`Check::span`]: vyrn_frontend::core::check::Check::span
+    pub span: Span,
     pub kind: Kind,
 }
 
@@ -144,10 +148,15 @@ pub fn facts(body: &Body, world: &World, erased: &Erased) -> Vec<Fact> {
     let mut out: Vec<Fact> = Vec::new();
     for (s, depth) in rows(&body.stmts) {
         if let Some((line, kind)) = row(s, body, world, erased) {
+            let span = match s {
+                St::Check(c) => c.span,
+                s => s.span(&body.names),
+            };
             out.push(Fact {
                 line,
                 ordinal: 0,
                 depth,
+                span,
                 kind,
             });
         }
@@ -462,16 +471,16 @@ pub fn source(program: &Program, world: &World, body: &Body, src: Src) -> String
 pub struct CostRow {
     /// The deepest loop nest among the line's facts of this verb.
     pub depth: u32,
-    /// What it does: the noun (a type, a callee, a check's kind), the reason, and how many
-    /// times the line states the pair.
-    whats: Vec<(String, String, usize)>,
+    /// What it does: the noun (a type, a callee, a check's kind), the reason, and the span of
+    /// each time the line states the pair.
+    whats: Vec<(String, String, Vec<Span>)>,
 }
 
 impl CostRow {
     /// Each noun as `say` spells it, with its count: `String x3`.
     fn nouns(&self, say: impl Fn(&str) -> String) -> Vec<String> {
         (self.whats.iter())
-            .map(|(noun, _, n)| match n {
+            .map(|(noun, _, at)| match at.len() {
                 1 => say(noun),
                 n => format!("{} x{n}", say(noun)),
             })
@@ -519,7 +528,7 @@ impl CostRow {
 
     /// How many facts the row joins.
     pub fn count(&self) -> usize {
-        self.whats.iter().map(|w| w.2).sum()
+        self.whats.iter().map(|w| w.2.len()).sum()
     }
 
     /// The row in full, with code in backticks: what it does and why, for `why --cost`
@@ -590,8 +599,8 @@ pub fn table(
                 .iter_mut()
                 .find(|w| (&w.0, &w.1) == (&what.0, &what.1))
             {
-                Some(w) => w.2 += 1,
-                None => row.whats.push((what.0, what.1, 1)),
+                Some(w) => w.2.push(f.span),
+                None => row.whats.push((what.0, what.1, vec![f.span])),
             }
         }
         out.push((id, shown));
@@ -616,7 +625,9 @@ pub fn fn_costs(program: &Program, world: &World) -> Vec<FnCost> {
                 depth: row.depth,
                 label: row.label(verb),
                 text: row.text(verb),
-                items: row.items(verb),
+                items: (row.items(verb).into_iter())
+                    .zip(row.whats.iter().map(|w| w.2.clone()))
+                    .collect(),
                 count: row.count(),
             })
             .collect()

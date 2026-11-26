@@ -2518,7 +2518,12 @@ impl Bodies {
                 .map(|d| in_module(d, key, root_key))
                 .collect()
         };
-        let brace = |tok: lexer::Tok, (line, col): (usize, usize)| lexer::Token { tok, line, col };
+        let brace = |tok: lexer::Tok, (line, col): (usize, usize)| lexer::Token {
+            tok,
+            line,
+            col,
+            end: (line, col),
+        };
         let mut tokens = Vec::new();
         let mut end = (1, 1);
         for &ri in rows {

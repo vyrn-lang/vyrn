@@ -123,7 +123,7 @@ fn compact(row: &CostLine) -> (String, String) {
         return (row.label.clone(), row.text.clone());
     };
     let mut tip = format!("**{glyph} {title} {}**\n", row.count);
-    for item in &row.items {
+    for (item, _) in &row.items {
         tip += &format!("\n- {item}");
     }
     match row.depth {

@@ -1178,6 +1178,7 @@ impl<'t> Recognizer<'t> {
         let mut toks = lex(&hole.src).map_err(|e| wrap(e.render()))?;
         for t in &mut toks {
             (t.line, t.col) = lexer::moved((t.line, t.col), (hole.line, hole.col));
+            t.end = lexer::moved(t.end, (hole.line, hole.col));
         }
         let run = {
             let cx = Cx::plain(self.cx.answers);

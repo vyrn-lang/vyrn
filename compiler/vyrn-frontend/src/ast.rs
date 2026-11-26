@@ -170,17 +170,18 @@ pub struct MethodId {
 
 /// A node's slot for its [`NodeId`], [`NodeId::NONE`] until numbered, the
 /// 1-based column of the name the node spells, 0 when a desugar built it, and
-/// where the node starts. Any two slots compare equal, so two trees compare by
+/// where the node starts and ends. Any two slots compare equal, so two trees compare by
 /// structure alone. `{:?}` prints every slot alike, so a fingerprint over a
 /// tree's debug text ignores ids too; `{:#?}` prints the id as `#unit.local`.
 #[derive(Clone, Copy, Default)]
-pub struct Id(pub NodeId, u32, Start);
+pub struct Id(pub NodeId, u32, Start, Start);
 
 /// The 1-based line and column of a node's first token. The parser gives it
 /// to every node it builds, and [`Numbering`] gives a node a desugar built
 /// its parent's, the construct it stands for. Only a node synthesized outside
 /// any parsed construct, such as a function the loader writes, starts at
-/// `(0, 0)`.
+/// `(0, 0)`. As an end, the line and column just past an expression's last
+/// token, `(0, 0)` for a node the parser did not build.
 #[derive(Clone, Copy, Default)]
 struct Start {
     line: u32,
@@ -189,16 +190,21 @@ struct Start {
 
 impl Id {
     /// The slot a node is built with.
-    pub const NEW: Id = Id(NodeId::NONE, 0, Start { line: 0, col: 0 });
+    pub const NEW: Id = Id(
+        NodeId::NONE,
+        0,
+        Start { line: 0, col: 0 },
+        Start { line: 0, col: 0 },
+    );
 
     /// The slot of a node whose name is spelled at column `col`.
     pub fn at(col: usize) -> Id {
-        Id(NodeId::NONE, col as u32, Start::default())
+        Id(NodeId::NONE, col as u32, Start::default(), Start::default())
     }
 
     /// The slot of the node numbered `node`, which spells no name.
     pub fn of(node: NodeId) -> Id {
-        Id(node, 0, Start::default())
+        Id(node, 0, Start::default(), Start::default())
     }
 
     /// The column of the name the node spells, 0 for none.
@@ -223,6 +229,22 @@ impl Id {
     pub fn starts(&mut self, (line, col): (usize, usize)) {
         if self.2.line == 0 {
             self.2 = Start {
+                line: line as u32,
+                col: col as u32,
+            };
+        }
+    }
+
+    /// The line and column just past the node's last token; `(0, 0)` for a node the parser
+    /// did not build.
+    pub fn end(self) -> (usize, usize) {
+        (self.3.line as usize, self.3.col as usize)
+    }
+
+    /// Sets where the node ends, unless it has an end already.
+    pub fn ends(&mut self, (line, col): (usize, usize)) {
+        if self.3.line == 0 {
+            self.3 = Start {
                 line: line as u32,
                 col: col as u32,
             };
@@ -2330,6 +2352,16 @@ impl Expr {
     /// Sets where the expression starts, unless it has a start already.
     pub fn starts(&mut self, at: (usize, usize)) {
         slot!(self, &mut).starts(at)
+    }
+
+    /// The line and column just past the expression's last token ([`Id::end`]).
+    pub fn end(&self) -> (usize, usize) {
+        slot!(self, &).end()
+    }
+
+    /// Sets where the expression ends, unless it has an end already.
+    pub fn ends(&mut self, at: (usize, usize)) {
+        slot!(self, &mut).ends(at)
     }
 
     /// The 1-based column of the name this node spells, 0 for a node that spells none.
