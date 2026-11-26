@@ -34,15 +34,15 @@ use lsp_types::{
     DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     Documentation, FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverContents, HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel,
-    InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InsertTextFormat, Location,
-    LocationLink, MarkupContent, MarkupKind, OneOf, Position, PrepareRenameResponse,
-    PublishDiagnosticsParams, Range, Registration, RegistrationParams, RelativePattern,
-    RenameOptions, RenameParams, SemanticToken, SemanticTokenModifier, SemanticTokenType,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
-    WorkspaceEdit,
+    InlayHintLabelPart, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
+    InsertTextFormat, Location, LocationLink, MarkupContent, MarkupKind, OneOf, Position,
+    PrepareRenameResponse, PublishDiagnosticsParams, Range, Registration, RegistrationParams,
+    RelativePattern, RenameOptions, RenameParams, SemanticToken, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 
 use vyrn_frontend::audience::ClaimKind;
@@ -2051,7 +2051,9 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
         })
         .collect();
     if let Some(src) = src.as_deref() {
-        hints.extend(type_hints(analysis, src, from, to));
+        let home = &p.text_document.uri;
+        let locate = |name: &str| type_location(server, analysis, Some(home), name);
+        hints.extend(type_hints(analysis, src, from, to, &locate));
         if cost_hints() {
             let path = uri_path(&p.text_document.uri);
             let uri = p.text_document.uri.as_str();
@@ -2083,7 +2085,13 @@ fn handle_inlay_resolve(server: &Server, params: serde_json::Value) -> Option<In
 /// A `: Type` label after the name of every binding in lines `from..=to` whose
 /// source does not already say its type (`let p = o.copy()` -> `p: Outer`). The
 /// type is the analysis's, as hover renders it.
-fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<InlayHint> {
+fn type_hints(
+    analysis: &Analysis,
+    src: &str,
+    from: usize,
+    to: usize,
+    locate: &dyn Fn(&str) -> Option<Location>,
+) -> Vec<InlayHint> {
     let lines: Vec<&str> = src.lines().collect();
     let mut out = Vec::new();
     for b in &analysis.locals {
@@ -2096,7 +2104,7 @@ fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<Inl
         let Some(label) = type_hint_label(b, &analysis.spellings, line, b.end_col) else {
             continue;
         };
-        out.push(type_hint_at(line, b.line, b.end_col, label));
+        out.push(type_hint_at(line, b.line, b.end_col, &label, locate));
     }
     out
 }
@@ -2125,14 +2133,21 @@ fn type_hint_label(
 }
 
 /// One type hint just past a name at 1-based `(line, end_col)`, `end_col` a char
-/// column of `line_text`.
-fn type_hint_at(line_text: &str, line: usize, end_col: usize, label: String) -> InlayHint {
+/// column of `line_text`. Each type name of `label` that `locate` finds is its own label part,
+/// with the declaration's location; the rest, a built-in type and the punctuation, stays plain.
+fn type_hint_at(
+    line_text: &str,
+    line: usize,
+    end_col: usize,
+    label: &str,
+    locate: &dyn Fn(&str) -> Option<Location>,
+) -> InlayHint {
     InlayHint {
         position: Position {
             line: (line - 1) as u32,
             character: char_col_to_utf16(line_text, end_col - 1),
         },
-        label: InlayHintLabel::String(format!(": {label}")),
+        label: InlayHintLabel::LabelParts(type_label_parts(label, locate)),
         kind: Some(InlayHintKind::TYPE),
         text_edits: None,
         tooltip: None,
@@ -2140,6 +2155,65 @@ fn type_hint_at(line_text: &str, line: usize, end_col: usize, label: String) -> 
         padding_right: None,
         data: None,
     }
+}
+
+/// `: label` as label parts: a part per name `locate` finds, carrying its location, and a
+/// plain part for each run between them.
+fn type_label_parts(
+    label: &str,
+    locate: &dyn Fn(&str) -> Option<Location>,
+) -> Vec<InlayHintLabelPart> {
+    let part = |value: String, location| InlayHintLabelPart {
+        value,
+        tooltip: None,
+        location,
+        command: None,
+    };
+    let mut parts = Vec::new();
+    let mut plain = String::from(": ");
+    let mut rest = label;
+    while !rest.is_empty() {
+        let word = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(rest.len());
+        let take = word.max(rest.chars().next().map_or(1, char::len_utf8));
+        let (head, tail) = rest.split_at(take);
+        match (word > 0).then(|| locate(head)).flatten() {
+            Some(at) => {
+                if !plain.is_empty() {
+                    parts.push(part(std::mem::take(&mut plain), None));
+                }
+                parts.push(part(head.to_string(), Some(at)));
+            }
+            None => plain.push_str(head),
+        }
+        rest = tail;
+    }
+    if !plain.is_empty() {
+        parts.push(part(plain, None));
+    }
+    parts
+}
+
+/// The declaration of the type `name` among `analysis`'s symbols: in its module's file, or in
+/// `home` for one the document declares. `None` for a built-in type and for a declaration with
+/// no file, such as one of a generated module.
+fn type_location(
+    server: &Server,
+    analysis: &Analysis,
+    home: Option<&Url>,
+    name: &str,
+) -> Option<Location> {
+    let s = (analysis.symbols.iter()).find(|s| s.kind == SymbolKind::Type && s.name == name)?;
+    let uri = match &s.file {
+        Some(f) => Url::from_file_path(f.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?,
+        None => home?.clone(),
+    };
+    let text = doc_text(server, &uri).unwrap_or_default();
+    Some(Location {
+        range: lsp_range(&text, s.line, s.col, s.end_col),
+        uri,
+    })
 }
 
 /// Type hints for a generator input: bindings of the generated module mapped back through
@@ -2169,11 +2243,14 @@ fn input_type_hints(server: &Server, input_uri: &Url, from: usize, to: usize) ->
                 else {
                     continue;
                 };
+                let analysis = &sp.synth.analysis;
+                let locate = |name: &str| type_location(server, analysis, None, name);
                 out.push(type_hint_at(
                     sp.input_line,
                     sp.region.origin.line,
                     col,
-                    label,
+                    &label,
+                    &locate,
                 ));
             }
         },

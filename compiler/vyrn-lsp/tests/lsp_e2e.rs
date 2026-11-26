@@ -5488,10 +5488,18 @@ fn inlay_hints(client: &mut LspClient, uri: &str) -> Vec<(u32, u32, String)> {
             (
                 h.pointer("/position/line").unwrap().as_u64().unwrap() as u32,
                 h.pointer("/position/character").unwrap().as_u64().unwrap() as u32,
-                h["label"].as_str().unwrap().to_string(),
+                label_text(&h["label"]),
             )
         })
         .collect()
+}
+
+/// A hint's label as one string: a plain label, or its parts' values joined.
+fn label_text(label: &serde_json::Value) -> String {
+    match label.as_array() {
+        Some(parts) => parts.iter().map(|p| p["value"].as_str().unwrap()).collect(),
+        None => label.as_str().unwrap().to_string(),
+    }
 }
 
 /// The type hints only; a type hint's label starts with `: `.
@@ -5534,6 +5542,60 @@ fn a_binding_gets_a_type_hint_when_its_line_hides_the_type() {
     let on_o: Vec<&(u32, u32, String)> = hints.iter().filter(|(l, _, _)| *l == oline).collect();
     assert!(on_o.is_empty(), "a record literal names its type: {on_o:?}");
 
+    let _ = client.child.kill();
+}
+
+/// A declared type in a type hint is its own label part, located at its declaration; a
+/// built-in type around it stays plain.
+#[test]
+fn a_type_hint_names_its_declared_types_with_their_locations() {
+    let src = "type Json = { s: String }
+
+fn make() -> Array<Json> {
+    [Json { s: \"a\" }]
+}
+
+fn main() {
+    let xs = make()
+    print(xs.length.toString())
+}
+";
+    let uri = "file:///typeparts.vyrn";
+    let mut client = spawn_client();
+    did_open(&mut client, uri, "vyrn", src);
+    let _ = read_diags_for(&mut client, "typeparts.vyrn");
+    let id = serde_json::json!("typeparts");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/inlayHint",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 99, "character": 0 } }
+        }
+    }));
+    let resp = client.read_response(&id);
+    let hint = (resp["result"].as_array().expect("hints").iter())
+        .find(|h| h["position"]["line"] == 7 && label_text(&h["label"]).starts_with(": "))
+        .expect("the type hint on `xs`")
+        .clone();
+    let parts: Vec<(String, Option<u64>)> = (hint["label"].as_array().expect("label parts").iter())
+        .map(|p| {
+            let at = p
+                .pointer("/location/range/start/line")
+                .and_then(|l| l.as_u64());
+            (p["value"].as_str().unwrap().to_string(), at)
+        })
+        .collect();
+    let want: Vec<(String, Option<u64>)> = vec![
+        (": Array<".into(), None),
+        ("Json".into(), Some(0)),
+        (">".into(), None),
+    ];
+    assert_eq!(parts, want, "{hint}");
+    assert_eq!(hint["label"][1]["location"]["uri"], uri);
+    assert_eq!(
+        hint["label"][1]["location"]["range"]["start"]["character"],
+        5
+    );
     let _ = client.child.kill();
 }
 
