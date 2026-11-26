@@ -1,0 +1,1 @@
+a_loop_states_at_most_one_measure.vyrn:3:0: the loop on line 3 states at most one measure, `decreases(m)` with `m` an `Int64` sum of its names and integer literals

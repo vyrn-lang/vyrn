@@ -75,6 +75,11 @@ pub enum Raises {
     /// The failure of a `let`'s `where` clause after a write of its binding
     /// ([`crate::trap::let_clause`]), which [`Guard::Clause`] carries.
     Let,
+    /// The measure of the loop on `line`, at least zero after the guard holds
+    /// (`start`) or below its value there where a turn ends. [`Guard::Clause`]
+    /// carries it as `m >= 0`, with the measure as its `says`. No build runs
+    /// it: a program that keeps one is refused.
+    Measure { line: usize, start: bool },
     /// The invariant of the loop on `line` where the loop starts (`entry`) or
     /// where a turn ends, which [`Guard::Clause`] carries with the invariant as
     /// its `says`. No build runs it: a program that keeps one is refused.
@@ -91,6 +96,7 @@ impl Raises {
             Raises::Result => "where-result",
             Raises::Let => "where-let",
             Raises::Invariant { .. } => "invariant",
+            Raises::Measure { .. } => "measure",
         }
     }
 }
@@ -199,6 +205,19 @@ impl Side {
     fn one(o: Operand) -> Side {
         Side(vec![(1, o)])
     }
+
+    /// The side with each name replaced as [`Atom::with`] replaces it.
+    pub fn with(&self, by: &dyn Fn(usize) -> Option<Val>) -> Option<Side> {
+        let each = |(f, o): &(i64, Operand)| {
+            let of = match &o.of {
+                Val::Name(k) => by(k.index())?,
+                lit => lit.clone(),
+            };
+            let part = o.part.clone();
+            Some((*f, Operand { of, part }))
+        };
+        Some(Side(self.0.iter().map(each).collect::<Option<_>>()?))
+    }
 }
 
 /// An operand of an [`Atom`]: the value `of`, or the `part` of it a read
@@ -215,21 +234,10 @@ impl Atom {
     /// `by(k)`: a call's argument or a body's parameter. `None` when `by`
     /// has none.
     pub fn with(&self, by: &dyn Fn(usize) -> Option<Val>) -> Option<Atom> {
-        let put = |s: &Side| {
-            let each = |(f, o): &(i64, Operand)| {
-                let of = match &o.of {
-                    Val::Name(k) => by(k.index())?,
-                    lit => lit.clone(),
-                };
-                let part = o.part.clone();
-                Some((*f, Operand { of, part }))
-            };
-            Some(Side(s.0.iter().map(each).collect::<Option<_>>()?))
-        };
         Some(Atom {
-            l: put(&self.l)?,
+            l: self.l.with(by)?,
             op: self.op,
-            r: put(&self.r)?,
+            r: self.r.with(by)?,
             ty: self.ty.clone(),
         })
     }
@@ -377,6 +385,10 @@ pub struct Invariant {
     pub atoms: Vec<Atom>,
     /// The invariant in source form.
     pub says: Arc<str>,
+    /// `decreases(m)`: the measure `m`, an `Int64` sum that is at least zero
+    /// after the guard holds and falls on every turn, so the loop ends; and
+    /// `m` in source form.
+    pub measure: Option<(Side, Arc<str>)>,
     /// The loop's line.
     pub line: usize,
     /// The line of the body's last statement, where a turn that falls off the
@@ -385,23 +397,100 @@ pub struct Invariant {
 }
 
 impl Invariant {
-    /// The comparisons of the invariant `e` of the `while` on `line`, over
-    /// `Val::Name(Name(j))` for `names[j]`, the names in scope it reads and
-    /// their types ([`Atom::with`]). The error is the rule the checker
-    /// refuses the invariant with.
-    pub fn atoms(
+    /// The clause `e` of the `while` on `line`, whose body's last statement
+    /// is on `end`, over `Val::Name(Name(j))` for `names[j]`, the names in
+    /// scope it reads and their types ([`Atom::with`]). A `decreases(m)`
+    /// conjunct is the measure, at most one. The error is the rule the
+    /// checker refuses the clause with.
+    pub fn of(
         e: &Expr,
         line: usize,
+        end: usize,
         names: &[(String, Type)],
         decls: &dyn Decls,
-    ) -> Result<Vec<Atom>, crate::rules::Rule> {
-        let (mut atoms, mut facts) = (Vec::new(), Vec::new());
+    ) -> Result<Invariant, crate::rules::Rule> {
         let of = Of::Loop { line, names };
-        conjuncts(of, e, decls, &mut atoms, &mut facts)?;
-        match facts.is_empty() {
-            true => Ok(atoms),
-            false => Err(of.form()),
+        let mut parts = Vec::new();
+        split(e, &mut parts);
+        let (mut atoms, mut facts, mut measure) = (Vec::new(), Vec::new(), None);
+        let mut says = Vec::new();
+        for p in parts {
+            let m = match p {
+                Expr::Call { name, args, .. } if name == "decreases" => args,
+                _ => {
+                    conjuncts(of, p, decls, &mut atoms, &mut facts)?;
+                    says.push(spelled(p));
+                    continue;
+                }
+            };
+            let [m] = m.as_slice() else {
+                return Err(rule!(MeasureForm, line));
+            };
+            let (mut terms, mut tys) = (Vec::new(), Vec::new());
+            side(of, m, 1, decls, &mut terms, &mut tys)?;
+            if measure.is_some() || tys.iter().any(|t| *t != Type::Int) {
+                return Err(rule!(MeasureForm, line));
+            }
+            measure = Some((Side(terms), spelled(m).into()));
         }
+        if !facts.is_empty() {
+            return Err(of.form());
+        }
+        Ok(Invariant {
+            atoms,
+            says: says.join(" && ").into(),
+            measure,
+            line,
+            end,
+        })
+    }
+
+    /// The invariant with each name replaced as [`Atom::with`] replaces it.
+    pub fn with(&self, by: &dyn Fn(usize) -> Option<Val>) -> Option<Invariant> {
+        let measure = match &self.measure {
+            Some((m, says)) => Some((m.with(by)?, says.clone())),
+            None => None,
+        };
+        Some(Invariant {
+            atoms: self
+                .atoms
+                .iter()
+                .map(|a| a.with(by))
+                .collect::<Option<_>>()?,
+            measure,
+            ..self.clone()
+        })
+    }
+
+    /// `m >= 0` for the measure `m`, the comparison its proof rows carry.
+    pub fn nonnegative(&self) -> Option<Atom> {
+        let (m, _) = self.measure.as_ref()?;
+        let zero = Operand {
+            of: Val::Lit(Lit::Int(0)),
+            part: None,
+        };
+        Some(Atom {
+            l: m.clone(),
+            op: BinOp::GtEq,
+            r: Side::one(zero),
+            ty: Type::Int,
+        })
+    }
+}
+
+/// Appends to `out` the `&&` operands of `e`, each no `&&` itself.
+fn split<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match e {
+        Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } => {
+            split(lhs, out);
+            split(rhs, out);
+        }
+        _ => out.push(e),
     }
 }
 

@@ -721,6 +721,15 @@ rules! {
         `read` parameter, the `.length`, `.byteLength` or integer field of one, the \
         `.length` of a field of one, and integer literals, of one integer type, or sums \
         and literal multiples of them over `Int64`, joined by `&&`";
+    MeasureForm { line }
+        "the loop on line {line} states at most one measure, `decreases(m)` with `m` an \
+        `Int64` sum of its names and integer literals";
+    MeasureStart { line, m, why }
+        "the measure of the loop on line {line}, `{m}`, may be negative where the loop \
+        turns: {why}";
+    MeasureFall { line, m, at, why }
+        "the measure of the loop on line {line}, `{m}`, may not fall on a turn that ends \
+        on line {at}: {why}";
     InvariantForm { line }
         "the invariant of the loop on line {line} may compare only names in scope, \
         their `.length`, `.byteLength` or integer field, the `.length` of a field of \

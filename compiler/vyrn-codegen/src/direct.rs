@@ -7474,7 +7474,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         let line = c.site.line;
         // A proof row runs nowhere: a program that keeps one is refused.
-        if matches!(c.rule, Raises::Invariant { .. }) {
+        if matches!(c.rule, Raises::Invariant { .. } | Raises::Measure { .. }) {
             return Ok(());
         }
         let Some(row) = self.row(m, b, c.clone()) else {
@@ -7626,7 +7626,8 @@ impl<'p> Fn_<'_, 'p> {
                 | Raises::Clause
                 | Raises::Result
                 | Raises::Let
-                | Raises::Invariant { .. } => {
+                | Raises::Invariant { .. }
+                | Raises::Measure { .. } => {
                     b.ins(&Instruction::Unreachable);
                 }
             },

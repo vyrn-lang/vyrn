@@ -1,1 +1,2 @@
 an_invariant_that_fails_where_the_loop_starts_is_refused.vyrn:4:0: the invariant of the loop on line 4, `j == 2 * i`, does not hold where the loop starts: it needs `0 >= 1`, and the compiler cannot show that here
+an_invariant_that_fails_where_the_loop_starts_is_refused.vyrn:6:0: the invariant of the loop on line 4, `j == 2 * i`, may not hold after a turn that ends on line 6: it needs the value of line 6 <= 2 * the value of line 5, and the compiler cannot show that here

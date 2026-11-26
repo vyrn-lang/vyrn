@@ -48,7 +48,7 @@ use vyrn_frontend::prim::Cmp;
 use crate::effects::StateUse;
 use crate::facts::{Cert, Fact, Lin, Node, Premise, Said, Sides, Src, State, Tags, Term, EXACT};
 use vyrn_frontend::core::check::{
-    scalar_rule, Atom, Check, Ensures, Guard, Invariant, Operand, Side, Site, Verdict, Why,
+    scalar_rule, Atom, Check, Ensures, Guard, Invariant, Operand, Raises, Side, Site, Verdict, Why,
 };
 use vyrn_frontend::core::{
     rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, NameInfo, Op, Place, Rhs, St,
@@ -5116,7 +5116,12 @@ impl<'a> Walk<'a> {
             }
             St::Trap => State::dead(),
             St::Check(c) => {
-                let goals = self.goals(&st, &c.guard);
+                let goals = match (c.rule, &c.guard) {
+                    (Raises::Measure { start: false, .. }, Guard::Clause { atoms, .. }) => {
+                        self.fell(atoms).map(|g| vec![g])
+                    }
+                    _ => self.goals(&st, &c.guard),
+                };
                 // A solve's walk writes no verdict: its copy of the rows is dropped.
                 if self.record && !self.solving {
                     // A check's goal takes a chain of three premises; a join's
@@ -5167,9 +5172,22 @@ impl<'a> Walk<'a> {
                         st.differ(&d, self.src(Premise::Passed));
                     }
                 }
-                if let Guard::Clause { atoms, .. } = &c.guard {
+                // No build runs a proof row, so a kept one states nothing.
+                let proof = matches!(c.rule, Raises::Invariant { .. } | Raises::Measure { .. });
+                if let (Guard::Clause { atoms, .. }, false) = (&c.guard, proof) {
                     let src = self.src(Premise::Passed);
                     atoms.iter().for_each(|a| self.holds(&mut st, a, src));
+                }
+                // The measure where the turn starts, which each turn's end
+                // compares with.
+                if let (Raises::Measure { start: true, .. }, Guard::Clause { atoms, .. }) =
+                    (c.rule, &c.guard)
+                {
+                    let m = atoms.first().and_then(|a| self.side(&a.l));
+                    st.forget(self.measure());
+                    if let Some(m) = m {
+                        st.define(self.measure(), &m, self.src(Premise::Declared));
+                    }
                 }
                 if let Guard::Scalar(n, t) = &c.guard {
                     self.premises(&mut st, *n, t);
@@ -5219,6 +5237,19 @@ impl<'a> Walk<'a> {
 
     /// What must be `>= 0` for the check to pass, as far as linear facts can
     /// say; `None` when they cannot say it all.
+    /// The measure of the innermost loop where its turn started: a term no
+    /// row writes.
+    fn measure(&self) -> Term {
+        Term::Ghost(u32::MAX - self.loops.len() as u32, false)
+    }
+
+    /// The goal of a turn's end that the measure `m >= 0` of `atoms` fell:
+    /// its value at the turn's start less `m`, less one.
+    fn fell(&self, atoms: &[Atom]) -> Option<Lin> {
+        let m = self.side(&atoms.first()?.l)?;
+        Lin::of(self.measure()).sub(&m)?.plus(-1)
+    }
+
     fn goals(&self, st: &State, g: &Guard) -> Option<Vec<Lin>> {
         // An element's length bounds nothing the state does not name.
         let len = |p: &Place| {
@@ -6997,9 +7028,13 @@ impl<'a> Walk<'a> {
     /// `n >= 1`. `value` stands for `param`.
     fn lin_text(&self, l: &Lin, param: Option<Name>) -> String {
         let atom = |t: Term| -> String {
-            // A ghost is never a check's goal ([`element_rows`]).
+            // A ghost is a check's goal only as a loop's measure where its
+            // turn started ([`Walk::measure`]); else an element bound.
             let Some(n) = t.name() else {
-                return "a bound".into();
+                return match t == self.measure() {
+                    true => "the measure where the turn started".into(),
+                    false => "a bound".into(),
+                };
             };
             let name = match Some(n) == param {
                 true => "value".into(),

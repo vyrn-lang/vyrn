@@ -129,6 +129,9 @@ compiler/vyrn-cli/tests/check/a_literal_that_settles_nothing_names_the_annotatio
 compiler/vyrn-cli/tests/check/a_local_fn_value_shadows_a_consuming_function.vyrn	0	cbf29ce484222325	20	19	ddc3d21aea616754
 compiler/vyrn-cli/tests/check/a_local_hides_a_function_in_call_position.vyrn	0	cbf29ce484222325	20	19	43f2f01bf2958436
 compiler/vyrn-cli/tests/check/a_local_spelled_like_an_impl_method_does_not_answer_a_copy.vyrn	0	cbf29ce484222325	20	18	6392856990d4e359
+compiler/vyrn-cli/tests/check/a_loop_measure_that_may_be_negative_is_refused.vyrn	0	cbf29ce484222325	20	17	47a3d9f35e348c4d
+compiler/vyrn-cli/tests/check/a_loop_measure_that_may_not_fall_is_refused.vyrn	0	cbf29ce484222325	20	17	8c60cc8bd5c2d956
+compiler/vyrn-cli/tests/check/a_loop_states_at_most_one_measure.vyrn	0	cbf29ce484222325	20	16	1312dee4d1da350d
 compiler/vyrn-cli/tests/check/a_looser_let_drops_the_promise_not_the_facts.vyrn	0	cbf29ce484222325	20	18	57b3eff954419fbb
 compiler/vyrn-cli/tests/check/a_match_binder_named_like_a_global_is_still_pure.vyrn	0	cbf29ce484222325	20	17	16c3d9ab5a9ddeba
 compiler/vyrn-cli/tests/check/a_member_equal_to_the_base_absorbs_the_union.vyrn	0	cbf29ce484222325	20	17	9f27de81db49e451

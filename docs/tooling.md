@@ -361,7 +361,7 @@ compile, except `--contract`.
   is empty; it is trap-free; it is in no cycle of the call graph; every
   parameter, local and result is an integer or `Bool`, or a `read` array of
   one, so `Float32` and `Float64` are named reasons; every loop is a counter
-  loop; and every callee is a kernel, a call the emitter erases aside. Its `yes` names the form the kernel
+  loop or states a measure; and every callee is a kernel, a call the emitter erases aside. Its `yes` names the form the kernel
   needs on a GPU and the first type that needs it: `native` for 32-bit
   integers and `Bool`, `packed` for 8- and 16-bit integers held in `u32`
   words, and `emulated` for 64-bit integers held as two `u32` words, as in
@@ -373,8 +373,8 @@ compile, except `--contract`.
   compiler removes, in source order, with its goal and each premise the
   proof read, indented under the facts it follows from. A premise names its
   source: a parameter clause, a callee's result clause at its call, a test
-  and its side, a check that stays, an invariant the loop head inferred, a
-  `let`, a type's rule, a length axiom, or a step (a join, a sum, a raised
+  and its side, a check that stays, an invariant the loop head inferred or
+  the loop declares, a `let`, a type's rule, a length axiom, or a step (a join, a sum, a raised
   bound). A premise marked `inferred` is one only the emitting walk reads,
   so a change to another body can bring the check back; the summary counts
   the checks that rest on one. `--uses fn` lists instead every removed check

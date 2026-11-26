@@ -3638,7 +3638,7 @@ impl<'a> Checker<'a> {
                 self.expr(cond, scope, None, Some(ret))?;
                 if let Some(e) = invariant {
                     let names = self.invariant_names(e, body, scope, *line)?;
-                    crate::core::check::Invariant::atoms(e, *line, &names, self)
+                    crate::core::check::Invariant::of(e, *line, 0, &names, self)
                         .map_err(|rule| cerr!(*line; rule))?;
                 }
                 self.block(body, ret, scope);

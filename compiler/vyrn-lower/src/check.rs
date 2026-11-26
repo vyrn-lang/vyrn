@@ -141,10 +141,29 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
                 invariant: Some(inv),
                 ..
             } => {
-                out.push(St::Check(proof(lines, inv, inv.line, true)));
+                if !inv.atoms.is_empty() {
+                    let entry = Raises::Invariant {
+                        line: inv.line,
+                        entry: true,
+                    };
+                    out.extend(proofs(lines, inv, inv.line, entry));
+                }
                 list(body, tys, b, lines);
+                let start = Raises::Measure {
+                    line: inv.line,
+                    start: true,
+                };
+                // After the guard's exit, the `if` whose other side breaks.
+                let guard = b
+                    .iter()
+                    .position(|s| matches!(s, St::If { then, .. } if then.is_empty()));
+                let at = guard.map_or(0, |k| k + 1);
+                let started: Vec<St> = proofs(lines, inv, inv.line, start).collect();
+                b.splice(at..at, started);
                 turns(b, inv, lines);
-                b.push(St::Check(proof(lines, inv, inv.end, false)));
+                for rule in turn(inv) {
+                    b.extend(proofs(lines, inv, inv.end, rule));
+                }
             }
             St::Loop { body: b, .. } | St::Block { body: b, .. } => list(body, tys, b, lines),
             St::Switch { arms, .. } => {
@@ -192,27 +211,58 @@ fn promised(body: &Body, s: &St) -> Vec<Guard> {
         .collect()
 }
 
-/// The proof row of the invariant `inv` on `line`, where the loop starts
-/// (`entry`) or where a turn ends.
-fn proof(lines: &mut BTreeMap<usize, u32>, inv: &Invariant, line: usize, entry: bool) -> Check {
-    let rule = Raises::Invariant {
-        line: inv.line,
-        entry,
+/// The proof row of kind `rule` of the loop clause `inv` on `line`: of its
+/// invariant, or of its measure. None where the clause states no such part.
+fn proofs(
+    lines: &mut BTreeMap<usize, u32>,
+    inv: &Invariant,
+    line: usize,
+    rule: Raises,
+) -> impl Iterator<Item = St> {
+    let guard = match rule {
+        Raises::Measure { .. } => (inv.nonnegative()).map(|a| Guard::Clause {
+            atoms: vec![a],
+            says: inv
+                .measure
+                .as_ref()
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default(),
+        }),
+        _ => (!inv.atoms.is_empty()).then(|| Guard::Clause {
+            atoms: inv.atoms.clone(),
+            says: inv.says.clone(),
+        }),
     };
-    let guard = Guard::Clause {
-        atoms: inv.atoms.clone(),
-        says: inv.says.clone(),
-    };
-    row(lines, line, rule, guard)
+    guard
+        .map(|g| St::Check(row(lines, line, rule, g)))
+        .into_iter()
 }
 
-/// Inserts the proof row of `inv` before each `continue` of its loop in `ss`;
-/// a nested loop's `continue` ends that loop's turn.
+/// The kinds of the proof rows where a turn of the loop of `inv` ends.
+fn turn(inv: &Invariant) -> [Raises; 2] {
+    [
+        Raises::Invariant {
+            line: inv.line,
+            entry: false,
+        },
+        Raises::Measure {
+            line: inv.line,
+            start: false,
+        },
+    ]
+}
+
+/// Inserts the proof rows of `inv` before each `continue` of its loop in
+/// `ss`; a nested loop's `continue` ends that loop's turn.
 fn turns(ss: &mut Vec<St>, inv: &Invariant, lines: &mut BTreeMap<usize, u32>) {
     let mut out = Vec::with_capacity(ss.len());
     for mut s in std::mem::take(ss) {
         match &mut s {
-            St::Continue { line, .. } => out.push(St::Check(proof(lines, inv, *line, false))),
+            St::Continue { line, .. } => {
+                for rule in turn(inv) {
+                    out.extend(proofs(lines, inv, *line, rule));
+                }
+            }
             St::Loop { .. } => {}
             _ => s.lists_mut().for_each(|l| turns(l, inv, lines)),
         }

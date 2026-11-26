@@ -1,0 +1,1 @@
+a_loop_measure_that_may_not_fall_is_refused.vyrn:4:0: the measure of the loop on line 3, `k`, may not fall on a turn that ends on line 4: it needs the value of line 4 < the measure where the turn started, and the loop moves `k` without a test of that; a loop condition that implies it drops the check

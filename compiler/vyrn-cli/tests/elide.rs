@@ -8216,6 +8216,45 @@ fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo 
     );
 }
 
+/// A loop that states a measure the walk proves ends, so a function whose
+/// only loop halves its counter is a kernel; without the measure it is no
+/// counter loop.
+#[test]
+fn a_loop_measure_makes_a_kernel() {
+    let src = |clause: &str| {
+        format!(
+            "fn halve(n: Int64 where value >= 0) -> Int64 {{
+    let mut k = n
+    let mut steps = 0
+    while k > 0{clause} {{
+        k = k / 2
+        steps = steps + 1
+    }}
+    return steps
+}}
+"
+        )
+    };
+    let cost = |clause: &str| {
+        let (_dir, file) = program(&src(clause), "    print(halve(100).toString())");
+        let why = vyrn().args(["why", "--cost"]).arg(&file).output().unwrap();
+        norm(&why.stdout)
+    };
+    let measured = cost(" where k >= 0 && decreases(k)");
+    assert!(
+        measured.contains(
+            "  halve: trap-free: yes; kernel: yes, emulated Int64
+"
+        ),
+        "{measured}"
+    );
+    let bare = cost("");
+    assert!(
+        bare.contains("kernel: no, the loop at line 4 is no counter loop"),
+        "{bare}"
+    );
+}
+
 /// A call for its effect into a pure, read-only, trap-free function that
 /// calls no function in a cycle emits nothing, and the run prints the same.
 #[test]
