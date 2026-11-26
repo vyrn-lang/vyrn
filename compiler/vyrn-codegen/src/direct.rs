@@ -600,10 +600,10 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             let reg = cx.reg.borrow();
             reg.shapes.todo.get(reg.shapes.done).cloned()
         };
-        if let Some((index, (rel, ty, holes), line)) = sh {
+        if let Some((index, (walk, ty, holes), line)) = sh {
             cx.subst = HashMap::new();
             let body = emit_here(&mut m, &cx, |log| {
-                lower_shape(log, &cx, rel, &ty, &holes, line)
+                lower_shape(log, &cx, walk, &ty, &holes, line)
             })?;
             m.fill(index, body)?;
             cx.reg.borrow_mut().shapes.done += 1;
@@ -1382,7 +1382,7 @@ struct Dispatch {
     done: usize,
 }
 
-/// One release and one copy function per type, so a drop site emits a call.
+/// One release, one copy and one hold function per type, so a drop site emits a call.
 /// Every step of the walk is a byte offset from [`crate::layout`], so the walk lives here.
 #[derive(Clone, Default)]
 struct Shapes {
@@ -1395,7 +1395,18 @@ struct Shapes {
 
 /// Identifies one shape body. The holes are places a `consume` took: a walk that skips
 /// them is a different function.
-type ShapeKey = (bool, Type, Vec<String>);
+type ShapeKey = (ShapeWalk, Type, Vec<String>);
+
+/// What a shape body does to each part of a value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShapeWalk {
+    /// Releases the heap it owns ([`Fn_::rel_body`]).
+    Rel,
+    /// Gives a copy its own heap ([`Fn_::copy_body`]).
+    Copy,
+    /// Records the running task as the holder of each task handle in it ([`Fn_::hold_body`]).
+    Hold,
+}
 
 /// What a `fn`-typed argument resolved to: the function a call through that parameter
 /// goes to directly, and how many leading parameters are captures the outer call site supplies.
@@ -1492,6 +1503,11 @@ struct ForkRoot {
 
 /// The run queue's number of the first fork root, past every root the host starts.
 const FORK_ROOTS: i32 = 1 << 16;
+
+/// The largest frame word of a fork's block whose task ended while a handle owned it: its
+/// status plus 1, so 1 returned and 2 cancelled ([`lower_fork_root`]). A frame is a heap
+/// address, past every such word.
+const FORK_ENDED: i32 = 2;
 
 /// How long each list of a [`Reg`] was when an emission began.
 #[derive(Clone, Copy)]
@@ -3481,21 +3497,21 @@ fn fnval_captures(
     Ok(())
 }
 
-/// One shape body: `(addr) -> ()`, releasing or copying the value at `addr`.
+/// One shape body: `(addr) -> ()`, the walk of the value at `addr`.
 fn lower_shape(
     m: &mut Log,
     cx: &Cx<'_>,
-    rel: bool,
+    walk: ShapeWalk,
     ty: &Type,
     holes: &[String],
     line: usize,
 ) -> Result<Frame, String> {
     let mut b = Frame::new(&[ValType::I32], &[], &[], 0);
     let mut f = top_level(cx);
-    if rel {
-        f.rel_body(m, &mut b, 0, ty, holes, line)?;
-    } else {
-        f.copy_body(m, &mut b, 0, ty, line)?;
+    match walk {
+        ShapeWalk::Rel => f.rel_body(m, &mut b, 0, ty, holes, line)?,
+        ShapeWalk::Copy => f.copy_body(m, &mut b, 0, ty, line)?,
+        ShapeWalk::Hold => f.hold_body(m, &mut b, 0, ty, line)?,
     }
     Ok(b)
 }
@@ -3528,24 +3544,30 @@ fn task_result_at(cx: &Cx<'_>, t: &Type) -> Result<u32, String> {
 }
 
 /// The root of a task `fork` started, `(block) -> status`: run-queue root [`FORK_ROOTS`] plus
-/// `k`, which `hostResume` reaches through `$resumeRoot`. While the block holds no frame, the
-/// root starts the task: `taskFork` makes it the running task, and the call takes its arguments
-/// from the block, an aggregate at its address there. Else it resumes the callee's frame with
-/// zeros for the parameters, as every root does. Once the call ends, the root stores a scalar
-/// result in the block (the callee wrote an aggregate one through the block's address) and
-/// releases each argument the callee only read. `taskForked` ends a start. A callee that does
-/// not wait, a specialization over a value that does not, ends at its start.
+/// `k`, which `hostResume` reaches through `$resumeRoot`. The block's frame word says what a
+/// step does. While it is 0, the root starts the task: `taskFork` makes it the running task,
+/// `taskHold` records it as the holder of each handle its arguments hold, and the call takes
+/// its arguments from the block, an aggregate at its address there. While it holds a frame,
+/// the root resumes the callee's frame with zeros for the parameters, as every root does. Once
+/// the call ends, the root stores a scalar result in the block (the callee wrote an aggregate
+/// one through the block's address) and releases each argument the callee only read.
+/// `taskForked` ends a start. A task with no owner frees its block, and its result if it
+/// returned; an owned one leaves its status plus 1 in the frame word ([`FORK_ENDED`]), so a
+/// later step, `std/task`'s `releaseHeld` after its holder trapped, frees them. A callee that
+/// does not wait, a specialization over a value that does not, ends at its start.
 fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<Frame, String> {
     let sig = &r.sig;
     let l = task_block(cx, sig)?;
     let (params, results) = cx.wasm_sig(sig, 0)?;
     let mut b = Frame::new(&[ValType::I32], &[ValType::I32], &[], 0);
     let mut f = top_level(cx);
-    let (blk, start, st, was) = (
+    let (blk, start, st, was, w, ended) = (
         0,
         b.local(ValType::I32),
         b.local(ValType::I32),
         b.local(ValType::I64),
+        b.local(ValType::I32),
+        b.local(ValType::I32),
     );
     let held: Vec<u32> = (results[..results.len() - usize::from(sig.waits)].iter())
         .map(|t| b.local(*t))
@@ -3564,6 +3586,7 @@ fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<F
     };
     b.ins(&Instruction::LocalGet(blk))
         .ins(&Instruction::I32Load(word_at(8)))
+        .ins(&Instruction::LocalTee(w))
         .ins(&Instruction::I32Eqz)
         .ins(&Instruction::LocalTee(start))
         .ins(&Instruction::If(BlockType::Empty))
@@ -3571,6 +3594,16 @@ fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<F
         .ins(&Instruction::LocalGet(blk))
         .ins(&Instruction::Call(cx.task("taskFork", 0)?))
         .ins(&Instruction::LocalSet(was));
+    for (p, off) in sig.params.iter().zip(&l.fields[3..]) {
+        if f.holds_task(p) {
+            let a = b.local(ValType::I32);
+            b.ins(&Instruction::LocalGet(blk))
+                .ins(&Instruction::I32Const(*off as i32))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(a));
+            f.hold_at(m, &mut b, a, p, 0)?;
+        }
+    }
     if sig.ret.out().is_some() && sig.in_place.is_none() {
         b.ins(&Instruction::LocalGet(blk))
             .ins(&Instruction::I32Const(l.fields[2] as i32))
@@ -3590,14 +3623,23 @@ fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<F
         b.ins(&Instruction::I32Const(0));
     }
     settle(&mut b);
-    b.ins(&Instruction::Else);
+    b.ins(&Instruction::Else)
+        .ins(&Instruction::LocalGet(w))
+        .ins(&Instruction::I32Const(FORK_ENDED))
+        .ins(&Instruction::I32LeU)
+        .ins(&Instruction::LocalTee(ended))
+        .ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::LocalGet(w))
+        .ins(&Instruction::I32Const(1))
+        .ins(&Instruction::I32Sub)
+        .ins(&Instruction::LocalSet(st))
+        .ins(&Instruction::Else);
     match sig.waits {
         true => {
             for t in &params[..params.len() - 1] {
                 b.ins(&zero(*t));
             }
-            b.ins(&Instruction::LocalGet(blk))
-                .ins(&Instruction::I32Load(word_at(8)));
+            b.ins(&Instruction::LocalGet(w));
             settle(&mut b);
         }
         false => {
@@ -3605,6 +3647,7 @@ fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<F
         }
     }
     b.ins(&Instruction::End)
+        .ins(&Instruction::End)
         .ins(&Instruction::LocalGet(st))
         .ins(&Instruction::I32Const(2))
         .ins(&Instruction::I32GeU)
@@ -3612,7 +3655,10 @@ fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<F
         .ins(&Instruction::LocalGet(blk))
         .ins(&Instruction::LocalGet(st))
         .ins(&Instruction::I32Store(word_at(8)))
-        .ins(&Instruction::Else);
+        .ins(&Instruction::Else)
+        .ins(&Instruction::LocalGet(ended))
+        .ins(&Instruction::I32Eqz)
+        .ins(&Instruction::If(BlockType::Empty));
     // A scalar result and each word of a [`Ret::Words`] one land in the block; a result the
     // callee left in a parameter's slot moves to the result's.
     match (&sig.ret, &held[..], sig.in_place) {
@@ -3651,23 +3697,31 @@ fn lower_fork_root(m: &mut Log, cx: &Cx<'_>, r: &ForkRoot, k: usize) -> Result<F
         f.rel_at(m, &mut b, a, p, 0)?;
     }
     // A task whose handle was released frees its block, and its result if it returned.
+    b.ins(&Instruction::End).ins(&Instruction::LocalGet(ended));
     if sig.waits {
-        let a = b.local(ValType::I32);
         b.ins(&Instruction::Call(cx.task("taskUnowned", 0)?))
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(blk))
-            .ins(&Instruction::I32Const(l.fields[2] as i32))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(a));
-        f.rel_at(m, &mut b, a, &sig.ret_ty, 0)?;
-        b.ins(&Instruction::End)
-            .ins(&Instruction::LocalGet(blk))
-            .ins(&Instruction::Call(cx.rt.free))
-            .ins(&Instruction::End);
+            .ins(&Instruction::I32Or);
     }
+    let a = b.local(ValType::I32);
+    b.ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::LocalGet(st))
+        .ins(&Instruction::I32Eqz)
+        .ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::LocalGet(blk))
+        .ins(&Instruction::I32Const(l.fields[2] as i32))
+        .ins(&Instruction::I32Add)
+        .ins(&Instruction::LocalSet(a));
+    f.rel_at(m, &mut b, a, &sig.ret_ty, 0)?;
+    b.ins(&Instruction::End)
+        .ins(&Instruction::LocalGet(blk))
+        .ins(&Instruction::Call(cx.rt.free))
+        .ins(&Instruction::Else)
+        .ins(&Instruction::LocalGet(blk))
+        .ins(&Instruction::LocalGet(st))
+        .ins(&Instruction::I32Const(1))
+        .ins(&Instruction::I32Add)
+        .ins(&Instruction::I32Store(word_at(8)))
+        .ins(&Instruction::End);
     b.ins(&Instruction::End)
         .ins(&Instruction::LocalGet(start))
         .ins(&Instruction::If(BlockType::Empty))
@@ -4251,19 +4305,23 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The index of the release (or copy) of `ty`, reserved and queued on first request.
     /// The type is substituted here because the body is written later, under another instance.
-    fn shape_fn(&self, m: &mut Log, rel: bool, ty: &Type, line: usize) -> u32 {
+    fn shape_fn(&self, m: &mut Log, walk: ShapeWalk, ty: &Type, line: usize) -> u32 {
         let ty = self.cx.sub(ty);
-        let holes: &[String] = if rel { &self.rel_holes } else { &[] };
+        let holes: &[String] = if walk == ShapeWalk::Rel {
+            &self.rel_holes
+        } else {
+            &[]
+        };
         let mut reg = self.cx.reg.borrow_mut();
         let s = &mut reg.shapes;
         if let Some((i, ..)) =
-            (s.todo.iter()).find(|(_, k, _)| k.0 == rel && k.1 == *ty && k.2 == holes)
+            (s.todo.iter()).find(|(_, k, _)| k.0 == walk && k.1 == *ty && k.2 == holes)
         {
             return *i;
         }
         let index = m.func(Owner::Shape);
         s.todo
-            .push((index, (rel, ty.into_owned(), holes.to_vec()), line));
+            .push((index, (walk, ty.into_owned(), holes.to_vec()), line));
         index
     }
 
@@ -4299,7 +4357,7 @@ impl<'p> Fn_<'_, 'p> {
             self.rel_holes.clear();
             return Ok(());
         }
-        let f = self.shape_fn(m, true, ty, line);
+        let f = self.shape_fn(m, ShapeWalk::Rel, ty, line);
         // The holes are part of the shape key, so every later reader starts empty.
         self.rel_holes.clear();
         b.ins(&Instruction::LocalGet(a)).ins(&Instruction::Call(f));
@@ -4383,7 +4441,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I32Load(word_at(l.fields[0])));
                 b.ins(&Instruction::LocalSet(data));
-                self.each(m, b, true, data, n, stride, &inner, line)?;
+                self.each(m, b, ShapeWalk::Rel, data, n, stride, &inner, line)?;
                 b.ins(&Instruction::LocalGet(data));
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
@@ -4397,7 +4455,7 @@ impl<'p> Fn_<'_, 'p> {
                 load_wrapped(b, a, l.fields[0]);
                 b.ins(&Instruction::LocalSet(n));
                 let base = self.sa_base(b, a, ty, line)?;
-                self.each(m, b, true, base, n, stride, &inner, line)?;
+                self.each(m, b, ShapeWalk::Rel, base, n, stride, &inner, line)?;
                 b.ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word_at(l.fields[2])))
                     .ins(&Instruction::Call(self.cx.rt.free));
@@ -4422,7 +4480,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Load(word_at(l.fields[i])));
                     b.ins(&Instruction::LocalSet(buf));
                     if i == 1 || mk == MapKey::Str {
-                        self.each(m, b, true, buf, n, stride, &elem, line)?;
+                        self.each(m, b, ShapeWalk::Rel, buf, n, stride, &elem, line)?;
                     }
                     b.ins(&Instruction::LocalGet(buf))
                         .ins(&Instruction::Call(self.cx.rt.free));
@@ -4467,7 +4525,7 @@ impl<'p> Fn_<'_, 'p> {
                 let count = b.local(ValType::I32);
                 b.ins(&Instruction::I32Const(n as i32));
                 b.ins(&Instruction::LocalSet(count));
-                self.each(m, b, true, a, count, stride, &inner, line)
+                self.each(m, b, ShapeWalk::Rel, a, count, stride, &inner, line)
             }
             Type::Enum(_) => {
                 for (tag, name, slots) in self.owning_payloads(ty, line)? {
@@ -7008,7 +7066,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I32Mul);
             b.ins(&Instruction::I32Add);
             b.ins(&Instruction::LocalSet(data));
-            self.each(m, b, true, data, n, stride, elem, line)?;
+            self.each(m, b, ShapeWalk::Rel, data, n, stride, elem, line)?;
         }
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Load(word_at(sl.fields[0])));
@@ -8054,7 +8112,8 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalSet(data));
-        self.each(m, b, rel, data, n, stride as u32, elem, line)
+        let walk = if rel { ShapeWalk::Rel } else { ShapeWalk::Copy };
+        self.each(m, b, walk, data, n, stride as u32, elem, line)
     }
 
     /// [`Fn_::arr_elems`] under `if cond`, where `cond` is an `i32` local.
@@ -8459,19 +8518,24 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// Releases (`rel`) or deep-copies each of the first `count` elements of `buf`.
+    /// Walks each of the first `count` elements of `buf`.
     fn each(
         &mut self,
         m: &mut Log,
         b: &mut Frame,
-        rel: bool,
+        walk: ShapeWalk,
         buf: u32,
         count: u32,
         stride: u32,
         elem: &Type,
         line: usize,
     ) -> Result<(), String> {
-        if !self.walks(rel, elem) {
+        let visits = match walk {
+            ShapeWalk::Rel => self.walks(true, elem),
+            ShapeWalk::Copy => self.walks(false, elem),
+            ShapeWalk::Hold => self.holds_task(elem),
+        };
+        if !visits {
             return Ok(());
         }
         let i = b.local(ValType::I32);
@@ -8497,10 +8561,10 @@ impl<'p> Fn_<'_, 'p> {
         }
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalSet(p));
-        if rel {
-            self.rel_at(m, b, p, elem, line)?;
-        } else {
-            self.copy_at(m, b, p, elem, line)?;
+        match walk {
+            ShapeWalk::Rel => self.rel_at(m, b, p, elem, line)?,
+            ShapeWalk::Copy => self.copy_at(m, b, p, elem, line)?,
+            ShapeWalk::Hold => self.hold_at(m, b, p, elem, line)?,
         }
         b.ins(&Instruction::LocalGet(i));
         b.ins(&Instruction::I32Const(1));
@@ -8528,9 +8592,147 @@ impl<'p> Fn_<'_, 'p> {
         if !self.owns_heap(ty) {
             return Ok(());
         }
-        let f = self.shape_fn(m, false, ty, line);
+        let f = self.shape_fn(m, ShapeWalk::Copy, ty, line);
         b.ins(&Instruction::LocalGet(a)).ins(&Instruction::Call(f));
         Ok(())
+    }
+
+    /// Whether a `ty` value holds a task handle.
+    fn holds_task(&self, ty: &Type) -> bool {
+        vyrn_frontend::types::contains_task(&self.cx.sub(ty), &self.cx.types)
+    }
+
+    /// Records the running task as the holder of each task handle the `ty` value at `a`
+    /// holds (`std/task`'s `taskHold`). The walk is a call, as a release is.
+    fn hold_at(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        if !self.holds_task(ty) {
+            return Ok(());
+        }
+        if let Type::Task(_) = self.cx.resolve(ty) {
+            b.ins(&Instruction::LocalGet(a)).ins(&self.cx.load(ty, 0));
+            return self.hold_handle(b, line);
+        }
+        let f = self.shape_fn(m, ShapeWalk::Hold, ty, line);
+        b.ins(&Instruction::LocalGet(a)).ins(&Instruction::Call(f));
+        Ok(())
+    }
+
+    /// `taskHold` of the task whose handle, its block's address, is on the stack.
+    fn hold_handle(&mut self, b: &mut Frame, line: usize) -> Result<(), String> {
+        b.ins(&Instruction::I64Load(mem_arg(0, 3)))
+            .ins(&Instruction::Call(self.cx.task("taskHold", line)?));
+        Ok(())
+    }
+
+    /// Emits the walk [`Fn_::hold_at`] calls, over the parts of `ty` that hold a handle.
+    fn hold_body(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        let t = self.cx.resolve(ty);
+        match &t {
+            Type::Array(inner) => {
+                let l = self.cx.layout(&t, line)?;
+                let stride = self.stride(inner, line)?;
+                let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
+                load_wrapped(b, a, l.fields[1]);
+                b.ins(&Instruction::LocalSet(n));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+                b.ins(&Instruction::LocalSet(data));
+                self.each(m, b, ShapeWalk::Hold, data, n, stride, inner, line)
+            }
+            Type::SmallArray(inner, _) => {
+                let l = self.cx.layout(&t, line)?;
+                let stride = self.stride(inner, line)?;
+                let n = b.local(ValType::I32);
+                load_wrapped(b, a, l.fields[0]);
+                b.ins(&Instruction::LocalSet(n));
+                let base = self.sa_base(b, a, &t, line)?;
+                self.each(m, b, ShapeWalk::Hold, base, n, stride, inner, line)
+            }
+            Type::ArrayN(inner, n) => {
+                let stride = self.stride(inner, line)?;
+                let count = b.local(ValType::I32);
+                b.ins(&Instruction::I32Const(*n as i32));
+                b.ins(&Instruction::LocalSet(count));
+                self.each(m, b, ShapeWalk::Hold, a, count, stride, inner, line)
+            }
+            // A key is a `String` or a number, so only the values hold handles.
+            Type::Map(_, vt) => {
+                let l = self.cx.layout(&t, line)?;
+                let stride = self.stride(vt, line)?;
+                let (n, buf) = (b.local(ValType::I32), b.local(ValType::I32));
+                load_wrapped(b, a, l.fields[2]);
+                b.ins(&Instruction::LocalSet(n));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load(word_at(l.fields[1])));
+                b.ins(&Instruction::LocalSet(buf));
+                self.each(m, b, ShapeWalk::Hold, buf, n, stride, vt, line)
+            }
+            Type::Record(_) => {
+                let l = self.cx.layout(&t, line)?;
+                let fields = (self.cx.fields(&t))
+                    .ok_or_else(|| gap(&format!("the fields of `{t}`"), line))?;
+                for (i, f) in fields.iter().enumerate() {
+                    if self.holds_task(&f.ty) {
+                        let p = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalGet(a))
+                            .ins(&Instruction::I32Const(l.fields[i] as i32))
+                            .ins(&Instruction::I32Add)
+                            .ins(&Instruction::LocalSet(p));
+                        self.hold_at(m, b, p, &f.ty, line)?;
+                    }
+                }
+                Ok(())
+            }
+            Type::Enum(_) => {
+                let l = self.cx.layout(&t, line)?;
+                let vs = self.cx.sum_vs(&t).unwrap_or_default();
+                for (tag, var) in vs.iter().enumerate() {
+                    if !var.payload.iter().any(|p| self.holds_task(p)) {
+                        continue;
+                    }
+                    tag_eq(b, a, tag as i64);
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.depth += 1;
+                    for (j, pty) in var.payload.iter().enumerate() {
+                        if !self.holds_task(pty) {
+                            continue;
+                        }
+                        let off = l.fields[self.cx.payload_slot(&var.payload, j)];
+                        match self.word2(pty)? {
+                            Word::Boxed => {
+                                let p = b.local(ValType::I32);
+                                load_wrapped(b, a, off);
+                                b.ins(&Instruction::LocalSet(p));
+                                self.hold_at(m, b, p, pty, line)?;
+                            }
+                            Word::Ext(ValType::I32) => {
+                                load_wrapped(b, a, off);
+                                self.hold_handle(b, line)?;
+                            }
+                            _ => return unsupported(&format!("a handle in `{pty}`"), line),
+                        }
+                    }
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                Ok(())
+            }
+            _ => unsupported(&format!("a handle in `{t}`"), line),
+        }
     }
 
     /// Emits the walk that duplicates the storage a `ty` value at `a` owns.
@@ -8574,7 +8776,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I64Load(at(l.fields[1])));
                 b.ins(&Instruction::I64Store(at(l.fields[2])));
-                self.each(m, b, false, nb, n, stride, &inner, line)
+                self.each(m, b, ShapeWalk::Copy, nb, n, stride, &inner, line)
             }
             // A `SmallArray<T, N>` that has not spilled owns no buffer, so the
             // header copy is the whole copy of its storage.
@@ -8616,7 +8818,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(base));
                 self.depth -= 1;
                 b.ins(&Instruction::End);
-                self.each(m, b, false, base, n, stride, &inner, line)
+                self.each(m, b, ShapeWalk::Copy, base, n, stride, &inner, line)
             }
             Type::Map(kt, vt) => {
                 // String keys are dup'd per entry; Int64 and packed keys copy
@@ -8655,7 +8857,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(nb));
                     b.ins(&Instruction::I32Store(word_at(l.fields[i])));
                     if i == 1 || mk == MapKey::Str {
-                        self.each(m, b, false, nb, n, stride, &elem, line)?;
+                        self.each(m, b, ShapeWalk::Copy, nb, n, stride, &elem, line)?;
                     }
                 }
                 // The index is copied, not rebuilt: it holds positions, and the
@@ -8690,7 +8892,7 @@ impl<'p> Fn_<'_, 'p> {
                 let count = b.local(ValType::I32);
                 b.ins(&Instruction::I32Const(n as i32));
                 b.ins(&Instruction::LocalSet(count));
-                self.each(m, b, false, a, count, stride, &inner, line)
+                self.each(m, b, ShapeWalk::Copy, a, count, stride, &inner, line)
             }
             // A copy that skipped a boxed payload would share the box, and both copies would
             // release it.
@@ -10156,7 +10358,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::Call(self.cx.rt.map_keys_copy));
         b.ins(&Instruction::LocalSet(buf));
         if mk == MapKey::Str {
-            self.each(m, b, false, buf, len, 4, &Type::Str, line)?;
+            self.each(m, b, ShapeWalk::Copy, buf, len, 4, &Type::Str, line)?;
         }
         let off = b.alloc(al.size, al.align);
         b.ins(&Instruction::LocalGet(b.base()));
@@ -10388,7 +10590,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(len));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalSet(count));
-        self.each(m, b, false, buf, count, stride, inner, line)?;
+        self.each(m, b, ShapeWalk::Copy, buf, count, stride, inner, line)?;
         let off = b.alloc(al.size, al.align);
         b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::LocalGet(buf));

@@ -258,10 +258,14 @@ fn anyCancelled(ids: Array<Int64>) -> Bool {
 /// A task: its number from 1 in start order, the emitter's number of the root
 /// that started it, the root's frame while it waits (a forked task's block),
 /// the host's id for it (0 for `main` and a forked task, which no host names),
-/// the root's result once it returned, whether a handle owns it, its state, 2
+/// the root's result once it returned, whether a handle owns it, the task
+/// whose values hold that handle (0 for code outside every task), its state, 2
 /// while it runs, 0 returned and 1 cancelled, and the operation its end
 /// delivers to its owner, 0 for none. An owned task stays until its owner
-/// takes or frees it; `release` makes a running one unowned.
+/// takes or frees it; `release` makes a running one unowned. A fork records
+/// the forker as the holder, and a fork argument that holds a handle records
+/// the forked task (`taskHold`), so `taskTrapped` finds every handle a trapped
+/// task held.
 type Run = {
     id: Int64,
     root: Int32,
@@ -269,6 +273,7 @@ type Run = {
     host: Int64,
     result: Int64,
     owned: Bool,
+    holder: Int64,
     state: Int32,
     watch: Int64,
 }
@@ -351,6 +356,7 @@ fn taskBegin(root: Int32, host: Int64) -> Int64 {
         host: host,
         result: 0,
         owned: false,
+        holder: 0,
         state: 2,
         watch: 0,
     })
@@ -371,11 +377,22 @@ fn taskFork(root: Int32, block: Int32) -> Int64 {
         host: 0,
         result: 0,
         owned: true,
+        holder: was,
         state: 2,
         watch: 0,
     })
     running = started
     return was
+}
+
+/// The running task holds task `id`'s handle: the root of a forked task calls
+/// this for each handle its arguments hold, after `taskFork` and before the
+/// call's first step.
+fn taskHold(id: Int64) {
+    let i = taskAt(id)
+    if i < runs.length {
+        runs[i].holder = running
+    }
 }
 
 /// The first step of the running forked task answered `st`, and `was` runs
@@ -636,8 +653,9 @@ fn drain() {
 
 /// `__vyrn_trapped`: the running task trapped, so the host gave up its step and
 /// it never ends. Forgets it and every wait it held, whose operations the host
-/// drops, ends any cancellation the trap cut short, and returns the host's id
-/// for the task: 0 for `main`'s, and when no task ran.
+/// drops, releases every handle it held as scope end would, ends any
+/// cancellation the trap cut short, and returns the host's id for the task: 0
+/// for `main`'s, and when no task ran.
 fn taskTrapped() -> Int64 {
     cancelling = 0
     let id = running
@@ -650,6 +668,7 @@ fn taskTrapped() -> Int64 {
     let owned = runs[i].owned
     let watching = runs[i].watch
     runs.swapRemove(i)
+    releaseHeld(id)
     let mut j: Int64 = 0
     while j < waits.length {
         if waits[j].task == id {
@@ -667,6 +686,29 @@ fn taskTrapped() -> Int64 {
         drain()
     }
     return host
+}
+
+/// Releases each handle task `id` held, as `release` does: a task that runs
+/// goes on without an owner, and one that ended leaves, its block and result
+/// freed by its root. The root of an ended owned task marks its block, so
+/// `hostResume` on it frees instead of resuming.
+fn releaseHeld(id: Int64) {
+    let mut j: Int64 = 0
+    while j < runs.length {
+        if runs[j].owned && runs[j].holder == id {
+            if runs[j].state == 2 {
+                runs[j].owned = false
+                j = j + 1
+            } else {
+                let root = runs[j].root
+                let block = runs[j].frame
+                runs.swapRemove(j)
+                hostResume(root, block)
+            }
+        } else {
+            j = j + 1
+        }
+    }
 }
 
 // A `region` that holds an `await` has an arena of its own, so tasks that

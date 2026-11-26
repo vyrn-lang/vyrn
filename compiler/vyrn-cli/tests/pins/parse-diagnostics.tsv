@@ -1126,6 +1126,7 @@ compiler/vyrn-cli/tests/waits/race.vyrn	0	cbf29ce484222325	20	15	d06871689c622f4
 compiler/vyrn-cli/tests/waits/released.vyrn	0	cbf29ce484222325	20	19	97f7f7284f2ffb1c
 compiler/vyrn-cli/tests/waits/result.vyrn	0	cbf29ce484222325	20	15	45a0b3aa47bcea81
 compiler/vyrn-cli/tests/waits/timedout.vyrn	0	cbf29ce484222325	20	16	8391e87dbc1a1325
+compiler/vyrn-cli/tests/waits/trapheld.vyrn	0	cbf29ce484222325	20	18	a433e10b329f96af
 compiler/vyrn-cli/tests/waits/trapholder.vyrn	0	cbf29ce484222325	20	17	50d26e778b40dc0b
 compiler/vyrn-cli/tests/waits/trapped.vyrn	0	cbf29ce484222325	20	19	669987a8c6c45110
 compiler/vyrn-cli/tests/waits/zerogroup.vyrn	0	cbf29ce484222325	20	15	7857f5d8343c1b39
@@ -1569,7 +1570,7 @@ std/sum.vyrn	0	cbf29ce484222325	20	15	8c91500e0625df59
 std/symbolmap.vyrn	0	cbf29ce484222325	20	16	a2136b9a284642be
 std/syntax.vyrn	0	cbf29ce484222325	20	15	ee5f33230f1a8dc0
 std/syntaxreport.vyrn	0	cbf29ce484222325	20	13	f1876887806cf00e
-std/task.vyrn	0	cbf29ce484222325	20	18	28608051e49590b8
+std/task.vyrn	0	cbf29ce484222325	20	16	c6c017ba6cd3b386
 std/text.vyrn	0	cbf29ce484222325	20	14	bc0918ce6f331d94
 std/tile.vyrn	0	cbf29ce484222325	20	18	0d5778cdb398a9d9
 std/time.vyrn	0	cbf29ce484222325	20	18	15f55a62a1512d82

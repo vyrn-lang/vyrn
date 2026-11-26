@@ -1453,6 +1453,7 @@ pub const RT_MODULES: &[RtModule] = &[
             "task$exitDue",
             "task$taskFork",
             "task$taskForked",
+            "task$taskHold",
             "task$waitFor",
         ]),
     },

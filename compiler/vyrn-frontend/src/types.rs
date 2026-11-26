@@ -1226,6 +1226,62 @@ impl<T: Decls + ?Sized> Decls for &T {
     }
 }
 
+/// What [`reaches`] does at one type: answer, or look at its parts.
+pub enum Reach {
+    Yes,
+    /// No, and the parts are not looked at.
+    No,
+    Parts,
+}
+
+/// Whether any part of `ty` answers [`Reach::Yes`]. A named type is read
+/// through its type arguments and its declaration; each declaration head
+/// is entered once, so a recursive type terminates. A `fn` type is never
+/// descended: `at` decides at it.
+pub fn reaches(ty: &Type, types: &dyn Decls, at: &dyn Fn(&Type) -> Reach) -> bool {
+    fn go<'t>(
+        ty: &'t Type,
+        types: &'t dyn Decls,
+        at: &dyn Fn(&Type) -> Reach,
+        seen: &mut Vec<&'t str>,
+    ) -> bool {
+        match at(ty) {
+            Reach::Yes => return true,
+            Reach::No => return false,
+            Reach::Parts => {}
+        }
+        match ty {
+            Type::Named(n) | Type::App(n, _) => {
+                let args = match ty {
+                    Type::App(_, a) => a.as_slice(),
+                    _ => &[],
+                };
+                args.iter().any(|a| go(a, types, at, seen))
+                    || (!seen.contains(&n.as_str())
+                        && types.decl(n).is_some_and(|d| {
+                            seen.push(n);
+                            let r = go(&d.base, types, at, seen);
+                            seen.pop();
+                            r
+                        }))
+            }
+            Type::Fn(..) => false,
+            _ => ty.children().any(|c| go(c, types, at, seen)),
+        }
+    }
+    go(ty, types, at, &mut Vec::new())
+}
+
+/// Whether `ty` contains a `Task<T>` anywhere, through named types and type
+/// arguments. A `fn` type holds none.
+pub fn contains_task(ty: &Type, types: &dyn Decls) -> bool {
+    reaches(ty, types, &|t| match t {
+        Type::Task(_) => Reach::Yes,
+        Type::Fn(_, _) => Reach::No,
+        _ => Reach::Parts,
+    })
+}
+
 /// A program's type declarations by name, cloned. A pass that has an
 /// [`crate::declared::Owned`] should use its copy.
 pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
