@@ -1633,7 +1633,7 @@ fn upstream() -> Upstream {
 fn fetching_src(port: u16) -> String {
     r#"
 import { fetchText, FetchError } from "std/fetch"
-import { race, Race, sleep, timeout } from "std/task"
+import { race, Race, timeout } from "std/task"
 
 fn upstream() -> String {
     return "http://127.0.0.1:PORT"
@@ -1648,7 +1648,7 @@ fn hang() -> Result<String, FetchError> {
 }
 
 fn boom(n: Int64) -> Int64 {
-    await sleep(100)
+    let held = await fetchText(upstream() + "/held")
     return n / (n - n)
 }
 
@@ -1748,7 +1748,9 @@ fn a_timeout_around_a_slow_upstream_answers_its_fallback_and_aborts_the_request(
 }
 
 /// A trap while a fetch waits answers 500 for its request alone, aborts the fetch, and the
-/// instance serves on.
+/// instance serves on. The trapping branch waits on the upstream until both fetches arrived,
+/// so the trap comes after the request it aborts is on the wire: a cancel before that sends
+/// nothing, and no upstream sees an abort.
 #[test]
 fn a_trap_while_a_fetch_waits_answers_500_and_aborts_the_request() {
     let _deadline = common::deadline(
@@ -1757,7 +1759,14 @@ fn a_trap_while_a_fetch_waits_answers_500_and_aborts_the_request() {
     );
     let up = upstream();
     let s = start_server_on(&fetching_src(up.port), &[]);
-    let (status, body) = get(s.server.port, "/trap");
+    let trap = get_later(s.server.port, "/trap", Duration::ZERO);
+    for _ in 0..2 {
+        up.arrived
+            .recv_timeout(Duration::from_secs(30))
+            .expect("both fetches arrived");
+    }
+    up.release.send(()).expect("release the trapping branch");
+    let ((status, body), _) = trap.join().unwrap();
     assert_eq!(status, "HTTP/1.1 500 Internal Server Error");
     assert_eq!(body, "internal error");
     let aborted = up.aborted.recv_timeout(Duration::from_secs(10));
