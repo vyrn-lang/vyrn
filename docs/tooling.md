@@ -560,9 +560,9 @@ shows the props. The module is analysed as a file beside its root, with each
 relative import respelled from there (`loader::generated_modules`).
 
 Each line that allocates, copies, grows a container, enters an allocating
-function of another file or keeps a check ends in an inlay hint with one part
-per row of `vyrn why --cost`. A line with none of these has no hint. The
-hints show every row, in a loop or not.
+function of another file or keeps a check ends in inlay hints for its rows of
+`vyrn why --cost`. A line with none of these has no hint. The hints show
+every row, in a loop or not.
 
 The client's `hintStyle` initialization option picks how a row reads. In the
 `compact` style, the default, a row is one glyph with its count in superscript;
@@ -576,10 +576,10 @@ proofs traced (`vyrn_lower::JUDGE_PROOFS`) and adds the proofs of the line as
 `vyrn why --proofs` prints them. Measured on 2026-11-26, the CLI's `why
 --proofs` takes 297 ms on `site/export.vyrn` against 173 ms for `check`, so a
 hover costs about one analysis and an edit nothing. Each glyph
-has its own hover: a bold title with the count, a line per noun with its
-reason, the loops around it, a fix where one is plain (`reserve` before a loop
-that grows), and a link that runs `vyrn why --cost` on the file. In the `full`
-style a row is a few plain words, such as `copies String, allocates String x3`
+is its own hint, so VS Code opens a hover per glyph: a bold title with the
+count, a line per noun with its reason, the loops around it, a fix where one
+is plain (`reserve` before a loop that grows), and a link that runs `vyrn why
+--cost` on the file. In the `full` style a row is a few plain words, such as `copies String, allocates String x3`
 or `index checked`, and the tooltip holds each row of `vyrn why --cost` in
 Markdown, with the full reason and the loops around it.
 

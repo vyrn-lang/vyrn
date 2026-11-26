@@ -5466,8 +5466,7 @@ fn main() -> Int64 {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Every inlay hint for the whole document whose label is one string, as
-/// `(line, character, label)`. A compact cost hint's label is parts, and is left out.
+/// Every inlay hint for the whole document, as `(line, character, label)`.
 fn inlay_hints(client: &mut LspClient, uri: &str) -> Vec<(u32, u32, String)> {
     let id = serde_json::json!(format!("inlay-{uri}"));
     client.send(&serde_json::json!({
@@ -5485,12 +5484,12 @@ fn inlay_hints(client: &mut LspClient, uri: &str) -> Vec<(u32, u32, String)> {
         .and_then(|r| r.as_array())
         .expect("an inlay hint list")
         .iter()
-        .filter_map(|h| {
-            Some((
+        .map(|h| {
+            (
                 h.pointer("/position/line").unwrap().as_u64().unwrap() as u32,
                 h.pointer("/position/character").unwrap().as_u64().unwrap() as u32,
-                h["label"].as_str()?.to_string(),
-            ))
+                h["label"].as_str().unwrap().to_string(),
+            )
         })
         .collect()
 }
@@ -6413,9 +6412,9 @@ fn an_edited_buffer_makes_the_profile_stale() {
     assert!(lenses.iter().all(|l| !l.contains("last run")), "{lenses:?}");
 }
 
-/// The compact cost hints of `uri`: per hint, its line and its label parts, each with its
-/// Markdown hover.
-fn compact_hints(client: &mut LspClient, uri: &str) -> Vec<(u64, Vec<(String, String)>)> {
+/// The compact cost hints of `uri`, the hints whose label is a glyph between thin spaces: per
+/// hint, its line, its glyph and its Markdown hover.
+fn compact_hints(client: &mut LspClient, uri: &str) -> Vec<(u64, String, String)> {
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": 93, "method": "textDocument/inlayHint",
         "params": { "textDocument": { "uri": uri }, "range": {
@@ -6424,15 +6423,11 @@ fn compact_hints(client: &mut LspClient, uri: &str) -> Vec<(u64, Vec<(String, St
     let resp = client.read_response(&serde_json::json!(93));
     (resp["result"].as_array().expect("hints").iter())
         .filter_map(|h| {
-            let parts = h["label"].as_array()?;
             let line = h["position"]["line"].as_u64().unwrap() + 1;
-            let parts = (parts.iter())
-                .map(|p| {
-                    let tip = p["tooltip"]["value"].as_str().unwrap_or_default();
-                    (p["value"].as_str().unwrap().to_string(), tip.to_string())
-                })
-                .collect();
-            Some((line, parts))
+            let label = h["label"].as_str().unwrap();
+            let glyph = label.strip_prefix('\u{2009}')?.strip_suffix('\u{2009}')?;
+            let tip = h["tooltip"]["value"].as_str().unwrap().to_string();
+            Some((line, glyph.to_string(), tip))
         })
         .collect()
 }
@@ -6442,10 +6437,11 @@ fn compact_hints(client: &mut LspClient, uri: &str) -> Vec<(u64, Vec<(String, St
 fn knucleotide_lines_carry_their_cost_as_glyphs() {
     let (path, text) = knucleotide();
     let (mut client, uri) = open_with_style(&path, &text, "compact");
-    let rows: Vec<String> = (compact_hints(&mut client, &uri).into_iter())
-        .map(|(line, parts)| {
-            let values: String = parts.into_iter().map(|p| p.0).collect();
-            format!("{line} {values}")
+    let hints = compact_hints(&mut client, &uri);
+    let rows: Vec<String> = (hints.chunk_by(|a, b| a.0 == b.0))
+        .map(|line| {
+            let glyphs: Vec<&str> = line.iter().map(|h| h.1.as_str()).collect();
+            format!("{} {}", line[0].0, glyphs.join(" "))
         })
         .collect();
     holds_pin("knucleotide-compact", &rows);
@@ -6463,17 +6459,22 @@ fn a_proof_glyph_resolves_to_the_proofs_of_its_line() {
             "start": { "line": 72, "character": 0 }, "end": { "line": 73, "character": 0 } } }
     }));
     let resp = client.read_response(&serde_json::json!(94));
-    let hint = resp["result"].as_array().expect("hints")[0].clone();
+    let hints = resp["result"].as_array().expect("hints");
+    let proofs: Vec<&serde_json::Value> = (hints.iter())
+        .filter(|h| h["position"]["line"] == 72 && !h["data"].is_null())
+        .collect();
+    assert_eq!(proofs.len(), 1, "{hints:?}");
+    let hint = proofs[0].clone();
+    assert!(
+        hint["label"].as_str().unwrap().contains('\u{21d2}'),
+        "{hint}"
+    );
     assert_eq!(hint["data"]["line"], 73);
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": 95, "method": "inlayHint/resolve", "params": hint
     }));
     let resolved = client.read_response(&serde_json::json!(95));
-    let parts = resolved["result"]["label"].as_array().expect("parts");
-    let proof = (parts.iter())
-        .find(|p| p["value"].as_str().unwrap().contains('\u{21d2}'))
-        .expect("the proof glyph");
-    let tip = proof["tooltip"]["value"].as_str().unwrap();
+    let tip = resolved["result"]["tooltip"]["value"].as_str().unwrap();
     assert!(tip.starts_with("```\n   73  division check: "), "{tip}");
 }
 
@@ -6484,10 +6485,10 @@ fn a_glyph_hover_names_each_fact_and_links_the_report() {
     let (path, text) = knucleotide();
     let (mut client, uri) = open_with_style(&path, &text, "compact");
     let hints = compact_hints(&mut client, &uri);
-    let (_, parts) = hints.iter().find(|h| h.0 == 73).expect("line 73");
-    let values: Vec<&str> = parts.iter().map(|p| p.0.as_str()).collect();
-    assert_eq!(values, ["\u{2197}", " ?", " \u{21d2}\u{b3}"]);
-    let grows = &parts[0].1;
+    let line: Vec<&(u64, String, String)> = hints.iter().filter(|h| h.0 == 73).collect();
+    let glyphs: Vec<&str> = line.iter().map(|h| h.1.as_str()).collect();
+    assert_eq!(glyphs, ["\u{2197}", "?", "\u{21d2}\u{b3}"]);
+    let grows = &line[0].2;
     assert!(
         grows.starts_with("**\u{2197} may grow 1**\n\n- `push(..)`"),
         "{grows}"
@@ -6500,11 +6501,33 @@ fn a_glyph_hover_names_each_fact_and_links_the_report() {
         grows.ends_with("[vyrn why --cost](command:vyrn.whyCost)"),
         "{grows}"
     );
-    let check = &parts[1].1;
+    let check = &line[1].2;
     assert!(check.contains("- index check: "), "{check}");
     assert!(
         check.contains("the result of `modulusOf(..)` at line 71"),
         "{check}"
+    );
+}
+
+/// A line with two glyphs ends in two hints at one position, each with its own hover, so VS Code
+/// opens a hover per glyph.
+#[test]
+fn each_glyph_of_a_line_is_its_own_hint() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_with_style(&path, &text, "compact");
+    let hints = compact_hints(&mut client, &uri);
+    let line: Vec<&(u64, String, String)> = hints.iter().filter(|h| h.0 == 95).collect();
+    let glyphs: Vec<&str> = line.iter().map(|h| h.1.as_str()).collect();
+    assert_eq!(glyphs, ["\u{29c9}", "\u{229e}"]);
+    assert!(
+        line[0].2.starts_with("**\u{29c9} copies 1**"),
+        "{}",
+        line[0].2
+    );
+    assert!(
+        line[1].2.starts_with("**\u{229e} allocates 1**"),
+        "{}",
+        line[1].2
     );
 }
 
@@ -6515,12 +6538,9 @@ fn a_fresh_profile_adds_a_last_run_glyph() {
     save_word_profile(&path, WORD);
     let (mut client, uri) = open_with_style(&path, WORD, "compact");
     let hints = compact_hints(&mut client, &uri);
-    let values: Vec<&str> = hints[0].1.iter().map(|p| p.0.as_str()).collect();
-    assert_eq!(
-        (hints[0].0, values),
-        (2, vec!["\u{229e}\u{b2}", " \u{d7}3"])
-    );
-    let run = &hints[0].1[1].1;
+    let glyphs: Vec<(u64, &str)> = hints.iter().map(|h| (h.0, h.1.as_str())).collect();
+    assert_eq!(glyphs, [(2, "\u{229e}\u{b2}"), (2, "\u{d7}3")]);
+    let run = &hints[1].2;
     assert!(run.contains("3 blocks, 40 bytes"), "{run}");
 }
 

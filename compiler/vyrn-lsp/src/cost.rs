@@ -8,10 +8,7 @@
 //! In the compact style ([`crate::compact_hints`]) a row is one glyph of [`GLYPHS`] with its
 //! count, and its text moves to the glyph's hover.
 
-use lsp_types::{
-    InlayHint, InlayHintLabel, InlayHintLabelPart, InlayHintLabelPartTooltip, InlayHintTooltip,
-    MarkupContent, MarkupKind, Position,
-};
+use lsp_types::{InlayHint, InlayHintLabel, InlayHintTooltip, MarkupContent, MarkupKind, Position};
 use vyrn_frontend::{Analysis, CostLine, FnCost};
 use vyrn_lower::lastrun::{self, Found, Sites};
 
@@ -92,6 +89,10 @@ const GLYPHS: [(&str, &str, &str); 9] = [
 /// The glyph of the blocks the last run made on a line.
 const LAST_RUN: &str = "×";
 
+/// The space on each side of a compact glyph. It widens the glyph's hover target, which is the
+/// label alone, by at most a space a side.
+const THIN: char = '\u{2009}';
+
 /// `n` in superscript digits; empty for 1, as a noun of one fact has no `x1`.
 fn superscript(n: usize) -> String {
     const DIGITS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
@@ -110,26 +111,16 @@ fn markdown(value: String) -> MarkupContent {
     }
 }
 
-/// One label part: `value`, with the Markdown `tip` as its hover.
-fn part(value: String, tip: String) -> InlayHintLabelPart {
-    InlayHintLabelPart {
-        value,
-        tooltip: Some(InlayHintLabelPartTooltip::MarkupContent(markdown(tip))),
-        location: None,
-        command: None,
-    }
-}
-
 /// The link that ends each compact hover. The extension's `vyrn.whyCost` command runs the
 /// report on the active file.
 const WHY_COST: &str = "[vyrn why --cost](command:vyrn.whyCost)";
 
-/// One row as a compact part: its glyph and count, and a hover with a bold title, one line per
+/// One row as a compact glyph: its glyph and count, and a hover with a bold title, one line per
 /// noun with its reason, the loops around it, a fix where one is plain, and the report's link.
 /// A verb [`GLYPHS`] lacks shows its words.
-fn compact(row: &CostLine) -> InlayHintLabelPart {
+fn compact(row: &CostLine) -> (String, String) {
     let Some(&(_, glyph, title)) = GLYPHS.iter().find(|g| g.0 == row.verb) else {
-        return part(row.label.clone(), row.text.clone());
+        return (row.label.clone(), row.text.clone());
     };
     let mut tip = format!("**{glyph} {title} {}**\n", row.count);
     for item in &row.items {
@@ -143,16 +134,16 @@ fn compact(row: &CostLine) -> InlayHintLabelPart {
     if row.verb == "grows" && row.depth > 0 {
         tip += "\n\nFix: `reserve` the capacity before the loop.";
     }
-    part(
+    (
         format!("{glyph}{}", superscript(row.count)),
         format!("{tip}\n\n{WHY_COST}"),
     )
 }
 
-/// The compact label of one line's rows of `f`: a part per row, then, after a fresh run, the
-/// blocks it made on the line.
-fn compact_label(f: &FnCost, rows: &[&CostLine], run: Option<&Sites>) -> InlayHintLabel {
-    let mut parts: Vec<InlayHintLabelPart> = rows.iter().map(|r| compact(r)).collect();
+/// The compact glyphs of one line's rows of `f`, each with its hover: one per row, then, after a
+/// fresh run, the blocks it made on the line.
+fn compact_glyphs(f: &FnCost, rows: &[&CostLine], run: Option<&Sites>) -> Vec<(String, String)> {
+    let mut glyphs: Vec<(String, String)> = rows.iter().map(|r| compact(r)).collect();
     // A check or a kept call makes no block, so a run counts none for it.
     let blocking: Vec<&&CostLine> = rows.iter().filter(|r| blocks(r.verb)).collect();
     if let Some(run) = run.filter(|_| !blocking.is_empty()) {
@@ -163,18 +154,16 @@ fn compact_label(f: &FnCost, rows: &[&CostLine], run: Option<&Sites>) -> InlayHi
             "**{LAST_RUN} last run {blocks}**\n\n{blocks} blocks, {bytes} bytes on this line in \
              the last `vyrn run --profile`.\n\n{WHY_COST}"
         );
-        parts.push(part(format!("{LAST_RUN}{blocks}"), tip));
+        glyphs.push((format!("{LAST_RUN}{blocks}"), tip));
     }
-    for p in parts.iter_mut().skip(1) {
-        p.value.insert(0, ' ');
-    }
-    InlayHintLabel::LabelParts(parts)
+    glyphs
 }
 
-/// The hints for lines `from..=to` (1-based): one at the end of each line that allocates,
-/// copies, grows a container, enters an allocating function, keeps a check, proves one or
-/// erases a call. A line with none of them has no hint. A compact hint with the proof glyph
-/// carries the document's `uri` and its line as `data`, for [`resolve`].
+/// The hints for lines `from..=to` (1-based), at the end of each line that allocates, copies,
+/// grows a container, enters an allocating function, keeps a check, proves one or erases a
+/// call: one in the full style, one per glyph in the compact style. A line with none of them
+/// has no hint. A line's first proof glyph carries the document's `uri` and its line as `data`,
+/// for [`resolve`].
 pub fn hints(
     analysis: &Analysis,
     uri: &str,
@@ -204,39 +193,39 @@ pub fn hints(
         for line_rows in rows.chunk_by(|a, b| a.line == b.line) {
             let line = line_rows[0].line;
             let text = line_of_text(src, line - 1);
-            let (label, tooltip) = match crate::compact_hints() {
-                true => (compact_label(f, line_rows, fresh), None),
-                false => {
-                    let labels: Vec<String> =
-                        line_rows.iter().map(|r| label(f, r, fresh)).collect();
-                    let tips: Vec<String> =
-                        line_rows.iter().map(|r| tooltip(f, r, fresh)).collect();
-                    let tip = InlayHintTooltip::MarkupContent(markdown(tips.join("\n\n")));
-                    (InlayHintLabel::String(labels.join(", ")), Some(tip))
-                }
+            let position = Position {
+                line: (line - 1) as u32,
+                character: char_col_to_utf16(text, text.chars().count()),
             };
-            let proved = line_rows.iter().any(|r| PROOFS.contains(&r.verb));
-            let data = (proved && crate::compact_hints())
-                .then(|| serde_json::json!({ "uri": uri, "line": line }));
-            out.push(InlayHint {
-                position: Position {
-                    line: (line - 1) as u32,
-                    character: char_col_to_utf16(text, text.chars().count()),
-                },
-                label,
+            let hint = |label: String, tip: String, data| InlayHint {
+                position,
+                label: InlayHintLabel::String(label),
                 kind: None,
                 text_edits: None,
-                tooltip,
+                tooltip: Some(InlayHintTooltip::MarkupContent(markdown(tip))),
                 padding_left: Some(true),
                 padding_right: None,
                 data,
-            });
+            };
+            if !crate::compact_hints() {
+                let labels: Vec<String> = line_rows.iter().map(|r| label(f, r, fresh)).collect();
+                let tips: Vec<String> = line_rows.iter().map(|r| tooltip(f, r, fresh)).collect();
+                out.push(hint(labels.join(", "), tips.join("\n\n"), None));
+                continue;
+            }
+            // A hint per glyph: VS Code keeps one hover per hint, and the padding between two
+            // hints belongs to neither, so the pointer that crosses it opens the next hover.
+            let mut proof = Some(serde_json::json!({ "uri": uri, "line": line }));
+            for (glyph, tip) in compact_glyphs(f, line_rows, fresh) {
+                let data = glyph.starts_with(PROVED).then(|| proof.take()).flatten();
+                out.push(hint(format!("{THIN}{glyph}{THIN}"), tip, data));
+            }
         }
     }
     out
 }
 
-/// The hint `hint` with the proofs of its line added to its proof glyph's hover: each removed
+/// The proof glyph's hint `hint` with the proofs of its line added to its hover: each removed
 /// check's goal and premises, as `vyrn why --proofs` prints them. `proofs` is the traced
 /// analysis's ([`Analysis::proofs`]), which the server runs only for this request.
 pub fn resolve(mut hint: InlayHint, line: usize, proofs: &[(usize, String)]) -> InlayHint {
@@ -244,20 +233,11 @@ pub fn resolve(mut hint: InlayHint, line: usize, proofs: &[(usize, String)]) -> 
         .filter(|(l, _)| *l == line)
         .map(|(_, t)| t.as_str())
         .collect();
-    let InlayHintLabel::LabelParts(parts) = &mut hint.label else {
-        return hint;
-    };
-    let Some(p) = parts
-        .iter_mut()
-        .find(|p| p.value.trim_start().starts_with(PROVED))
-    else {
-        return hint;
-    };
     let proof = match text.is_empty() {
         true => "No check on this line rests on a proof the traced walk found.".to_string(),
         false => format!("```\n{}\n```", text.join("\n")),
     };
-    if let Some(InlayHintLabelPartTooltip::MarkupContent(m)) = &mut p.tooltip {
+    if let Some(InlayHintTooltip::MarkupContent(m)) = &mut hint.tooltip {
         m.value = format!("{proof}\n\n{}", m.value);
     }
     hint
