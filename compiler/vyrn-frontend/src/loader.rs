@@ -411,7 +411,7 @@ pub(crate) const GEN_SEP: &str = "\u{1f}";
 /// `key` as a reader sees it: every [`GEN_SEP`] spelled ` at `, so no diagnostic prints the
 /// control character (#589), and each file under `std_root` spelled `std/<name>.vyrn` as a
 /// panic site spells it, so a refusal in std reads the same on every machine.
-pub(crate) fn shown_key(key: &str, std_root: Option<&str>) -> String {
+pub fn shown_key(key: &str, std_root: Option<&str>) -> String {
     let root = std_root.map(|r| format!("{}/", normalize(r)));
     let shown = |part: &str| match root.as_deref().and_then(|r| part.strip_prefix(r)) {
         Some(rest) => format!("std/{rest}"),

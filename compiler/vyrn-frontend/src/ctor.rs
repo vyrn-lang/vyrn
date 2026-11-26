@@ -79,8 +79,13 @@ pub fn constructors(types: &[TypeDecl]) -> Vec<Function> {
         if !decl.type_params.is_empty() {
             continue;
         }
-        out.push(predicate_fn(decl));
-        out.push(constructor_fn(decl));
+        // Each states its declaration's lines, so it belongs to the declaration's module.
+        for f in [predicate_fn(decl), constructor_fn(decl)] {
+            out.push(Function {
+                module: decl.module.clone(),
+                ..f
+            });
+        }
     }
     out
 }
