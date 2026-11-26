@@ -1,0 +1,4 @@
+export type Local = { a: Int64 }
+
+@Local { a: 1 }
+export type T = { a: Int64 }

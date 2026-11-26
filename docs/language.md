@@ -54,6 +54,26 @@ A file holds these top-level forms, in any order:
 
 `export` before a `fn`, `type`, `protocol` or `contract` makes it visible to importers. Declaration order does not matter, except that a module-state initializer may read only earlier state.
 
+### Annotations
+
+An annotation is data a generator reads off a declaration. It is `@Name { field: value }` before a `type` declaration, a field of its outermost record or an enum variant, after the doc comment and before `export`. `@Name` alone is `@Name {}`.
+
+```vyrn
+import { Opt } from "./flags"
+
+/// Serve a directory over HTTP.
+export type Serve = {
+    @Opt { short: "p" }
+    port: Int64,
+    verbose: Bool,
+}
+```
+
+- `Name` is an imported record type whose fields are `Int64`, `String` or `Bool`, or `ns.Name` through a namespace import. Every field of the literal is a constant.
+- An annotation never changes the declaration it sits on, and no judgment of the program reads it.
+- Reflection carries it: `TypeInfo.annotations` lists each one as an `AnnotationInfo`, with its declaration's written name and the import specifier of that declaration's module, the member it sits on (`""` for the declaration), its fields as `Value`s and the `Origin` of its `@`.
+- An annotation on a function, a parameter, a protocol, an impl, a statement or a field of an anonymous record is refused.
+
 ## Bindings
 
 `let` binds a value once. `let mut` allows assignment. The type is inferred from the initializer, or written.

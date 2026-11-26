@@ -26,7 +26,7 @@ fn accumulates_across_functions() {
 /// The lexer stops at the first illegal token.
 #[test]
 fn lex_error_is_single_and_has_a_column() {
-    let src = "fn main() -> Int64 { let x = @; return x; }";
+    let src = "fn main() -> Int64 { let x = $; return x; }";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 1, "{:?}", diags);
     assert_eq!(diags[0].stage, "lex");

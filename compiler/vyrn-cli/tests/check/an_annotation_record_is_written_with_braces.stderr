@@ -1,0 +1,1 @@
+an_annotation_record_is_written_with_braces.vyrn:3:1: `@Opt` is a record type: write its fields as `@Opt { .. }`

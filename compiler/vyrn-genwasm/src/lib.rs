@@ -765,8 +765,7 @@ impl Decoders {
         }
         let resolved = vyrn_frontend::types::resolve(ty, &self.types);
         // A resolved `Option<T>` is a variant list, so
-        // the payload comes from the reader. A declared enum of other variants
-        // declines.
+        // the payload comes from the reader.
         let opt = vyrn_frontend::types::option_payload(&resolved).cloned();
         let body = match resolved {
             // The length, then that many elements.
@@ -873,6 +872,52 @@ impl Decoders {
                     },
                     Stmt::ret(Expr::var("None", 0), 0),
                 ]
+            }
+            // The variant's index, then its payloads. The last variant takes no
+            // test, so every path returns.
+            Type::Enum(variants) => {
+                let mut body = vec![Stmt::Let {
+                    id: Id::NEW,
+                    name: "tag".into(),
+                    mutable: false,
+                    ty: Some(Type::Int),
+                    clause: None,
+                    value: Expr::call(vyrn_codegen::GEN_NEXT_INT, vec![], 0),
+                    line: 0,
+                    col: 0,
+                }];
+                let last = variants.len().checked_sub(1)?;
+                for (i, v) in variants.iter().enumerate() {
+                    let args = (v.payload.iter()).map(|p| self.decode(p));
+                    let args = args.collect::<Option<Vec<_>>>()?;
+                    let ret = Stmt::ret(
+                        match args.is_empty() {
+                            true => Expr::var(&v.name, 0),
+                            false => Expr::call(&v.name, args, 0),
+                        },
+                        0,
+                    );
+                    body.push(match i == last {
+                        true => ret,
+                        false => Stmt::If {
+                            id: Id::NEW,
+                            cond: Expr::Binary {
+                                id: Id::NEW,
+                                op: vyrn_frontend::ast::BinOp::Eq,
+                                lhs: Box::new(Expr::var("tag", 0)),
+                                rhs: Box::new(Expr::int(i as i64)),
+                                line: 0,
+                            },
+                            then_block: Block {
+                                id: Id::NEW,
+                                stmts: vec![ret],
+                            },
+                            else_block: None,
+                            line: 0,
+                        },
+                    });
+                }
+                body
             }
             // Fields in declaration order, which the host pushed: both sides
             // read `record_fields`.
@@ -1288,6 +1333,22 @@ pub fn encode(
             Expr::Var { name, .. } if name == "None" => out.push(Atom::Int(0)),
             _ => return Err(wrong()),
         },
+        // As in `Decoders::materialize`: the variant's index, then its payloads.
+        Type::Enum(variants) => {
+            let (name, args) = match lit {
+                Expr::Call { name, args, .. } => (name, args.as_slice()),
+                Expr::Var { name, .. } => (name, &[][..]),
+                _ => return Err(wrong()),
+            };
+            let i = (variants.iter().position(|v| v.name == *name)).ok_or_else(wrong)?;
+            if variants[i].payload.len() != args.len() {
+                return Err(wrong());
+            }
+            out.push(Atom::Int(i as i64));
+            for (p, a) in variants[i].payload.iter().zip(args) {
+                encode(p, a, types, out)?;
+            }
+        }
         Type::Array(inner) => match lit {
             Expr::ArrayLit { elems, .. } => {
                 out.push(Atom::Int(elems.len() as i64));

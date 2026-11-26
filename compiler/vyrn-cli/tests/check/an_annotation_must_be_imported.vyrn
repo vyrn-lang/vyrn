@@ -1,0 +1,4 @@
+import { Skip } from "./annotations_lib"
+
+@Opt { short: "p", hidden: false, rank: 0 }
+export type T = { a: Int64 }

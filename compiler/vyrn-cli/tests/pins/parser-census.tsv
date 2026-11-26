@@ -1,9 +1,9 @@
 file	kind	lines	diagnostics
-parser.rs	the tree of a form	2064	0
+parser.rs	the tree of a form	2128	0
 parser.rs	a desugar the parser states	432	0
 parser.rs	a table stated a second time	0	0
 parser.rs	the checks behind a row	77	0
-parser.rs	shared machinery	494	0
+parser.rs	shared machinery	499	0
 parser.rs	tests	1654	0
 lexer.rs	the tree of a form	0	0
 lexer.rs	a desugar the parser states	0	0

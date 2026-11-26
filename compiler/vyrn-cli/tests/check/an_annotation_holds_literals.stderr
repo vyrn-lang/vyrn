@@ -1,0 +1,1 @@
+an_annotation_holds_literals.vyrn:8:0: field `short` of `@Opt` is no constant: an annotation holds literals

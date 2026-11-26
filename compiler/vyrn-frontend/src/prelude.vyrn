@@ -127,7 +127,10 @@ type TypeInfo = {
     // across an import.
     origin: Origin,
     // The declaration's base as a tree of `TypeNode`s, node 0 the root.
-    shape: Array<TypeNode>
+    shape: Array<TypeNode>,
+    // The annotations on the declaration and its members, in source order: a
+    // record only generation reads (`types::resolve`).
+    annotations: Array<AnnotationInfo>
 }
 
 type ModuleInterface = { functions: Array<FnInfo>, types: Array<TypeInfo> }

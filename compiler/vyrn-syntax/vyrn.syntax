@@ -70,6 +70,7 @@ token Pipe '|'
 token Amp '&'
 token Caret '^'
 token Tilde '~'
+token At '@'
 
 nest 1024 ^NestingTooDeep(max='1024')
 
@@ -150,8 +151,14 @@ Close = split '>'
 Module = many Item until eof recover decl ItemStart
 ItemStart = 'fn' / 'type' / 'protocol' / 'impl' / 'import' / 'export' / 'let' / 'logging'
           / 'mut' 'fn' / 'extern' 'fn' / 'gen' 'fn' / 'test' plainStr / 'bench' plainStr / ContractHead
+          / '@'
 ContractHead = 'contract' ident '{'
-Item = doc* (&eof / Export / ?quote splice / Decl)
+Item = doc* (&'@' Annotated / &eof / Export / ?quote splice / Decl)
+
+// An annotation sits on a type declaration, a field of its outermost record or a
+// variant.
+Annotated = Annotation+ (&('type' / 'export' ExportTo? 'type') (Export / Decl) / ^AnnotationTarget)
+Annotation = '@' Ident ('.' Ident)? (Args / StructBody)?
 
 Export = 'export' ( &(ExportTo 'extern' 'fn') ExportTo ^ExportToExtern / ExportTo? +exported(ExportTarget) )
 ExportTo = &('to' plainStr) 'to' plainStr (&(',' plainStr) ',' plainStr)*
@@ -172,7 +179,7 @@ Source = plainStr / &(ident '(') ident Args / ?quote splice / ^ImportPathExpecte
 
 TypeDecl = 'type' DeclName ('<' list TName sep ',' until '>' Close)? '=' +collect(EnumType / Type) ('where' Expr)? ';'?
 EnumType = 'enum' '{' list Variant sep ',' until '}' '}'
-Variant = Ident ('(' list Type sep ',' until ')' ')')?
+Variant = Annotation* Ident ('(' list Type sep ',' until ')' ')')?
 
 Global = 'let' 'mut'? n:DeclName (':' Type)? ('=' / ^GlobalNeedsInit(name=n)) Expr ';'?
 
@@ -261,7 +268,7 @@ TypeName = Ident
 // Only the outermost record of a `type` declaration may refine a field.
 RecordType = ?collect -collect(+named(RecordBody)) / -named(RecordBody)
 RecordBody = '{' (Alone / list Field sep ',' until '}') '}'
-Field = Ident ':' ( l:'lazy' (?named / ^LazyAnonymous@l) Type (w:'where' Expr (?named / ^WhereAnonymous@w) ^LazyWhere@w)?
+Field = (?named Annotation* / &'@' ^AnnotationAnonymous)? Ident ':' ( l:'lazy' (?named / ^LazyAnonymous@l) Type (w:'where' Expr (?named / ^WhereAnonymous@w) ^LazyWhere@w)?
                   / Type (w:'where' Expr (?named / ^WhereAnonymous@w))? )
 
 // ------------------------------------------------------------- statements

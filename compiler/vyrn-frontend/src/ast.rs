@@ -446,7 +446,7 @@ pub const DEFAULT_LOG_LEVEL: usize = 2;
 /// `vyrnModule` and `vyrnType` answer. A program pays nothing for one it does not name;
 /// `types::record_fields` states the fields.
 pub fn is_gen_record(n: &str) -> bool {
-    n == "Token" || n == "VyrnNode"
+    matches!(n, "Token" | "VyrnNode" | "AnnotationInfo" | "AnnotationField")
 }
 
 /// The builtins spelled as ordinary identifiers rather than with an `@` prefix.
@@ -663,7 +663,36 @@ pub struct TypeDecl {
     /// `ctor::name_unions` fills it, before the checker, with `base` the
     /// members' base and `predicate` the `||` of their rules.
     pub members: Vec<Type>,
+    /// The annotations written on the declaration and on its members, in
+    /// source order. A synthetic `Decl.field` holds none: its field's stay here.
+    pub annotations: Vec<Annotation>,
     pub line: usize,
+}
+
+/// `@name`, `@name(args)` or `@Name { field: value }` before a type
+/// declaration, a field of its outermost record or a variant. It never
+/// changes the declaration it sits on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Annotation {
+    /// The field or variant it sits on; `None` for the declaration.
+    pub member: Option<String>,
+    /// What follows the `@`: a name ([`Expr::Var`], or [`Expr::Field`] through a
+    /// namespace until the loader resolves it), a record literal
+    /// ([`Expr::StructLit`]) or a call ([`Expr::Call`]).
+    pub expr: Expr,
+    /// Where the `@` is written.
+    pub line: usize,
+    pub col: usize,
+}
+
+impl Annotation {
+    /// The name the annotation resolves through, as the loader left it.
+    pub fn name(&self) -> &str {
+        match &self.expr {
+            Expr::Var { name, .. } | Expr::StructLit { name, .. } | Expr::Call { name, .. } => name,
+            _ => "",
+        }
+    }
 }
 
 impl TypeDecl {
@@ -2459,8 +2488,9 @@ impl Program {
         };
         for t in &mut self.type_decls {
             let mut n = unit();
-            if let Some(p) = &mut t.predicate {
-                n.expr(p);
+            let anns = t.annotations.iter_mut().map(|a| &mut a.expr);
+            for e in t.predicate.iter_mut().chain(anns) {
+                n.expr(e);
             }
         }
         for f in &mut self.functions {

@@ -160,6 +160,7 @@ fn union_decl(name: String, members: Vec<Type>, types: &dyn Decls) -> TypeDecl {
         base: crate::types::resolve(&members[0], types),
         predicate,
         members,
+        annotations: Vec::new(),
         line: 0,
     }
 }

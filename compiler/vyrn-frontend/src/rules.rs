@@ -344,6 +344,18 @@ rules! {
         "a union's members share one base, but `{a}` is over `{ab}` and `{b}` over `{bb}`";
     RecordWhere {} "a record type cannot have a `where` clause";
     NotRecord { name } "`{name}` does not resolve to a record";
+    AnnotationKind { name }
+        "`@{name}` names no record type: an annotation names an imported record type";
+    AnnotationLocal { name }
+        "`@{name}` is declared here or by the language: an annotation names an imported record type";
+    AnnotationArgs { name } "`@{name}` is a record type: write its fields as `@{name} {{ .. }}`";
+    AnnotationFieldType { name, field, ty }
+        "`{name}` cannot be an annotation: its field `{field}` is `{ty}`, and an \
+        annotation's fields are `Int64`, `String` or `Bool`";
+    AnnotationNotConstant { name, field }
+        "field `{field}` of `@{name}` is no constant: an annotation holds literals";
+    AnnotationMember { name, member, decl }
+        "`@{name}` sits on `{member}`, which is no field or variant of `{decl}`";
     ValidatedBaseNotScalar { name }
         "`{name}` must have a scalar base (Int64, sized int, Float64, Bool, or String)";
     PredicateCalls { kind, name } "{kind} predicate for `{name}` may not contain calls (v0.1)";
@@ -1054,6 +1066,10 @@ rules! {
         `extern fn`, `gen fn`, or `mut fn`";
     ExportToExtern {}
         "an `extern fn` takes no `export to`: the JS host imports it, not a module";
+    AnnotationTarget {} "an annotation sits on a `type` declaration, a field or a variant";
+    AnnotationAnonymous {}
+        "an annotation on a field needs the outermost record of a `type` declaration; \
+        an anonymous record has no declaration to carry it";
     LambdaNotHere { form, fix }
         "`{form} ...` is not a lambda here; a lambda takes its parameters before an arrow"
         fix "{fix}";

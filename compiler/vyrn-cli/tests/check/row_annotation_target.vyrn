@@ -1,0 +1,6 @@
+import { Skip } from "./annotations_lib"
+
+@Skip
+export fn f() -> Int64 {
+    return 1
+}

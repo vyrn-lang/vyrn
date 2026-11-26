@@ -8,15 +8,17 @@
 //! ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
 //! FnInfo   { name: String, params: Array<ParamInfo>, ret: String, retSchema: Schema, retUncodable: String, mutates: Bool, origin: Origin }
 //! ParamInfo{ name: String, spelling: String, schema: Schema, uncodable: String }
-//! TypeInfo { name: String, source: String, module: String, schema: Schema, origin: Origin, shape: Array<TypeNode> }
+//! TypeInfo { name: String, source: String, module: String, schema: Schema, origin: Origin, shape: Array<TypeNode>, annotations: Array<AnnotationInfo> }
 //! TypeNode { kind: String, name: String, spelling: String, args: Array<Int64>, members: Array<TypeMember>, predicate: String }
 //! Origin   { file: String, line: Int64, col: Int64, name: String }
+//! AnnotationInfo { name: String, module: String, member: String, fields: Array<AnnotationField>, origin: Origin }
 //! ```
 //! `ret` and `spelling` are type spellings; `TypeInfo.source` is the canonical
 //! `type` declaration text; `uncodable` and `retUncodable` are
 //! [`crate::codec`]'s verdict on crossing a JSON wire; `mutates` is the
 //! author's `mut fn` marker; `origin` is where the declaration is written;
-//! `shape` is the declaration's base as a tree (`push_node`). `moduleCode(path)`
+//! `shape` is the declaration's base as a tree (`push_node`); `annotations` are
+//! its annotations' constants (`annotation_lit`). `moduleCode(path)`
 //! returns the same literal inside a `ModuleCode`, with each type a generator
 //! writes, and each shape node, paired with itself as `Code` ([`Reflect::Code`]).
 //!
@@ -69,18 +71,24 @@ impl Origins {
 
     /// Returns the `Origin` literal for `name`, declared on `line` of `module`.
     fn lit(&self, module: &Option<String>, name: &str, line: usize) -> Expr {
-        let file = self
-            .files
-            .get(module)
-            .cloned()
-            .or_else(|| module.clone())
-            .unwrap_or_default();
         let col = self
             .cols
             .get(module)
             .and_then(|m| m.get(&(line, name.to_string())))
             .copied()
             .unwrap_or(0);
+        self.at(module, name, line, col)
+    }
+
+    /// Returns the `Origin` literal for `name`, written at `line` and `col` of
+    /// `module`.
+    fn at(&self, module: &Option<String>, name: &str, line: usize, col: usize) -> Expr {
+        let file = self
+            .files
+            .get(module)
+            .cloned()
+            .or_else(|| module.clone())
+            .unwrap_or_default();
         struct_lit(
             "Origin",
             vec![
@@ -162,7 +170,10 @@ pub fn module_lit(
     let type_info = |t: &TypeDecl| {
         let spec = specifiers.get(&t.module).map(|s| s.as_str()).unwrap_or("");
         let shape = shape_nodes(t, &types);
-        (type_info_lit(t, spec, &shape, &types, origins), shape)
+        let anns = (t.annotations.iter())
+            .map(|a| annotation_lit(t, a, &types, specifiers, &program.spellings, origins))
+            .collect();
+        (type_info_lit(t, spec, &shape, anns, &types, origins), shape)
     };
     let iface = |fns: Vec<Expr>, tys: Vec<Expr>| {
         struct_lit(
@@ -373,6 +384,7 @@ fn type_info_lit(
     t: &TypeDecl,
     module_spec: &str,
     shape: &[(Expr, String)],
+    annotations: Vec<Expr>,
     types: &HashMap<String, TypeDecl>,
     origins: &Origins,
 ) -> Expr {
@@ -388,6 +400,50 @@ fn type_info_lit(
                 "shape",
                 array_lit(shape.iter().map(|(n, _)| n.clone()).collect()),
             ),
+            ("annotations", array_lit(annotations)),
+        ],
+    )
+}
+
+/// Builds the `AnnotationInfo` literal for annotation `a` on `t`: its
+/// declaration as written, the specifier of the module declaring it, as
+/// `TypeInfo.module` spells one, and each field the checker found constant.
+fn annotation_lit(
+    t: &TypeDecl,
+    a: &Annotation,
+    types: &HashMap<String, TypeDecl>,
+    specifiers: &HashMap<Option<String>, String>,
+    spellings: &Spellings,
+    origins: &Origins,
+) -> Expr {
+    let linked = a.name();
+    let name = spellings.decls.get(linked).map_or(linked, |(written, _)| written);
+    let decl = types.get(linked);
+    let module = decl.and_then(|d| specifiers.get(&d.module)).cloned();
+    let written: &[(String, Expr)] = match &a.expr {
+        Expr::StructLit { fields, .. } => fields,
+        _ => &[],
+    };
+    let fields = written.iter().filter_map(|(field, e)| {
+        let value = match crate::consteval::eval(e, &HashMap::new())? {
+            crate::consteval::ConstVal::Int(n) => Expr::call("IntVal", vec![Expr::int(n)], 0),
+            crate::consteval::ConstVal::Str(s) => Expr::call("StrVal", vec![Expr::str(s)], 0),
+            crate::consteval::ConstVal::Bool(b) => {
+                Expr::call("BoolVal", vec![Expr::Bool(b, Id::NEW)], 0)
+            }
+            crate::consteval::ConstVal::Float(_) => return None,
+        };
+        let pair = vec![("name", Expr::str(field.clone())), ("value", value)];
+        Some(struct_lit("AnnotationField", pair))
+    });
+    struct_lit(
+        "AnnotationInfo",
+        vec![
+            ("name", Expr::str(name)),
+            ("module", Expr::str(module.unwrap_or_default())),
+            ("member", Expr::str(a.member.clone().unwrap_or_default())),
+            ("fields", array_lit(fields.collect())),
+            ("origin", origins.at(&t.module, name, a.line, a.col)),
         ],
     )
 }

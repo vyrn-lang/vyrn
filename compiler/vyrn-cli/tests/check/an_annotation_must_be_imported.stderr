@@ -1,0 +1,1 @@
+an_annotation_must_be_imported.vyrn:3:0: annotation `Opt` is defined in `./annotations_lib` but not imported here: add it to an `import { .. } from` list

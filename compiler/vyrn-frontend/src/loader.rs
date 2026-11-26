@@ -5590,6 +5590,9 @@ impl NsResolver<'_> {
                 let locals: HashSet<String> = std::iter::once("value".to_string()).collect();
                 body_expr_mut(pred, &locals, self);
             }
+            for a in &mut t.annotations {
+                body_expr_mut(&mut a.expr, &HashSet::new(), self);
+            }
         }
         for g in &mut p.globals {
             if let Some(ty) = &mut g.ty {
@@ -6238,6 +6241,9 @@ fn link(
             }
             for n in type_names(&t.base) {
                 check_name(&n, t.line, "type", &mut errors);
+            }
+            for a in &t.annotations {
+                check_name(a.name(), a.line, "annotation", &mut errors);
             }
         }
         for imp in &m.program.impls {
@@ -7352,9 +7358,10 @@ fn rewrite_module_refs(
     }
     for t in &mut p.type_decls {
         rewrite_type(&mut t.base, map);
-        if let Some(pred) = &mut t.predicate {
-            // A refinement predicate has no locals of its own.
-            body_expr_mut(pred, &HashSet::new(), rn);
+        // A refinement predicate and an annotation have no locals of their own.
+        let anns = t.annotations.iter_mut().map(|a| &mut a.expr);
+        for e in t.predicate.iter_mut().chain(anns) {
+            body_expr_mut(e, &HashSet::new(), rn);
         }
     }
     for g in &mut p.globals {

@@ -1069,6 +1069,11 @@ fn check_accum_inner(
         if let Err(s) = checker.unit(|| checker.check_type_decl(t)) {
             out.extend(s);
         }
+        for a in &t.annotations {
+            if let Err(s) = checker.unit(|| checker.check_annotation(t, a)) {
+                out.extend(s.map(|d| d.in_file(t.module.clone())));
+            }
+        }
     }
     checker.reader.set(None);
 
@@ -2810,8 +2815,14 @@ impl<'a> Checker<'a> {
                 }
                 self.ensure_no_stream(&f.ty, t.line, "a record field")?;
                 // A prelude record (line 0) may hold a generation-only type,
-                // `TypeArgNode.code`: only generation makes or reads one.
-                if !(t.line == 0 && self.gen_only(&f.ty, crate::prelude::type_decls().len())) {
+                // `TypeArgNode.code` or `TypeInfo.annotations`: only generation
+                // makes or reads one.
+                let mut gen_record = false;
+                crate::loader::type_heads(&f.ty, &mut |n| {
+                    gen_record |= crate::ast::is_gen_record(n) && self.decl(n).is_none()
+                });
+                let gen = gen_record || self.gen_only(&f.ty, crate::prelude::type_decls().len());
+                if !(t.line == 0 && gen) {
                     self.ensure_type_exists(&f.ty, t.line)?;
                 }
             }
@@ -2893,6 +2904,63 @@ impl<'a> Checker<'a> {
             "refinement",
             std::iter::once(("value".to_string(), t.base.clone())),
         )
+    }
+
+    /// Checks annotation `a` on `t`: it sits on a member `t` declares, and it
+    /// is a literal of constants of an imported record type whose fields are
+    /// `Int64`, `String` or `Bool`.
+    fn check_annotation(&self, t: &TypeDecl, a: &Annotation) -> Result<(), Diagnostic> {
+        let refuse = |rule: Rule| Err(cerr!(a.line; rule).at(a.col, a.col));
+        let name = DeclName(a.name());
+        if let Some(member) = &a.member {
+            let field = crate::types::record_fields(&t.base, self)
+                .is_some_and(|fs| fs.iter().any(|f| &f.name == member));
+            let variant = crate::types::declared_variants(&t.base)
+                .is_some_and(|vs| vs.iter().any(|v| &v.name == member));
+            if !(field || variant) {
+                return refuse(rule!(
+                    AnnotationMember,
+                    name,
+                    member,
+                    decl = DeclName(&t.name)
+                ));
+            }
+        }
+        let Some((d, Type::Record(fields))) = self.decl(name.0).map(|d| (d, &d.base)) else {
+            return refuse(rule!(AnnotationKind, name));
+        };
+        if d.module == t.module || d.line == 0 {
+            return refuse(rule!(AnnotationLocal, name));
+        }
+        if let Some(f) =
+            (fields.iter()).find(|f| !matches!(f.ty, Type::Int | Type::Str | Type::Bool))
+        {
+            return refuse(rule!(AnnotationFieldType, name, field = f.name, ty = f.ty));
+        }
+        match &a.expr {
+            Expr::StructLit {
+                fields: written, ..
+            } => {
+                self.expr(&a.expr, &Scope::closed(), None, None)?;
+                match written
+                    .iter()
+                    .find(|(_, e)| consteval::eval(e, &HashMap::new()).is_none())
+                {
+                    Some((field, e)) => Err(cerr!(
+                        e.line().max(a.line),
+                        AnnotationNotConstant,
+                        name,
+                        field
+                    )),
+                    None => Ok(()),
+                }
+            }
+            Expr::Var { .. } => match fields.first() {
+                Some(f) => refuse(rule!(MissingField, field = f.name, name)),
+                None => Ok(()),
+            },
+            _ => refuse(rule!(AnnotationArgs, name)),
+        }
     }
 
     /// Checks a type's `where` predicate: no call, and Bool in a scope holding

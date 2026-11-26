@@ -295,6 +295,14 @@ compiler/vyrn-cli/tests/check/accepts_valid_compile_time_construction.vyrn	0	cbf
 compiler/vyrn-cli/tests/check/allows_a_consume_of_a_value_that_owns_no_heap_inside_a_region.vyrn	0	cbf29ce484222325	20	16	62e80794a93ec810
 compiler/vyrn-cli/tests/check/allows_nonheap_stores_out_of_region.vyrn	0	cbf29ce484222325	20	18	0d4a29dbe3d0a55b
 compiler/vyrn-cli/tests/check/allows_region_local_heap_binding.vyrn	0	cbf29ce484222325	20	17	fe19d28d27ce3669
+compiler/vyrn-cli/tests/check/an_annotation_field_is_an_int_a_string_or_a_bool.vyrn	0	cbf29ce484222325	20	19	01e33c7ca15cc193
+compiler/vyrn-cli/tests/check/an_annotation_holds_literals.vyrn	0	cbf29ce484222325	20	19	3b2541e571e7d981
+compiler/vyrn-cli/tests/check/an_annotation_must_be_imported.vyrn	0	cbf29ce484222325	20	19	1b882d048ca69ac3
+compiler/vyrn-cli/tests/check/an_annotation_names_a_record_type.vyrn	0	cbf29ce484222325	20	18	0d3d3380050ab2ed
+compiler/vyrn-cli/tests/check/an_annotation_names_an_imported_type.vyrn	0	cbf29ce484222325	20	17	1c5ce8b885e30645
+compiler/vyrn-cli/tests/check/an_annotation_record_is_written_with_braces.vyrn	0	cbf29ce484222325	20	17	861ff2ac39c5f8dc
+compiler/vyrn-cli/tests/check/an_annotation_sits_on_a_member_of_its_declaration.vyrn	0	cbf29ce484222325	20	18	c59e903db6cadea3
+compiler/vyrn-cli/tests/check/an_annotation_without_braces_has_no_fields.vyrn	0	cbf29ce484222325	20	18	3c8f340e727bd374
 compiler/vyrn-cli/tests/check/an_array_alias_cannot_have_a_where_clause.vyrn	0	cbf29ce484222325	20	19	f6fcc83511e0bab9
 compiler/vyrn-cli/tests/check/an_array_keeps_length.vyrn	0	cbf29ce484222325	20	18	ca13dfa7c3c8bc82
 compiler/vyrn-cli/tests/check/an_array_sorted_by_another_order_cannot_be_searched.vyrn	0	cbf29ce484222325	20	18	842c4e9759247acb
@@ -349,6 +357,8 @@ compiler/vyrn-cli/tests/check/an_unsolved_parameter_in_a_stored_fn_type_names_th
 compiler/vyrn-cli/tests/check/an_unsolved_parameter_in_a_stored_fn_type_names_the_annotation_2.vyrn	0	cbf29ce484222325	20	16	3f4aa972ec6eb721
 compiler/vyrn-cli/tests/check/an_unsolved_parameter_in_a_stored_fn_type_names_the_annotation_3.vyrn	0	cbf29ce484222325	20	18	f4ba97c39cfb0d54
 compiler/vyrn-cli/tests/check/an_unsorted_array_cannot_be_searched.vyrn	0	cbf29ce484222325	20	20	8933528d4a455220
+compiler/vyrn-cli/tests/check/annotations_carry_constants_of_an_imported_record.vyrn	0	cbf29ce484222325	20	17	64f56b83940dbdd3
+compiler/vyrn-cli/tests/check/annotations_lib.vyrn	0	cbf29ce484222325	20	18	4525a93677668734
 compiler/vyrn-cli/tests/check/arrayn_allows_store.vyrn	0	cbf29ce484222325	20	13	3aa1632442b44b91
 compiler/vyrn-cli/tests/check/assert_and_asserteq_check_inside_a_test.vyrn	0	cbf29ce484222325	20	15	fcc1a5a9dfd33ea9
 compiler/vyrn-cli/tests/check/assert_outside_a_test_is_rejected_1.vyrn	0	cbf29ce484222325	20	15	cfc9544ad44036be
@@ -676,6 +686,8 @@ compiler/vyrn-cli/tests/check/rename_and_fsync_are_rejected_in_a_generator_1.vyr
 compiler/vyrn-cli/tests/check/rename_and_fsync_are_rejected_in_a_generator_2.vyrn	0	cbf29ce484222325	20	17	19a83566b991643f
 compiler/vyrn-cli/tests/check/rename_and_fsync_have_the_io_signatures.vyrn	0	cbf29ce484222325	20	16	889f8641617e9383
 compiler/vyrn-cli/tests/check/result_is_codable_and_named_aliases_work.vyrn	0	cbf29ce484222325	20	19	42441da1e385e044
+compiler/vyrn-cli/tests/check/row_annotation_anonymous.vyrn	1	3c5e75594739b265	20	20	29a35b0050847918
+compiler/vyrn-cli/tests/check/row_annotation_target.vyrn	1	234e061517d4207d	20	20	ed345a9d1e96fd09
 compiler/vyrn-cli/tests/check/row_array_size.vyrn	1	bf18ba215889f605	20	20	c582c4a7ea211041
 compiler/vyrn-cli/tests/check/row_assoc_type_after_methods.vyrn	1	654da9159e5a6501	20	20	02da34024e317d06
 compiler/vyrn-cli/tests/check/row_assoc_type_rhs.vyrn	1	f85609beda3a73f4	20	20	db225f6473f903e8

@@ -94,6 +94,7 @@ pub enum Tok {
     Amp,
     Caret,
     Tilde,
+    At,
 }
 
 impl Tok {
@@ -168,6 +169,7 @@ impl Tok {
             Self::Amp => "&",
             Self::Caret => "^",
             Self::Tilde => "~",
+            Self::At => "@",
             _ => return None,
         })
     }
@@ -244,6 +246,7 @@ pub(crate) fn punct_tok(text: &str) -> Option<Tok> {
         "&" => Tok::Amp,
         "^" => Tok::Caret,
         "~" => Tok::Tilde,
+        "@" => Tok::At,
         _ => return None,
     })
 }
@@ -315,6 +318,7 @@ pub const PUNCT_SPELLINGS: &[&str] = &[
     "&",
     "^",
     "~",
+    "@",
 ];
 
 /// The words the lexer hands back as identifiers and a syntactic rule reads by
@@ -560,6 +564,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
             [b'&', ..] => (Tok::Amp, 1),
             [b'^', ..] => (Tok::Caret, 1),
             [b'~', ..] => (Tok::Tilde, 1),
+            [b'@', ..] => (Tok::At, 1),
             _ => return Ok(false),
         };
         let start = self.pos;

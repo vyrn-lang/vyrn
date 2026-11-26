@@ -589,7 +589,10 @@ mod tests {
         let own =
             |list: &[(&str, Scope)]| list.iter().map(|(re, s)| (re.to_string(), *s)).collect();
         Naming {
-            before_words: own(&[("\\b[A-Z][A-Za-z0-9_]*\\b", Scope::SupportType)]),
+            before_words: own(&[
+                ("(?<=@)[A-Za-z_][A-Za-z0-9_]*", Scope::Function),
+                ("\\b[A-Z][A-Za-z0-9_]*\\b", Scope::SupportType),
+            ]),
             after_words: own(&[
                 ("(?<=\\bfn\\s)[a-z_][A-Za-z0-9_]*", Scope::Function),
                 ("\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\(|\")", Scope::Function),

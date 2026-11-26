@@ -1,0 +1,1 @@
+an_annotation_without_braces_has_no_fields.vyrn:3:1: missing field `short` for `Opt`

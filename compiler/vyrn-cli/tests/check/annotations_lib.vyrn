@@ -1,0 +1,10 @@
+/// A flag's short name.
+export type Opt = { short: String, hidden: Bool, rank: Int64 }
+
+export type Skip = {}
+
+export type Wide = { xs: Array<Int64> }
+
+export fn notAType() -> Int64 {
+    return 1
+}
