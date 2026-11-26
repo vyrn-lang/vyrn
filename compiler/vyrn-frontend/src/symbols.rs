@@ -104,9 +104,9 @@ pub struct Analysis {
     /// names)`, so a `Named("T")` receiver finds its protocols.
     pub type_param_bounds: Vec<(usize, String, Vec<String>)>,
     /// Record fields by declaring type name, for member completion on a record
-    /// receiver. A refined field renders as written
+    /// receiver and its jump. A refined field renders as written
     /// (`age: Int64 where value >= 18`).
-    pub record_fields: Vec<(String, Completion)>,
+    pub record_fields: Vec<RecordField>,
     /// Every finite validated string type with its enumerated language, up to a
     /// cap, for string-literal completion: `t("` offers every
     /// `TransKey`. A type past the cap, infinite or not a regex is absent.
@@ -227,6 +227,21 @@ pub struct NamespaceInfo {
     pub generated: Option<String>,
 }
 
+/// A field of a declared record type.
+#[derive(Debug, Clone)]
+pub struct RecordField {
+    /// The declaring type's name in the linked program.
+    pub of: String,
+    pub completion: Completion,
+    /// The field's name token as `(line, col, end_col)`, 1-based; `None` where no
+    /// source writes it, as for a generation record.
+    pub at: Option<(usize, usize, usize)>,
+    /// As [`Resolution::target_file`].
+    pub file: Option<String>,
+    /// As [`Resolution::generated`].
+    pub generated: Option<String>,
+}
+
 /// Answer to "what is at this cursor": the declaration it resolves to.
 #[derive(Debug, Clone)]
 pub struct Resolution {
@@ -254,6 +269,9 @@ pub struct Resolution {
     /// The module key of the generated module that declares it, whose text no file holds;
     /// `target_file` is `None` then.
     pub generated: Option<String>,
+    /// The builtin row it names, an index of [`crate::prelude::builtins`], whose declaration
+    /// [`prelude_document`] writes; `target_*` are 0 then.
+    pub builtin: Option<usize>,
 }
 
 /// One completion item (a top-level symbol).
@@ -621,6 +639,9 @@ fn analyze_inner(
                 .map(|(tp, bs)| (f.line, tp.clone(), bs.clone()))
         })
         .collect();
+    // Each declaring module is lexed once, for its fields' name tokens: the root's
+    // text, a generated module's, or what the resolver reads.
+    let mut lexed: HashMap<Option<&str>, Vec<lexer::Token>> = HashMap::new();
     let mut record_fields = Vec::new();
     for t in &member_src.type_decls {
         // Skip synthetic inline-refinement decls (`User.age`); the parent record
@@ -629,10 +650,28 @@ fn analyze_inner(
             continue;
         }
         if let Type::Record(fields) = &t.base {
+            let module = t.module.as_deref();
+            let gen = module.and_then(|m| generated_text(&graph, m));
+            let tokens = lexed.entry(module).or_insert_with(|| {
+                let text = match (module, &linker) {
+                    (None, _) => Some(std::borrow::Cow::Borrowed(source)),
+                    (Some(m), Some((_, _, resolver))) => module_text(m, *resolver, gen),
+                    (Some(_), None) => None,
+                };
+                (text.and_then(|t| lexer::lex(&t).ok())).unwrap_or_default()
+            });
+            let names = (t.line > 0)
+                .then(|| record_field_names(tokens, t.line))
+                .unwrap_or_default();
             for f in fields {
-                record_fields.push((
-                    t.name.clone(),
-                    Completion {
+                record_fields.push(RecordField {
+                    of: t.name.clone(),
+                    at: (names.iter())
+                        .find(|(n, _)| *n == f.name)
+                        .map(|(_, at)| *at),
+                    file: module.filter(|_| gen.is_none()).map(str::to_string),
+                    generated: gen.and(module).map(str::to_string),
+                    completion: Completion {
                         label: f.name.clone(),
                         kind: SymbolKind::Field,
                         detail: {
@@ -645,7 +684,7 @@ fn analyze_inner(
                         },
                         doc: None,
                     },
-                ));
+                });
             }
         }
     }
@@ -991,8 +1030,8 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         let c = (member_completions(analysis, tok.line, tok.col).into_iter())
             .find(|c| c.label == tok.text)?;
         // A user protocol or impl method is an indexed symbol, so it keeps its
-        // declaration site; `x::P.m` jumps to `P`'s. A field or builtin method
-        // hovers without a jump.
+        // declaration site; `x::P.m` jumps to `P`'s. A builtin method hovers
+        // without a jump; a field is [`declared_field`]'s.
         let decl = match protocol_qualifier(analysis, tok.line, tok.col) {
             Some(p) => protocol_member_symbol(analysis, &p.text, &c.label),
             None => (analysis.symbols.iter())
@@ -1013,6 +1052,7 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         doc: h.doc,
         definition: true,
         generated: None,
+        builtin: None,
     };
     let nowhere = |name: &str, kind, h: Hover| Resolution {
         name: name.to_string(),
@@ -1026,6 +1066,12 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         doc: h.doc,
         definition: false,
         generated: None,
+        builtin: None,
+    };
+    let row = |row: Option<usize>, r: Resolution| Resolution {
+        definition: row.is_some(),
+        builtin: row,
+        ..r
     };
     match resolve_token(analysis, tok, member) {
         Some(Named::Local(b)) => Some(local_resolution(analysis, b)),
@@ -1042,13 +1088,29 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         Some(Named::Member((c, decl))) => {
             let doc = c.doc.clone().or_else(|| decl.and_then(|d| d.doc.clone()));
             let hover = hover_of(&c.detail, &[doc_piece(&doc)]);
-            Some(match decl {
-                Some(d) => Resolution {
+            let field = (c.kind == SymbolKind::Field)
+                .then(|| declared_field(analysis, tok, &c.label))
+                .flatten();
+            Some(match (field, decl) {
+                (Some((f, (line, col, end_col))), _) => Resolution {
+                    target_line: line,
+                    target_col: col,
+                    target_end_col: end_col,
+                    target_file: f.file.clone(),
+                    definition: true,
+                    generated: f.generated.clone(),
+                    ..nowhere(&c.label, c.kind, hover)
+                },
+                (None, Some(d)) if c.kind != SymbolKind::Field => Resolution {
                     name: c.label,
                     kind: c.kind,
                     ..at(d, hover)
                 },
-                None => nowhere(&c.label, c.kind, hover),
+                (None, _) => {
+                    let of = |b: &crate::prelude::Builtin| b.hover.as_ref() == Some(&c.detail);
+                    let at = crate::prelude::builtins().iter().position(of);
+                    row(at, nowhere(&c.label, c.kind, hover))
+                }
             })
         }
         // The namespace binding itself, a compile-time name, not a value: its hover lists
@@ -1083,17 +1145,117 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         // built-in function by its contract (`print`), then the ambient
         // `Result` and `Option` and their constructors, imported or not.
         None => match builtin_method(&tok.text) {
-            Some(b) => Some(nowhere(b.name, SymbolKind::Method, hover_of(b.detail, &[]))),
-            None => match crate::prelude::builtin(&tok.text).and_then(|b| b.sig.as_ref()) {
-                Some(f) => Some(nowhere(
-                    &tok.text,
-                    SymbolKind::Function,
-                    hover_of(&function_detail(f, &analysis.spellings), &[]),
-                )),
+            Some(b) => Some(row(
+                Some(b.row),
+                nowhere(b.name, SymbolKind::Method, hover_of(b.detail, &[])),
+            )),
+            None => match crate::prelude::row_of(&tok.text) {
+                Some(at) => {
+                    let b = &crate::prelude::builtins()[at];
+                    let hover = hover_of(&row_declaration(b, &analysis.spellings), &[]);
+                    Some(row(
+                        Some(at),
+                        nowhere(&tok.text, SymbolKind::Function, hover),
+                    ))
+                }
                 None => builtin_type_or_ctor(&tok.text)
                     .map(|(kind, hover)| nowhere(&tok.text, kind, hover_of(&hover, &[]))),
             },
         },
+    }
+}
+
+/// The field `label` of the declared record `tok`'s receiver types as, with its name
+/// token. An inline record or a builtin field (`length`) has none.
+fn declared_field<'a>(
+    analysis: &'a Analysis,
+    tok: &TokenInfo,
+    label: &str,
+) -> Option<(&'a RecordField, (usize, usize, usize))> {
+    let Type::Named(n) = resolve_receiver_type(analysis, tok.line, tok.col)? else {
+        return None;
+    };
+    let f = (analysis.record_fields.iter()).find(|f| f.of == n && f.completion.label == label)?;
+    Some((f, f.at?))
+}
+
+/// The read-only document of the builtin rows, [`crate::prelude::builtins`] in table order.
+/// Each row is its hover as `///` lines, a line naming each Vyrn function it routes to,
+/// and its [`row_declaration`].
+pub struct PreludeDocument {
+    pub text: String,
+    /// Each row's name in its declaration, as `(line, col, end_col)`, 1-based, by row index.
+    pub rows: Vec<(usize, usize, usize)>,
+}
+
+/// Writes the [`PreludeDocument`]. A route names its function's file under `std_root`,
+/// read through `resolver`, and `link` spells that file and 1-based line as the
+/// editor's link. A route whose function no file declares is named without a link.
+pub fn prelude_document(
+    std_root: Option<&str>,
+    resolver: &dyn crate::loader::ModuleResolver,
+    link: &dyn Fn(&str, usize) -> Option<String>,
+) -> PreludeDocument {
+    let sp = Spellings::default();
+    let mut lines =
+        vec!["// The builtins: a declaration per row of the compiler's table.".to_string()];
+    let mut rows = Vec::new();
+    for b in crate::prelude::builtins() {
+        lines.push(String::new());
+        lines.extend((b.hover.iter()).flat_map(|h| h.lines().map(|l| format!("/// {l}"))));
+        for (route, verb) in [(b.route, "Runs"), (b.gen_route, "A generator runs")] {
+            let Some(route) = route else { continue };
+            let at = route_site(route, std_root, resolver).and_then(|(f, l)| link(&f, l));
+            let at = at.map(|l| format!(" at {l}")).unwrap_or_default();
+            lines.push(format!("/// {verb} `{route}`{at}"));
+        }
+        let decl = row_declaration(b, &sp);
+        let col = decl
+            .find(b.name)
+            .map_or(0, |c| decl[..c].chars().count() + 1);
+        let end = if col == 0 {
+            0
+        } else {
+            col + b.name.chars().count()
+        };
+        rows.push((lines.len() + 1, col, end));
+        lines.push(decl);
+    }
+    lines.push(String::new());
+    PreludeDocument {
+        text: lines.join("\n"),
+        rows,
+    }
+}
+
+/// The file under `std_root` and the 1-based line of the function a route such as
+/// `runtime$parseV` names: the runtime module ([`crate::loader::RT_MODULES`]) whose
+/// prefix it carries, and the function its rest names.
+fn route_site(
+    route: &str,
+    std_root: Option<&str>,
+    resolver: &dyn crate::loader::ModuleResolver,
+) -> Option<(String, usize)> {
+    let (prefix, name) = route.split_at(route.find('$')? + 1);
+    let rt = (crate::loader::RT_MODULES.iter()).find(|rt| rt.prefix == prefix)?;
+    let file = format!("{}/{}.vyrn", std_root?, rt.spec.strip_prefix("std/")?);
+    let line = (declared(&file, resolver, None)?.functions.iter())
+        .find(|f| f.name == name)?
+        .line;
+    Some((file, line))
+}
+
+/// A builtin row's declaration: its contract, else the operand and result types it is
+/// typed at, else its bare name.
+fn row_declaration(b: &crate::prelude::Builtin, sp: &Spellings) -> String {
+    match (&b.sig, &b.typed) {
+        (Some(f), _) => function_detail(f, sp),
+        (None, Some(t)) => {
+            let params: Vec<String> = t.params.iter().map(|p| type_to_string(p, sp)).collect();
+            let ret = type_to_string(&t.ret, sp);
+            format!("fn {}({}) -> {ret}", b.name, params.join(", "))
+        }
+        (None, None) => format!("fn {}", b.name),
     }
 }
 
@@ -1384,9 +1546,9 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
     // structural receiver offers its own.
     match &ty {
         Type::Named(n) => {
-            for (tn, c) in &analysis.record_fields {
-                if tn == n {
-                    out.push(c.clone());
+            for f in &analysis.record_fields {
+                if f.of == *n {
+                    out.push(f.completion.clone());
                 }
             }
         }
@@ -1880,6 +2042,44 @@ fn name_col_on_line(tok_info: &[TokenInfo], name: &str, line: usize) -> (usize, 
         .unwrap_or((0, 0))
 }
 
+/// The name token of each field of the record the declaration on `line` writes, as
+/// `(name, (line, col, end_col))`: a word followed by `:` one bracket deep inside the
+/// first `{` after the declaration's `=`.
+fn record_field_names(
+    tokens: &[lexer::Token],
+    line: usize,
+) -> Vec<(String, (usize, usize, usize))> {
+    let start = (tokens.iter())
+        .position(|t| t.line >= line && t.tok == Tok::Eq)
+        .and_then(|eq| Some(eq + tokens[eq..].iter().position(|t| t.tok == Tok::LBrace)?));
+    let Some(start) = start else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    for (i, t) in tokens.iter().enumerate().skip(start) {
+        match t.tok {
+            Tok::LBrace | Tok::LParen | Tok::LBracket => depth += 1,
+            Tok::RBrace | Tok::RParen | Tok::RBracket => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        let word = match &t.tok {
+            Tok::Ident(n) => Some(n.as_str()),
+            other => other.keyword_text(),
+        };
+        let typed = tokens.get(i + 1).is_some_and(|n| n.tok == Tok::Colon);
+        if let (Some(name), 1, true) = (word, depth, typed) {
+            out.push((name.to_string(), (t.line, t.col, t.end.1)));
+        }
+    }
+    out
+}
+
 /// What a [`Decl`] declares, so an index takes the kinds it shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Of {
@@ -2095,10 +2295,7 @@ fn index_imported_symbols(
         if imp.names.is_empty() {
             continue;
         }
-        let gen = graph
-            .iter()
-            .find(|(k, _, _)| k == target)
-            .and_then(|(_, _, g)| g.as_ref().map(|g| g.source.as_str()));
+        let gen = generated_text(graph, target);
         let Some(program) = declared(target, resolver, gen) else {
             continue;
         };
@@ -2170,10 +2367,7 @@ fn index_namespaces(
     let mut out = Vec::new();
     for (imp, target) in root.imports.iter().zip(targets) {
         if let Some(ns) = &imp.namespace {
-            let gen = graph
-                .iter()
-                .find(|(k, _, _)| k == target)
-                .and_then(|(_, _, g)| g.as_ref().map(|g| g.source.as_str()));
+            let gen = generated_text(graph, target);
             let mut members = namespace_members(target, (&root_key, opts), resolver, gen);
             for m in &mut members {
                 let generated = m.name.clone();
@@ -2266,23 +2460,35 @@ fn declared_spellings(
     sp
 }
 
-/// The declarations of `target` as its own source writes them, bodies
-/// skimmed: `gen_source` when `target` is a generated module, else what
-/// `resolver` reads. `None` for a target neither holds or that does not lex.
+/// The declarations of `target` as its [`module_text`] writes them, bodies skimmed.
+/// `None` for a target with no text or one that does not lex.
 fn declared(
     target: &str,
     resolver: &dyn crate::loader::ModuleResolver,
     gen_source: Option<&str>,
 ) -> Option<ast::Program> {
-    let read;
-    let text = match gen_source {
-        Some(g) => g,
-        None => {
-            read = resolver.read(target).ok()?;
-            read.as_str()
-        }
-    };
-    Some(parser::parse_imported(lexer::lex(text).ok()?, true).0)
+    let text = module_text(target, resolver, gen_source)?;
+    Some(parser::parse_imported(lexer::lex(&text).ok()?, true).0)
+}
+
+/// The source of `target`: `gen_source` when it is a generated module, else what
+/// `resolver` reads. `None` for a target neither holds.
+fn module_text<'a>(
+    target: &str,
+    resolver: &dyn crate::loader::ModuleResolver,
+    gen_source: Option<&'a str>,
+) -> Option<std::borrow::Cow<'a, str>> {
+    match gen_source {
+        Some(g) => Some(g.into()),
+        None => resolver.read(target).ok().map(Into::into),
+    }
+}
+
+/// The text of the generated module `key` of the load's `graph`; `None` for a module on
+/// disk.
+fn generated_text<'a>(graph: &'a crate::loader::ModuleGraph, key: &str) -> Option<&'a str> {
+    let (_, _, gen) = graph.iter().find(|(k, _, _)| k == key)?;
+    gen.as_ref().map(|g| g.source.as_str())
 }
 
 /// The symbol maps of every generated module the linked program reached,
@@ -2548,6 +2754,7 @@ fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
         doc,
         definition: true,
         generated: None,
+        builtin: None,
     }
 }
 
@@ -3353,7 +3560,7 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
         receiver_before_dot(analysis, tok.line, tok.col)?;
         let is_field = match resolve_receiver_type(analysis, tok.line, tok.col)? {
             Type::Named(n) => {
-                (analysis.record_fields.iter()).any(|(tn, c)| *tn == n && c.label == tok.text)
+                (analysis.record_fields.iter()).any(|f| f.of == n && f.completion.label == tok.text)
             }
             Type::Record(fields) => fields.iter().any(|f| f.name == tok.text),
             _ => false,
@@ -3430,14 +3637,17 @@ fn mods_default_lib() -> SemMods {
 struct BuiltinMethod {
     name: &'static str,
     detail: &'static str,
+    /// Its index in [`crate::prelude::builtins`].
+    row: usize,
 }
 
 /// Every builtin with hover text, in the table's order.
 fn builtin_methods() -> impl Iterator<Item = (BuiltinMethod, &'static [crate::prelude::Shape])> {
-    crate::prelude::builtins().iter().filter_map(|b| {
+    (crate::prelude::builtins().iter().enumerate()).filter_map(|(row, b)| {
         let m = BuiltinMethod {
             name: b.method.unwrap_or(b.name),
             detail: b.hover.as_deref()?,
+            row,
         };
         Some((m, b.on))
     })

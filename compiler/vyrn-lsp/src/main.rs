@@ -1102,6 +1102,14 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     if !r.definition {
         return None;
     }
+    if let Some(row) = r.builtin {
+        let doc = prelude_document();
+        let (line, col, end) = *doc.rows.get(row)?;
+        return Some(GotoDefinitionResponse::Scalar(Location {
+            uri: Url::parse(PRELUDE_URI).ok()?,
+            range: lsp_range(&doc.text, line, col, end),
+        }));
+    }
     if let Some(module) = &r.generated {
         let owner = home_uri?;
         let target_uri = generated_uri(&owner, module);
@@ -1230,10 +1238,28 @@ fn generated_source(server: &Server, owner: &Url, module: &str) -> Option<String
     Some(synth_for(server, owner, module)?.gen_source.clone())
 }
 
-/// `vyrn/generatedSource`: the text of the generated module a [`generated_uri`] `{ uri }`
-/// names; `null` for another URI and for a module its owner does not generate.
+/// The read-only document of the builtin rows, where a definition of a builtin lands.
+const PRELUDE_URI: &str = "vyrn-builtin:/prelude.vyrn";
+
+/// The [`vyrn_frontend::PreludeDocument`] over the server's std, each route a `file:` link
+/// to its function's line.
+fn prelude_document() -> vyrn_frontend::PreludeDocument {
+    let link = |file: &str, line: usize| {
+        let url = Url::from_file_path(file.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
+        Some(format!("{url}#L{line}"))
+    };
+    let resolver = vyrn_frontend::loader::DiskResolver;
+    vyrn_frontend::prelude_document(std_root().as_deref(), &resolver, &link)
+}
+
+/// `vyrn/generatedSource`: the text of the read-only document `{ uri }` names: the
+/// [`PRELUDE_URI`], or the generated module a [`generated_uri`] names. `null` for another
+/// URI and for a module its owner does not generate.
 fn handle_generated_source(server: &Server, params: serde_json::Value) -> Option<String> {
     let uri = Url::parse(params.get("uri")?.as_str()?).ok()?;
+    if uri.as_str() == PRELUDE_URI {
+        return Some(prelude_document().text);
+    }
     if uri.scheme() != GENERATED_SCHEME {
         return None;
     }
