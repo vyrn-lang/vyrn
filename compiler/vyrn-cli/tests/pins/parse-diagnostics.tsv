@@ -544,6 +544,7 @@ compiler/vyrn-cli/tests/check/literal_a_reversed_class.vyrn	0	cbf29ce484222325	2
 compiler/vyrn-cli/tests/check/literal_a_sized_sibling.vyrn	0	cbf29ce484222325	20	17	6a9dbe8230d28ca1
 compiler/vyrn-cli/tests/check/literal_a_sized_slot.vyrn	0	cbf29ce484222325	20	13	6ac16f2854088518
 compiler/vyrn-cli/tests/check/literal_a_smallarray_slot.vyrn	0	cbf29ce484222325	20	16	f120996775ea69c7
+compiler/vyrn-cli/tests/check/literal_an_empty_class.vyrn	0	cbf29ce484222325	20	18	d85e569fe14dd1a9
 compiler/vyrn-cli/tests/check/literal_part_a_borrow_into_a_let_s_literal.vyrn	0	cbf29ce484222325	20	19	b2ea86bdca1c2eca
 compiler/vyrn-cli/tests/check/literal_part_a_borrow_into_an_inline_literal.vyrn	0	cbf29ce484222325	20	18	502a178f62c1e062
 compiler/vyrn-cli/tests/check/literal_part_a_move_into_a_let_s_literal.vyrn	0	cbf29ce484222325	20	19	c501be9d93548a95
@@ -1557,7 +1558,7 @@ std/num.vyrn	0	cbf29ce484222325	20	18	82ccd8c2fe8231da
 std/openapi.vyrn	0	cbf29ce484222325	20	17	a347559be7420f9b
 std/order.vyrn	0	cbf29ce484222325	20	20	34901d18d4f3ea0c
 std/random.vyrn	0	cbf29ce484222325	20	16	b8e97c8b736a86a6
-std/regex.vyrn	0	cbf29ce484222325	20	17	cfb07ec5985e7a67
+std/regex.vyrn	0	cbf29ce484222325	20	18	6ce670f4eff4ed59
 std/rpc.editor.vyrn	0	cbf29ce484222325	20	15	5308db71b62b6a5c
 std/rpc.vyrn	0	cbf29ce484222325	20	17	1fb054967659d958
 std/runtime.vyrn	0	cbf29ce484222325	20	18	b61fdfd5e0a895b6

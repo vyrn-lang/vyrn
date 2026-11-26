@@ -7,11 +7,12 @@
 /// The language is `std/regex.syntax`, the one `=~` reads, and a pattern means what
 /// it means there: `.` is any character but `\n` and `\r`, `\d`, `\w` and `\s` are
 /// shorthands, `\n`, `\t`, `\r`, `\f` and `\v` are control characters, and any
-/// other escape is the character after it. A Thompson NFA with no backtracking, so
-/// the time is linear in the pattern size times the input for every pattern. A
-/// search runs it as a lazy DFA: one table read per byte. Refuses what the grammar
-/// accepts and this builder does not compile: anchors, counted repetition and an
-/// empty class. It has no backreferences or lookaround: `\1` is the byte `1`.
+/// other escape is the character after it. `{m,n}` repeats a term `m` to `n` times,
+/// each count at most 255. `^` and `$` are the bytes they spell, and the empty
+/// pattern matches the empty string. A Thompson NFA with no backtracking, so the
+/// time is linear in the pattern size times the input for every pattern. A search
+/// runs it as a lazy DFA: one table read per byte. It has no backreferences or
+/// lookaround: `\1` is the byte `1`.
 ///
 /// Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
 /// backtracking engine answers `a`.
@@ -100,22 +101,27 @@ type Builder = {
     b: Array<Int64>,
     cls: Array<ByteSet>,
     err: Option<rx.Row>,
+    // The terms counted repetition has copied, against `countBudget`.
+    expanded: Int64,
 }
 
-/// The sentence of `row`, the one place a refusal is said. Every form of a counted
-/// repetition says one sentence, because this builder compiles none of them.
+/// The terms counted repetition may copy in one pattern. Nested counts multiply,
+/// so `(a{99}){99}` copies about 10^4.
+let countBudget = 16384
+
+/// The sentence of `row`, the one place a refusal is said.
 fn regexSay(row: rx.Row) -> String {
     return match row {
-        Anchor => say.tAnchor__En(),
         Backwards => say.tBackwards__En(),
         ClassBackslash => say.tClassBackslash__En(),
         ClassUnclosed => say.tClassUnclosed__En(),
-        CountForm => say.tCounted__En(),
-        CountNumber => say.tCounted__En(),
-        CountUnclosed => say.tCounted__En(),
-        Counted => say.tCounted__En(),
+        CountBudget => say.tCountBudget__En(),
+        CountForm => say.tCountForm__En(),
+        CountLarge => say.tCountLarge__En(),
+        CountNumber => say.tCountNumber__En(),
+        CountOrder => say.tCountOrder__En(),
+        CountUnclosed => say.tCountUnclosed__En(),
         EmptyClass => say.tEmptyClass__En(),
-        EmptyPattern => say.tEmptyPattern__En(),
         Expected(token) => say.tExpected__En(token),
         GroupUnclosed => say.tGroupUnclosed__En(),
         NoCountTerm => say.tNoCountTerm__En(),
@@ -136,6 +142,14 @@ fn refuse(bd: modify Builder, row: consume rx.Row) {
         None => {
             bd.err = Some(row)
         }
+    }
+}
+
+/// Whether the walk has refused.
+fn refused(bd: Builder) -> Bool {
+    return match bd.err {
+        Some(first) => true,
+        None => false,
     }
 }
 
@@ -226,9 +240,6 @@ fn escapeBytes(c: UInt8) -> ByteSet {
 /// between the two bytes that touch its `-`.
 fn classBytes(bd: modify Builder, pattern: String, c: rx.RegexClass) -> ByteSet {
     let mut k = noBytes()
-    if c.items.length == 0 {
-        refuse(bd, EmptyClass)
-    }
     let mut i = 0
     while i < c.items.length {
         match c.items[i] {
@@ -286,73 +297,241 @@ fn fragSet(bd: modify Builder, k: ByteSet) -> Frag {
     return Frag { start: pc, holes: [pc * 2 + 1, sp * 2 + 1] }
 }
 
-/// `f` under the repeat of `piece`, if it has one.
-fn fragRepeat(bd: modify Builder, f: consume Frag, piece: rx.RegexPiece) -> Frag {
-    if let Some(c) = piece.count {
-        refuse(bd, Counted)
-    }
-    if let Some(op) = piece.op {
-        let sp = emit(bd, opSplit, f.start, 0, noBytes())
-        if op.text == "?" {
-            return Frag { start: sp, holes: joinHoles(f.holes, [sp * 2 + 1]) }
-        }
-        // Greedy: the split's first operand enters the body, which loops back to
-        // the split.
-        patch(bd, f.holes, sp)
-        return Frag { start: if op.text == "*" { sp } else { f.start }, holes: [sp * 2 + 1] }
-    }
-    return f
-}
-
-/// The bytes of `pattern` from `from` up to `to`, one term each, with the repeat of
-/// `piece` on the last: a repeat takes one byte of a character outside ASCII.
-fn fragBytes(bd: modify Builder, pattern: String, from: Int64, to: Int64, piece: rx.RegexPiece) -> Frag {
+/// The fragment of byte `c`.
+fn fragByte(bd: modify Builder, c: UInt8) -> Frag {
     let mut k = noBytes()
-    addByte(k, Int64(pattern[from]))
-    let f = fragSet(bd, k)
-    if from + 1 == to {
-        return fragRepeat(bd, f, piece)
-    }
-    let g = fragBytes(bd, pattern, from + 1, to, piece)
-    patch(bd, f.holes, g.start)
-    return Frag { start: f.start, holes: consume g.holes }
+    addByte(k, Int64(c))
+    return fragSet(bd, k)
 }
 
-fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag {
-    match piece.atom {
+/// The empty string: a split with both edges dangling.
+fn fragEmpty(bd: modify Builder) -> Frag {
+    let sp = emit(bd, opSplit, 0, 0, noBytes())
+    return Frag { start: sp, holes: [sp * 2, sp * 2 + 1] }
+}
+
+/// `f` under the repeat `op`: `*`, `+` or `?`.
+fn fragOp(bd: modify Builder, f: consume Frag, op: String) -> Frag {
+    let sp = emit(bd, opSplit, f.start, 0, noBytes())
+    if op == "?" {
+        return Frag { start: sp, holes: joinHoles(f.holes, [sp * 2 + 1]) }
+    }
+    // Greedy: the split's first operand enters the body, which loops back to the
+    // split.
+    patch(bd, f.holes, sp)
+    return Frag { start: if op == "*" { sp } else { f.start }, holes: [sp * 2 + 1] }
+}
+
+/// The term of `atom` a repeat applies to: the whole atom, or the last byte of a
+/// character outside ASCII, whose other bytes `fragPiece` emits before it.
+fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
+    match atom {
         RegexAtomRegexGroup(g) => {
-            return fragRepeat(bd, fragAlt(bd, pattern, g.alt), piece)
+            return fragAlt(bd, pattern, g.alt)
         }
         RegexAtomRegexClass(c) => {
-            return fragRepeat(bd, fragSet(bd, classBytes(bd, pattern, c)), piece)
+            return fragSet(bd, classBytes(bd, pattern, c))
         }
         RegexAtomRegexEscape(e) => {
-            // A character outside ASCII stands for its bytes.
             if e.end > e.start + 2 {
-                return fragBytes(bd, pattern, e.start + 1, e.end, piece)
+                return fragByte(bd, pattern[e.end - 1])
             }
-            return fragRepeat(bd, fragSet(bd, escapeBytes(pattern[e.start + 1])), piece)
+            return fragSet(bd, escapeBytes(pattern[e.start + 1]))
         }
         RegexAtomRegexDot(d) => {
             // Every byte but `\n` and `\r`.
             let all: UInt64 = 18446744073709551615
             let k = ByteSet { w0: ~((UInt64(1) << 10) | (UInt64(1) << 13)), w1: all, w2: all, w3: all }
-            return fragRepeat(bd, fragSet(bd, k), piece)
+            return fragSet(bd, k)
         }
         RegexAtomRegexLiteral(l) => {
-            if l.text == "^" || l.text == "$" {
-                refuse(bd, Anchor)
-            }
-            return fragBytes(bd, pattern, l.start, l.end, piece)
+            return fragByte(bd, pattern[l.end - 1])
         }
     }
 }
 
+/// The offset after the digits of `pattern` that start at `from`.
+fn digitsEnd(pattern: String, from: Int64) -> Int64 {
+    let mut i = from
+    while i < pattern.byteLength && pattern[i] >= '0' && pattern[i] <= '9' {
+        i = i + 1
+    }
+    return i
+}
+
+/// The number the digits of `pattern` from `from` up to `to` state, or 256 for any
+/// number above 255.
+fn countValue(pattern: String, from: Int64, to: Int64) -> Int64 {
+    let mut v = 0
+    let mut i = from
+    while i < to {
+        v = v * 10 + Int64(pattern[i]) - 48
+        if v > 255 {
+            return 256
+        }
+        i = i + 1
+    }
+    return v
+}
+
+/// The bounds of a count: `{min}`, `{min,}` or `{min,max}`. An open count has
+/// `max` equal to `min`.
+type Bounds = { min: Int64, max: Int64, open: Bool }
+
+/// The bounds of `c`, whose text the grammar states: `{`, digits, then `}`, `,}` or
+/// `,`, digits and `}`.
+fn boundsOf(pattern: String, c: rx.RegexCount) -> Bounds {
+    let comma = digitsEnd(pattern, c.start + 1)
+    let min = countValue(pattern, c.start + 1, comma)
+    if pattern[comma] != ',' {
+        return Bounds { min: min, max: min, open: false }
+    }
+    if comma + 2 == c.end {
+        return Bounds { min: min, max: min, open: true }
+    }
+    return Bounds { min: min, max: countValue(pattern, comma + 1, c.end - 1), open: false }
+}
+
+/// The copies of its term a count of bounds `n` makes.
+fn copiesOf(n: Bounds) -> Int64 {
+    return if n.open { n.min + 1 } else { n.max }
+}
+
+/// The terms of `piece` once its counts are expanded: a byte, a class, a dot and
+/// the empty string are one term each, as the compiler's builder counts them.
+fn pieceSize(pattern: String, piece: rx.RegexPiece) -> Int64 {
+    let term = termSize(pattern, piece.atom)
+    let mut prefix = 0
+    match piece.atom {
+        RegexAtomRegexGroup(g) => {}
+        RegexAtomRegexClass(c) => {}
+        RegexAtomRegexEscape(e) => {
+            prefix = if e.end > e.start + 2 { e.end - e.start - 2 } else { 0 }
+        }
+        RegexAtomRegexDot(d) => {}
+        RegexAtomRegexLiteral(l) => {
+            prefix = l.end - l.start - 1
+        }
+    }
+    if let Some(c) = piece.count {
+        let copies = copiesOf(boundsOf(pattern, c))
+        return prefix + if copies == 0 { 1 } else { copies * term }
+    }
+    return prefix + term
+}
+
+/// The terms of `alt` once its counts are expanded.
+fn altSize(pattern: String, alt: rx.RegexAlt) -> Int64 {
+    let mut n = 0
+    let mut i = 0
+    while i < alt.branches.length {
+        if alt.branches[i].pieces.length == 0 {
+            n = n + 1
+        }
+        let mut j = 0
+        while j < alt.branches[i].pieces.length {
+            n = n + pieceSize(pattern, alt.branches[i].pieces[j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+/// The terms of `atom`, the term a repeat applies to.
+fn termSize(pattern: String, atom: rx.RegexAtom) -> Int64 {
+    return match atom {
+        RegexAtomRegexGroup(g) => altSize(pattern, g.alt),
+        RegexAtomRegexClass(c) => 1,
+        RegexAtomRegexEscape(e) => 1,
+        RegexAtomRegexDot(d) => 1,
+        RegexAtomRegexLiteral(l) => 1,
+    }
+}
+
+/// One copy of the term of `atom` a count makes: as it is, or else under `*` for
+/// an open count and under `?` for a closed one.
+fn fragCopy(bd: modify Builder, pattern: String, atom: rx.RegexAtom, optional: Bool, open: Bool) -> Frag {
+    let f = fragTerm(bd, pattern, atom)
+    if !optional {
+        return f
+    }
+    return fragOp(bd, f, if open { "*" } else { "?" })
+}
+
+/// The term of `piece` under its repeat or its count.
+fn fragRepeat(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag {
+    if let Some(op) = piece.op {
+        return fragOp(bd, fragTerm(bd, pattern, piece.atom), op.text)
+    }
+    if let Some(c) = piece.count {
+        return fragCount(bd, pattern, piece.atom, boundsOf(pattern, c))
+    }
+    return fragTerm(bd, pattern, piece.atom)
+}
+
+/// The term of `atom` under a count of bounds `n`: `{m,n}` is `m` copies of the
+/// term and then `n - m` optional copies, and `{m,}` is `m` copies and a starred
+/// one.
+fn fragCount(bd: modify Builder, pattern: String, atom: rx.RegexAtom, n: Bounds) -> Frag {
+    let copies = copiesOf(n)
+    let cost = copies * termSize(pattern, atom)
+    if n.min > 255 || n.max > 255 {
+        refuse(bd, CountLarge)
+    } else if n.max < n.min {
+        refuse(bd, CountOrder)
+    } else if bd.expanded + cost > countBudget {
+        refuse(bd, CountBudget)
+    }
+    if copies == 0 || refused(bd) {
+        return fragEmpty(bd)
+    }
+    bd.expanded = bd.expanded + cost
+    let mut f = fragCopy(bd, pattern, atom, n.min == 0, n.open)
+    let mut i = 1
+    while i < copies {
+        let g = fragCopy(bd, pattern, atom, i >= n.min, n.open)
+        patch(bd, f.holes, g.start)
+        f = Frag { start: f.start, holes: consume g.holes }
+        i = i + 1
+    }
+    return f
+}
+
+fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag {
+    // A character outside ASCII stands for its bytes, and a repeat takes the last.
+    let mut from = 0
+    let mut to = 0
+    match piece.atom {
+        RegexAtomRegexGroup(g) => {}
+        RegexAtomRegexClass(c) => {}
+        RegexAtomRegexEscape(e) => {
+            if e.end > e.start + 2 {
+                from = e.start + 1
+                to = e.end - 1
+            }
+        }
+        RegexAtomRegexDot(d) => {}
+        RegexAtomRegexLiteral(l) => {
+            from = l.start
+            to = l.end - 1
+        }
+    }
+    let mut f = fragRepeat(bd, pattern, piece)
+    let mut i = to - 1
+    while i >= from {
+        let g = fragByte(bd, pattern[i])
+        patch(bd, g.holes, f.start)
+        f = Frag { start: g.start, holes: consume f.holes }
+        i = i - 1
+    }
+    return f
+}
+
 fn fragBranch(bd: modify Builder, pattern: String, branch: rx.RegexBranch) -> Frag {
     if branch.pieces.length == 0 {
-        // The empty branch, as in `(a|)`: a split with both edges dangling.
-        let sp = emit(bd, opSplit, 0, 0, noBytes())
-        return Frag { start: sp, holes: [sp * 2, sp * 2 + 1] }
+        // The empty branch, as in `(a|)`.
+        return fragEmpty(bd)
     }
     let mut f = fragPiece(bd, pattern, branch.pieces[0])
     let mut i = 1
@@ -400,9 +579,6 @@ fn byteClasses(bd: Builder) -> Array<UInt8> {
 /// Compiles `pattern`, or says what is wrong with it. Compile once and search
 /// often: the whole cost of a pattern is paid here.
 export fn compile(pattern: String) -> Result<Regex, String> {
-    if pattern.byteLength == 0 {
-        return Err(regexSay(EmptyPattern))
-    }
     return match rx.parseRegexPattern(pattern) {
         Ok(tree) => build(pattern, tree),
         Err(errors) => Err(regexSay(errors[0].row)),
@@ -410,7 +586,7 @@ export fn compile(pattern: String) -> Result<Regex, String> {
 }
 
 fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
-    let mut bd = Builder { op: [], a: [], b: [], cls: [], err: None }
+    let mut bd = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0 }
     let f = fragAlt(bd, pattern, tree)
     if let Some(row) = bd.err {
         return Err(regexSay(row))
@@ -822,6 +998,38 @@ test "find says where, and searching from there finds the next" {
     }
 }
 
+test "a count repeats its term" {
+    let re = match compile("a{2,3}") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(re, "a"), 0)
+    assertEq(countMatches(re, "aaaaa"), 2)
+    let pair = match compile("(ab){2}x{0}y{1,}") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    if let Some(m) = find(pair, "ababyyy", 0) {
+        assertEq(m.end, 7)
+    } else {
+        panic("no match")
+    }
+    assertEq(countMatches(pair, "abyy"), 0)
+}
+
+test "an anchor is its byte and the empty pattern matches the empty string" {
+    let caret = match compile("^a$") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(caret, "a ^a$"), 1)
+    let empty = match compile("") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(empty, "ab"), 3)
+}
+
 test "what it refuses, it refuses by name" {
     match compile("a(b") {
         Ok(r) => panic("an unbalanced group compiled"),
@@ -831,13 +1039,21 @@ test "what it refuses, it refuses by name" {
         Ok(r) => panic("an unterminated class compiled"),
         Err(w) => assert(w == "a character class with no closing `]`"),
     }
-    match compile("^a") {
-        Ok(r) => panic("an anchor compiled"),
-        Err(w) => assert(w == "anchors (`^` and `$`) are not supported"),
+    match compile("[]") {
+        Ok(r) => panic("an empty class compiled"),
+        Err(w) => assert(w == "a character class with no members"),
     }
-    match compile("a{2,3}") {
-        Ok(r) => panic("counted repetition compiled"),
-        Err(w) => assert(w == "counted repetition (`{m,n}`) is not supported"),
+    match compile("a{3,2}") {
+        Ok(r) => panic("a count below its minimum compiled"),
+        Err(w) => assert(w == "a counted repetition whose maximum is below its minimum"),
+    }
+    match compile("a{256}") {
+        Ok(r) => panic("a count above 255 compiled"),
+        Err(w) => assert(w == "a repetition count above 255"),
+    }
+    match compile("((a{99}){99}){2}") {
+        Ok(r) => panic("a count past the budget compiled"),
+        Err(w) => assert(w == "counted repetition that expands the pattern past 16384 terms"),
     }
     match compile("a*?") {
         Ok(r) => panic("a non-greedy repeat compiled"),
@@ -846,10 +1062,6 @@ test "what it refuses, it refuses by name" {
     match compile("[z-a]") {
         Ok(r) => panic("a backwards range compiled"),
         Err(w) => assert(w == "a character range that runs backwards"),
-    }
-    match compile("") {
-        Ok(r) => panic("an empty pattern compiled"),
-        Err(w) => assert(w == "an empty pattern"),
     }
 }
 

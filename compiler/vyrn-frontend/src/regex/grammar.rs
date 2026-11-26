@@ -13,6 +13,7 @@ pub enum Rule {
     CountForm {  },
     CountNumber {  },
     CountUnclosed {  },
+    EmptyClass {  },
     GroupUnclosed {  },
     NoCountTerm {  },
     NoTerm {  },
@@ -318,7 +319,11 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
-            (self.eat_byte(b'[') && { let negate = self.pos; ({ let _ = self.regex_negate()?; true }) && { loop { let p = self.pos; if !{
+            (self.eat_byte(b'[') && { let negate = self.pos; ({ let _ = self.regex_negate()?; true }) && { let _ = {
+                let p0 = self.pos;
+                ({ let p = self.pos; let m = self.eat_byte(b']'); self.pos = p; m } && { let rule = rule!(EmptyClass); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }; true } && { loop { let p = self.pos; if !{
                 let p0 = self.pos;
                 (!{ let p = self.pos; let m = (
                     self.eat_byte(b']')

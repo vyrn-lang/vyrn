@@ -121,6 +121,7 @@ impl Hooks for Build<'_> {
             Rule::CountForm {} => "malformed counted repetition (expected `}` or `,`)",
             Rule::CountNumber {} => "counted repetition needs a number (`{m}`, `{m,}`, `{m,n}`)",
             Rule::CountUnclosed {} => "unclosed counted repetition `{`",
+            Rule::EmptyClass {} => "empty character class `[]`",
             Rule::GroupUnclosed {} => "unclosed group `(`",
             Rule::NoCountTerm {} => "nothing to repeat before counted repetition `{..}`",
             Rule::NoTerm {} | Rule::NonGreedy { .. } => "nothing to repeat before quantifier",
@@ -1253,6 +1254,8 @@ mod tests {
         assert!(compile("a}").is_err()); // unmatched brace (literal is \})
         assert!(compile("[z-a]").is_err()); // reversed class range
         assert!(compile("a{3,2}").is_err()); // max < min
+        assert!(compile("[]").is_err()); // empty class
+        assert!(compile("[^]").is_err()); // empty negated class
         assert!(compile("a{999}").is_err()); // over the 255 cap
         assert!(compile("a{2,").is_err()); // unclosed counted repetition
     }
