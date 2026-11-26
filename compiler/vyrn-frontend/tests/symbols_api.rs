@@ -359,7 +359,7 @@ fn binding_not_visible_before_its_line() {
 /// `definition: false` tells the LSP's go-to-definition handler there is no
 /// source declaration to jump to.
 #[test]
-fn builtin_method_hover_is_definition_false() {
+fn a_builtin_method_jumps_to_its_row() {
     let src = "\
 fn main() -> Int64 {
     let mut a: Array<Int64> = [];
@@ -377,7 +377,8 @@ fn main() -> Int64 {
     let r = resolve(&a, 3, 7).expect("push at (3,7) should resolve to a builtin");
     assert_eq!(r.kind, SymbolKind::Method);
     assert_eq!(r.name, "push");
-    assert!(!r.definition, "a built-in method has no source declaration");
+    assert_eq!(r.builtin, vyrn_frontend::prelude::row_of("@push"));
+    assert!(r.definition, "a built-in method jumps to its row");
     assert!(r.hover.contains("array.push(value)"), "hover: {}", r.hover);
 }
 
@@ -399,7 +400,7 @@ fn main() -> Int64 {
     // Line 3: `    log.info("hi");`: `log` 5-8, `.` 9, `info` 10-14.
     let r = resolve(&a, 3, 10).expect("info at (3,10) should resolve to a builtin");
     assert_eq!(r.name, "info");
-    assert!(!r.definition);
+    assert_eq!(r.builtin, vyrn_frontend::prelude::row_of("@info"));
     assert!(
         r.hover.contains("info(logger, message)"),
         "hover: {}",
@@ -976,7 +977,7 @@ fn main() -> Int64 {
 ";
     let r = resolve(&analyze(src), 2, 6).expect("print resolves");
     assert_eq!(r.kind, SymbolKind::Function);
-    assert!(!r.definition);
+    assert_eq!(r.builtin, vyrn_frontend::prelude::row_of("print"));
     assert!(
         r.signature
             .as_deref()

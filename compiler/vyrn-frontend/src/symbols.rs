@@ -269,6 +269,9 @@ pub struct Resolution {
     /// The module key of the generated module that declares it, whose text no file holds;
     /// `target_file` is `None` then.
     pub generated: Option<String>,
+    /// The builtin row it names, an index of [`crate::prelude::builtins`], whose declaration
+    /// [`prelude_document`] writes; `target_*` are 0 then.
+    pub builtin: Option<usize>,
 }
 
 /// One completion item (a top-level symbol).
@@ -1049,6 +1052,7 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         doc: h.doc,
         definition: true,
         generated: None,
+        builtin: None,
     };
     let nowhere = |name: &str, kind, h: Hover| Resolution {
         name: name.to_string(),
@@ -1062,6 +1066,12 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         doc: h.doc,
         definition: false,
         generated: None,
+        builtin: None,
+    };
+    let row = |row: Option<usize>, r: Resolution| Resolution {
+        definition: row.is_some(),
+        builtin: row,
+        ..r
     };
     match resolve_token(analysis, tok, member) {
         Some(Named::Local(b)) => Some(local_resolution(analysis, b)),
@@ -1096,7 +1106,11 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
                     kind: c.kind,
                     ..at(d, hover)
                 },
-                (None, _) => nowhere(&c.label, c.kind, hover),
+                (None, _) => {
+                    let of = |b: &crate::prelude::Builtin| b.hover.as_ref() == Some(&c.detail);
+                    let at = crate::prelude::builtins().iter().position(of);
+                    row(at, nowhere(&c.label, c.kind, hover))
+                }
             })
         }
         // The namespace binding itself, a compile-time name, not a value: its hover lists
@@ -1131,13 +1145,19 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         // built-in function by its contract (`print`), then the ambient
         // `Result` and `Option` and their constructors, imported or not.
         None => match builtin_method(&tok.text) {
-            Some(b) => Some(nowhere(b.name, SymbolKind::Method, hover_of(b.detail, &[]))),
-            None => match crate::prelude::builtin(&tok.text).and_then(|b| b.sig.as_ref()) {
-                Some(f) => Some(nowhere(
-                    &tok.text,
-                    SymbolKind::Function,
-                    hover_of(&function_detail(f, &analysis.spellings), &[]),
-                )),
+            Some(b) => Some(row(
+                Some(b.row),
+                nowhere(b.name, SymbolKind::Method, hover_of(b.detail, &[])),
+            )),
+            None => match crate::prelude::row_of(&tok.text) {
+                Some(at) => {
+                    let b = &crate::prelude::builtins()[at];
+                    let hover = hover_of(&row_declaration(b, &analysis.spellings), &[]);
+                    Some(row(
+                        Some(at),
+                        nowhere(&tok.text, SymbolKind::Function, hover),
+                    ))
+                }
                 None => builtin_type_or_ctor(&tok.text)
                     .map(|(kind, hover)| nowhere(&tok.text, kind, hover_of(&hover, &[]))),
             },
@@ -1157,6 +1177,86 @@ fn declared_field<'a>(
     };
     let f = (analysis.record_fields.iter()).find(|f| f.of == n && f.completion.label == label)?;
     Some((f, f.at?))
+}
+
+/// The read-only document of the builtin rows, [`crate::prelude::builtins`] in table order.
+/// Each row is its hover as `///` lines, a line naming each Vyrn function it routes to,
+/// and its [`row_declaration`].
+pub struct PreludeDocument {
+    pub text: String,
+    /// Each row's name in its declaration, as `(line, col, end_col)`, 1-based, by row index.
+    pub rows: Vec<(usize, usize, usize)>,
+}
+
+/// Writes the [`PreludeDocument`]. A route names its function's file under `std_root`,
+/// read through `resolver`, and `link` spells that file and 1-based line as the
+/// editor's link. A route whose function no file declares is named without a link.
+pub fn prelude_document(
+    std_root: Option<&str>,
+    resolver: &dyn crate::loader::ModuleResolver,
+    link: &dyn Fn(&str, usize) -> Option<String>,
+) -> PreludeDocument {
+    let sp = Spellings::default();
+    let mut lines =
+        vec!["// The builtins: a declaration per row of the compiler's table.".to_string()];
+    let mut rows = Vec::new();
+    for b in crate::prelude::builtins() {
+        lines.push(String::new());
+        lines.extend((b.hover.iter()).flat_map(|h| h.lines().map(|l| format!("/// {l}"))));
+        for (route, verb) in [(b.route, "Runs"), (b.gen_route, "A generator runs")] {
+            let Some(route) = route else { continue };
+            let at = route_site(route, std_root, resolver).and_then(|(f, l)| link(&f, l));
+            let at = at.map(|l| format!(" at {l}")).unwrap_or_default();
+            lines.push(format!("/// {verb} `{route}`{at}"));
+        }
+        let decl = row_declaration(b, &sp);
+        let col = decl
+            .find(b.name)
+            .map_or(0, |c| decl[..c].chars().count() + 1);
+        let end = if col == 0 {
+            0
+        } else {
+            col + b.name.chars().count()
+        };
+        rows.push((lines.len() + 1, col, end));
+        lines.push(decl);
+    }
+    lines.push(String::new());
+    PreludeDocument {
+        text: lines.join("\n"),
+        rows,
+    }
+}
+
+/// The file under `std_root` and the 1-based line of the function a route such as
+/// `runtime$parseV` names: the runtime module ([`crate::loader::RT_MODULES`]) whose
+/// prefix it carries, and the function its rest names.
+fn route_site(
+    route: &str,
+    std_root: Option<&str>,
+    resolver: &dyn crate::loader::ModuleResolver,
+) -> Option<(String, usize)> {
+    let (prefix, name) = route.split_at(route.find('$')? + 1);
+    let rt = (crate::loader::RT_MODULES.iter()).find(|rt| rt.prefix == prefix)?;
+    let file = format!("{}/{}.vyrn", std_root?, rt.spec.strip_prefix("std/")?);
+    let line = (declared(&file, resolver, None)?.functions.iter())
+        .find(|f| f.name == name)?
+        .line;
+    Some((file, line))
+}
+
+/// A builtin row's declaration: its contract, else the operand and result types it is
+/// typed at, else its bare name.
+fn row_declaration(b: &crate::prelude::Builtin, sp: &Spellings) -> String {
+    match (&b.sig, &b.typed) {
+        (Some(f), _) => function_detail(f, sp),
+        (None, Some(t)) => {
+            let params: Vec<String> = t.params.iter().map(|p| type_to_string(p, sp)).collect();
+            let ret = type_to_string(&t.ret, sp);
+            format!("fn {}({}) -> {ret}", b.name, params.join(", "))
+        }
+        (None, None) => format!("fn {}", b.name),
+    }
 }
 
 /// The ambient `Result` and `Option` types and their constructors, with their
@@ -2654,6 +2754,7 @@ fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
         doc,
         definition: true,
         generated: None,
+        builtin: None,
     }
 }
 
@@ -3536,14 +3637,17 @@ fn mods_default_lib() -> SemMods {
 struct BuiltinMethod {
     name: &'static str,
     detail: &'static str,
+    /// Its index in [`crate::prelude::builtins`].
+    row: usize,
 }
 
 /// Every builtin with hover text, in the table's order.
 fn builtin_methods() -> impl Iterator<Item = (BuiltinMethod, &'static [crate::prelude::Shape])> {
-    crate::prelude::builtins().iter().filter_map(|b| {
+    (crate::prelude::builtins().iter().enumerate()).filter_map(|(row, b)| {
         let m = BuiltinMethod {
             name: b.method.unwrap_or(b.name),
             detail: b.hover.as_deref()?,
+            row,
         };
         Some((m, b.on))
     })

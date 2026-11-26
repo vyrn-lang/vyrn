@@ -7299,20 +7299,84 @@ fn a_declared_field_jumps_to_its_name() {
     let (text, uri, mut client) = open_calc_editor("fielddef");
     let account = definition_at(&mut client, &uri, &text, "x.account.text", 2);
     let target = account["uri"].as_str().expect("a location").to_string();
-    assert!(target.starts_with("vyrn-gen:/syntax(.calc.syntax).vyrn?"), "{account}");
+    assert!(
+        target.starts_with("vyrn-gen:/syntax(.calc.syntax).vyrn?"),
+        "{account}"
+    );
     let source = generated_source(&mut client, &target);
     let start = &account["range"]["start"];
     let line = source.lines().nth(start["line"].as_u64().unwrap() as usize);
     let col = start["character"].as_u64().unwrap() as usize;
-    assert!(line.unwrap_or("")[col..].starts_with("account:"), "{line:?}");
+    assert!(
+        line.unwrap_or("")[col..].starts_with("account:"),
+        "{line:?}"
+    );
     let col = definition_at(&mut client, &uri, &text, "at.col,", 3);
     assert_eq!(col["uri"], uri, "{col}");
-    let place = text.lines().position(|l| l.starts_with("type Place")).unwrap();
+    let place = text
+        .lines()
+        .position(|l| l.starts_with("type Place"))
+        .unwrap();
     assert_eq!(col["range"]["start"]["line"], place, "{col}");
     let at = text.lines().nth(place).unwrap().find("col:").unwrap();
     assert_eq!(col["range"]["start"]["character"], at, "{col}");
     let length = definition_at(&mut client, &uri, &text, "name.byteLength", 5);
     assert!(length.is_null(), "{length}");
+}
+
+/// The line of the prelude document a definition at the first `needle` of `text` lands on,
+/// `skip` characters in, with the line before it.
+fn prelude_row(
+    client: &mut LspClient,
+    uri: &str,
+    text: &str,
+    needle: &str,
+    skip: u32,
+) -> (String, String) {
+    let at = definition_at(client, uri, text, needle, skip);
+    assert_eq!(at["uri"], "vyrn-builtin:/prelude.vyrn", "{needle}: {at}");
+    let source = generated_source(client, "vyrn-builtin:/prelude.vyrn");
+    let line = at["range"]["start"]["line"].as_u64().unwrap() as usize;
+    let lines: Vec<&str> = source.lines().collect();
+    (lines[line - 1].to_string(), lines[line].to_string())
+}
+
+/// A builtin call or method jumps to its row's declaration in the prelude document, and a
+/// row that routes to a Vyrn function links that function's file and line.
+#[test]
+fn a_builtin_jumps_to_its_row_in_the_prelude_document() {
+    let (text, uri, mut client) = open_calc_editor("builtindef");
+    let (above, parse) = prelude_row(&mut client, &uri, &text, "parse(x.amount", 1);
+    assert!(parse.starts_with("fn parse(s: String)"), "{parse}");
+    let std = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    let runtime = std::fs::read_to_string(std.join("runtime.vyrn")).unwrap();
+    let declared = runtime
+        .lines()
+        .position(|l| l.contains("fn parseV("))
+        .unwrap()
+        + 1;
+    let link = format!("/std/runtime.vyrn#L{declared}");
+    assert!(
+        above.starts_with("/// Runs `runtime$parseV` at file:///"),
+        "{above}"
+    );
+    assert!(above.ends_with(&link), "{above}");
+    let (_, read) = prelude_row(&mut client, &uri, &text, "readFile(path)", 1);
+    assert!(read.starts_with("fn readFile("), "{read}");
+    let (above, copy) = prelude_row(&mut client, &uri, &text, "copy()", 1);
+    assert_eq!(copy, "fn @copy", "{copy}");
+    assert!(above.starts_with("/// x.copy() -> T"), "{above}");
+    let (_, render) = prelude_row(&mut client, &uri, &text, "toString()", 1);
+    assert!(render.starts_with("fn @str<T"), "{render}");
+
+    let syntax = std.join("syntax.vyrn");
+    let (text, uri) = (std::fs::read_to_string(&syntax).unwrap(), file_uri(&syntax));
+    did_open(&mut client, &uri, "vyrn", &text);
+    let _ = read_diags_for(&mut client, "syntax.vyrn");
+    let (_, parser) = prelude_row(&mut client, &uri, &text, "syntaxParser(path)", 1);
+    assert_eq!(parser, "fn syntaxParser(String) -> Code", "{parser}");
+    let (_, reporter) = prelude_row(&mut client, &uri, &text, "syntaxReporter(path)", 1);
+    assert_eq!(reporter, "fn syntaxReporter(String) -> Code", "{reporter}");
 }
 
 /// The generator's path string jumps to the file it names.

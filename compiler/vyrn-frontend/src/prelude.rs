@@ -1366,6 +1366,11 @@ pub fn builtins() -> &'static [Builtin] {
 /// The row a call site's name keys, in constant time: every call expression
 /// asks.
 pub fn builtin(name: &str) -> Option<&'static Builtin> {
+    row_of(name).map(|i| &builtins()[i])
+}
+
+/// The index in [`builtins`] of the row `name` keys, in constant time.
+pub fn row_of(name: &str) -> Option<usize> {
     static BY_NAME: OnceLock<std::collections::HashMap<&'static str, usize>> = OnceLock::new();
     let at = BY_NAME.get_or_init(|| {
         builtins()
@@ -1374,7 +1379,7 @@ pub fn builtin(name: &str) -> Option<&'static Builtin> {
             .map(|(i, b)| (b.name, i))
             .collect()
     });
-    at.get(name).map(|i| &builtins()[*i])
+    at.get(name).copied()
 }
 
 /// Whether `name` shrinks its receiver in place and hands back what it took.
