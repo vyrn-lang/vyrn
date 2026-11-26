@@ -568,7 +568,14 @@ The client's `hintStyle` initialization option picks how a row reads. In the
 `compact` style, the default, a row is one glyph with its count in superscript;
 a count of one has none. The glyphs are `vyrn-lsp`'s `cost::GLYPHS`, one per
 verb: copies, allocates, enters, grows, check kept, check refused and call
-kept; `cost::LAST_RUN` precedes the blocks of the last run. Each glyph
+kept, and the proof glyph for a check the compiler proved and a call the
+emitter erases, which only this style shows; `cost::LAST_RUN` precedes the
+blocks of the last run. The proof glyph's hover is resolved on demand
+(`inlayHint/resolve`): the server analyzes the document once more with the
+proofs traced (`vyrn_lower::JUDGE_PROOFS`) and adds the proofs of the line as
+`vyrn why --proofs` prints them. Measured on 2026-11-26, the CLI's `why
+--proofs` takes 297 ms on `site/export.vyrn` against 173 ms for `check`, so a
+hover costs about one analysis and an edit nothing. Each glyph
 has its own hover: a bold title with the count, a line per noun with its
 reason, the loops around it, a fix where one is plain (`reserve` before a loop
 that grows), and a link that runs `vyrn why --cost` on the file. In the `full`

@@ -152,6 +152,9 @@ pub struct Analysis {
     /// `vyrn why --cost`, read from [`Judged::cost`]. Empty when the checks did not run, found an
     /// error or no [`Judge`] was given.
     pub cost: Vec<FnCost>,
+    /// The proof of each check removed in this document, by line, read from
+    /// [`Judged::proofs`]: empty unless the [`Judge`] traces proofs.
+    pub proofs: Vec<(usize, String)>,
     /// The functions that wait, read from [`Judged::waits`]; a function's hover says so.
     pub waits: Vec<String>,
     /// The hash of every module the document links ([`crate::ast::Program::module_hashes`]),
@@ -313,6 +316,9 @@ pub struct Judged {
     pub memory: HashMap<crate::ast::FnId, Vec<crate::own::MemoryRow>>,
     /// The cost of each function of the root file; empty for a program the kernel did not judge.
     pub cost: Vec<FnCost>,
+    /// The proof of each check removed in the root file, by line; empty unless the judge
+    /// traces proofs.
+    pub proofs: Vec<(usize, String)>,
     /// The linked name of each function whose effect set holds `waits`; empty for a program
     /// the kernel did not judge.
     pub waits: Vec<String>,
@@ -478,6 +484,7 @@ fn analyze_inner(
     let mut memory = HashMap::new();
     let mut cost = Vec::new();
     let mut waits = Vec::new();
+    let mut proofs = Vec::new();
     let locals = match &mut checked {
         Some(prog) => {
             let cs = crate::prof::phase("check: the analysis's own");
@@ -490,6 +497,7 @@ fn analyze_inner(
                     let judged = (judge.check)(prog, engine, pending, linker);
                     memory = judged.memory;
                     cost = judged.cost;
+                    proofs = judged.proofs;
                     waits = judged.waits;
                     (judged.diagnostics, judged.binders)
                 }
@@ -702,6 +710,7 @@ fn analyze_inner(
         diagnostics: diags,
         memory,
         cost,
+        proofs,
         waits,
         module_hashes,
         symbols,
@@ -804,6 +813,7 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         symbol_maps: Vec::new(),
         memory: Vec::new(),
         cost: Vec::new(),
+        proofs: Vec::new(),
         waits: Vec::new(),
         module_hashes: Default::default(),
         spellings: Default::default(),

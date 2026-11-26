@@ -62,6 +62,9 @@ pub enum Kind {
     /// emitter keeps ([`crate::verdict::Erased`]): the callee, and the first
     /// rule it fails.
     Stays(String, String),
+    /// A call for its effect the emitter erases ([`crate::verdict::Erased`]):
+    /// the callee.
+    Erased(String),
 }
 
 /// What a fact does, in the order a reader asks: what is copied, what is
@@ -77,6 +80,10 @@ pub enum Verb {
     Refuses,
     /// A call into a function with a result clause that is not erased.
     Stays,
+    /// A check the compiler proved: the editor's proof glyph only.
+    Proves,
+    /// A call the emitter erases: the editor's proof glyph only.
+    Erases,
 }
 
 impl Verb {
@@ -90,20 +97,32 @@ impl Verb {
             Verb::Keeps => "check kept",
             Verb::Refuses => "check refused",
             Verb::Stays => "call kept",
+            Verb::Proves => "check proved",
+            Verb::Erases => "call erased",
         }
+    }
+
+    /// Whether the row is a proof, which only the editor shows: `why --proofs`
+    /// prints the proofs themselves.
+    pub fn proves(self) -> bool {
+        matches!(self, Verb::Proves | Verb::Erases)
     }
 
     /// Whether a row of this verb can make a block, so a profile counts its
     /// runs.
     pub fn blocks(self) -> bool {
-        !matches!(self, Verb::Keeps | Verb::Refuses | Verb::Stays)
+        !matches!(
+            self,
+            Verb::Keeps | Verb::Refuses | Verb::Stays | Verb::Proves | Verb::Erases
+        )
     }
 }
 
 impl Kind {
-    /// The verb a fact prints under, `None` for a proved check.
+    /// The verb a fact prints under.
     pub fn verb(&self) -> Option<Verb> {
         match self {
+            Kind::Erased(_) => Some(Verb::Erases),
             Kind::Copy { .. } => Some(Verb::Copies),
             Kind::Alloc(_) => Some(Verb::Allocates),
             Kind::Enters(..) => Some(Verb::Enters),
@@ -112,7 +131,7 @@ impl Kind {
             Kind::Check { kept, refused, .. } => match (kept, refused) {
                 (_, true) => Some(Verb::Refuses),
                 (true, false) => Some(Verb::Keeps),
-                (false, false) => None,
+                (false, false) => Some(Verb::Proves),
             },
         }
     }
@@ -153,6 +172,9 @@ pub fn row(s: &St, body: &Body, world: &World, erased: &Erased) -> Option<(u32, 
         } => (
             *line,
             row_kind(rhs, &body.names, None, world, body).or_else(|| {
+                if erased.erases(world, s) {
+                    return Some(Kind::Erased(body.spelled(callee).to_string()));
+                }
                 let (f, unfit) = erased.stays(world, s)?;
                 world.body_at(f)?.ensures.as_ref()?;
                 Some(Kind::Stays(
@@ -382,6 +404,21 @@ pub fn proof_lines(program: &Program, world: &World, body: &Body, proofs: &[Proo
     out
 }
 
+/// The proof of each check the compiler removes in the root file, by the
+/// check's line: its goal and premises as [`proof_lines`] prints them. It
+/// walks every root body once more with tags on, so the editor asks for it
+/// only on a hover, never on an edit.
+pub fn root_proofs(program: &Program, world: &World) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (_, body) in root_frames(program, world) {
+        for p in body.id.map(|f| world.proofs(f)).unwrap_or_default() {
+            let lines = proof_lines(program, world, body, std::slice::from_ref(&p));
+            out.push((p.site.line, lines.join("\n")));
+        }
+    }
+    out
+}
+
 /// Where a premise comes from, over the names the body's source spells.
 pub fn source(program: &Program, world: &World, body: &Body, src: Src) -> String {
     let at = src.line;
@@ -453,6 +490,8 @@ impl CostRow {
             Verb::Keeps => format!("{nouns} checked"),
             Verb::Refuses => format!("{nouns} check refused"),
             Verb::Stays => format!("{nouns} call kept"),
+            Verb::Proves => format!("{nouns} proved"),
+            Verb::Erases => format!("{nouns} erased"),
         }
     }
 
@@ -467,6 +506,8 @@ impl CostRow {
             Verb::Keeps => (|n| format!("{n} check"), ": "),
             Verb::Refuses => (|n| format!("{n} check refused"), ": "),
             Verb::Stays => (|n| format!("`{n}(..)`"), ", because "),
+            Verb::Proves => (|n| format!("{n} check proved"), ""),
+            Verb::Erases => (|n| format!("`{n}(..)` erased"), ""),
         };
         (self.nouns(say).into_iter().zip(&self.whats))
             .map(|(noun, (_, why, _))| match why.is_empty() {
@@ -495,6 +536,7 @@ impl CostRow {
             ),
             Verb::Keeps | Verb::Refuses => items.join("; "),
             Verb::Stays => format!("call kept: {}", items.join("; ")),
+            Verb::Proves | Verb::Erases => items.join("; "),
         }
     }
 }
@@ -507,8 +549,14 @@ pub type CostFn = (FnId, BTreeMap<(u32, Verb), CostRow>);
 pub type CostTable = (Vec<CostFn>, [(usize, usize); 5]);
 
 /// The rows of `why --cost` for each function of the root file ([`root`]), in function-table
-/// order. `named` spells the file a call enters.
-pub fn table(program: &Program, world: &World, named: &dyn Fn(&str) -> String) -> CostTable {
+/// order, with the editor's proof rows where `proofs` holds ([`Verb::proves`]). `named`
+/// spells the file a call enters.
+pub fn table(
+    program: &Program,
+    world: &World,
+    named: &dyn Fn(&str) -> String,
+    proofs: bool,
+) -> CostTable {
     let mut tally = [(0usize, 0usize); 5];
     let mut out = Vec::new();
     for (id, facts) in root(program, world) {
@@ -526,12 +574,15 @@ pub fn table(program: &Program, world: &World, named: &dyn Fn(&str) -> String) -
                     (what.to_string(), why.clone()),
                 ),
                 Kind::Stays(c, why) => (None, (c.clone(), why.clone())),
+                Kind::Erased(c) => (None, (c.clone(), String::new())),
             };
             if let Some(slot) = slot {
                 tally[slot].0 += 1;
                 tally[slot].1 += usize::from(f.depth > 0);
             }
-            let Some(verb) = f.kind.verb() else { continue };
+            let Some(verb) = f.kind.verb().filter(|v| proofs || !v.proves()) else {
+                continue;
+            };
             let row = shown.entry((f.line, verb)).or_default();
             row.depth = row.depth.max(f.depth);
             match row
@@ -552,13 +603,11 @@ pub fn table(program: &Program, world: &World, named: &dyn Fn(&str) -> String) -
 /// file is named by the file's last path segment, `std/strings` by its import.
 pub fn fn_costs(program: &Program, world: &World) -> Vec<FnCost> {
     let std = vyrn_frontend::manifest::std_root();
-    let (rows, _) = table(program, world, &|file| match std
-        .as_deref()
-        .and_then(|s| file.strip_prefix(s))
-    {
+    let named = |file: &str| match std.as_deref().and_then(|s| file.strip_prefix(s)) {
         Some(m) => format!("std{}", m.trim_end_matches(".vyrn")),
         None => file.rsplit('/').next().unwrap_or(file).to_string(),
-    });
+    };
+    let (rows, _) = table(program, world, &named, true);
     let lines = |shown: BTreeMap<(u32, Verb), CostRow>| {
         (shown.into_iter())
             .map(|((line, verb), row)| CostLine {

@@ -1561,6 +1561,7 @@ fn cost_table(
             Some(m) => format!("std{}", m.trim_end_matches(".vyrn")),
             None => rel_to(file, here),
         },
+        false,
     )
 }
 

@@ -34,14 +34,15 @@ use lsp_types::{
     DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     Documentation, FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverContents, HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel,
-    InlayHintParams, InsertTextFormat, Location, LocationLink, MarkupContent, MarkupKind, OneOf,
-    Position, PrepareRenameResponse, PublishDiagnosticsParams, Range, Registration,
-    RegistrationParams, RelativePattern, RenameOptions, RenameParams, SemanticToken,
-    SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
+    InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InsertTextFormat, Location,
+    LocationLink, MarkupContent, MarkupKind, OneOf, Position, PrepareRenameResponse,
+    PublishDiagnosticsParams, Range, Registration, RegistrationParams, RelativePattern,
+    RenameOptions, RenameParams, SemanticToken, SemanticTokenModifier, SemanticTokenType,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
+    WorkspaceEdit,
 };
 
 use vyrn_frontend::audience::ClaimKind;
@@ -89,6 +90,17 @@ fn analyze_doc(
     text: &str,
     overlays: &HashMap<String, String>,
 ) -> Analysis {
+    analyze_doc_with(session, uri, text, overlays, judge())
+}
+
+/// [`analyze_doc`] through `judge`.
+fn analyze_doc_with(
+    session: &Arc<Session>,
+    uri: &Url,
+    text: &str,
+    overlays: &HashMap<String, String>,
+    judge: &vyrn_frontend::Judge,
+) -> Analysis {
     let (opts, resolver, path, manifest_error) = match load_context(session, uri, overlays) {
         Some(ctx) => ctx,
         None => {
@@ -98,14 +110,14 @@ fn analyze_doc(
                 ..Default::default()
             };
             let linker = Some(("untitled.vyrn", &opts, &**session as &dyn ModuleResolver));
-            return analyze_judged(text, linker, Some(&*engine()), judge());
+            return analyze_judged(text, linker, Some(&*engine()), judge);
         }
     };
     let mut analysis = analyze_judged(
         text,
         Some((&path, &opts, &resolver)),
         Some(&*engine()),
-        judge(),
+        judge,
     );
     // A manifest that does not parse would drop the import map and audience
     // rules silently, so it is an error on the open document.
@@ -456,8 +468,13 @@ fn handle_initialize(
             work_done_progress_options: Default::default(),
         })),
         document_formatting_provider: Some(OneOf::Left(true)),
-        // Move hints. No resolve provider: the label is in the cached analysis.
-        inlay_hint_provider: Some(OneOf::Left(true)),
+        // The label is in the cached analysis; a proof glyph's hover is resolved on demand.
+        inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
+            InlayHintOptions {
+                resolve_provider: Some(true),
+                work_done_progress_options: Default::default(),
+            },
+        ))),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 work_done_progress_options: Default::default(),
@@ -812,6 +829,7 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
         }
         // A `-> f(..)` label at every move.
         "textDocument/inlayHint" => Response::new_ok(req.id, handle_inlay_hint(server, req.params)),
+        "inlayHint/resolve" => Response::new_ok(req.id, handle_inlay_resolve(server, req.params)),
         "textDocument/semanticTokens/full" => {
             Response::new_ok(req.id, handle_semantic_tokens_full(server, req.params))
         }
@@ -1979,10 +1997,30 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
         hints.extend(type_hints(analysis, src, from, to));
         if cost_hints() {
             let path = uri_path(&p.text_document.uri);
-            hints.extend(cost::hints(analysis, path.as_deref(), src, from, to));
+            let uri = p.text_document.uri.as_str();
+            hints.extend(cost::hints(analysis, uri, path.as_deref(), src, from, to));
         }
     }
     Some(hints)
+}
+
+/// A proof glyph's hint with the proofs of its line ([`cost::resolve`]). It analyzes the
+/// document once more with the proofs traced ([`vyrn_lower::JUDGE_PROOFS`]): a hover asks for
+/// it, never an edit.
+fn handle_inlay_resolve(server: &Server, params: serde_json::Value) -> Option<InlayHint> {
+    let hint: InlayHint = serde_json::from_value(params).ok()?;
+    let data = hint.data.as_ref()?;
+    let uri = Url::parse(data.get("uri")?.as_str()?).ok()?;
+    let line = usize::try_from(data.get("line")?.as_u64()?).ok()?;
+    let text = doc_text(server, &uri)?;
+    let analysis = analyze_doc_with(
+        &server.session,
+        &uri,
+        &text,
+        &overlays_of(server),
+        &vyrn_lower::JUDGE_PROOFS,
+    );
+    Some(cost::resolve(hint, line, &analysis.proofs))
 }
 
 /// A `: Type` label after the name of every binding in lines `from..=to` whose

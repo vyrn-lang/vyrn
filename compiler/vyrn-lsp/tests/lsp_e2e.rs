@@ -6497,6 +6497,32 @@ fn knucleotide_lines_carry_their_cost_as_glyphs() {
     holds_pin("knucleotide-compact", &rows);
 }
 
+/// A proof glyph's hover resolves on demand to the proofs of its line: each removed check's
+/// goal and premises, as `vyrn why --proofs` prints them.
+#[test]
+fn a_proof_glyph_resolves_to_the_proofs_of_its_line() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_with_style(&path, &text, "compact");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 94, "method": "textDocument/inlayHint",
+        "params": { "textDocument": { "uri": uri }, "range": {
+            "start": { "line": 72, "character": 0 }, "end": { "line": 73, "character": 0 } } }
+    }));
+    let resp = client.read_response(&serde_json::json!(94));
+    let hint = resp["result"].as_array().expect("hints")[0].clone();
+    assert_eq!(hint["data"]["line"], 73);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 95, "method": "inlayHint/resolve", "params": hint
+    }));
+    let resolved = client.read_response(&serde_json::json!(95));
+    let parts = resolved["result"]["label"].as_array().expect("parts");
+    let proof = (parts.iter())
+        .find(|p| p["value"].as_str().unwrap().contains('\u{21d2}'))
+        .expect("the proof glyph");
+    let tip = proof["tooltip"]["value"].as_str().unwrap();
+    assert!(tip.starts_with("```\n   73  division check: "), "{tip}");
+}
+
 /// A glyph's hover has a bold title with the count, a line per noun with its reason, the loops
 /// around it, a plain fix and the report's link.
 #[test]
@@ -6506,7 +6532,7 @@ fn a_glyph_hover_names_each_fact_and_links_the_report() {
     let hints = compact_hints(&mut client, &uri);
     let (_, parts) = hints.iter().find(|h| h.0 == 73).expect("line 73");
     let values: Vec<&str> = parts.iter().map(|p| p.0.as_str()).collect();
-    assert_eq!(values, ["\u{2197}", " ?"]);
+    assert_eq!(values, ["\u{2197}", " ?", " \u{21d2}\u{b3}"]);
     let grows = &parts[0].1;
     assert!(
         grows.starts_with("**\u{2197} may grow 1**\n\n- `push(..)`"),

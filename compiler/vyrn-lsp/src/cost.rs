@@ -20,6 +20,18 @@ use crate::{char_col_to_utf16, line_of_text};
 /// The verb of a check row `why --cost` keeps. A run counts no blocks for it.
 const KEPT: &str = "check kept";
 
+/// The verbs of the proof glyph: a check the compiler proved and a call the emitter erases.
+/// Its hover's proof is resolved on demand ([`resolve`]).
+const PROOFS: [&str; 2] = ["check proved", "call erased"];
+
+/// The glyph of [`PROOFS`].
+const PROVED: &str = "⇒";
+
+/// Whether a run counts blocks for a row of `verb`.
+fn blocks(verb: &str) -> bool {
+    !matches!(verb, KEPT | "check refused" | "call kept") && !PROOFS.contains(&verb)
+}
+
 /// The last run of the document at `path`, if its stamp is the buffer's `src` and the modules
 /// `analysis` linked.
 fn last_run(path: Option<&str>, src: &str, analysis: &Analysis) -> Found {
@@ -65,7 +77,7 @@ fn tooltip(f: &FnCost, row: &CostLine, run: Option<&Sites>) -> String {
 
 /// Each verb's compact glyph and hover title, keyed by [`CostLine::verb`]: the one table of
 /// the editor's cost glyphs. [`LAST_RUN`] marks the blocks of the last profile.
-const GLYPHS: [(&str, &str, &str); 7] = [
+const GLYPHS: [(&str, &str, &str); 9] = [
     ("copies", "⧉", "copies"),
     ("allocates", "⊞", "allocates"),
     ("enters", "↘", "enters an allocating function"),
@@ -73,6 +85,8 @@ const GLYPHS: [(&str, &str, &str); 7] = [
     (KEPT, "?", "check kept"),
     ("check refused", "✗", "check refused"),
     ("call kept", "↺", "call kept"),
+    (PROOFS[0], PROVED, "check proved"),
+    (PROOFS[1], PROVED, "call erased"),
 ];
 
 /// The glyph of the blocks the last run made on a line.
@@ -140,9 +154,7 @@ fn compact(row: &CostLine) -> InlayHintLabelPart {
 fn compact_label(f: &FnCost, rows: &[&CostLine], run: Option<&Sites>) -> InlayHintLabel {
     let mut parts: Vec<InlayHintLabelPart> = rows.iter().map(|r| compact(r)).collect();
     // A check or a kept call makes no block, so a run counts none for it.
-    let blocking: Vec<&&CostLine> = (rows.iter())
-        .filter(|r| !matches!(r.verb, KEPT | "check refused" | "call kept"))
-        .collect();
+    let blocking: Vec<&&CostLine> = rows.iter().filter(|r| blocks(r.verb)).collect();
     if let Some(run) = run.filter(|_| !blocking.is_empty()) {
         let [blocks, bytes] = (blocking.iter())
             .map(|r| ran(run, f, r))
@@ -160,10 +172,12 @@ fn compact_label(f: &FnCost, rows: &[&CostLine], run: Option<&Sites>) -> InlayHi
 }
 
 /// The hints for lines `from..=to` (1-based): one at the end of each line that allocates,
-/// copies, grows a container, enters an allocating function or keeps a check. A line with none of
-/// them has no hint.
+/// copies, grows a container, enters an allocating function, keeps a check, proves one or
+/// erases a call. A line with none of them has no hint. A compact hint with the proof glyph
+/// carries the document's `uri` and its line as `data`, for [`resolve`].
 pub fn hints(
     analysis: &Analysis,
+    uri: &str,
     path: Option<&str>,
     src: &str,
     from: usize,
@@ -172,8 +186,10 @@ pub fn hints(
     let mut out = Vec::new();
     let mut run = None;
     for f in &analysis.cost {
+        // The proof glyph has no words: the full style shows only costs.
         let rows: Vec<&CostLine> = (f.lines.iter())
             .filter(|r| (from..=to).contains(&r.line))
+            .filter(|r| crate::compact_hints() || !PROOFS.contains(&r.verb))
             .collect();
         if rows.is_empty() {
             continue;
@@ -199,6 +215,9 @@ pub fn hints(
                     (InlayHintLabel::String(labels.join(", ")), Some(tip))
                 }
             };
+            let proved = line_rows.iter().any(|r| PROOFS.contains(&r.verb));
+            let data = (proved && crate::compact_hints())
+                .then(|| serde_json::json!({ "uri": uri, "line": line }));
             out.push(InlayHint {
                 position: Position {
                     line: (line - 1) as u32,
@@ -210,11 +229,38 @@ pub fn hints(
                 tooltip,
                 padding_left: Some(true),
                 padding_right: None,
-                data: None,
+                data,
             });
         }
     }
     out
+}
+
+/// The hint `hint` with the proofs of its line added to its proof glyph's hover: each removed
+/// check's goal and premises, as `vyrn why --proofs` prints them. `proofs` is the traced
+/// analysis's ([`Analysis::proofs`]), which the server runs only for this request.
+pub fn resolve(mut hint: InlayHint, line: usize, proofs: &[(usize, String)]) -> InlayHint {
+    let text: Vec<&str> = (proofs.iter())
+        .filter(|(l, _)| *l == line)
+        .map(|(_, t)| t.as_str())
+        .collect();
+    let InlayHintLabel::LabelParts(parts) = &mut hint.label else {
+        return hint;
+    };
+    let Some(p) = parts
+        .iter_mut()
+        .find(|p| p.value.trim_start().starts_with(PROVED))
+    else {
+        return hint;
+    };
+    let proof = match text.is_empty() {
+        true => "No check on this line rests on a proof the traced walk found.".to_string(),
+        false => format!("```\n{}\n```", text.join("\n")),
+    };
+    if let Some(InlayHintLabelPartTooltip::MarkupContent(m)) = &mut p.tooltip {
+        m.value = format!("{proof}\n\n{}", m.value);
+    }
+    hint
 }
 
 /// The lenses of the last profile. A fresh one puts `last run: N blocks` above each function
@@ -227,10 +273,11 @@ pub fn lenses(analysis: &Analysis, path: Option<&str>, src: &str) -> Vec<serde_j
         Found::Fresh(sites) => (analysis.cost.iter())
             .filter_map(|f| {
                 let blocks: u64 = (f.lines.iter())
-                    .filter(|r| r.verb != KEPT)
+                    .filter(|r| r.verb != KEPT && !PROOFS.contains(&r.verb))
                     .map(|r| ran(&sites, f, r)[0])
                     .sum();
-                let allocates = f.lines.iter().any(|r| r.verb != KEPT);
+                let allocates =
+                    (f.lines.iter()).any(|r| r.verb != KEPT && !PROOFS.contains(&r.verb));
                 allocates.then(|| lens(f, format!("last run: {blocks} blocks")))
             })
             .collect(),
