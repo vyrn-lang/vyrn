@@ -258,6 +258,33 @@ fn third(xs: Array<Int64> where value.length >= 3) -> Int64 {
     assert_eq!(verdicts(src, "third"), ["proved array-index"]);
 }
 
+/// The declared clause marks the call's arguments relevant, so the length of
+/// a local array the caller builds reaches the result: no body summary of
+/// `applyAll` states it, and only the clause links `b` to `xs`.
+#[test]
+fn a_declared_result_clause_links_the_arguments_of_its_call() {
+    let src = "fn applyAll(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> where value.length == xs.length {
+    let g: fn(Int64) -> Int64 = n -> f(n) + 1
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < xs.length {
+        out.push(g(xs[i]))
+        i = i + 1
+    }
+    return out
+}
+fn twice(n: Int64) -> Int64 {
+    return n * 2
+}
+fn third() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    let b = applyAll(xs, twice)
+    return b[2]
+}
+";
+    assert_eq!(verdicts(src, "third"), ["proved array-index"]);
+}
+
 /// A clause may name the length of a field: `t.dims.length >= 2` proves both
 /// reads, and a caller that passes a shorter field keeps the clause check.
 #[test]

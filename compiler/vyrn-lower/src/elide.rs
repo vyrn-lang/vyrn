@@ -471,15 +471,17 @@ impl<'a> View<'a> {
         self.frames.get(&(self.call(rhs)?, k))
     }
 
-    /// Whether `f` states a fact of its result.
+    /// Whether `f` states a fact of its result, inferred or declared.
     fn post(&self, f: FnId) -> bool {
         self.get(f)
-            .is_some_and(|(_, s)| !s.post.is_empty() || !s.when.is_empty())
+            .is_some_and(|(_, s)| !s.post.is_empty() || !s.when.is_empty() || s.ensures.is_some())
     }
 
-    /// Whether `rhs` is a direct call whose callee states a fact of its result.
+    /// Whether the body `rhs` runs states a fact of its result. A call that
+    /// binds a function value counts, as [`Walk::ensured`] assumes the
+    /// declared clause over it.
     fn linked(&self, rhs: &Rhs) -> bool {
-        self.call(rhs).is_some_and(|f| self.post(f))
+        runs(self.instances, rhs).is_some_and(|f| self.post(f))
     }
 
     /// The callee of `s`, a direct call to a body with entry facts, with the

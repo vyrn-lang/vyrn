@@ -1132,7 +1132,7 @@ examples/record_width_slots.vyrn	wide	yes	no, its effect set is alloc
 examples/record_width_slots.vyrn	narrow	yes	no, its effect set is alloc
 examples/record_width_slots.vyrn	take	yes	no, its effect set is alloc
 examples/record_width_slots.vyrn	pick	yes	no, its effect set is alloc
-examples/record_width_slots.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output, module-state
+examples/record_width_slots.vyrn	main	no, it calls `map`, which is not trap-free	no, its effect set is alloc, write-output, module-state
 examples/recordorder.vyrn	show	yes	no, its effect set is alloc, write-output
 examples/recordorder.vyrn	asB	yes	no, `a` is A, not an integer, Bool or a read array of one
 examples/recordorder.vyrn	some	yes	no, `a` is A, not an integer, Bool or a read array of one
@@ -2276,7 +2276,7 @@ site/guide/html.vyrn	view	yes	no, its effect set is alloc
 site/guide/html.vyrn	demo	no, it calls `toHtmlString`, which is not trap-free	no, its effect set is alloc, trap
 site/guide/imports.vyrn	demo	no, it calls `padStart`, which is not trap-free	no, its effect set is alloc, trap
 site/guide/lambdas.vyrn	double	yes	yes, emulated Int64
-site/guide/lambdas.vyrn	demo	no, it keeps an index check	no, its effect set is alloc
+site/guide/lambdas.vyrn	demo	no, it calls `map`, which is not trap-free	no, its effect set is alloc
 site/guide/maps.vyrn	score	yes	no, its effect set is alloc
 site/guide/maps.vyrn	demo	yes	no, its effect set is alloc
 site/guide/matching.vyrn	found	yes	no, its effect set is alloc
