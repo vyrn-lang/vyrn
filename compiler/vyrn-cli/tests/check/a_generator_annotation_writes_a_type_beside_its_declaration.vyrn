@@ -1,0 +1,9 @@
+import { boxed } from "./annotation_gens_lib"
+
+@boxed
+type P = { x: Int64 }
+
+fn main() -> Int64 {
+    print(boxedP(P { x: 1 }))
+    return 0
+}

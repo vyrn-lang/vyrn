@@ -424,7 +424,7 @@ fn returns_code(f: &Function) -> bool {
 
 /// The types a gen fn's leading parameters take from the call's reflected
 /// values (`GenInputs::reflected`), as `moduleInterface` answers one: a
-/// `derive` generator's `TypeArg`, an annotation's `TypeCode` and
+/// `toJson` generator's `TypeArg`, an annotation's `TypeCode` and
 /// `ModuleInterface`.
 const REFLECTED: [&str; 3] = ["TypeArg", "TypeCode", "ModuleInterface"];
 

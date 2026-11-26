@@ -75,9 +75,8 @@ pub fn set_gen_budgets_for_test(fuel: Option<u64>, max_output: Option<usize>) {
 }
 
 /// `resolver` with the root's text served at the root's key. A host holds the
-/// root as text (an editor buffer, the playground's page), and a `derive`
-/// generator the root declares loads the root again as its own root
-/// ([`crate::gen::derive`]).
+/// root as text (an editor buffer, the playground's page), and a generator's
+/// load may read the root again.
 pub struct WithRoot<'a> {
     key: String,
     source: &'a str,
@@ -634,9 +633,6 @@ pub struct Nest {
     /// How many loads enclose this one. A generator import's own load and a
     /// load its run makes are one deeper than the load that imports it.
     pub(crate) depth: u32,
-    /// The `derive` generators running, outermost first, each as its module
-    /// key and declared name ([`crate::gen::derive`]).
-    pub(crate) deriving: Vec<String>,
     /// The gen fn whose own load this is, as its module declares it. The link
     /// keeps only what it reaches ([`keep_reached`]). Only
     /// [`checked_generator`] sets it, and the loads a generator's run makes
@@ -1111,7 +1107,7 @@ pub const RT_PREFIX: &str = "json$";
 const RT_JSON_SPEC: &str = "std/json";
 
 /// The `std/json` generator that writes `toJson`'s encoders, under its reserved
-/// name. `toJson(x)` is `derive(jsonEncoders, x)`.
+/// name. `toJson(x)` calls what it wrote for `x`'s type ([`crate::gen::derive`]).
 pub const JSON_ENCODERS: &str = "json$jsonEncoders";
 
 /// The reserved prefix of `std/jsondec`'s declarations.
@@ -1547,9 +1543,6 @@ pub fn routed_callee<'e>(
             Some((crate::checker::gen_entry_contract_of(c), &[]))
         }
         ("toJson", _, [a]) => Some((crate::gen::derived_name(JSON_ENCODERS, &ty_of(a)?), args)),
-        ("derive", _, [Expr::Var { name: g, .. }, a]) => {
-            Some((crate::gen::derived_name(g, &ty_of(a)?), &args[1..]))
-        }
         ("fromJson", [t], [_]) => Some((crate::gen::derived_name(JSON_DECODERS, t), args)),
         _ => None,
     }
@@ -4029,7 +4022,7 @@ fn gen_call<'a>(
 }
 
 /// What one generation runs on ([`generation`]): an import line's constants,
-/// a `derive` site's `TypeArg`, or an annotation's reflected declaration and
+/// a `toJson` or `fromJson` site's `TypeArg`, or an annotation's reflected declaration and
 /// constants.
 pub(crate) struct GenCall<'a> {
     pub(crate) consts: &'a [crate::consteval::ConstVal],
@@ -4059,8 +4052,8 @@ pub(crate) enum GenFault {
 
 /// Runs gen fn `name` of the module `gen_mod_key` on `call`, under `inner`
 /// ([`generator_opts`]): the cache, the load and check of the generator's
-/// program, and the run. An import line's generator and a `derive` generator
-/// share this path and its cache. The key names the compiler, the module, the
+/// program, and the run. An import line's generator, an annotation's and a
+/// `toJson` generator share this path and its cache. The key names the compiler, the module, the
 /// gen fn, the arguments and the input roots ([`generator_cache_key`]); the
 /// entry records every input the run read and the generator's sources, and a
 /// hit checks each one by its stamp or its hash. `(cache, memo)`: with `cache`
@@ -4347,7 +4340,7 @@ pub(crate) fn generator_opts(opts: &LoadOptions, caller: &str) -> Result<LoadOpt
 
 /// Loads the generator module `gen_mod_key` as its own root, keeping what its
 /// gen fn `name` reaches, and checks it, under `inner` ([`generator_opts`]).
-/// An import line's generator and a `derive` generator both load here. A
+/// An import line's generator, an annotation's and a `toJson` generator load here. A
 /// program in `held` is reused: the calls of one load share `inner`, so each
 /// call of a gen fn checks the same program. With `memo`, a program checked
 /// before under the same context is reused while its sources are unchanged.
@@ -4380,8 +4373,8 @@ fn checked_generator(
         aliases.sort();
         let n = &inner.nest;
         format!(
-            "{gen_mod_key}\u{0}{serves}\u{0}{std_root:?}\u{0}{}\u{0}{:?}\u{0}{aliases:?}",
-            n.depth, n.deriving
+            "{gen_mod_key}\u{0}{serves}\u{0}{std_root:?}\u{0}{}\u{0}{aliases:?}",
+            n.depth
         )
     });
     if let Some(k) = &memo_key {
@@ -4424,16 +4417,15 @@ fn checked_generator(
     // closure's keys and content hashes (`gen_graph` holds the generator, its
     // imports and the runtime modules the load links), the gen fns the link
     // keeps, the std root the contract restamping resolves against, and the
-    // nest, because a `derive` in the check refuses a generator already
-    // deriving and runs its own loads one deeper. The engine adds the
+    // depth, because a `toJson` in the check runs its own loads one deeper.
+    // The engine adds the
     // compiler's identity (`vyrn_genwasm::artifact_key`).
     let fingerprint = describable.then(|| {
         let n = &inner.nest;
         let mut fp = format!(
-            "{gen_mod_key}\u{0}{serves}\u{0}{}\u{0}{}\u{0}{:?}\u{0}",
+            "{gen_mod_key}\u{0}{serves}\u{0}{}\u{0}{}\u{0}",
             std_root.unwrap_or(""),
-            n.depth,
-            n.deriving
+            n.depth
         );
         for (k, h) in &gen_sources {
             fp.push_str(k);
@@ -6725,7 +6717,6 @@ fn reach(
 /// They are taken before `link` renames, so a spelling reaches every function
 /// that declares it, and a namespace member `ns.f` is the field `f`: the
 /// link's walk ([`drop_unreached`]) drops every function left out here. A
-/// program that calls `derive` parses every cut body.
 ///
 /// Under a build ([`gives_unrun`]) gen fns and their bodies reach last,
 /// because a gen fn runs in no run: a function only they reach takes its
@@ -6829,7 +6820,6 @@ fn parse_reached(
     if opts.nest.gen.is_some() {
         names.extend(GEN_HOST.calls());
     }
-    let mut derive = names.contains(&"derive") || unrun.contains(&"derive");
     let mut work: Vec<(usize, usize)> = Vec::new();
     // Each row reached, by module and row, and the body it takes: parsed here,
     // given under [`std_given`], or given here to what only gen fns reach.
@@ -6846,11 +6836,11 @@ fn parse_reached(
     loop {
         while let Some((mi, ri)) = work.pop() {
             let (m, (b, r)) = (&modules[mi], row(mi, ri));
-            if gives && r.gen && !giving && !derive {
+            if gives && r.gen && !giving {
                 deferred.push((mi, ri));
                 continue;
             }
-            if r.stateful && (std_given(opts) || giving && !derive) {
+            if r.stateful && (std_given(opts) || giving) {
                 closed.resize_with(modules.len(), || None);
                 if closed[mi].is_none() {
                     closed[mi] = Some(read_closed(resolver, m, b, modules, read));
@@ -6860,14 +6850,13 @@ fn parse_reached(
                 .is_some_and(|c| c.contains(b.name(r)));
             let spelled = b.names_of(r).filter(|_| !r.stateful || listed);
             // The emitter calls a runtime module's functions by name.
-            let gift = (spelled.clone().filter(|_| giving && !derive))
+            let gift = (spelled.clone().filter(|_| giving))
                 .filter(|_| runtime_module(&m.key, opts).is_none());
             let kept = spelled.filter(|_| std_given(opts));
             if let Some(g) = gift.or(kept) {
                 let list = if giving { &mut given } else { &mut stored };
                 list.push((mi, ri, g));
                 let names: Vec<&str> = list[list.len() - 1].2.iter().collect();
-                derive |= names.contains(&"derive");
                 for n in names {
                     reach(n, &mut waiting, &mut work);
                 }
@@ -6881,18 +6870,10 @@ fn parse_reached(
             crate::project::walk_block(&mut body, &mut site_stamp(&site, &m.key));
             let mut names: Vec<&str> = Vec::new();
             crate::ast::spelled(&body, &mut names);
-            derive |= names.contains(&"derive");
             for n in names {
                 reach(n, &mut waiting, &mut work);
             }
             parsed.push((mi, ri, body));
-        }
-        // A `derive` generator writes calls after the check, to any function.
-        if derive && !(waiting.is_empty() && given.is_empty() && deferred.is_empty()) {
-            work.append(&mut deferred);
-            work.extend(given.drain(..).map(|(mi, ri, _)| (mi, ri)));
-            work.extend(waiting.drain().flat_map(|(_, at)| at));
-            continue;
         }
         if giving || (unrun.is_empty() && deferred.is_empty()) {
             break;
@@ -6997,9 +6978,6 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
 /// method call `x.f()` arrives as a call named `f`, and the linked namespace is
 /// flat, so a name reaches the one function it can mean.
 ///
-/// A program that calls `derive` drops nothing: its generator writes calls
-/// after the check, to any function of the program.
-///
 /// `generators` names each `gen fn` an import line calls ([`generator_calls`]).
 /// Its import is no root, so a `lazy` one is kept only where a kept body spells
 /// it.
@@ -7017,7 +6995,7 @@ fn drop_unreached(
     let calls: Vec<String> = (RUNTIME_CALLS.iter())
         .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
         .collect();
-    // A gen fn runs only in its own load, an import line's or a derive's
+    // A gen fn runs only in its own load, an import line's or a toJson's
     // (checked_generator), so neither the import nor a toJson or fromJson site
     // reaches it. Only a std one drops: std bodies are judged as their own load
     // roots, and a user module's functions are all roots.
@@ -7040,11 +7018,6 @@ fn drop_unreached(
         crate::ast::expr_spelled(p, &mut roots);
     }
     let keep = reached(program, roots);
-    if keep.contains("derive") {
-        drop(keep);
-        program.lazy = None;
-        return;
-    }
     let kept: Vec<bool> = (program.functions.iter())
         .map(|f| !is_lazy(&f.module) || keep.contains(f.name.as_str()))
         .collect();

@@ -63,9 +63,9 @@ generation engine the same way, beside the resolver of each load and check.
 `vyrn_genwasm::engine` is the wasmtime engine; the playground builds its own,
 which runs the module in the page. Both wrap their run in
 `vyrn_lower::gen_engine`, which judges the generator's own program first. The
-engine rides in `gen::GenInputs`, so a generator's own loads and `derive`
-sites run on it too. A load with no engine fails every `derive` and generator
-import.
+engine rides in `gen::GenInputs`, so a generator's own loads and `toJson`
+and `fromJson` sites run on it too. A load with no engine fails each of them
+and every generator import.
 
 ## The front end
 
@@ -160,8 +160,8 @@ the playground serves an embedded `std/`. The loader:
   and visits the output as a module that joins it (`Module::joins`): the link
   registers the output's declarations under the module's key, and the output
   holds a copy of the module's imports;
-- loads a generator's module as its own root, for an import line's generator
-  and a `derive` generator alike (`checked_generator`), and links only what its
+- loads a generator's module as its own root, for an import line's generator,
+  an annotation's and a `toJson` generator alike (`checked_generator`), and links only what its
   gen fn reaches, or for a std module what every gen fn it exports reaches
   (`keep_reached`). A load checks the program of each gen fn its import lines
   call once, a std module's once for all its gen fns, and each of those lines
@@ -199,21 +199,19 @@ the whole program again.
    all-paths return, and each `where` predicate against constant arguments
    (`consteval.rs`). The checker records every expression's type in
    `checker::Recorded`, keyed by node address. Every later pass reads types
-   from this record and derives none of its own. The bodies a `derive` or the
+   from this record and derives none of its own. The bodies a `toJson` site or the
    synthesis appends add their types to it (`Recorded::extend`), so the
    judgments read the one record this check made.
-   If the program calls `derive(g, x)`, `gen::derive` runs each generator
-   once over a `TypeArg` of the types its sites need, through the load that
-   linked the program and the generator cache import lines use
-   (`loader::generation`). The functions it
-   writes join the program with the type declarations it writes and the
-   `where` constructors. Each site's entry must have the signature its call
-   needs. `checker::check_appended` types their bodies
-   against the joined program's declarations, and a whole check runs only in
-   the case its doc names. `toJson(x)` is a `derive` site of `std/json`'s
-   `jsonEncoders`, and `fromJson<T>(s)` of `std/jsondec`'s `jsonDecoders`.
+   If the program calls `toJson(x)` or `fromJson<T>(s)`, `gen::derive` runs
+   `std/json`'s `jsonEncoders` or `std/jsondec`'s `jsonDecoders` once over a
+   `TypeArg` of the types its sites need, through the load that linked the
+   program and the generator cache import lines use (`loader::generation`).
+   The functions it writes join the program with the type declarations it
+   writes and the `where` constructors. `checker::check_appended` types their
+   bodies against the joined program's declarations, and a whole check runs
+   only in the case its doc names.
 2. Synthesis, only for a program that type-checks: `ctor::constructors`
-   generates one constructor per `where` type the `derive` join did not add.
+   generates one constructor per `where` type the generated join did not add.
    These are ordinary functions, so every backend compiles one body.
 3. `vyrn_lower::refusals`: `vyrn_lower::analyze`, which runs the placer and
    the judgments, then one list of ownership refusals in source order.

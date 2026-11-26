@@ -1,18 +1,24 @@
-// A generator run on a checked type.
+// A generator annotation run on a type declaration.
 
 import { shapeOf } from "./lib/gen_shape"
 
+@shapeOf
 type Point = { x: Int64, y: Int64 }
+@shapeOf
 type Shade = enum { Light, Dark, Custom(String) }
+@shapeOf
+type Names = Array<String>
+@shapeOf
+type Maybe = Option<Int64>
 
 fn main() -> Int64 {
     let p = Point { x: 1, y: 2 }
-    print(derive(shapeOf, p))
-    print(derive(shapeOf, Point { x: 3, y: 4 }))
-    let names: Array<String> = ["a", "b"]
-    print(derive(shapeOf, names))
-    let maybe: Option<Int64> = Some(3)
-    print(derive(shapeOf, maybe))
-    print(derive(shapeOf, Dark))
+    print(shapeOfPoint(p))
+    print(shapeOfPoint(Point { x: 3, y: 4 }))
+    let names: Names = ["a", "b"]
+    print(shapeOfNames(names))
+    let maybe: Maybe = Some(3)
+    print(shapeOfMaybe(maybe))
+    print(shapeOfShade(Dark))
     return 0
 }

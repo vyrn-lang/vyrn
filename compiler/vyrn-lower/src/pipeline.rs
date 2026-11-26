@@ -11,7 +11,7 @@ use vyrn_frontend::{ast, checker, floor, loader, movecheck, prof, symbols, types
 
 /// Loads a multi-module program: parses `root_source`, resolves every
 /// `import` transitively through `resolver`, links one [`ast::Program`], and
-/// checks it. `engine` runs every generator import and `derive` site; with
+/// checks it. `engine` runs every generator import, annotation and `toJson` site; with
 /// `None`, each one fails.
 pub fn load(
     root_source: &str,

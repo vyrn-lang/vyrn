@@ -603,11 +603,6 @@ rules! {
     ContractOfName {} "`contractOf` needs a contract name";
     ToJsonArity { got } "`toJson` takes 1 argument (a value), got {got}";
     ToJsonUncodable { off } "`toJson` cannot encode `{off}` (not a codable type)";
-    DeriveArity {} "`derive` takes a generator's name and a value: `derive(g, x)`";
-    DeriveUnknownGen { g } "`derive` needs a `gen fn {g}(t: TypeArg)` returning `Code`; `{g}` is not one";
-    DeriveUncodable { g, off } "`derive({g}, ..)` cannot reflect `{off}`: it has no wire form";
-    DeriveEntryMismatch { g, got, want }
-        "generator `{g}` wrote the entry `{got}`, and this call needs `{want}`";
     ValueType { t } "`value` boxes an Int64, Bool, or String, found {t}";
     ValueTypeNoShow { t, key }
         "`value` boxes an Int64, Bool, or String, found {t}: say how it renders \
@@ -1034,7 +1029,7 @@ rules! {
         "artifact `{artifact}` ({target}) cannot include `{module}`: {what}";
     FormatterInvariant {}
         "internal formatter error: output would change the parse (source left unchanged)";
-    DeriveWroteDerive {} "a `derive` generator wrote a `derive` call";
+    DeriveWroteDerive {} "a `toJson` or `fromJson` generator wrote a `toJson` or `fromJson` call";
     AudienceCannotImport { importer, from, imported, to }
         "`{importer}` is {from} and cannot import `{imported}`, which is {to}";
     AudienceRuntime { shown, fenced }

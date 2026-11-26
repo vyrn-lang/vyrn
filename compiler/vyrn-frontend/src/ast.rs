@@ -384,7 +384,7 @@ pub struct Program {
     pub given: GivenRef,
     /// The modules whose unreached functions the load dropped: every `std/`
     /// module but the root. `None` where the load dropped nothing, as a
-    /// generator's own load and a program that calls `derive` do. An emitted
+    /// generator's own load does. An emitted
     /// module runs a function of one only where an entry calls it
     /// (`vyrn_lower::World::runs`).
     pub lazy: Option<std::sync::Arc<std::collections::BTreeSet<String>>>,
@@ -446,7 +446,10 @@ pub const DEFAULT_LOG_LEVEL: usize = 2;
 /// `vyrnModule` and `vyrnType` answer. A program pays nothing for one it does not name;
 /// `types::record_fields` states the fields.
 pub fn is_gen_record(n: &str) -> bool {
-    matches!(n, "Token" | "VyrnNode" | "AnnotationInfo" | "AnnotationField")
+    matches!(
+        n,
+        "Token" | "VyrnNode" | "AnnotationInfo" | "AnnotationField"
+    )
 }
 
 /// The builtins spelled as ordinary identifiers rather than with an `@` prefix.

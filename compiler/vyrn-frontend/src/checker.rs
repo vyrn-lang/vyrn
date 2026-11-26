@@ -352,7 +352,6 @@ pub const RESERVED: &[&str] = &[
     "jsonSchema",
     "toJson",
     "fromJson",
-    "derive",
     "pop",
     "swapRemove",
     "assert",
@@ -1214,7 +1213,6 @@ fn check_accum_inner(
     let mut derived = acc.derive;
     for site in &mut derived {
         lowered(&mut site.ty);
-        lowered(&mut site.entry);
     }
     let binders = Binders {
         locals: local_index(program, &acc.binders),
@@ -5883,37 +5881,7 @@ impl<'a> Checker<'a> {
             }
             self.acc.borrow_mut().derive.push(crate::gen::Site {
                 g: crate::loader::JSON_ENCODERS.to_string(),
-                entry: Type::Fn(vec![at.clone()], Box::new(Type::Str)),
                 ty: at,
-                line,
-            });
-            return Ok(Type::Str);
-        }
-        // `derive(g, x)`: generator `g` writes a function for `x`'s type after
-        // the check (`gen::derive`); the call site calls it. `toJson` above is
-        // one.
-        if name == "derive" {
-            let g = match args {
-                [Expr::Var { name: g, .. }, _] => g,
-                _ => return Err(cerr!(line, DeriveArity)),
-            };
-            let arg = Type::Named("TypeArg".to_string());
-            let takes = matches!(self.sig(g), Some((ps, r)) if *ps == [arg] && *r == Type::Named("Code".into()));
-            if !takes || !self.gen_fns.contains(g) {
-                return Err(cerr!(line, DeriveUnknownGen, g));
-            }
-            let at = self.expr(&args[1], scope, None, fn_ret)?;
-            if matches!(at, Type::Err) {
-                return Ok(Type::Str);
-            }
-            if let Err(off) = crate::codec::encodable(&at, self) {
-                return Err(cerr!(line, DeriveUncodable, g, off));
-            }
-            self.acc.borrow_mut().derive.push(crate::gen::Site {
-                g: g.clone(),
-                entry: Type::Fn(vec![at.clone()], Box::new(Type::Str)),
-                ty: at,
-                line,
             });
             return Ok(Type::Str);
         }
@@ -6351,14 +6319,6 @@ impl<'a> Checker<'a> {
                     self.acc.borrow_mut().derive.push(crate::gen::Site {
                         g: crate::loader::JSON_DECODERS.to_string(),
                         ty: t.clone(),
-                        line,
-                        entry: Type::Fn(
-                            params
-                                .iter()
-                                .map(|p| crate::types::substitute(p, &subst))
-                                .collect(),
-                            Box::new(rty.clone()),
-                        ),
                     });
                 }
             }

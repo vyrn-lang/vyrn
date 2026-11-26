@@ -1,0 +1,9 @@
+import { wrong } from "./annotation_gens_lib"
+
+@wrong
+type P = { x: Int64 }
+
+fn main() -> Int64 {
+    print(wrongP(P { x: 1 }))
+    return 0
+}
