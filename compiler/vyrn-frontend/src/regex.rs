@@ -210,6 +210,47 @@ struct Build<'a> {
     expanded: usize,
     /// Whether the scan stopped at a row of the grammar.
     in_grammar: bool,
+    /// The flags of each group being read, the pattern's first.
+    flags: Vec<Flags>,
+    /// The names of the named groups read so far.
+    names: Vec<Vec<u8>>,
+}
+
+/// The flags that change what an atom means: `i` folds ASCII case and `s` lets `.`
+/// take `\n` and `\r`. `m` changes only `^` and `$`, which `AnchorPending` refuses.
+#[derive(Clone, Copy, Default)]
+struct Flags {
+    fold: bool,
+    dot_all: bool,
+}
+
+impl Flags {
+    /// The flags after the letters `t` of `(?ims-ims` up to `:` or `)`.
+    fn with(mut self, t: &[u8]) -> Flags {
+        let mut on = true;
+        for &c in t {
+            match c {
+                b'-' => on = false,
+                b'i' => self.fold = on,
+                b's' => self.dot_all = on,
+                _ => {}
+            }
+        }
+        self
+    }
+}
+
+/// `set` with the other case of each ASCII letter it holds.
+fn fold(set: &Chars) -> Chars {
+    let shift = |lo: u32, hi: u32, by: i32| -> Vec<(u32, u32)> {
+        let part = set.intersect(&Chars::of(&[(lo, hi)]));
+        let moved = |c: u32| c.wrapping_add_signed(by);
+        part.0.iter().map(|&(a, b)| (moved(a), moved(b))).collect()
+    };
+    let mut all = set.0.clone();
+    all.extend(shift(0x61, 0x7a, -32));
+    all.extend(shift(0x41, 0x5a, 32));
+    Chars::new(all)
 }
 
 /// The entries of `stack` that start at `start` or later, taken off it.
@@ -235,6 +276,18 @@ impl Build<'_> {
     fn one_set(&mut self) -> Chars {
         self.sets.pop().expect("a bound pushes its set").1
     }
+
+    fn flags(&self) -> Flags {
+        *self.flags.last().expect("the pattern's flags stay")
+    }
+
+    /// The code point `c` as a term, both cases of an ASCII letter under `i`.
+    fn char_term(&self, c: u32) -> Re {
+        match self.flags().fold && char::from_u32(c).is_some_and(|c| c.is_ascii_alphabetic()) {
+            true => fold(&Chars::of(&[(c, c)])).re(),
+            false => char_re(c),
+        }
+    }
 }
 
 impl Hooks for Build<'_> {
@@ -245,7 +298,48 @@ impl Hooks for Build<'_> {
     }
 
     fn _regex_literal(&mut self, start: usize, _end: usize) -> Result<(), String> {
-        self.terms.push((start, char_re(self.char_at(start))));
+        self.terms
+            .push((start, self.char_term(self.char_at(start))));
+        Ok(())
+    }
+
+    /// A group's flags hold until its `)`; a name names one group.
+    fn regex_group_open(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let t = &self.b[start..end];
+        let name = match t.get(2) {
+            Some(b'P') => Some(&t[4..t.len() - 1]),
+            Some(b'<' | b'\'') => Some(&t[3..t.len() - 1]),
+            _ => None,
+        };
+        let flags = match (name, t.len()) {
+            (None, 3..) => self.flags().with(&t[2..t.len() - 1]),
+            _ => self.flags(),
+        };
+        if let Some(name) = name {
+            if self.names.iter().any(|n| n == name) {
+                return Err(say("NameTwice", &[]));
+            }
+            self.names.push(name.to_vec());
+        }
+        self.flags.push(flags);
+        Ok(())
+    }
+
+    fn _regex_group(&mut self, _start: usize, _end: usize) -> Result<(), String> {
+        self.flags.pop();
+        Ok(())
+    }
+
+    /// `(?i)` sets the flags for the rest of its group and matches the empty string.
+    fn _regex_flags(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let flags = self.flags().with(&self.b[start + 2..end - 1]);
+        *self.flags.last_mut().expect("the pattern's flags stay") = flags;
+        self.terms.push((start, Re::Empty));
+        Ok(())
+    }
+
+    fn _regex_comment(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        self.terms.push((start, Re::Empty));
         Ok(())
     }
 
@@ -261,8 +355,9 @@ impl Hooks for Build<'_> {
                     Re::Empty
                 } else {
                     let text = std::str::from_utf8(q).expect("a pattern is UTF-8");
-                    let chars = text.chars().map(|c| (start, char_re(u32::from(c))));
-                    self.terms.extend(chars);
+                    for c in text.chars() {
+                        self.terms.push((start, self.char_term(u32::from(c))));
+                    }
                     return Ok(());
                 }
             }
@@ -272,15 +367,19 @@ impl Hooks for Build<'_> {
                 Chars::of(&[(0x0a, 0x0d)]).re(),
             ]),
             c if SHORTHANDS.contains(&c) => shorthand(c).re(),
-            _ => char_re(escape_char(t)?),
+            _ => self.char_term(escape_char(t)?),
         };
         self.terms.push((start, re));
         Ok(())
     }
 
-    // `.` excludes LF and CR, as in ECMA-262.
+    // `.` excludes LF and CR, as in ECMA-262, but under `s`.
     fn _regex_dot(&mut self, start: usize, _end: usize) -> Result<(), String> {
-        let dot = Chars::of(&[(0x0a, 0x0a), (0x0d, 0x0d)]).complement();
+        let breaks = match self.flags().dot_all {
+            true => Chars(Vec::new()),
+            false => Chars::of(&[(0x0a, 0x0a), (0x0d, 0x0d)]),
+        };
+        let dot = breaks.complement();
         self.terms.push((start, dot.re()));
         Ok(())
     }
@@ -345,7 +444,7 @@ impl Hooks for Build<'_> {
         Ok(())
     }
 
-    /// The operators combine the unions left to right.
+    /// The operators combine the unions left to right; `i` folds before `^` negates.
     fn _regex_class(&mut self, start: usize, _end: usize) -> Result<(), String> {
         let ops = since(&mut self.ops, start);
         let mut sets = since(&mut self.sets, start).into_iter();
@@ -358,6 +457,7 @@ impl Hooks for Build<'_> {
                 b'-' => a.minus(&b),
                 _ => a.minus(&b).union(&b.minus(&a)),
             });
+        let set = if self.flags().fold { fold(&set) } else { set };
         let set = if self.b[start + 1] == b'^' {
             set.complement()
         } else {
@@ -515,6 +615,8 @@ fn parse(pattern: &str) -> Result<Re, Refusal> {
         counts: Vec::new(),
         expanded: 0,
         in_grammar: false,
+        flags: vec![Flags::default()],
+        names: Vec::new(),
     };
     let mut scanner = grammar::Scanner::new(pattern, build);
     if let Err(why) = scanner._regex_pattern() {
@@ -1611,6 +1713,51 @@ mod tests {
     }
 
     #[test]
+    fn a_group_form_names_folds_or_comments() {
+        assert!(m("(?:ab)+", "abab"));
+        assert!(m("(?<y>\\d{4})-(?P<m>\\d\\d)-(?'d'\\d\\d)", "2026-11-27"));
+        assert!(m("a(?#note)b", "ab"));
+        assert!(m("(?i)abc", "aBC"));
+        assert!(m("a(?i)b|c", "C"));
+        assert!(!m("(?i:a)b", "AB"));
+        assert!(m("(?i:a)b", "Ab"));
+        assert!(m("(?i)[a-c]+", "ABC"));
+        assert!(!m("(?i)[^a]", "A"));
+        assert!(m("(?i)\\x41", "a"));
+        assert!(!m("(?i)\u{e9}", "\u{c9}"));
+        assert!(m("(?s).", "\n"));
+        assert!(!m(".", "\n"));
+        assert!(m("(?is-i:A)a", "Aa"));
+        assert!(!m("(?is-i:A)a", "aa"));
+        assert!(m("(?m)a", "a"));
+    }
+
+    #[test]
+    fn a_group_form_with_no_meaning_is_refused() {
+        let says = |p: &str| compile(p).err().map(|e| e.to_string());
+        let says = |p: &str, s: &str| assert_eq!(says(p).as_deref(), Some(s), "{p}");
+        says("(?x)a", "a flag (`x`) that is none of `i`, `m` and `s`");
+        says("(?=a)", "an assertion (`(?=`) is not supported");
+        says("a^", "an assertion (`^`) is not supported");
+        says(
+            "(?>a)",
+            "a PCRE control form (`(?>`), which only a backtracking engine has",
+        );
+        says(
+            "(?R)",
+            "a PCRE control form (`(?R)`), which only a backtracking engine has",
+        );
+        says("(?<1a>b)", "a group name that is not a letter or `_` and then letters, digits and `_` up to its closing `>` or `'`");
+        says("(?<a>b)(?<a>c)", "a group name that names two groups");
+        says(
+            "(?~a)",
+            "a group form after `(?` that is none of `:`, a name, flags and `#`",
+        );
+        says("(?#a", "a group with no closing `)`");
+        assert!(compile("(?<a>b){2}").is_ok());
+    }
+
+    #[test]
     fn an_escape_with_no_meaning_is_refused() {
         let says = |p: &str| compile(p).err().map(|e| e.to_string());
         let says = |p: &str, s: &str| assert_eq!(says(p).as_deref(), Some(s), "{p}");
@@ -1622,7 +1769,7 @@ mod tests {
             "\\1",
             "the escape `\\1` means nothing: a backslash makes only ASCII punctuation literal",
         );
-        says("\\b", "an anchor or a boundary (`\\b`) is not supported");
+        says("\\b", "an assertion (`\\b`) is not supported");
         says(
             "[\\A]",
             "an anchor or a backreference (`\\A`) cannot stand inside a character class",

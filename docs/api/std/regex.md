@@ -13,11 +13,14 @@ are shorthands, their capitals negate them, and `\N` is any character but `\n`. 
 `\x{H..}`, `\uHHHH`, `\u{H..}` and `\o{O..}` are code points. `\R` is a line
 break, `\Q` quotes the text up to `\E` or the end, and a backslash before ASCII
 punctuation makes it literal. Every other escape is refused. `{m,n}` repeats a
-term `m` to `n` times, each count at most 255. `^` and `$` are the bytes they
-spell, and the empty pattern matches the empty string. A Thompson NFA with no
-backtracking, so the time is linear in the pattern size times the input for
-every pattern. A search runs it as a lazy DFA: one table read per byte. It has no
-backreferences or lookaround.
+term `m` to `n` times, each count at most 255. `(?:..)` groups without a name,
+`(?<n>..)`, `(?P<n>..)` and `(?'n'..)` name a group, and `(?#..)` is a comment.
+The flags `i` (ASCII case folding), `s` (`.` takes `\n` and `\r`) and `m` hold
+for the rest of a group after `(?ims-ims)`, or inside `(?ims-ims:..)`. `^`, `$`
+and every other assertion are refused, and the empty pattern matches the empty
+string. A Thompson NFA with no backtracking, so the time is linear in the pattern
+size times the input for every pattern. A search runs it as a lazy DFA: one table
+read per byte. It has no backreferences or lookaround.
 
 Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
 backtracking engine answers `a`.

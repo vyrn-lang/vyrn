@@ -18,6 +18,9 @@ pub enum Rule {
     CountNumber {  },
     CountUnclosed {  },
     EmptyClass {  },
+    FlagUnknown { f: String },
+    GroupForm {  },
+    GroupName {  },
     GroupUnclosed {  },
     HexDigits { e: String },
     NoCountTerm {  },
@@ -50,6 +53,9 @@ impl Rule {
             Rule::CountNumber {  } => ("CountNumber", vec![]),
             Rule::CountUnclosed {  } => ("CountUnclosed", vec![]),
             Rule::EmptyClass {  } => ("EmptyClass", vec![]),
+            Rule::FlagUnknown { f } => ("FlagUnknown", vec![("f", f.as_str())]),
+            Rule::GroupForm {  } => ("GroupForm", vec![]),
+            Rule::GroupName {  } => ("GroupName", vec![]),
             Rule::GroupUnclosed {  } => ("GroupUnclosed", vec![]),
             Rule::HexDigits { e } => ("HexDigits", vec![("e", e.as_str())]),
             Rule::NoCountTerm {  } => ("NoCountTerm", vec![]),
@@ -97,6 +103,12 @@ pub(super) trait Hooks {
         Ok(())
     }
     fn _regex_atom(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn _regex_flags(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn _regex_comment(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn _regex_group(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -154,6 +166,24 @@ pub(super) trait Hooks {
         Ok(())
     }
     fn regex_int(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_flags(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_comment(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_group_open(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_group_form(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_flag(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_name(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn regex_op(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -340,7 +370,9 @@ impl<'s, H: Hooks> Scanner<'s, H> {
 
     fn _regex_atom(&mut self) -> Result<bool, String> {
         let start = self.pos;
-        let hit = self._regex_group()?
+        let hit = self._regex_flags()?
+            || self._regex_comment()?
+            || self._regex_group()?
             || self._regex_class()?
             || self._regex_escape()?
             || self._regex_dot()?
@@ -359,6 +391,16 @@ impl<'s, H: Hooks> Scanner<'s, H> {
                 ({ let p = self.pos; let m = self.eat_byte(b'}'); self.pos = p; m } && { let rule = rule!(StrayBrace); return Err(self.hooks.refuse(self.pos, rule)); })
                 || { self.pos = p0; false }
             }
+            || {
+                let p0 = self.pos;
+                (self.eat_byte(b'^') && { let rule = rule!(AnchorPending, a = "^"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }
+            || {
+                let p0 = self.pos;
+                (self.eat_byte(b'$') && { let rule = rule!(AnchorPending, a = "$"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }
             || self._regex_literal()?;
         if !hit {
             return Ok(false);
@@ -367,11 +409,31 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         Ok(true)
     }
 
+    fn _regex_flags(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = self.regex_flags()?;
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks._regex_flags(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn _regex_comment(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = self.regex_comment()?;
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks._regex_comment(start, self.pos)?;
+        Ok(true)
+    }
+
     fn _regex_group(&mut self) -> Result<bool, String> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
-            (self.eat_byte(b'(') && { let alt = self.pos; ({ self._regex_alt()?; true }) && { if !(self.eat_byte(b')')) { { let rule = rule!(GroupUnclosed); return Err(self.hooks.refuse(self.pos, rule)); } } true } })
+            ({ let open = self.pos; self.regex_group_open()? && { let alt = self.pos; ({ self._regex_alt()?; true }) && { if !(self.eat_byte(b')')) { { let rule = rule!(GroupUnclosed); return Err(self.hooks.refuse(self.pos, rule)); } } true } } })
             || { self.pos = p0; false }
         };
         if !hit {
@@ -642,6 +704,162 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         }
         self.hooks.regex_int(start, self.pos)?;
         Ok(true)
+    }
+
+    fn regex_flags(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = {
+            let p0 = self.pos;
+            (self.eat_lit(b"(?") && { self.eat_while(|c| matches!(c, 'i' | 'm' | 's')); true } && { let _ = {
+                let p0 = self.pos;
+                (self.eat_byte(b'-') && (self.eat_one(|c| matches!(c, 'i' | 'm' | 's')) && { self.eat_while(|c| matches!(c, 'i' | 'm' | 's')); true }))
+                || { self.pos = p0; false }
+            }; true } && self.eat_byte(b')'))
+            || { self.pos = p0; false }
+        };
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_flags(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn regex_comment(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = {
+            let p0 = self.pos;
+            (self.eat_lit(b"(?#") && { self.skip_to(b')'); true } && { if !((matches!(self.peek_byte(), Some(b')')) && self.eat_byte(b')'))) { { let rule = rule!(GroupUnclosed); return Err(self.hooks.refuse(self.pos, rule)); } } true })
+            || { self.pos = p0; false }
+        };
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_comment(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn regex_group_open(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = {
+            let p0 = self.pos;
+            (self.eat_byte(b'(') && { let _ = (
+                (matches!(self.peek_byte(), Some(b'*')) && {
+                    let p0 = self.pos;
+                    (self.eat_byte(b'*') && { let rule = rule!(PcreControl, form = "(*..)"); return Err(self.hooks.refuse(self.pos, rule)); })
+                    || { self.pos = p0; false }
+                })
+                || (matches!(self.peek_byte(), Some(b'?')) && {
+                    let p0 = self.pos;
+                    (self.eat_byte(b'?') && { self.regex_group_form()?; true })
+                    || { self.pos = p0; false }
+                })
+            ); true })
+            || { self.pos = p0; false }
+        };
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_group_open(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn regex_group_form(&mut self) -> Result<(), String> {
+        let start = self.pos;
+        { if !((matches!(self.peek_byte(), Some(b':')) && self.eat_byte(b':')) || (matches!(self.peek_byte(), Some(b'P')) && {
+                let p0 = self.pos;
+                (self.eat_lit(b"P<") && { self.regex_name()?; true } && { if !((matches!(self.peek_byte(), Some(b'>')) && self.eat_byte(b'>'))) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } true })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'\'')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'\'') && { self.regex_name()?; true } && { if !((matches!(self.peek_byte(), Some(b'\'')) && self.eat_byte(b'\''))) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } true })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'=')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'=') && { let rule = rule!(AnchorPending, a = "(?="); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'!')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'!') && { let rule = rule!(AnchorPending, a = "(?!"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'<')) && {
+                let p0 = self.pos;
+                (self.eat_lit(b"<=") && { let rule = rule!(AnchorPending, a = "(?<="); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'<')) && {
+                let p0 = self.pos;
+                (self.eat_lit(b"<!") && { let rule = rule!(AnchorPending, a = "(?<!"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'<')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'<') && { self.regex_name()?; true } && { if !((matches!(self.peek_byte(), Some(b'>')) && self.eat_byte(b'>'))) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } true })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'>')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'>') && { let rule = rule!(PcreControl, form = "(?>"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'R')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'R') && { let rule = rule!(PcreControl, form = "(?R)"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'+' | b'0'..=b'9')) && {
+                let p0 = self.pos;
+                (self.eat_one(|c| matches!(c, '0'..='9' | '+')) && { let rule = rule!(PcreControl, form = "(?N)"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'-')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'-') && self.eat_one(|c| matches!(c, '0'..='9')) && { let rule = rule!(PcreControl, form = "(?N)"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'&')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'&') && { let rule = rule!(PcreControl, form = "(?&"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'(')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'(') && { let rule = rule!(PcreControl, form = "(?("); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'C')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'C') && { let rule = rule!(PcreControl, form = "(?C"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'|')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'|') && { let rule = rule!(PcreControl, form = "(?|"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            }) || (matches!(self.peek_byte(), Some(b'P')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'P') && { let rule = rule!(PcreControl, form = "(?P"); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            })) { loop { let p = self.pos; if !self.regex_flag()? || self.pos == p { break; } } let _ = {
+                let p0 = self.pos;
+                (self.eat_byte(b'-') && (self.regex_flag()? && { loop { let p = self.pos; if !self.regex_flag()? || self.pos == p { break; } } true }))
+                || { self.pos = p0; false }
+            }; if !((matches!(self.peek_byte(), Some(b':')) && self.eat_byte(b':'))) { { let rule = rule!(GroupForm); return Err(self.hooks.refuse(self.pos, rule)); } }  } }
+        self.hooks.regex_group_form(start, self.pos)
+    }
+
+    fn regex_flag(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = self.eat_one(|c| matches!(c, 'i' | 'm' | 's'))
+            || {
+                let p0 = self.pos;
+                ({ let p = self.pos; let m = self.eat_one(|c| matches!(c, 'A'..='Z' | 'a'..='z')); self.pos = p; m } && { let rule = rule!(FlagUnknown, f = self.char_text(false)); return Err(self.hooks.refuse(self.pos, rule)); })
+                || { self.pos = p0; false }
+            };
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_flag(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn regex_name(&mut self) -> Result<(), String> {
+        let start = self.pos;
+        { if !((matches!(self.peek_byte(), Some(b'A'..=b'Z' | b'_' | b'a'..=b'z')) && {
+                let p0 = self.pos;
+                (self.eat_one(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '_')) && { self.eat_while(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_')); true })
+                || { self.pos = p0; false }
+            })) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } }
+        self.hooks.regex_name(start, self.pos)
     }
 
     fn regex_op(&mut self) -> Result<bool, String> {

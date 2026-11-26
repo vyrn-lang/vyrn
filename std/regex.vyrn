@@ -11,11 +11,14 @@
 /// `\x{H..}`, `\uHHHH`, `\u{H..}` and `\o{O..}` are code points. `\R` is a line
 /// break, `\Q` quotes the text up to `\E` or the end, and a backslash before ASCII
 /// punctuation makes it literal. Every other escape is refused. `{m,n}` repeats a
-/// term `m` to `n` times, each count at most 255. `^` and `$` are the bytes they
-/// spell, and the empty pattern matches the empty string. A Thompson NFA with no
-/// backtracking, so the time is linear in the pattern size times the input for
-/// every pattern. A search runs it as a lazy DFA: one table read per byte. It has no
-/// backreferences or lookaround.
+/// term `m` to `n` times, each count at most 255. `(?:..)` groups without a name,
+/// `(?<n>..)`, `(?P<n>..)` and `(?'n'..)` name a group, and `(?#..)` is a comment.
+/// The flags `i` (ASCII case folding), `s` (`.` takes `\n` and `\r`) and `m` hold
+/// for the rest of a group after `(?ims-ims)`, or inside `(?ims-ims:..)`. `^`, `$`
+/// and every other assertion are refused, and the empty pattern matches the empty
+/// string. A Thompson NFA with no backtracking, so the time is linear in the pattern
+/// size times the input for every pattern. A search runs it as a lazy DFA: one table
+/// read per byte. It has no backreferences or lookaround.
 ///
 /// Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
 /// backtracking engine answers `a`.
@@ -106,6 +109,15 @@ type Builder = {
     err: Option<rx.Row>,
     // The terms counted repetition has copied, against `countBudget`.
     expanded: Int64,
+    // The flags of the group being walked: `fold` is `i`, which folds ASCII case,
+    // and `dotAll` is `s`, which lets `.` take `\n` and `\r`. `m` changes only `^`
+    // and `$`, which `AnchorPending` refuses.
+    fold: Bool,
+    dotAll: Bool,
+    // Each named group's name, and the offset of its `(` in `nameAt`: a count walks
+    // a group once per copy, and a name names one group.
+    names: Array<String>,
+    nameAt: Array<Int64>,
 }
 
 /// The terms counted repetition may copy in one pattern. Nested counts multiply,
@@ -147,6 +159,10 @@ fn regexSay(row: rx.Row) -> String {
         PropertyClass(form) => say.tPropertyClass__En(form),
         SetOperand => say.tSetOperand__En(),
         UnknownEscape(c) => say.tUnknownEscape__En(c),
+        FlagUnknown(f) => say.tFlagUnknown__En(f),
+        GroupForm => say.tGroupForm__En(),
+        GroupName => say.tGroupName__En(),
+        NameTwice => say.tNameTwice__En(),
     }
 }
 
@@ -649,15 +665,85 @@ fn classChars(bd: modify Builder, pattern: String, c: rx.RegexClass) -> Array<In
         }
         i = i + 1
     }
+    let folded = if bd.fold { foldChars(acc) } else { acc }
     if let Some(n) = c.negate {
-        return charsNot(acc)
+        return charsNot(folded)
     }
-    return acc
+    return folded
 }
 
-/// The set of `.`: every character but `\n` and `\r`.
-fn dotChars() -> Array<Int64> {
-    return charsNot([10, 10, 13, 13])
+/// The set of `.`: every character but `\n` and `\r`, or every one under `s`.
+fn dotChars(bd: Builder) -> Array<Int64> {
+    return if bd.dotAll { charsNot([]) } else { charsNot([10, 10, 13, 13]) }
+}
+
+/// `set` with the members from `lo` to `hi` moved by `by`.
+fn charsMoved(set: Array<Int64>, lo: Int64, hi: Int64, by: Int64) -> Array<Int64> {
+    let part = charsAnd(set, [lo, hi])
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < part.length {
+        out.push(part[i] + by)
+        i = i + 1
+    }
+    return out
+}
+
+/// `set` with the other case of each ASCII letter it holds.
+fn foldChars(set: Array<Int64>) -> Array<Int64> {
+    return charsOr(set, charsOr(charsMoved(set, 97, 122, 0 - 32), charsMoved(set, 65, 90, 32)))
+}
+
+/// The fragment of the code point `c`, both cases of an ASCII letter under `i`.
+fn fragChar(bd: modify Builder, c: Int64) -> Frag {
+    if bd.fold && ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+        return fragChars(bd, foldChars([c, c]))
+    }
+    return fragBytes(bd, utf8(c))
+}
+
+/// Sets `bd`'s flags by the letters of `pattern` from `from` up to `to`, a flag
+/// list of `(?ims-ims`.
+fn setFlags(bd: modify Builder, pattern: String, from: Int64, to: Int64) {
+    let mut on = true
+    let mut i = from
+    while i < to {
+        if pattern[i] == '-' {
+            on = false
+        } else if pattern[i] == 'i' {
+            bd.fold = on
+        } else if pattern[i] == 's' {
+            bd.dotAll = on
+        }
+        i = i + 1
+    }
+}
+
+/// The group `g` under its own flags, which end at its `)`. A name names one group.
+fn fragGroup(bd: modify Builder, pattern: String, g: rx.RegexGroup) -> Frag {
+    let fold = bd.fold
+    let dotAll = bd.dotAll
+    let open = g.open.text
+    let named = open.byteLength > 2 && (open[2] == 'P' || open[2] == '<' || open[2] == '\'')
+    if named {
+        let from = if open[2] == 'P' { 4 } else { 3 }
+        let name = substring(open, from, open.byteLength - 1)
+        let mut i = 0
+        while i < bd.names.length {
+            if bd.names[i] == name && bd.nameAt[i] != g.start {
+                refuse(bd, NameTwice)
+            }
+            i = i + 1
+        }
+        bd.names.push(name)
+        bd.nameAt.push(g.start)
+    } else if open.byteLength > 2 {
+        setFlags(bd, open, 2, open.byteLength - 1)
+    }
+    let f = fragAlt(bd, pattern, g.alt)
+    bd.fold = fold
+    bd.dotAll = dotAll
+    return f
 }
 
 /// One class test, as a fragment.
@@ -693,7 +779,7 @@ fn fragEscape(bd: modify Builder, pattern: String, start: Int64, end: Int64) -> 
     let c = pattern[start + 1]
     if c == 'Q' {
         let to = quoteEnd(pattern, start, end)
-        return if to == start + 2 { fragEmpty(bd) } else { fragBytes(bd, utf8(charAt(pattern, lastChar(pattern, to)))) }
+        return if to == start + 2 { fragEmpty(bd) } else { fragChar(bd, charAt(pattern, lastChar(pattern, to))) }
     }
     if c == 'R' {
         let crlf = fragBytes(bd, [13, 10])
@@ -704,7 +790,7 @@ fn fragEscape(bd: modify Builder, pattern: String, start: Int64, end: Int64) -> 
     if isShorthand(c) {
         return fragChars(bd, shorthandChars(c))
     }
-    return fragBytes(bd, utf8(escapeChar(bd, pattern, start + 1, end)))
+    return fragChar(bd, escapeChar(bd, pattern, start + 1, end))
 }
 
 /// The terms of the escape from `start` up to `end`, as the compiler's builder
@@ -748,8 +834,15 @@ fn fragOp(bd: modify Builder, f: consume Frag, op: String) -> Frag {
 /// character, whose other bytes `fragPiece` emits before it.
 fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
     match atom {
+        RegexAtomRegexFlags(f) => {
+            setFlags(bd, pattern, f.start + 2, f.end - 1)
+            return fragEmpty(bd)
+        }
+        RegexAtomRegexComment(c) => {
+            return fragEmpty(bd)
+        }
         RegexAtomRegexGroup(g) => {
-            return fragAlt(bd, pattern, g.alt)
+            return fragGroup(bd, pattern, g)
         }
         RegexAtomRegexClass(c) => {
             return fragChars(bd, classChars(bd, pattern, c))
@@ -758,10 +851,10 @@ fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
             return fragEscape(bd, pattern, e.start, e.end)
         }
         RegexAtomRegexDot(d) => {
-            return fragChars(bd, dotChars())
+            return fragChars(bd, dotChars(bd))
         }
         RegexAtomRegexLiteral(l) => {
-            return fragBytes(bd, utf8(charAt(pattern, l.start)))
+            return fragChar(bd, charAt(pattern, l.start))
         }
     }
 }
@@ -819,6 +912,8 @@ fn pieceSize(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Int64
     let term = termSize(bd, pattern, piece.atom)
     let mut prefix = 0
     match piece.atom {
+        RegexAtomRegexFlags(f) => {}
+        RegexAtomRegexComment(c) => {}
         RegexAtomRegexGroup(g) => {}
         RegexAtomRegexClass(c) => {}
         RegexAtomRegexEscape(e) => {
@@ -859,10 +954,12 @@ fn altSize(bd: modify Builder, pattern: String, alt: rx.RegexAlt) -> Int64 {
 /// walk would raise building the atom.
 fn termSize(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Int64 {
     return match atom {
+        RegexAtomRegexFlags(f) => 1,
+        RegexAtomRegexComment(c) => 1,
         RegexAtomRegexGroup(g) => altSize(bd, pattern, g.alt),
         RegexAtomRegexClass(c) => charsSize(classChars(bd, pattern, c)),
         RegexAtomRegexEscape(e) => escapeSize(pattern, e.start, e.end),
-        RegexAtomRegexDot(d) => charsSize(dotChars()),
+        RegexAtomRegexDot(d) => charsSize(dotChars(bd)),
         RegexAtomRegexLiteral(l) => l.end - l.start,
     }
 }
@@ -922,6 +1019,8 @@ fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag 
     let mut from = 0
     let mut to = 0
     match piece.atom {
+        RegexAtomRegexFlags(f) => {}
+        RegexAtomRegexComment(c) => {}
         RegexAtomRegexGroup(g) => {}
         RegexAtomRegexClass(c) => {}
         RegexAtomRegexEscape(e) => {
@@ -937,7 +1036,8 @@ fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag 
     let mut f = fragRepeat(bd, pattern, piece)
     let mut i = to - 1
     while i >= from {
-        let g = fragRange(bd, Int64(pattern[i]), Int64(pattern[i]))
+        let b = Int64(pattern[i])
+        let g = if b < 128 { fragChar(bd, b) } else { fragRange(bd, b, b) }
         patch(bd, g.holes, f.start)
         f = Frag { start: g.start, holes: consume f.holes }
         i = i - 1
@@ -1008,7 +1108,7 @@ export fn compile(pattern: String) -> Result<Regex, String> {
 }
 
 fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
-    let mut bd = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0 }
+    let mut bd = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, names: [], nameAt: [] }
     let f = fragAlt(bd, pattern, tree)
     if let Some(row) = bd.err {
         return Err(regexSay(row))
@@ -1401,7 +1501,7 @@ test "an escape with no meaning is refused" {
     }
     match compile("\\b") {
         Ok(r) => panic("a boundary compiled"),
-        Err(w) => assert(w == "an anchor or a boundary (`\\b`) is not supported"),
+        Err(w) => assert(w == "an assertion (`\\b`) is not supported"),
     }
     match compile("\\x{110000}") {
         Ok(r) => panic("a code point past 10FFFF compiled"),
@@ -1434,6 +1534,33 @@ test "a class is a set of code points" {
         Err(w) => panic("compile: \{w}"),
     }
     assertEq(replaceAll(rest, "ab12d", "."), ".12.")
+}
+
+test "a group names, folds or comments" {
+    let date = match compile("(?<y>\\d{4})-(?:\\d\\d)(?#day follows)-(?P<d>\\d\\d)") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(date, "on 2026-11-27.", "D"), "on D.")
+    let fold = match compile("a(?i)b|c|(?-i:d)") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(fold, "aB C D d"), 3)
+    let dot = match compile("(?s:a.b)|a.c") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(dot, "a\nb a\nc"), 1)
+    match compile("(?<n>a)(?<n>b)") {
+        Ok(r) => panic("a name twice compiled"),
+        Err(w) => assert(w == "a group name that names two groups"),
+    }
+    let twice = match compile("(?<n>a){2}") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(twice, "aaa"), 1)
 }
 
 test "the patterns regex-redux counts" {
@@ -1504,12 +1631,16 @@ test "a count repeats its term" {
     assertEq(countMatches(pair, "abyy"), 0)
 }
 
-test "an anchor is its byte and the empty pattern matches the empty string" {
-    let caret = match compile("^a$") {
+test "an anchor is refused and the empty pattern matches the empty string" {
+    match compile("^a") {
+        Ok(r) => panic("an anchor compiled"),
+        Err(w) => assert(w == "an assertion (`^`) is not supported"),
+    }
+    let escaped = match compile("\\^a\\$") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(countMatches(caret, "a ^a$"), 1)
+    assertEq(countMatches(escaped, "a ^a$"), 1)
     let empty = match compile("") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),

@@ -954,7 +954,7 @@ fn the_regex_refusals_are_the_catalogues_sentences() {
         ),
         (
             "x02_a_boundary_escape.vyrn",
-            "an anchor or a boundary (`\\b`) is not supported",
+            "an assertion (`\\b`) is not supported",
         ),
         (
             "x03_an_anchor_in_a_class.vyrn",
@@ -999,6 +999,22 @@ fn the_regex_refusals_are_the_catalogues_sentences() {
         (
             "x13_a_set_operation_with_one_side.vyrn",
             "a class set operation (`&&`, `--` or `~~`) with no members on one side",
+        ),
+        (
+            "x14_a_flag_of_no_meaning.vyrn",
+            "a flag (`x`) that is none of `i`, `m` and `s`",
+        ),
+        (
+            "x15_a_group_form_of_no_meaning.vyrn",
+            "a group form after `(?` that is none of `:`, a name, flags and `#`",
+        ),
+        (
+            "x16_a_group_name_that_is_no_name.vyrn",
+            "a group name that is not a letter or `_` and then letters, digits and `_` up to its closing `>` or `'`",
+        ),
+        (
+            "x17_a_group_name_used_twice.vyrn",
+            "invalid regex `(?<a>b)(?<a>c)`: a group name that names two groups",
         ),
     ];
     let dir = dir().join("regex");

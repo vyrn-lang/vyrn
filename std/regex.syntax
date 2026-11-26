@@ -8,13 +8,14 @@ nest 250 ^TooDeep
 
 // What each builder raises from the tree, because a grammar compares no numbers: a
 // range that runs backwards, a count above 255, a count whose maximum is below its
-// minimum, counts that expand the pattern past 16384 terms, and a code point above
-// 10FFFF or in the surrogates.
+// minimum, counts that expand the pattern past 16384 terms, a code point above
+// 10FFFF or in the surrogates, and a group name used twice.
 row Backwards
 row CountLarge
 row CountOrder
 row CountBudget
 row CodepointRange
+row NameTwice
 
 RegexPattern = RegexAlt (eof / ^StrayParen)
 
@@ -25,10 +26,14 @@ RegexCount = '{' (regexInt / ^CountNumber)
              ('}' / ',' ('}' / (regexInt / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
 
 // The order states the language: a literal is what no other alternative takes.
-RegexAtom = RegexGroup / RegexClass / RegexEscape / RegexDot
+RegexAtom = RegexFlags / RegexComment / RegexGroup / RegexClass / RegexEscape / RegexDot
             / &('*' / '+' / '?') ^NoTerm / &'{' ^NoCountTerm / &'}' ^StrayBrace
-            / RegexLiteral
-RegexGroup = '(' alt:RegexAlt (')' / ^GroupUnclosed)
+            / '^' ^AnchorPending(a='^') / '$' ^AnchorPending(a='$') / RegexLiteral
+// `(?i)` sets flags for the rest of its group, `(?i:..)` for its own; `(?#..)` is a
+// comment. Each matches the empty string.
+RegexFlags = regexFlags
+RegexComment = regexComment
+RegexGroup = open:regexGroupOpen alt:RegexAlt (')' / ^GroupUnclosed)
 RegexEscape = '\\' (regexQuote / regexShorthand / regexAnchor / regexSense / regexForeign
                     / ^PatternBackslash)
 RegexDot = '.'
@@ -58,6 +63,24 @@ regexSetOp = '&&' / '--' / '~~'
 regexPosixName = 'alnum' / 'alpha' / 'blank' / 'cntrl' / 'digit' / 'graph' / 'lower' / 'print'
                  / 'punct' / 'space' / 'upper' / 'xdigit'
 regexInt = [0-9]+
+regexFlags = '(?' [ims]* ('-' [ims]+)? ')'
+regexComment = '(?#' (!')' .)* (')' / ^GroupUnclosed)
+
+// A group captures, or holds a form after `(?`: `:` does not capture, a name captures
+// by it, and flags apply inside. Every other form is refused.
+regexGroupOpen = '(' ('*' ^PcreControl(form='(*..)') / '?' regexGroupForm)?
+regexGroupForm = ':' / 'P<' regexName ('>' / ^GroupName) / '\'' regexName ('\'' / ^GroupName)
+                 / '=' ^AnchorPending(a='(?=') / '!' ^AnchorPending(a='(?!')
+                 / '<=' ^AnchorPending(a='(?<=') / '<!' ^AnchorPending(a='(?<!')
+                 / '<' regexName ('>' / ^GroupName)
+                 / '>' ^PcreControl(form='(?>') / 'R' ^PcreControl(form='(?R)')
+                 / [0-9+] ^PcreControl(form='(?N)') / '-' [0-9] ^PcreControl(form='(?N)')
+                 / '&' ^PcreControl(form='(?&') / '(' ^PcreControl(form='(?(')
+                 / 'C' ^PcreControl(form='(?C') / '|' ^PcreControl(form='(?|')
+                 / 'P' ^PcreControl(form='(?P')
+                 / regexFlag* ('-' regexFlag+)? (':' / ^GroupForm)
+regexFlag = [ims] / &[A-Za-z] ^FlagUnknown(f=.)
+regexName = [A-Za-z_] [A-Za-z0-9_]* / ^GroupName
 regexOp = '*' (&'?' ^NonGreedy(op='*'))? / '+' (&'?' ^NonGreedy(op='+'))? / '?'
 
 // An escape is meaningful or refused. In and out of a class it is a shorthand, a
