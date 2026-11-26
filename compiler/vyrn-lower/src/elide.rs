@@ -471,15 +471,17 @@ impl<'a> View<'a> {
         self.frames.get(&(self.call(rhs)?, k))
     }
 
-    /// Whether `f` states a fact of its result.
+    /// Whether `f` states a fact of its result, inferred or declared.
     fn post(&self, f: FnId) -> bool {
         self.get(f)
-            .is_some_and(|(_, s)| !s.post.is_empty() || !s.when.is_empty())
+            .is_some_and(|(_, s)| !s.post.is_empty() || !s.when.is_empty() || s.ensures.is_some())
     }
 
-    /// Whether `rhs` is a direct call whose callee states a fact of its result.
+    /// Whether the body `rhs` runs states a fact of its result. A call that
+    /// binds a function value counts, as [`Walk::ensured`] assumes the
+    /// declared clause over it.
     fn linked(&self, rhs: &Rhs) -> bool {
-        self.call(rhs).is_some_and(|f| self.post(f))
+        runs(self.instances, rhs).is_some_and(|f| self.post(f))
     }
 
     /// The callee of `s`, a direct call to a body with entry facts, with the
@@ -6938,9 +6940,13 @@ impl<'a> Walk<'a> {
     /// would test it: `` `xs` non-empty ``, `` `i < xs.length` ``. A goal over a
     /// temporary reads `the value of line N` and is no code. With `param`, also
     /// the goal as that parameter's `where` clause, where [`Walk::states`]
-    /// allows one.
+    /// allows one. A goal the state reduces to a constant reads as written:
+    /// `0 >= 1` names no fact the reader can act on.
     fn goal(&self, st: &State, g: &Lin, param: Option<Name>) -> (Arc<str>, Option<Arc<str>>) {
-        let l = &st.norm(g).unwrap_or(Cow::Borrowed(g));
+        let l = &st
+            .norm(g)
+            .filter(|l| !l.terms.is_empty())
+            .unwrap_or(Cow::Borrowed(g));
         let temp = (l.terms.iter()).any(|(t, _)| {
             t.name()
                 .is_some_and(|n| self.body.names[n.index()].source.starts_with('@'))

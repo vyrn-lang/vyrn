@@ -3340,3 +3340,50 @@ fn an_array_of_a_generic_owned_type_releases_each_element() {
     let src = "import { Slots, newSlots, insert } from \"std/slots\"                fn main() -> Int64 { let mut s: Slots<String> = newSlots()                let h = insert(s, \"a\" + \"b\") let mut xs: Array<Slots<String>> = []                xs.push(s) print(xs.length) return 0 }";
     clean_on_both_routes(&common::scratch("slots-array"), "slots", src, "1");
 }
+
+/// `drop` releases any value the compiler releases, as its scope's end would:
+/// a `Json`, whose release the compiler writes, and a record that declares
+/// none. A leak exits 135 and a double free 134 under the audit, on the
+/// engine and, where clang, wabt and simde are found, on the wasm2c route.
+#[test]
+fn drop_releases_a_value_whose_release_the_compiler_writes() {
+    let src = "import { Json, emit } from \"std/json\"\n\
+               type Pair = { name: String, tags: Array<String> }\n\
+               fn main() -> Int64 {\n\
+               let v: Json = JArr([JStr(\"a\" + \"b\"), JNum(\"1\".copy())])\n\
+               print(emit(v.copy()))\n\
+               drop v\n\
+               let p = Pair { name: \"n\" + \"m\", tags: [\"x\" + \"y\"] }\n\
+               print(p.name)\n\
+               drop p\n\
+               return 0\n\
+               }\n";
+    let want = (Some(0), "[\"ab\",1]\nnm\n".to_string());
+    assert_eq!(audited_run("dropowned", src), want);
+    let root = repo("");
+    let wasm2c = vyrn_codegen::toolchain::wasm2c_from(&root).ok().flatten();
+    let (Some(w), Some((simde, _)), Some(_)) = (
+        wasm2c,
+        vyrn_codegen::toolchain::simde_from(&root),
+        vyrn_codegen::toolchain::find_clang(),
+    ) else {
+        eprintln!("SKIP the route's leg: clang, wabt or simde is missing");
+        return;
+    };
+    let dir = common::scratch("dropowned");
+    let (file, exe) = (dir.join("m.vyrn"), dir.join("m.exe"));
+    std::fs::write(&file, src).unwrap();
+    let build = common::vyrn()
+        .env("VYRN_LEAK_CHECK", "1")
+        .env("VYRN_WASM2C", &w.exe)
+        .env("VYRN_SIMDE", &simde)
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("vyrn build");
+    assert!(build.status.success(), "{}", common::norm(&build.stderr));
+    let o = Command::new(&exe).output().expect("run the build");
+    assert_eq!((o.status.code(), common::norm(&o.stdout)), want);
+}

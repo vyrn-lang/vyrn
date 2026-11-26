@@ -935,20 +935,16 @@ impl<'b> Kernel<'b> {
     }
 
     /// A payload binder handed on, or its part at `under` taken, leaves a
-    /// hole in the scrutinee, which the scrutinee's release walks around. A
-    /// type that declares `release` owns the whole of its value, so the
-    /// hand-off is refused.
+    /// hole in the scrutinee, which the scrutinee's release walks around. The
+    /// hand-off takes the value apart, so it is refused where another module
+    /// declares the release ([`vyrn_frontend::declared::hole_walk`]).
     fn leaves_payload(&self, st: &mut State, n: Name, under: &str) -> Result<(), Refusal> {
         let payload = match &self.body.names[n.index()].payload {
             None => return Ok(()),
-            Some(Payload::Sealed(ty)) => {
-                let b = self.src(n);
-                let m = match st.alias(n) {
-                    Some(Alias { via: Some(m), .. }) => self.src(*m),
-                    _ => b,
-                };
-                let ty = self.body.spelled(ty);
-                return Err(self.refuse(self.here, rule!(SealedPayload, b, ty, m)));
+            Some(Payload::Sealed(t)) => {
+                let what = format!("handing `{}` on", self.src(n));
+                let t = self.body.spelled(t);
+                return Err(self.refuse(self.here, rule!(TakenApart, what, t)));
             }
             Some(Payload::Hole(p)) => p,
         };

@@ -1188,10 +1188,6 @@ rules! {
     StoreUnderHole { s, h, here, path }
         "`{s}{h}` was moved here into `consume`\nline {here}: ... and `{s}{path}` is written \
         here, under the hole";
-    // A payload binder handed on out of a type that declares `release`.
-    SealedPayload { b, ty, m }
-        "`{b}` may not be handed to a `consume` parameter: `{ty}` declares `release`, which \
-        reads it; consume `{m}` or copy `{b}`";
     // A written `drop` of a name with a hole.
     DropWithHole { s, h, l }
         "`{s}` may not be dropped: `{s}{h}` was taken out of it on line {l}, and `drop` \
@@ -1390,12 +1386,10 @@ rules! {
     DropUnbound { name } "`drop` of unbound variable `{name}`";
     DropTypeParam { name, t }
         "cannot `drop` `{name}`: its type `{t}` is a type parameter, so this body cannot know \
-        whether the rule below holds for the instance; a plain record would be released \
-        here where `drop` on it directly is refused. Release the value where its concrete \
-        type is known, or `consume` the heap field and `drop` that";
+        whether the instance owns heap. Release the value where its concrete type is known";
     DropNotHeap { name, t }
-        "`drop` needs a heap value (a String, an Array, a Map, a Ref, or an Option/Result \
-        carrying one, or a type declaring `impl Owned` or `impl MustUse`), but `{name}` is {t}";
+        "`drop` needs a value that owns heap (a String, an Array, a Map, or a record or enum \
+        holding one) or a type declaring `impl MustUse`, but `{name}` is {t}";
 
     // A body the core builder did not build: a defect in the builder, since
     // the checker typed the body.

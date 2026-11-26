@@ -1560,7 +1560,7 @@ std/rpc.editor.vyrn	0	cbf29ce484222325	20	15	5308db71b62b6a5c
 std/rpc.vyrn	0	cbf29ce484222325	20	17	1fb054967659d958
 std/runtime.vyrn	0	cbf29ce484222325	20	18	b61fdfd5e0a895b6
 std/scan.vyrn	0	cbf29ce484222325	20	16	fa2868ab13f061b1
-std/slots.vyrn	0	cbf29ce484222325	20	17	8720b7a8b5d539a3
+std/slots.vyrn	0	cbf29ce484222325	20	16	e41b0facff1d4130
 std/storage.vyrn	0	cbf29ce484222325	20	14	838ee66367094974
 std/stream.vyrn	0	cbf29ce484222325	20	18	7b33eaedd834b02c
 std/strings.vyrn	0	cbf29ce484222325	20	17	b629a5aa6d142897

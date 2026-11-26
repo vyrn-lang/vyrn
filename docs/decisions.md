@@ -208,6 +208,7 @@ pull request.
 - A `region` that holds an `await` has an arena of its own, swapped by `std/task` at each suspension and resume over accessors `std/runtime` exports only to it (decided 2026-10-25 by the user). The nesting count is per task: a suspension takes off each region it leaves.
 - Allocation failure prints `error: out of memory` and exits 1 on every engine. The bound may differ by engine.
 - Releasing a deep tree recurses, bounded like any recursive walk. No worklist release.
+- `drop` releases any value whose release the compiler writes, as its scope's end would; a type parameter is refused, and a type declares `release` only to do more than take itself apart (decided 2026-11-26 by the user).
 - No raw-memory view or `unsafe`. `Array` is the primitive and containers over it are ordinary Vyrn; `SmallArray` stays built in because it needs an uninitialized place.
 - No transmute, unchecked indexing, inline assembly or atomics.
 

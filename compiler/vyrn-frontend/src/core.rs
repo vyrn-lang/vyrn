@@ -843,8 +843,8 @@ impl Arm {
 pub enum Payload {
     /// A hole the scrutinee's release walks around, spelled `.Variant.i`.
     Hole(String),
-    /// Nothing may leave: the scrutinee's type, spelled here, declares a
-    /// `release` that reads every payload.
+    /// Nothing may leave: another module declares the release of this type,
+    /// spelled here, which reads every payload.
     Sealed(String),
 }
 
