@@ -802,7 +802,9 @@ function registerCostDecorations(context, vsc, lspState) {
     editor.setDecorations(
       glyphType,
       costDecorations(rows || []).map((g) => ({
-        range: new vsc.Range(g.at.line, g.at.character, g.at.line, g.at.character),
+        // The glyph covers its expression's last character: VS Code shows an empty range's
+        // hover only at the end of a line, so a glyph inside a line would have none.
+        range: new vsc.Range(g.at.line, Math.max(g.at.character - 1, 0), g.at.line, g.at.character),
         hoverMessage: hover(g.hover),
         renderOptions: { after: { contentText: g.glyph } },
       }))
