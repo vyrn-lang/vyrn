@@ -1,7 +1,11 @@
 {
+  "anchorPending": "an anchor or a boundary (`{$a}`) is not supported",
   "backwards": "a character range that runs backwards",
+  "classAnchor": "an anchor or a backreference (`\\\\{$c}`) cannot stand inside a character class",
   "classBackslash": "a backslash at the end of a character class",
   "classUnclosed": "a character class with no closing `]`",
+  "codepointRange": "a code point escape above `10FFFF` or in the surrogates `D800` to `DFFF`",
+  "controlLetter": "a control escape (`\\\\c`) with no ASCII letter after it",
   "countBudget": "counted repetition that expands the pattern past 16384 terms",
   "countForm": "a counted repetition (`\\{m,n\\}`) whose number a `,` or a `\\}` does not follow",
   "countLarge": "a repetition count above 255",
@@ -11,11 +15,17 @@
   "emptyClass": "a character class with no members",
   "expected": "a pattern is expected to hold {$token} here",
   "groupUnclosed": "a group with no closing `)`",
+  "hexDigits": "a code point escape (`\\\\{$e}`) with no digits of its form: `\\\\xHH`, `\\\\uHHHH`, `\\\\x\\{H..\\}`, `\\\\u\\{H..\\}` or `\\\\o\\{O..\\}`",
   "noCountTerm": "a counted repetition (`\\{m,n\\}`) with no term before it",
   "noTerm": "a repeat (`*`, `+` or `?`) with no term before it",
   "nonGreedy": "non-greedy repetition (`{$op}?`) is not supported",
+  "nulEscape": "a NUL escape, which no `String` holds",
+  "octalEscape": "an octal escape (`\\\\0` and a digit), which PCRE reads as a backreference: write `\\\\x` and two hex digits",
   "patternBackslash": "a backslash at the end of the pattern",
+  "pcreControl": "a PCRE control form (`{$form}`), which only a backtracking engine has",
+  "propertyClass": "a Unicode property class (`{$form}\\{..\\}`) is not supported",
   "strayBrace": "a `\\}` with no `\\{` before it (a literal brace is `\\\\\\}`)",
   "strayParen": "a `)` with no `(` before it",
-  "tooDeep": "a pattern that nests more than 250 levels deep"
+  "tooDeep": "a pattern that nests more than 250 levels deep",
+  "unknownEscape": "the escape `\\\\{$c}` means nothing: a backslash makes only ASCII punctuation literal"
 }

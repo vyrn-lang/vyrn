@@ -8,11 +8,13 @@ nest 250 ^TooDeep
 
 // What each builder raises from the tree, because a grammar compares no numbers: a
 // range that runs backwards, a count above 255, a count whose maximum is below its
-// minimum, and counts that expand the pattern past 16384 terms.
+// minimum, counts that expand the pattern past 16384 terms, and a code point above
+// 10FFFF or in the surrogates.
 row Backwards
 row CountLarge
 row CountOrder
 row CountBudget
+row CodepointRange
 
 RegexPattern = RegexAlt (eof / ^StrayParen)
 
@@ -27,7 +29,8 @@ RegexAtom = RegexGroup / RegexClass / RegexEscape / RegexDot
             / &('*' / '+' / '?') ^NoTerm / &'{' ^NoCountTerm / &'}' ^StrayBrace
             / RegexLiteral
 RegexGroup = '(' alt:RegexAlt (')' / ^GroupUnclosed)
-RegexEscape = '\\' (regexChar / ^PatternBackslash)
+RegexEscape = '\\' (regexQuote / regexShorthand / regexAnchor / regexSense / regexForeign
+                    / ^PatternBackslash)
 RegexDot = '.'
 RegexLiteral = regexChar
 
@@ -35,7 +38,8 @@ RegexLiteral = regexChar
 RegexClass = '[' negate:regexNegate? (&']' ^EmptyClass)? (!(']' / eof) items:RegexItem)*
              (']' / ^ClassUnclosed)
 RegexItem = RegexItemEscape / RegexMember
-RegexItemEscape = '\\' (regexChar / ^ClassBackslash)
+RegexItemEscape = '\\' (regexItemShorthand / regexItemAnchor / regexSense / regexForeign
+                        / ^ClassBackslash)
 RegexMember = regexChar hi:regexHi?
 
 regexChar = .
@@ -43,3 +47,25 @@ regexHi = '-' !']' .
 regexNegate = '^'
 regexInt = [0-9]+
 regexOp = '*' (&'?' ^NonGreedy(op='*'))? / '+' (&'?' ^NonGreedy(op='+'))? / '?'
+
+// An escape is meaningful or refused. In and out of a class it is a shorthand, a
+// control, a code point or ASCII punctuation, which stands for itself.
+regexShorthand = [dDwWsShHNR]
+regexItemShorthand = [dDwWsShHb]
+regexItemAnchor = &[BAzZG1-9] ^ClassAnchor(c=.)
+regexSense = [tnrfvae] / 'c' ([A-Za-z] / ^ControlLetter) / regexCode / [!-/:-@[-`{-~]
+regexCode = 'x' (&('00' / '{' '0'+ '}') ^NulEscape / hex hex / '{' hex+ '}' / ^HexDigits(e='x'))
+            / 'u' (&('0000' / '{' '0'+ '}') ^NulEscape / hex hex hex hex / '{' hex+ '}'
+                   / ^HexDigits(e='u'))
+            / 'o' (&('{' '0'+ '}') ^NulEscape / '{' [0-7]+ '}' / ^HexDigits(e='o'))
+            / '0' (&[0-9] ^OctalEscape / ^NulEscape)
+regexAnchor = 'b' ^AnchorPending(a='\\b') / 'B' ^AnchorPending(a='\\B')
+              / 'A' ^AnchorPending(a='\\A') / 'z' ^AnchorPending(a='\\z')
+              / 'Z' ^AnchorPending(a='\\Z') / '<' ^AnchorPending(a='\\<')
+              / '>' ^AnchorPending(a='\\>')
+// The forms another engine gives a meaning this one refuses, and every other escape.
+regexForeign = 'p' ^PropertyClass(form='\\p') / 'P' ^PropertyClass(form='\\P')
+               / 'X' ^PcreControl(form='\\X') / 'C' ^PcreControl(form='\\C')
+               / 'K' ^PcreControl(form='\\K') / 'G' ^PcreControl(form='\\G')
+               / &. ^UnknownEscape(c=.)
+regexQuote = 'Q' (!'\\E' .)* '\\E'?

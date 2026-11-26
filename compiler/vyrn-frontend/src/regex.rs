@@ -30,6 +30,9 @@ impl ByteClass {
     fn contains(&self, b: u8) -> bool {
         self.0[(b >> 6) as usize] & (1u64 << (b & 63)) != 0
     }
+    fn or(self, o: Self) -> Self {
+        ByteClass(std::array::from_fn(|i| self.0[i] | o.0[i]))
+    }
     fn negated(self) -> Self {
         ByteClass([!self.0[0], !self.0[1], !self.0[2], !self.0[3]])
     }
@@ -127,10 +130,34 @@ impl Hooks for Build<'_> {
         Ok(())
     }
 
+    /// A quote's bytes are terms of their own, so a repeat takes the last, as in PCRE.
     fn _regex_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
-        self.terms
-            .push((start, Re::Class(escape_class(self.b[start + 1]))));
-        self.bytes(start, start + 2, end);
+        let t = &self.b[start + 1..end];
+        let re = match t[0] {
+            b'Q' => {
+                let q = &t[1..];
+                let q = q.strip_suffix(b"\\E").unwrap_or(q);
+                if !q.is_empty() {
+                    self.bytes(start, start + 2, start + 2 + q.len());
+                    return Ok(());
+                }
+                Re::Empty
+            }
+            // `\R` is a line break: CR LF, or one of LF, VT, FF and CR.
+            b'R' => {
+                let mut breaks = ByteClass::empty();
+                breaks.add_range(0x0a, 0x0d);
+                Re::Alt(vec![
+                    concat(vec![char_re(13), char_re(10)]),
+                    Re::Class(breaks),
+                ])
+            }
+            _ => match escape(t)? {
+                Escape::Set(cl) => Re::Class(cl),
+                Escape::Char(c) => char_re(c),
+            },
+        };
+        self.terms.push((start, re));
         Ok(())
     }
 
@@ -149,12 +176,17 @@ impl Hooks for Build<'_> {
         Ok(())
     }
 
+    /// A code point in a class is the set of its bytes.
     fn _regex_item_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
-        let ec = escape_class(self.b[start + 1]);
-        for (w, e) in self.class.0.iter_mut().zip(ec.0) {
-            *w |= e;
-        }
-        self.members(start + 2, end);
+        let more = match escape(&self.b[start + 1..end])? {
+            Escape::Set(cl) => cl,
+            Escape::Char(c) => {
+                let mut cl = ByteClass::empty();
+                utf8(c).iter().for_each(|&b| cl.set(b));
+                cl
+            }
+        };
+        self.class = self.class.or(more);
         Ok(())
     }
 
@@ -342,49 +374,82 @@ fn parse(pattern: &str) -> Result<Re, Refusal> {
     Ok(scanner.hooks.terms.pop().map_or(Re::Empty, |t| t.1))
 }
 
-/// Returns the class of an escape: a shorthand (`\d \w \s` and negations), a
-/// control character (`\t \n \v \f \r`, never the bare letter in ECMA-262), or
-/// the escaped byte itself.
-fn escape_class(e: u8) -> ByteClass {
+/// What an escape stands for in and out of a class, but for `\Q` and `\R`.
+enum Escape {
+    Set(ByteClass),
+    Char(u32),
+}
+
+/// The meaning of the escape `t`, the text after its backslash, which the grammar
+/// admits: a shorthand, a control, a code point or ASCII punctuation. `\b` reaches
+/// here only from a class, where it is backspace.
+fn escape(t: &[u8]) -> Result<Escape, String> {
     let mut cl = ByteClass::empty();
-    match e {
+    let negated = t[0].is_ascii_uppercase();
+    match t[0].to_ascii_lowercase() {
         b'd' => cl.add_range(b'0', b'9'),
-        b'D' => {
-            cl.add_range(b'0', b'9');
-            return cl.negated();
-        }
         b'w' => {
             cl.add_range(b'a', b'z');
             cl.add_range(b'A', b'Z');
             cl.add_range(b'0', b'9');
             cl.set(b'_');
         }
-        b'W' => {
-            cl.add_range(b'a', b'z');
-            cl.add_range(b'A', b'Z');
-            cl.add_range(b'0', b'9');
-            cl.set(b'_');
-            return cl.negated();
-        }
         b's' => {
-            for &w in &[b' ', b'\t', b'\n', b'\r', 0x0b, 0x0c] {
-                cl.set(w);
-            }
+            cl.add_range(0x09, 0x0d);
+            cl.set(b' ');
         }
-        b'S' => {
-            for &w in &[b' ', b'\t', b'\n', b'\r', 0x0b, 0x0c] {
-                cl.set(w);
-            }
-            return cl.negated();
+        b'h' => {
+            cl.set(b'\t');
+            cl.set(b' ');
         }
-        b'n' => cl.set(b'\n'),
-        b'r' => cl.set(b'\r'),
-        b't' => cl.set(b'\t'),
-        b'f' => cl.set(0x0c),
-        b'v' => cl.set(0x0b),
-        other => cl.set(other),
+        // `\N` is any byte but LF; the grammar admits it outside a class only.
+        b'n' if negated => cl.set(b'\n'),
+        _ => {
+            let c = match t[0] {
+                b'x' | b'u' | b'o' => code_point(t)?,
+                b'c' => u32::from(t[1] & 31),
+                b't' => 9,
+                b'n' => 10,
+                b'v' => 11,
+                b'f' => 12,
+                b'r' => 13,
+                b'a' => 7,
+                b'e' => 0x1b,
+                b'b' => 8,
+                c => u32::from(c),
+            };
+            return Ok(Escape::Char(c));
+        }
     }
-    cl
+    Ok(Escape::Set(if negated { cl.negated() } else { cl }))
+}
+
+/// The code point of `\xHH`, `\x{H..}`, `\uHHHH`, `\u{H..}` or `\o{O..}`, refused
+/// above 10FFFF or in the surrogates. The grammar refuses NUL.
+fn code_point(t: &[u8]) -> Result<u32, String> {
+    let digits = t[1..].strip_prefix(b"{").map_or(&t[1..], |d| &d[..d.len() - 1]);
+    let radix = if t[0] == b'o' { 8 } else { 16 };
+    let digits = std::str::from_utf8(digits).expect("the grammar admits ASCII digits");
+    u32::from_str_radix(digits, radix)
+        .ok()
+        .filter(|&c| char::from_u32(c).is_some())
+        .ok_or_else(|| say("CodepointRange", &[]))
+}
+
+/// The UTF-8 bytes of the code point `c`, which [`code_point`] or the grammar bounds.
+fn utf8(c: u32) -> Vec<u8> {
+    let c = char::from_u32(c).expect("a scalar value");
+    c.encode_utf8(&mut [0; 4]).as_bytes().to_vec()
+}
+
+/// The code point `c` as one term: the concatenation of its bytes.
+fn char_re(c: u32) -> Re {
+    let byte = |b: &u8| {
+        let mut cl = ByteClass::empty();
+        cl.set(*b);
+        Re::Class(cl)
+    };
+    concat(utf8(c).iter().map(byte).collect())
 }
 
 struct NfaState {
@@ -1285,6 +1350,46 @@ mod tests {
         assert!(compile("[^]").is_err()); // empty negated class
         assert!(compile("a{999}").is_err()); // over the 255 cap
         assert!(compile("a{2,").is_err()); // unclosed counted repetition
+    }
+
+    #[test]
+    fn an_escape_is_a_control_a_code_point_a_shorthand_or_punctuation() {
+        assert!(m("\\a\\e\\cJ\\cj", "\u{7}\u{1b}\n\n"));
+        assert!(m("\\x41\\x{42}\\u0043\\u{1F600}\\o{101}", "ABC\u{1F600}A"));
+        assert!(m("\\u{e9}+", "\u{e9}\u{e9}"));
+        assert!(m("\\h\\H", "\tx"));
+        assert!(!m("\\h", "\n"));
+        assert!(m("\\N", "x"));
+        assert!(!m("\\N", "\n"));
+        assert!(m("a\\Rb", "a\r\nb"));
+        assert!(m("a\\Rb", "a\u{0c}b"));
+        assert!(m("\\Q.*\\E", ".*"));
+        assert!(m("\\Qab*", "ab*"));
+        assert!(m("\\Qab\\E*", "abbb"));
+        assert!(m("\\Q\\E", ""));
+        assert!(m("[\\b\\x41]", "\u{8}"));
+        assert!(m("\\-\\.\\\\", "-.\\"));
+        assert!(m("[\\<]", "<"));
+    }
+
+    #[test]
+    fn an_escape_with_no_meaning_is_refused() {
+        let says = |p: &str| compile(p).err().map(|e| e.to_string());
+        let says = |p: &str, s: &str| assert_eq!(says(p).as_deref(), Some(s), "{p}");
+        says("\\y", "the escape `\\y` means nothing: a backslash makes only ASCII punctuation literal");
+        says("\\1", "the escape `\\1` means nothing: a backslash makes only ASCII punctuation literal");
+        says("\\b", "an anchor or a boundary (`\\b`) is not supported");
+        says("[\\A]", "an anchor or a backreference (`\\A`) cannot stand inside a character class");
+        says("\\K", "a PCRE control form (`\\K`), which only a backtracking engine has");
+        says("\\p{L}", "a Unicode property class (`\\p{..}`) is not supported");
+        says("\\0", "a NUL escape, which no `String` holds");
+        says("\\x{000}", "a NUL escape, which no `String` holds");
+        says("\\012", "an octal escape (`\\0` and a digit), which PCRE reads as a backreference: write `\\x` and two hex digits");
+        says("\\c1", "a control escape (`\\c`) with no ASCII letter after it");
+        says("\\x4", "a code point escape (`\\x`) with no digits of its form: `\\xHH`, `\\uHHHH`, `\\x{H..}`, `\\u{H..}` or `\\o{O..}`");
+        says("\\x{110000}", "a code point escape above `10FFFF` or in the surrogates `D800` to `DFFF`");
+        says("\\u{D800}", "a code point escape above `10FFFF` or in the surrogates `D800` to `DFFF`");
+        says("\\\u{e9}", "the escape `\\\u{e9}` means nothing: a backslash makes only ASCII punctuation literal");
     }
 
     #[test]

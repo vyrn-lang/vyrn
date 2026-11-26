@@ -5,14 +5,17 @@
 /// and counts.
 ///
 /// The language is `std/regex.syntax`, the one `=~` reads, and a pattern means what
-/// it means there: `.` is any character but `\n` and `\r`, `\d`, `\w` and `\s` are
-/// shorthands, `\n`, `\t`, `\r`, `\f` and `\v` are control characters, and any
-/// other escape is the character after it. `{m,n}` repeats a term `m` to `n` times,
-/// each count at most 255. `^` and `$` are the bytes they spell, and the empty
-/// pattern matches the empty string. A Thompson NFA with no backtracking, so the
-/// time is linear in the pattern size times the input for every pattern. A search
-/// runs it as a lazy DFA: one table read per byte. It has no backreferences or
-/// lookaround: `\1` is the byte `1`.
+/// it means there: `.` is any character but `\n` and `\r`. `\d`, `\w`, `\s` and `\h`
+/// are shorthands, their capitals negate them, and `\N` is any character but `\n`. `\t`,
+/// `\n`, `\r`, `\f`, `\v`, `\a`, `\e` and `\cX` are control characters, and `\xHH`,
+/// `\x{H..}`, `\uHHHH`, `\u{H..}` and `\o{O..}` are code points. `\R` is a line
+/// break, `\Q` quotes the text up to `\E` or the end, and a backslash before ASCII
+/// punctuation makes it literal. Every other escape is refused. `{m,n}` repeats a
+/// term `m` to `n` times, each count at most 255. `^` and `$` are the bytes they
+/// spell, and the empty pattern matches the empty string. A Thompson NFA with no
+/// backtracking, so the time is linear in the pattern size times the input for
+/// every pattern. A search runs it as a lazy DFA: one table read per byte. It has no
+/// backreferences or lookaround.
 ///
 /// Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
 /// backtracking engine answers `a`.
@@ -131,6 +134,16 @@ fn regexSay(row: rx.Row) -> String {
         StrayBrace => say.tStrayBrace__En(),
         StrayParen => say.tStrayParen__En(),
         TooDeep => say.tTooDeep__En(),
+        AnchorPending(a) => say.tAnchorPending__En(a),
+        ClassAnchor(c) => say.tClassAnchor__En(c),
+        CodepointRange => say.tCodepointRange__En(),
+        ControlLetter => say.tControlLetter__En(),
+        HexDigits(e) => say.tHexDigits__En(e),
+        NulEscape => say.tNulEscape__En(),
+        OctalEscape => say.tOctalEscape__En(),
+        PcreControl(form) => say.tPcreControl__En(form),
+        PropertyClass(form) => say.tPropertyClass__En(form),
+        UnknownEscape(c) => say.tUnknownEscape__En(c),
     }
 }
 
@@ -208,10 +221,14 @@ fn addRange(k: modify ByteSet, lo: Int64, hi: Int64) {
     }
 }
 
-/// The bytes the escape `\c` stands for: a shorthand (`\d`, `\w`, `\s` and their
-/// capitals, which negate), a control character (`\t`, `\n`, `\v`, `\f`, `\r`), or
-/// `c` itself.
-fn escapeBytes(c: UInt8) -> ByteSet {
+/// Whether the escape `\c` is a shorthand: `\d`, `\w`, `\s`, `\h`, their capitals,
+/// which negate, and `\N`, any byte but `\n`.
+fn isShorthand(c: UInt8) -> Bool {
+    return c == 'd' || c == 'D' || c == 'w' || c == 'W' || c == 's' || c == 'S' || c == 'h' || c == 'H' || c == 'N'
+}
+
+/// The bytes the shorthand `\c` stands for.
+fn shorthandBytes(c: UInt8) -> ByteSet {
     let mut k = noBytes()
     if c == 'd' || c == 'D' || c == 'w' || c == 'W' {
         addRange(k, '0', '9')
@@ -222,18 +239,86 @@ fn escapeBytes(c: UInt8) -> ByteSet {
         addByte(k, '_')
     }
     if c == 's' || c == 'S' {
-        addByte(k, ' ')
         addRange(k, 9, 13)
     }
-    if c == 'D' || c == 'W' || c == 'S' {
+    if c == 's' || c == 'S' || c == 'h' || c == 'H' {
+        addByte(k, ' ')
+    }
+    if c == 'h' || c == 'H' {
+        addByte(k, 9)
+    }
+    if c == 'N' {
+        addByte(k, 10)
+    }
+    if c >= 'A' && c <= 'Z' {
         return ByteSet { w0: ~k.w0, w1: ~k.w1, w2: ~k.w2, w3: ~k.w3 }
     }
-    if c == 'n' || c == 'r' || c == 't' || c == 'f' || c == 'v' {
-        addByte(k, if c == 'n' { 10 } else if c == 'r' { 13 } else if c == 't' { 9 } else if c == 'f' { 12 } else { 11 })
-    } else if c != 'd' && c != 'w' && c != 's' {
-        addByte(k, Int64(c))
-    }
     return k
+}
+
+/// The code point of the escape from `from`, the byte after its backslash, up to
+/// `to`: a control, a code point escape or ASCII punctuation, or -1 for a code point
+/// above 10FFFF or in the surrogates. `\b` reaches here only from a class, where it
+/// is backspace.
+fn codeOf(pattern: String, from: Int64, to: Int64) -> Int64 {
+    let c = pattern[from]
+    if c == 'c' {
+        return Int64(pattern[from + 1]) & 31
+    }
+    if c != 'x' && c != 'u' && c != 'o' {
+        return if c == 't' { 9 } else if c == 'n' { 10 } else if c == 'v' { 11 } else if c == 'f' { 12 } else if c == 'r' { 13 } else if c == 'a' { 7 } else if c == 'e' { 27 } else if c == 'b' { 8 } else { Int64(c) }
+    }
+    let radix = if c == 'o' { 8 } else { 16 }
+    let mut i = from + 1
+    let mut end = to
+    if pattern[i] == '{' {
+        i = i + 1
+        end = to - 1
+    }
+    let mut v = 0
+    while i < end {
+        let d = Int64(pattern[i])
+        v = v * radix + if d <= '9' { d - '0' } else if d <= 'F' { d - 'A' + 10 } else { d - 'a' + 10 }
+        if v > 1114111 {
+            return 0 - 1
+        }
+        i = i + 1
+    }
+    return if v >= 55296 && v <= 57343 { 0 - 1 } else { v }
+}
+
+/// The code point of the escape from `from` up to `to`, as `codeOf` states it; one
+/// out of range is refused and stands as 0.
+fn escapeChar(bd: modify Builder, pattern: String, from: Int64, to: Int64) -> Int64 {
+    let c = codeOf(pattern, from, to)
+    if c < 0 {
+        refuse(bd, CodepointRange)
+        return 0
+    }
+    return c
+}
+
+/// The UTF-8 bytes of the code point `c`.
+fn utf8(c: Int64) -> Array<Int64> {
+    if c < 128 {
+        return [c]
+    }
+    if c < 2048 {
+        return [192 | (c >> 6), 128 | (c & 63)]
+    }
+    if c < 65536 {
+        return [224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63)]
+    }
+    return [240 | (c >> 18), 128 | ((c >> 12) & 63), 128 | ((c >> 6) & 63), 128 | (c & 63)]
+}
+
+/// The offset after the text of the quote `\Q..\E` at `start`, which ends at `end`:
+/// `end` less its `\E`, or `end` when the pattern ends first.
+fn quoteEnd(pattern: String, start: Int64, end: Int64) -> Int64 {
+    if end - start >= 4 && pattern[end - 2] == '\\' && pattern[end - 1] == 'E' {
+        return end - 2
+    }
+    return end
 }
 
 /// The set a class states. An escape stands for its bytes, and a member's range runs
@@ -244,9 +329,18 @@ fn classBytes(bd: modify Builder, pattern: String, c: rx.RegexClass) -> ByteSet 
     while i < c.items.length {
         match c.items[i] {
             RegexItemRegexItemEscape(e) => {
-                let x = escapeBytes(pattern[e.start + 1])
-                k = ByteSet { w0: k.w0 | x.w0, w1: k.w1 | x.w1, w2: k.w2 | x.w2, w3: k.w3 | x.w3 }
-                addBytes(k, pattern, e.start + 2, e.end)
+                let s = pattern[e.start + 1]
+                if isShorthand(s) {
+                    let x = shorthandBytes(s)
+                    k = ByteSet { w0: k.w0 | x.w0, w1: k.w1 | x.w1, w2: k.w2 | x.w2, w3: k.w3 | x.w3 }
+                } else {
+                    let bs = utf8(escapeChar(bd, pattern, e.start + 1, e.end))
+                    let mut j = 0
+                    while j < bs.length {
+                        addByte(k, bs[j])
+                        j = j + 1
+                    }
+                }
             }
             RegexItemRegexMember(m) => {
                 if let Some(h) = m.hi {
@@ -298,10 +392,61 @@ fn fragSet(bd: modify Builder, k: ByteSet) -> Frag {
 }
 
 /// The fragment of byte `c`.
-fn fragByte(bd: modify Builder, c: UInt8) -> Frag {
+fn fragByte(bd: modify Builder, c: Int64) -> Frag {
     let mut k = noBytes()
-    addByte(k, Int64(c))
+    addByte(k, c)
     return fragSet(bd, k)
+}
+
+/// The fragment of the bytes `bs`, one after another.
+fn fragBytes(bd: modify Builder, bs: Array<Int64>) -> Frag {
+    let mut f = fragByte(bd, bs[0])
+    let mut i = 1
+    while i < bs.length {
+        let g = fragByte(bd, bs[i])
+        patch(bd, f.holes, g.start)
+        f = Frag { start: f.start, holes: consume g.holes }
+        i = i + 1
+    }
+    return f
+}
+
+/// The term of the escape from `start`, its backslash, up to `end`. A quote's last
+/// byte is its term, as a literal's is, and `fragPiece` emits the bytes before it.
+/// `\R` is a line break: CR LF, or one of LF, VT, FF and CR.
+fn fragEscape(bd: modify Builder, pattern: String, start: Int64, end: Int64) -> Frag {
+    let c = pattern[start + 1]
+    if c == 'Q' {
+        let to = quoteEnd(pattern, start, end)
+        return if to == start + 2 { fragEmpty(bd) } else { fragByte(bd, Int64(pattern[to - 1])) }
+    }
+    if c == 'R' {
+        let crlf = fragBytes(bd, [13, 10])
+        let mut k = noBytes()
+        addRange(k, 10, 13)
+        let one = fragSet(bd, k)
+        let sp = emit(bd, opSplit, crlf.start, one.start, noBytes())
+        return Frag { start: sp, holes: joinHoles(crlf.holes, one.holes) }
+    }
+    if isShorthand(c) {
+        return fragSet(bd, shorthandBytes(c))
+    }
+    return fragBytes(bd, utf8(escapeChar(bd, pattern, start + 1, end)))
+}
+
+/// The terms of the escape from `start` up to `end`, as the compiler's builder
+/// counts them: a set or an empty quote is one, `\R` three, a code point a term per
+/// byte. A quote's other bytes are `pieceSize`'s.
+fn escapeSize(pattern: String, start: Int64, end: Int64) -> Int64 {
+    let c = pattern[start + 1]
+    if c == 'R' {
+        return 3
+    }
+    if c == 'Q' || isShorthand(c) {
+        return 1
+    }
+    let code = codeOf(pattern, start + 1, end)
+    return utf8(if code < 0 { 0 } else { code }).length
 }
 
 /// The empty string: a split with both edges dangling.
@@ -333,10 +478,7 @@ fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
             return fragSet(bd, classBytes(bd, pattern, c))
         }
         RegexAtomRegexEscape(e) => {
-            if e.end > e.start + 2 {
-                return fragByte(bd, pattern[e.end - 1])
-            }
-            return fragSet(bd, escapeBytes(pattern[e.start + 1]))
+            return fragEscape(bd, pattern, e.start, e.end)
         }
         RegexAtomRegexDot(d) => {
             // Every byte but `\n` and `\r`.
@@ -345,7 +487,7 @@ fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
             return fragSet(bd, k)
         }
         RegexAtomRegexLiteral(l) => {
-            return fragByte(bd, pattern[l.end - 1])
+            return fragByte(bd, Int64(pattern[l.end - 1]))
         }
     }
 }
@@ -406,7 +548,10 @@ fn pieceSize(pattern: String, piece: rx.RegexPiece) -> Int64 {
         RegexAtomRegexGroup(g) => {}
         RegexAtomRegexClass(c) => {}
         RegexAtomRegexEscape(e) => {
-            prefix = if e.end > e.start + 2 { e.end - e.start - 2 } else { 0 }
+            if pattern[e.start + 1] == 'Q' {
+                let n = quoteEnd(pattern, e.start, e.end) - e.start - 2
+                prefix = if n > 0 { n - 1 } else { 0 }
+            }
         }
         RegexAtomRegexDot(d) => {}
         RegexAtomRegexLiteral(l) => {
@@ -443,7 +588,7 @@ fn termSize(pattern: String, atom: rx.RegexAtom) -> Int64 {
     return match atom {
         RegexAtomRegexGroup(g) => altSize(pattern, g.alt),
         RegexAtomRegexClass(c) => 1,
-        RegexAtomRegexEscape(e) => 1,
+        RegexAtomRegexEscape(e) => escapeSize(pattern, e.start, e.end),
         RegexAtomRegexDot(d) => 1,
         RegexAtomRegexLiteral(l) => 1,
     }
@@ -506,9 +651,10 @@ fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag 
         RegexAtomRegexGroup(g) => {}
         RegexAtomRegexClass(c) => {}
         RegexAtomRegexEscape(e) => {
-            if e.end > e.start + 2 {
-                from = e.start + 1
-                to = e.end - 1
+            let q = quoteEnd(pattern, e.start, e.end)
+            if pattern[e.start + 1] == 'Q' && q > e.start + 2 {
+                from = e.start + 2
+                to = q - 1
             }
         }
         RegexAtomRegexDot(d) => {}
@@ -520,7 +666,7 @@ fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag 
     let mut f = fragRepeat(bd, pattern, piece)
     let mut i = to - 1
     while i >= from {
-        let g = fragByte(bd, pattern[i])
+        let g = fragByte(bd, Int64(pattern[i]))
         patch(bd, g.holes, f.start)
         f = Frag { start: g.start, holes: consume f.holes }
         i = i - 1
@@ -947,6 +1093,48 @@ test "an escape is the byte after it, not the metacharacter" {
         Err(w) => panic("compile: \{w}"),
     }
     assertEq(replaceAll(re, "x|ab|y", "-"), "x-y")
+}
+
+test "an escape is a control, a code point, a line break or a quote" {
+    let re = match compile("\\x41\\u{e9}\\cJ\\o{102}") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(re, "xAé\nBAé\nB"), 2)
+    let breaks = match compile("\\R") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(breaks, "a\r\nb\nc\rd"), 3)
+    let quote = match compile("\\Q.*\\E+") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(quote, "a.**b.x", "-"), "a-b.x")
+    let cls = match compile("[\\x{e9}\\h\\b]+") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(cls, "aé \tb", "-"), "a-b")
+}
+
+test "an escape with no meaning is refused" {
+    match compile("\\y") {
+        Ok(r) => panic("an unknown escape compiled"),
+        Err(w) => assert(w == "the escape `\\y` means nothing: a backslash makes only ASCII punctuation literal"),
+    }
+    match compile("\\b") {
+        Ok(r) => panic("a boundary compiled"),
+        Err(w) => assert(w == "an anchor or a boundary (`\\b`) is not supported"),
+    }
+    match compile("\\x{110000}") {
+        Ok(r) => panic("a code point past 10FFFF compiled"),
+        Err(w) => assert(w == "a code point escape above `10FFFF` or in the surrogates `D800` to `DFFF`"),
+    }
+    match compile("[\\1]") {
+        Ok(r) => panic("a backreference in a class compiled"),
+        Err(w) => assert(w == "an anchor or a backreference (`\\1`) cannot stand inside a character class"),
+    }
 }
 
 test "the patterns regex-redux counts" {
