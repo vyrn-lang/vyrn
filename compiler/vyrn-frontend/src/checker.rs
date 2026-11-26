@@ -2389,11 +2389,20 @@ impl<'a> Checker<'a> {
     /// Records a string literal that flows into an island type as a site the
     /// island verdict reads ([`crate::gen::island_verdicts`]).
     fn note_island(&self, expr: &Expr, to: &Type) {
-        let (Expr::Str(text, _), Type::Named(n)) = (expr, to) else {
+        let Type::Named(n) = to else {
             return;
         };
-        let island = self.islands.iter().find(|i| &i.ty == n);
-        if let (Some(island), Some(r)) = (island, self.acc.borrow_mut().record.as_mut()) {
+        if let Some(island) = self.islands.iter().find(|i| &i.ty == n) {
+            self.note_site(expr, island);
+        }
+    }
+
+    /// Records `expr`, if it is a string literal, as a site of `island`.
+    fn note_site(&self, expr: &Expr, island: &crate::gen::Island) {
+        let Expr::Str(text, _) = expr else {
+            return;
+        };
+        if let Some(r) = self.acc.borrow_mut().record.as_mut() {
             let (line, col) = expr.start();
             r.islands.push(crate::gen::IslandSite {
                 module: self.frame.borrow().here.clone(),
@@ -4234,6 +4243,16 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(t) = adapt_byte_literal(rhs, &l) {
                     r = t;
+                }
+                // The pattern of `=~` is a literal of `std/regex.syntax`.
+                if *op == BinOp::Match {
+                    let regex = self
+                        .islands
+                        .iter()
+                        .find(|i| i.ty == crate::gen::REGEX_ISLAND);
+                    if let Some(island) = regex {
+                        self.note_site(rhs, island);
+                    }
                 }
                 // A float literal adapts to a `Float32` sibling.
                 if l == Type::Float && r == Type::Float32 && matches!(**lhs, Expr::Float(_, _)) {

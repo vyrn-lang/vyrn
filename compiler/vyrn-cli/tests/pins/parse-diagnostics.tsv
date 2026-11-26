@@ -178,6 +178,7 @@ compiler/vyrn-cli/tests/check/a_param_bounded_by_a_later_protocol_dispatches_thr
 compiler/vyrn-cli/tests/check/a_parameter_under_a_compound_slot_is_still_refused_1.vyrn	0	cbf29ce484222325	20	18	d6645ae5c9701047
 compiler/vyrn-cli/tests/check/a_parameter_under_a_compound_slot_is_still_refused_2.vyrn	0	cbf29ce484222325	20	16	a2fe5263acffd65c
 compiler/vyrn-cli/tests/check/a_part_read_as_a_statement_takes_nothing.vyrn	0	cbf29ce484222325	20	17	69c5d5d6cc67aa27
+compiler/vyrn-cli/tests/check/a_pattern_refusal_stands_inside_it.vyrn	0	cbf29ce484222325	20	18	a236f0ffa531123f
 compiler/vyrn-cli/tests/check/a_place_may_root_in_a_borrowing_prologue_let.vyrn	0	cbf29ce484222325	20	18	1a3f554a319dbd94
 compiler/vyrn-cli/tests/check/a_predicate_call_passes_only_its_binds.vyrn	0	cbf29ce484222325	20	19	56ccec26c7064340
 compiler/vyrn-cli/tests/check/a_predicate_may_call_a_bool_function_of_its_module.vyrn	0	cbf29ce484222325	20	18	88c8cd29714f7485

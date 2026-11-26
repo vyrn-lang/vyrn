@@ -1,1 +1,1 @@
-literal_an_empty_class.vyrn:1:34: invalid regex `[]`: empty character class `[]`
+literal_an_empty_class.vyrn:1:41: a character class with no members

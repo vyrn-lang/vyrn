@@ -993,6 +993,21 @@ pub fn derived_name(g: &str, ty: &crate::ast::Type) -> String {
 /// renamed under `derive$g$`, which no source can spell.
 pub type Derived = (Vec<crate::ast::Function>, Vec<crate::ast::TypeDecl>);
 
+/// The island type of the pattern of `=~`, which no source can spell.
+pub const REGEX_ISLAND: &str = "=~";
+
+/// The island the pattern of `=~` is: `std/regex.syntax` under `std_root`, read
+/// from `RegexPattern`.
+pub fn regex_island(std_root: &str) -> Island {
+    Island {
+        ty: REGEX_ISLAND.to_string(),
+        grammar: format!("{std_root}/regex.syntax"),
+        start: "RegexPattern".to_string(),
+        names: Vec::new(),
+        decls: String::new(),
+    }
+}
+
 /// A string literal that crosses into an island type: the module it is
 /// written in (`None` the root), the line and column of its opening quote,
 /// its decoded text, and the island.
@@ -1005,9 +1020,9 @@ pub struct IslandSite {
     pub island: Island,
 }
 
-/// The key of the root an island's report runs from, beside its grammar. No
-/// file holds it: a key the loader serves from a string.
-const ISLAND_ROOT: &str = ".vyrn-island.vyrn";
+/// The stem of the key of the root an island's report runs from, beside the
+/// program's root. No file holds it: a key the loader serves from a string.
+const ISLAND_ROOT: &str = ".vyrn-island";
 
 /// Reads the text of each island literal of `sites` with its grammar's written
 /// report, `report<Start>Text("", text)`, and returns one refusal per report at
@@ -1030,11 +1045,16 @@ pub fn island_verdicts(
         if !seen.insert((&site.module, site.line, site.col)) {
             continue;
         }
-        let g = &site.island.grammar;
-        let (dir, file) = g.rsplit_once('/').unwrap_or(("", g));
-        let at = format!("{dir}/{ISLAND_ROOT}");
+        // Beside the program's root, not the grammar: a root in the std tree
+        // skims the bodies of the report it writes. The key names the grammar,
+        // because a process keeps a generator module by its key.
+        let root = crate::loader::normalize(root);
+        let dir = root.rsplit_once('/').map_or("", |(d, _)| d);
+        let std_root = opts.std_root.as_deref();
+        let spec = crate::loader::import_specifier(dir, &site.island.grammar, std_root);
+        let at = format!("{dir}/{ISLAND_ROOT}.{}.vyrn", spec.replace(['/', '.'], "_"));
         let source = format!(
-            "import {{ syntaxReport }} from \"std/syntax\"\nimport * as reported from syntaxReport(\"./{file}\")\n"
+            "import {{ syntaxReport }} from \"std/syntax\"\nimport * as reported from syntaxReport(\"{spec}\")\n"
         );
         let with = crate::loader::WithRoot::new(&at, &source, resolver);
         let name = vyrn_syntax::island_report_fn(&site.island.start);
@@ -1050,7 +1070,7 @@ pub fn island_verdicts(
                 continue;
             }
         };
-        let src = resolver.read(site.module.as_deref().unwrap_or(root)).ok();
+        let src = resolver.read(site.module.as_deref().unwrap_or(&root)).ok();
         let map = maps.entry(site.module.clone()).or_insert_with(|| {
             (src.as_deref()).map_or(Vec::new(), |s| {
                 crate::lexer::literal_maps(s).unwrap_or_default()

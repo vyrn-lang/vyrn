@@ -141,7 +141,7 @@ A `String` is UTF-8 bytes with no NUL.
 - `s.byteLength` is the length in bytes, read in constant time. `s.charCount()` walks the string and counts Unicode scalar values.
 - `s[i]` is the byte at offset `i`, a `UInt8`. `bytes(s)` is the whole `Array<UInt8>`. `stringFromBytes(b)` answers `Result<String, String>` and refuses invalid UTF-8 and NUL.
 - `+` concatenates. `==`, `!=`, `<` and the other comparisons compare bytes.
-- `s =~ "pattern"` is a whole-string regular-expression match against a string literal, compiled at build time. [std/regex](std.md#text) searches, counts and replaces.
+- `s =~ "pattern"` is a whole-string regular-expression match against a string literal, compiled at build time. The literal is an island of `std/regex.syntax`: the editor colours it with that grammar, and a refusal stands at its place inside the literal. [std/regex](std.md#text) searches, counts and replaces.
 - `x.toString()` renders a number, a `Bool`, a `String` or a type with `impl Show`.
 
 Offsets in every string function are byte offsets. [std/strings](std.md#text) holds split, join, trim, case, search and padding.

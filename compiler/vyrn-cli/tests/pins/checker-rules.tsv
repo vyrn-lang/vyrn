@@ -36,7 +36,6 @@ checker-rules.vyrn:192:13: unknown variable `zz`
 checker-rules.vyrn:196:13: unary `-` needs a numeric type, found String
 checker-rules.vyrn:200:13: unary `!` needs Bool, found Int64
 checker-rules.vyrn:204:13: unary `~` needs an integer type, found String
-checker-rules.vyrn:209:13: invalid regex `(`: unclosed group `(`
 checker-rules.vyrn:215:13: the right side of `=~` must be a string-literal pattern
 checker-rules.vyrn:219:13: shift amount 64 is out of range for a 64-bit value (valid range is 0..64)
 checker-rules.vyrn:224:15: String has no `length`: use `byteLength` for bytes or `charCount()` for Unicode scalars
