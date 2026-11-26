@@ -6484,14 +6484,29 @@ fn compact_hints(client: &mut LspClient, uri: &str) -> Vec<(u64, String, String)
     }));
     let resp = client.read_response(&serde_json::json!(93));
     (resp["result"].as_array().expect("hints").iter())
-        .filter_map(|h| {
+        .filter(|h| h.get("tooltip").is_some())
+        .map(|h| {
             let line = h["position"]["line"].as_u64().unwrap() + 1;
-            let label = h["label"].as_str().unwrap();
-            let glyph = label.strip_prefix('\u{2009}')?.strip_suffix('\u{2009}')?;
-            let tip = h["tooltip"]["value"].as_str().unwrap().to_string();
-            Some((line, glyph.to_string(), tip))
+            let label = h["label"].as_str().unwrap().to_string();
+            (
+                line,
+                label,
+                h["tooltip"]["value"].as_str().unwrap().to_string(),
+            )
         })
         .collect()
+}
+
+/// The text of `src` a hover link's `#Lline,col-Lline,col` fragment selects, 1-based lines
+/// and columns; every line of the probes is ASCII.
+fn linked_text<'a>(src: &'a str, link: &str) -> &'a str {
+    let frag = link.rsplit_once("#L").expect("a line fragment").1;
+    let num = |t: &str| t.parse::<usize>().unwrap();
+    let (a, b) = frag.split_once("-L").unwrap();
+    let ((l1, c1), (l2, c2)) = (a.split_once(',').unwrap(), b.split_once(',').unwrap());
+    assert_eq!(l1, l2, "one-line span: {link}");
+    let line = src.lines().nth(num(l1) - 1).unwrap();
+    &line[num(c1) - 1..num(c2) - 1]
 }
 
 /// In the compact style each row is a glyph with its count; the rows are the full style's.
@@ -6500,12 +6515,7 @@ fn knucleotide_lines_carry_their_cost_as_glyphs() {
     let (path, text) = knucleotide();
     let (mut client, uri) = open_with_style(&path, &text, "compact");
     let hints = compact_hints(&mut client, &uri);
-    let rows: Vec<String> = (hints.chunk_by(|a, b| a.0 == b.0))
-        .map(|line| {
-            let glyphs: Vec<&str> = line.iter().map(|h| h.1.as_str()).collect();
-            format!("{} {}", line[0].0, glyphs.join(" "))
-        })
-        .collect();
+    let rows: Vec<String> = (hints.iter()).map(|h| format!("{} {}", h.0, h.1)).collect();
     holds_pin("knucleotide-compact", &rows);
 }
 
@@ -6540,58 +6550,75 @@ fn a_proof_glyph_resolves_to_the_proofs_of_its_line() {
     assert!(tip.starts_with("```\n   73  division check: "), "{tip}");
 }
 
-/// A glyph's hover has a bold title with the count, a line per noun with its reason, the loops
-/// around it, a plain fix and the report's link.
+/// A line's one hover groups its facts by glyph: a bold title with the count, a line per noun
+/// with its reason linked to its span, the loops around it, a plain fix, and the report's link
+/// once, at the end.
 #[test]
-fn a_glyph_hover_names_each_fact_and_links_the_report() {
+fn a_line_hover_groups_its_facts_by_glyph_and_links_the_report() {
     let (path, text) = knucleotide();
     let (mut client, uri) = open_with_style(&path, &text, "compact");
     let hints = compact_hints(&mut client, &uri);
     let line: Vec<&(u64, String, String)> = hints.iter().filter(|h| h.0 == 73).collect();
-    let glyphs: Vec<&str> = line.iter().map(|h| h.1.as_str()).collect();
-    assert_eq!(glyphs, ["\u{2197}", "?", "\u{21d2}\u{b3}"]);
-    let grows = &line[0].2;
+    assert_eq!(line.len(), 1, "one hint per line: {line:?}");
+    let (label, tip) = (&line[0].1, &line[0].2);
+    assert_eq!(label, "\u{2197} ? \u{21d2}\u{b3}");
     assert!(
-        grows.starts_with("**\u{2197} may grow 1**\n\n- `push(..)`"),
-        "{grows}"
+        tip.starts_with(&format!(
+            "**\u{2197} may grow 1**\n\n- [`push(..)`]({uri}#L73,"
+        )),
+        "{tip}"
     );
     assert!(
-        grows.contains("In a loop.") && grows.contains("Fix: `reserve`"),
-        "{grows}"
+        tip.contains("In a loop.") && tip.contains("Fix: `reserve`"),
+        "{tip}"
     );
     assert!(
-        grows.ends_with("[vyrn why --cost](command:vyrn.whyCost)"),
-        "{grows}"
+        tip.contains("\n\n**? check kept 1**\n\n- [index check: "),
+        "{tip}"
     );
-    let check = &line[1].2;
-    assert!(check.contains("- index check: "), "{check}");
     assert!(
-        check.contains("the result of `modulusOf(..)` at line 71"),
-        "{check}"
+        tip.contains("the result of `modulusOf(..)` at line 71"),
+        "{tip}"
+    );
+    assert_eq!(tip.matches("command:vyrn.whyCost").count(), 1, "{tip}");
+    assert!(
+        tip.ends_with("[vyrn why --cost](command:vyrn.whyCost)"),
+        "{tip}"
     );
 }
 
-/// A line with two glyphs ends in two hints at one position, each with its own hover, so VS Code
-/// opens a hover per glyph.
+/// Each fact's link selects the expression that costs, not the line.
 #[test]
-fn each_glyph_of_a_line_is_its_own_hint() {
+fn a_hover_link_selects_the_costly_expression() {
     let (path, text) = knucleotide();
     let (mut client, uri) = open_with_style(&path, &text, "compact");
     let hints = compact_hints(&mut client, &uri);
-    let line: Vec<&(u64, String, String)> = hints.iter().filter(|h| h.0 == 95).collect();
-    let glyphs: Vec<&str> = line.iter().map(|h| h.1.as_str()).collect();
-    assert_eq!(glyphs, ["\u{29c9}", "\u{229e}"]);
-    assert!(
-        line[0].2.starts_with("**\u{29c9} copies 1**"),
-        "{}",
-        line[0].2
-    );
-    assert!(
-        line[1].2.starts_with("**\u{229e} allocates 1**"),
-        "{}",
-        line[1].2
-    );
+    let mut found = Vec::new();
+    for (line, _, tip) in hints.iter().filter(|h| [73, 95].contains(&h.0)) {
+        for link in tip
+            .split("](")
+            .skip(1)
+            .filter(|l| l.starts_with(uri.as_str()))
+        {
+            let link = &link[..link.find(')').unwrap()];
+            found.push(format!("{line} {}", linked_text(&text, link)));
+        }
+    }
+    assert_eq!(found, PROBE_LINKS, "{found:#?}");
 }
+
+/// The expressions of the facts on lines 73 and 95 of `examples/knucleotide.vyrn`, in hover
+/// order: the push, its index check, the division's two proved checks and the modulus's, then
+/// the hole a template copies and the literal it allocates.
+const PROBE_LINKS: [&str; 7] = [
+    "73 w.push(alphabet[(key / d) % 4])",
+    "73 alphabet[(key / d) % 4]",
+    "73 key / d",
+    "73 key / d",
+    "73 (key / d) % 4",
+    r"95 \{frac}",
+    r#"95 "0\{frac}""#,
+];
 
 /// After a fresh profile the compact line ends in the blocks the run made there.
 #[test]
@@ -6601,8 +6628,8 @@ fn a_fresh_profile_adds_a_last_run_glyph() {
     let (mut client, uri) = open_with_style(&path, WORD, "compact");
     let hints = compact_hints(&mut client, &uri);
     let glyphs: Vec<(u64, &str)> = hints.iter().map(|h| (h.0, h.1.as_str())).collect();
-    assert_eq!(glyphs, [(2, "\u{229e}\u{b2}"), (2, "\u{d7}3")]);
-    let run = &hints[1].2;
+    assert_eq!(glyphs, [(2, "\u{229e}\u{b2} \u{d7}3")]);
+    let run = &hints[0].2;
     assert!(run.contains("3 blocks, 40 bytes"), "{run}");
 }
 
