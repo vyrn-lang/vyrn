@@ -619,6 +619,18 @@ stays.
 A move of a `let` name ends in a hint naming what took the value, such as
 `moved into take(..)`. A move the source writes as `consume x` has none.
 
+A namespace that names a generated module, such as
+`import * as reported from syntaxReport("./calc.syntax")`, has no file to
+jump to. The definition of the namespace's name, or of a member such as
+`reported.reportLedger`, is a location in the read-only document
+`vyrn-gen:/<call>.vyrn?owner=<root>&module=<key>`: `call` is the generator
+call (`loader::generator_call`) without the characters a path cannot hold,
+`owner` the root that generates the module and `module` its banner key. The
+request `vyrn/generatedSource` takes `{ uri }` with such a URI and answers the
+module's text, as `vyrn emit-gen` prints it, or `null` when the root does not
+generate it. The VS Code extension serves the scheme as a read-only Vyrn
+document.
+
 The server is outside the Cargo workspace. Build and test it explicitly:
 
 ```

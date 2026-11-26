@@ -7177,6 +7177,87 @@ pay power x
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// `examples/dsl` copied to a scratch directory, with `calc.editor.vyrn` open: its text, its
+/// URI and the client.
+fn open_calc_editor(tag: &str) -> (String, String, LspClient) {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_{tag}_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("calc.errors")).unwrap();
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/dsl");
+    for name in [
+        "vyrn.json",
+        "calc.vyrn",
+        "calc.editor.vyrn",
+        "calc.syntax",
+        "calc.errors/en.json",
+    ] {
+        std::fs::copy(example.join(name), dir.join(name)).unwrap();
+    }
+    let text = std::fs::read_to_string(dir.join("calc.editor.vyrn")).unwrap();
+    let uri = file_uri(&dir.join("calc.editor.vyrn"));
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", &text);
+    let _ = read_diags_for(&mut client, "calc.editor.vyrn");
+    (text, uri, client)
+}
+
+/// The definition response at the first `needle` of `text`, the cursor `skip` characters in.
+fn definition_at(
+    client: &mut LspClient,
+    uri: &str,
+    text: &str,
+    needle: &str,
+    skip: u32,
+) -> serde_json::Value {
+    let (line, col) = text
+        .lines()
+        .enumerate()
+        .find_map(|(i, l)| l.find(needle).map(|c| (i as u32, c as u32)))
+        .expect("the needle is in the text");
+    let id = serde_json::json!(format!("def-{line}-{col}"));
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/definition",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": col + skip } }
+    }));
+    client.read_response(&id)["result"].clone()
+}
+
+/// The text `vyrn/generatedSource` answers for `uri`.
+fn generated_source(client: &mut LspClient, uri: &str) -> String {
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": "gen-src", "method": "vyrn/generatedSource", "params": { "uri": uri }
+    }));
+    let resp = client.read_response(&serde_json::json!("gen-src"));
+    resp["result"]
+        .as_str()
+        .expect("the generated text")
+        .to_string()
+}
+
+/// A member of a generated namespace jumps into the generated module's read-only document,
+/// at the member's declaration; the namespace's own name jumps to its first line.
+#[test]
+fn a_generated_namespace_member_jumps_into_its_generated_document() {
+    let (text, uri, mut client) = open_calc_editor("gendef");
+    let member = definition_at(&mut client, &uri, &text, "reported.reportLedger", 9);
+    let target = member["uri"].as_str().expect("a location").to_string();
+    assert!(
+        target.starts_with("vyrn-gen:/syntaxReport(.calc.syntax).vyrn?owner="),
+        "{member}"
+    );
+    let source = generated_source(&mut client, &target);
+    let line = member["range"]["start"]["line"].as_u64().unwrap() as usize;
+    let declared = source.lines().nth(line).unwrap_or("");
+    assert!(
+        declared.contains("fn reportLedger("),
+        "line {line}: {declared}"
+    );
+    let ns = definition_at(&mut client, &uri, &text, "as reported", 3);
+    assert_eq!(ns["uri"], member["uri"], "{ns}");
+    assert_eq!(ns["range"]["start"]["line"], 0, "{ns}");
+}
+
 /// A language module's companion replaces the default check: `calc.editor.vyrn`
 /// refuses an account the ledger does not know, keeps the grammar's own
 /// refusal, and gives an account's hover.

@@ -856,6 +856,9 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
         }
         "vyrn/costLenses" => Response::new_ok(req.id, Some(handle_cost_lenses(server, req.params))),
         "vyrn/costRows" => Response::new_ok(req.id, Some(handle_cost_rows(server, req.params))),
+        "vyrn/generatedSource" => {
+            Response::new_ok(req.id, handle_generated_source(server, req.params))
+        }
         // A custom request, not `code_lens_provider`: `extension.js` builds
         // every lens from answers like this one.
         "vyrn/routeLenses" => {
@@ -1099,6 +1102,15 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     if !r.definition {
         return None;
     }
+    if let Some(module) = &r.generated {
+        let owner = home_uri?;
+        let target_uri = generated_uri(&owner, module);
+        let target_text = generated_source(server, &owner, module)?;
+        return Some(GotoDefinitionResponse::Scalar(Location {
+            uri: target_uri,
+            range: lsp_range(&target_text, r.target_line, r.target_col, r.target_end_col),
+        }));
+    }
     // A remote module key (`github:...`) is no file, so it has no definition.
     let target_uri = match &r.target_file {
         Some(f) => Url::from_file_path(f.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?,
@@ -1188,6 +1200,48 @@ fn import_path_definition(
         target_range: Range::default(),
         target_selection_range: Range::default(),
     }]))
+}
+
+/// The scheme of a generated module's read-only document ([`generated_uri`]).
+const GENERATED_SCHEME: &str = "vyrn-gen";
+
+/// The document of the generated module `module` that the root `owner` generates:
+/// `vyrn-gen:/<call>.vyrn?owner=<owner>&module=<module>`, `call` the generator call of the
+/// module's key without the characters a path segment cannot hold, so the editor's tab names
+/// it. `vyrn/generatedSource` answers its text.
+fn generated_uri(owner: &Url, module: &str) -> Url {
+    let call = vyrn_frontend::loader::generator_call(module).unwrap_or(module);
+    let call: String = (call.chars())
+        .filter(|c| c.is_alphanumeric() || "._()".contains(*c))
+        .collect();
+    let mut uri = Url::parse(&format!("{GENERATED_SCHEME}:/{call}.vyrn"))
+        .unwrap_or_else(|_| unreachable!("the path holds only unreserved characters"));
+    uri.query_pairs_mut()
+        .append_pair("owner", owner.as_str())
+        .append_pair("module", module);
+    uri
+}
+
+/// The text of the generated module `module` of the root `owner`, as `vyrn emit-gen`
+/// prints it.
+fn generated_source(server: &Server, owner: &Url, module: &str) -> Option<String> {
+    Some(synth_for(server, owner, module)?.gen_source.clone())
+}
+
+/// `vyrn/generatedSource`: the text of the generated module a [`generated_uri`] `{ uri }`
+/// names; `null` for another URI and for a module its owner does not generate.
+fn handle_generated_source(server: &Server, params: serde_json::Value) -> Option<String> {
+    let uri = Url::parse(params.get("uri")?.as_str()?).ok()?;
+    if uri.scheme() != GENERATED_SCHEME {
+        return None;
+    }
+    let pair = |k: &str| {
+        uri.query_pairs()
+            .find(|(q, _)| q == k)
+            .map(|(_, v)| v.into_owned())
+    };
+    let owner = Url::parse(&pair("owner")?).ok()?;
+    generated_source(server, &owner, &pair("module")?)
 }
 
 /// The local file an import specifier names. A generator's directory argument

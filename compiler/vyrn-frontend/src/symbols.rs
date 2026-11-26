@@ -222,6 +222,9 @@ pub struct CostLine {
 pub struct NamespaceInfo {
     pub name: String,
     pub members: Vec<Symbol>,
+    /// The module key of the generated module the namespace names, whose source no file
+    /// holds; `None` for a module on disk.
+    pub generated: Option<String>,
 }
 
 /// Answer to "what is at this cursor": the declaration it resolves to.
@@ -248,6 +251,9 @@ pub struct Resolution {
     /// Whether a source declaration exists to jump to. `false` for a built-in
     /// method such as `push`: it has hover text but no definition site.
     pub definition: bool,
+    /// The module key of the generated module that declares it, whose text no file holds;
+    /// `target_file` is `None` then.
+    pub generated: Option<String>,
 }
 
 /// One completion item (a top-level symbol).
@@ -924,7 +930,7 @@ enum Named<'a, M> {
     Local(&'a LocalBinding),
     /// `ns.member`, after an unshadowed namespace. Before top-level symbols, so
     /// a same-named declaration does not capture a qualified member.
-    NsMember(&'a str, &'a Symbol),
+    NsMember(&'a NamespaceInfo, &'a Symbol),
     Member(M),
     Namespace(&'a NamespaceInfo),
     Symbol(&'a Symbol),
@@ -947,7 +953,7 @@ fn resolve_token<'a, M>(
         let ns = (analysis.namespaces.iter()).find(|n| n.name == recv.text);
         if let (None, Some(ns)) = (local_at(analysis, recv), ns) {
             if let Some(m) = ns.members.iter().find(|m| m.name == tok.text) {
-                return Some(Named::NsMember(&ns.name, m));
+                return Some(Named::NsMember(ns, m));
             }
         }
     }
@@ -1006,6 +1012,7 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         signature: h.signature,
         doc: h.doc,
         definition: true,
+        generated: None,
     };
     let nowhere = |name: &str, kind, h: Hover| Resolution {
         name: name.to_string(),
@@ -1018,14 +1025,17 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         signature: h.signature,
         doc: h.doc,
         definition: false,
+        generated: None,
     };
     match resolve_token(analysis, tok, member) {
         Some(Named::Local(b)) => Some(local_resolution(analysis, b)),
         Some(Named::NsMember(ns, m)) => {
-            let via = format!("— via namespace `{ns}`");
+            let via = format!("— via namespace `{}`", ns.name);
             let hover = hover_of(&m.detail, &[doc_piece(&m.doc), Some(&via)]);
             Some(Resolution {
-                definition: m.file.is_some(),
+                definition: m.file.is_some() || ns.generated.is_some(),
+                // A member an origin map places in a file jumps there.
+                generated: ns.generated.clone().filter(|_| m.file.is_none()),
                 ..at(m, hover)
             })
         }
@@ -1041,19 +1051,24 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
                 None => nowhere(&c.label, c.kind, hover),
             })
         }
-        // The namespace binding itself, a compile-time name, not a value.
-        Some(Named::Namespace(ns)) => Some(nowhere(
-            &ns.name,
-            SymbolKind::Type,
-            hover_of(
+        // The namespace binding itself, a compile-time name, not a value. A generated one's
+        // definition is its module's first line.
+        Some(Named::Namespace(ns)) => {
+            let hover = hover_of(
                 &format!(
                     "namespace `{}` — {} exported member(s) (a compile-time name, not a value)",
                     ns.name,
                     ns.members.len()
                 ),
                 &[],
-            ),
-        )),
+            );
+            Some(Resolution {
+                target_line: 1,
+                definition: ns.generated.is_some(),
+                generated: ns.generated.clone(),
+                ..nowhere(&ns.name, SymbolKind::Type, hover)
+            })
+        }
         Some(Named::Symbol(s)) => {
             let waits = (s.kind == SymbolKind::Function && analysis.waits.contains(&s.name))
                 .then_some("waits: each call of it is marked `await`");
@@ -2162,6 +2177,7 @@ fn index_namespaces(
             out.push(NamespaceInfo {
                 name: ns.clone(),
                 members,
+                generated: gen.map(|_| target.clone()),
             });
         }
     }
@@ -2526,6 +2542,7 @@ fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
         signature: Some(h.signature.unwrap_or(detail)),
         doc,
         definition: true,
+        generated: None,
     }
 }
 

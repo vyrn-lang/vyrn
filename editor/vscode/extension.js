@@ -135,6 +135,18 @@ function activate(context) {
   const started = client.start();
   context.subscriptions.push(started);
   const redrawCosts = registerCostDecorations(context, vsc, lspState);
+  // A generated module's read-only document, where a definition into a generated
+  // namespace lands: the server answers its text (`vyrn/generatedSource`).
+  context.subscriptions.push(
+    vsc.workspace.registerTextDocumentContentProvider("vyrn-gen", {
+      provideTextDocumentContent: async (uri) => {
+        const text = await lspState.client
+          ?.sendRequest("vyrn/generatedSource", { uri: uri.toString() })
+          .catch(() => null);
+        return text ?? "// The root does not generate this module.\n";
+      },
+    })
+  );
   // The server reads these settings once, at `initialize`.
   context.subscriptions.push(
     vsc.workspace.onDidChangeConfiguration((e) => {
