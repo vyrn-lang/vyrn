@@ -248,6 +248,16 @@ impl Grammar {
         Some(parser::report_fn(self.rule_name(self.start()?)))
     }
 
+    /// Returns, per start rule, the refinement type [`crate::parser`] writes for it,
+    /// `<Start>Text`, and the rule's name. A grammar with no start rule has none.
+    pub fn islands(&self) -> Vec<(String, String)> {
+        let starts = parser::start_rules(self).unwrap_or_default();
+        let name = |r: RuleId| self.rule_name(r).to_string();
+        (starts.into_iter())
+            .map(|r| (parser::island_type(&name(r)), name(r)))
+            .collect()
+    }
+
     /// Returns the name of rule `id`.
     pub fn rule_name(&self, id: RuleId) -> &str {
         &self.rules[id.0 as usize].name

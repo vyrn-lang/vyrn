@@ -103,14 +103,24 @@ pub struct Report {
 }
 
 /// What a generator wrote: the module's text, its span table and its reports,
-/// each sorted by offset, and the key of each grammar whose parser `syntaxParser`
-/// wrote into it, in call order.
+/// each sorted by offset, the key of each grammar whose parser `syntaxParser`
+/// wrote into it, in call order, and the islands those parsers declare.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Written {
     pub source: String,
     pub spans: Vec<SpanRow>,
     pub reports: Vec<Report>,
     pub grammars: Vec<String>,
+    pub islands: Vec<Island>,
+}
+
+/// A refinement type a written parser declares, `ty`, whose value start rule
+/// `start` of the grammar keyed `grammar` accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Island {
+    pub ty: String,
+    pub grammar: String,
+    pub start: String,
 }
 
 impl Written {
@@ -285,14 +295,16 @@ pub enum Writes<'a> {
 /// Returns what `syntaxParser` or `syntaxReporter` answers for the grammar at
 /// `path`, whose `bytes` the run read, `None` when it could not: the module
 /// `writes` names as code by module `key`, or a report at the place the grammar
-/// or its catalogue goes wrong.
+/// or its catalogue goes wrong; with a parser's islands, each `(type, start)`.
 pub fn syntax_span(
     key: &str,
     path: &str,
     bytes: Option<&[u8]>,
     writes: Writes<'_>,
-) -> Result<Span, String> {
-    let report = |at: String, sentence: &str| diag_span("error", &at, &sentence.replace('\n', " "));
+) -> Result<(Span, Vec<(String, String)>), String> {
+    let report = |at: String, sentence: &str| {
+        diag_span("error", &at, &sentence.replace('\n', " ")).map(|s| (s, Vec::new()))
+    };
     let Some(bytes) = bytes else {
         return report(format!("{path}:1:1"), "cannot read this grammar");
     };
@@ -311,19 +323,22 @@ pub fn syntax_span(
         },
     };
     let written = vyrn_syntax::load(src).and_then(|g| match &sentences {
-        None => vyrn_syntax::parser(&g),
-        Some(sentences) => vyrn_syntax::report(&g, path, sentences),
+        None => vyrn_syntax::parser(&g).map(|text| (text, g.islands())),
+        Some(sentences) => vyrn_syntax::report(&g, path, sentences).map(|t| (t, Vec::new())),
     });
     match written {
-        Ok(text) => Ok(Span {
-            text,
-            author: Author::File {
-                key: Arc::from(key),
-                at: Pos { line: 1, col: 1 },
+        Ok((text, islands)) => Ok((
+            Span {
+                text,
+                author: Author::File {
+                    key: Arc::from(key),
+                    at: Pos { line: 1, col: 1 },
+                },
+                shown: None,
+                kind: Kind::Code,
             },
-            shown: None,
-            kind: Kind::Code,
-        }),
+            islands,
+        )),
         Err(e) => report(format!("{path}:{}:{}", e.line, e.col), &e.sentence),
     }
 }

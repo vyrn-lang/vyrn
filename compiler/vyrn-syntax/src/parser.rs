@@ -69,7 +69,7 @@ pub fn parser(g: &Grammar) -> Result<String, Refused> {
     }
     refuse_wide_classes(g, &rules)?;
     let rows = rows(g);
-    let shapes = shapes(g, &rules, rows.keys())?;
+    let shapes = shapes(g, &rules, &starts, rows.keys())?;
     let mut w = Writer {
         g,
         free: free_labels(g, &rules),
@@ -801,6 +801,31 @@ impl Writer<'_> {
         }
         self.line("return Err(consume p.errors)");
         self.close();
+        let (name, island) = (type_name(&rule.name), island_type(&rule.name));
+        let _ = write!(
+            self.o,
+            "
+/// Whether `parse{name}` accepts `text`.
+export fn is{name}(text: String) -> Bool {{
+    return match parse{name}(text) {{
+        Ok(tree) => true,
+        Err(errors) => false,
+    }}
+}}
+
+/// A text `parse{name}` accepts. A string literal of this type is read with the
+/// grammar when the program is checked.
+export type {island} = String where is{name}(value)
+
+/// The tree of `text`, which `parse{name}` accepts.
+export fn parsed{name}(text: {island}) -> {ty} {{
+    return match parse{name}(text) {{
+        Ok(tree) => tree,
+        Err(errors) => panic(\"a `{island}` that `parse{name}` refuses\"),
+    }}
+}}
+"
+        );
         self.o.push('\n');
         Ok(())
     }
@@ -1804,6 +1829,12 @@ impl Writer<'_> {
     }
 }
 
+/// The refinement type [`parser`] writes for start rule `rule`, whose value the
+/// rule accepts.
+pub(crate) fn island_type(rule: &str) -> String {
+    format!("{}Text", type_name(rule))
+}
+
 /// The name of the reporting `gen fn` of start rule `rule`.
 pub(crate) fn report_fn(rule: &str) -> String {
     format!("report{}", type_name(rule))
@@ -1844,8 +1875,14 @@ pub fn report(
             "/// The refusals `parse{name}` gives the text at `path`, each a report at its
 /// line and column.
 export gen fn {report}(path: String) -> Code {{
+    return {report}Text(path, readFile(path) ?? \"\")
+}}
+
+/// The refusals `parse{name}` gives `text`, each a report at its line and column
+/// in the file `path`.
+export gen fn {report}Text(path: String, text: String) -> Code {{
     let mut out = vyrn\"\"
-    match parsed.parse{name}(readFile(path) ?? \"\") {{
+    match parsed.parse{name}(text) {{
         Ok(tree) => {{}}
         Err(errors) => {{
             for e in errors {{

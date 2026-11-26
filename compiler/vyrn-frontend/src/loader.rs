@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
-use crate::gen::{Author, Pos, Report, Shown, SpanRow, Written};
+use crate::gen::{Author, Island, Pos, Report, Shown, SpanRow, Written};
 use crate::rules::{refuse, rule, DeclName, Rule};
 use crate::{lexer, parser};
 
@@ -4596,13 +4596,13 @@ const ABSENT: &str = "absent";
 /// The cache entry format tag, bumped when an entry's meaning changes.
 /// [`read_cache_entry`] rejects any other tag as a miss, so the generator re-runs
 /// and overwrites the entry.
-const CACHE_ENTRY_TAG: &str = "v8";
+const CACHE_ENTRY_TAG: &str = "v9";
 
 /// Formats this compiler wrote before [`CACHE_ENTRY_TAG`]. Such an entry is
 /// stale, not foreign, so it is ignored without a warning.
-const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2", "v3", "v4", "v5", "v6", "v7"];
+const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"];
 
-/// Serializes a cache entry: `v7 <tag> <N>`, then `path<TAB>hash` lines, each
+/// Serializes a cache entry: `v9 <tag> <N>`, then `path<TAB>hash` lines, each
 /// with `<TAB>stamp` where `stamps` holds one; then `-`, or the count of `gens`
 /// and one `name<TAB>params<TAB>ret` line per gen fn, `ret` `-` for `Code`, each
 /// `export to` path after another tab; then the span table and the reports
@@ -4637,10 +4637,11 @@ fn render_cache_entry(
     format!("{CACHE_ENTRY_TAG} {} {body}", entry_tag(key, &body))
 }
 
-/// A span table, the reports and the grammars as cache lines: the row count, then one
-/// `offset<TAB>author<TAB>shown` line per row; then the report count, then one
-/// `offset<TAB>line` line per report; then the grammar count, then one key per
-/// line. An author is `-` for the call site or
+/// A span table, the reports, the grammars and the islands as cache lines: the row
+/// count, then one `offset<TAB>author<TAB>shown` line per row; then the report
+/// count, then one `offset<TAB>line` line per report; then the grammar count, then
+/// one key per line; then the island count, then one `ty<TAB>start<TAB>grammar`
+/// line per island. An author is `-` for the call site or
 /// `line:col:key`; a shown position is `-` or `line:col:path`. The key, the
 /// path and the report's line come last, so a colon or a tab in them splits
 /// nothing.
@@ -4665,13 +4666,17 @@ fn written_table(w: &Written) -> String {
     for g in &w.grammars {
         out.push_str(&format!("{g}\n"));
     }
+    out.push_str(&format!("{}\n", w.islands.len()));
+    for i in &w.islands {
+        out.push_str(&format!("{}\t{}\t{}\n", i.ty, i.start, i.grammar));
+    }
     out
 }
 
 /// Inverse of [`written_table`], read from `next`.
 fn read_written_table<'a>(
     mut next: impl FnMut() -> Option<&'a str>,
-) -> Option<(Vec<SpanRow>, Vec<Report>, Vec<String>)> {
+) -> Option<(Vec<SpanRow>, Vec<Report>, Vec<String>, Vec<Island>)> {
     // `line:col:rest`, the rest keeping any colon. Rows repeat one key and one
     // path, so a rest equal to `last` shares it.
     let placed = |field: &str,
@@ -4725,7 +4730,14 @@ fn read_written_table<'a>(
     for _ in 0..next()?.parse::<usize>().ok()? {
         grammars.push(next()?.to_string());
     }
-    Some((rows, reports, grammars))
+    let mut islands = Vec::new();
+    for _ in 0..next()?.parse::<usize>().ok()? {
+        let mut cols = next()?.splitn(3, '\t');
+        let (ty, start) = (cols.next()?.to_string(), cols.next()?.to_string());
+        let grammar = cols.next()?.to_string();
+        islands.push(Island { ty, grammar, start });
+    }
+    Some((rows, reports, grammars, islands))
 }
 
 /// Inverse of [`render_cache_entry`], for an entry this compiler wrote.
@@ -4824,7 +4836,7 @@ fn read_cache_entry(
             Some(gens)
         }
     };
-    let (spans, reports, grammars) = read_written_table(&mut line)?;
+    let (spans, reports, grammars, islands) = read_written_table(&mut line)?;
     Some(CacheEntry {
         inputs: Rc::from(inputs),
         stamps,
@@ -4834,6 +4846,7 @@ fn read_cache_entry(
             spans,
             reports,
             grammars,
+            islands,
         },
     })
 }
@@ -7948,6 +7961,11 @@ mod tests {
                 line: "warning C:/p/in.txt:1:1 a\tb".to_string(),
             }],
             grammars: vec!["C:/p/a:b.syntax".to_string()],
+            islands: vec![Island {
+                ty: "FileText".to_string(),
+                grammar: "C:/p/a:b.syntax".to_string(),
+                start: "file".to_string(),
+            }],
         };
         let gens = vec![
             GenFn {

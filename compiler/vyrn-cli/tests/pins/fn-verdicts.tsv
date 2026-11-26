@@ -61,6 +61,8 @@ examples/bin/client/boot.vyrn	where$pCreated	yes	yes, emulated Int64
 examples/bin/client/boot.vyrn	where$cCreated	no, it calls `panic`	no, its effect set is trap
 examples/bin/client/boot.vyrn	where$pCreated__from0	yes	yes, emulated Int64
 examples/bin/client/boot.vyrn	where$cCreated__from0	no, it calls `panic`	no, its effect set is trap
+examples/bin/client/boot.vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/bin/client/boot.vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/bin/client/boot.vyrn	where$pInstant	yes	yes, emulated Int64
 examples/bin/client/boot.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
 examples/bin/client/boot.vyrn	where$pLang	yes	no, `value` is String, not an integer, Bool or a read array of one
@@ -81,6 +83,12 @@ examples/bin/client/boot.vyrn	where$pTw	yes	no, `value` is String, not an intege
 examples/bin/client/boot.vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
 examples/bin/client/boot.vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/bin/client/boot.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
+examples/bin/client/boot.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+examples/bin/client/boot.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/bin/client/boot.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+examples/bin/client/boot.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/bin/client/boot.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+examples/bin/client/boot.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/bin/server.vyrn	runMiddleware	no, it calls a function value	no, its effect set is alloc, write-output, fs-write, clock, random, module-state, trap
 examples/bin/server.vyrn	handle	no, it calls `runMiddleware`, which is not trap-free	no, its effect set is alloc, write-output, fs-write, clock, random, serve, module-state, trap
 examples/bin/server.vyrn	routed	no, it calls `mount`, which is not trap-free	no, its effect set is alloc, write-output, fs-write, clock, random, serve, module-state, trap
@@ -89,6 +97,8 @@ examples/bin/server.vyrn	where$pBody	yes	no, `value` is String, not an integer, 
 examples/bin/server.vyrn	where$cBody	no, it calls `panic`	no, its effect set is trap
 examples/bin/server.vyrn	where$pCreated	yes	yes, emulated Int64
 examples/bin/server.vyrn	where$cCreated	no, it calls `panic`	no, its effect set is trap
+examples/bin/server.vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/bin/server.vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/bin/server.vyrn	where$pInstant	yes	yes, emulated Int64
 examples/bin/server.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
 examples/bin/server.vyrn	where$pLang	yes	no, `value` is String, not an integer, Bool or a read array of one
@@ -113,6 +123,12 @@ examples/bin/server.vyrn	where$pTw	yes	no, `value` is String, not an integer, Bo
 examples/bin/server.vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
 examples/bin/server.vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/bin/server.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
+examples/bin/server.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+examples/bin/server.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/bin/server.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+examples/bin/server.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/bin/server.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+examples/bin/server.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/bin/server/api/pastes.http.vyrn	routes	no, it calls `recent`, which is not trap-free	no, its effect set is alloc, trap
 examples/bin/server/api/pastes.http.vyrn	tailStep	no, it calls `cursorGet`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/bin/server/api/pastes.http.vyrn	tail	yes	no, its effect set is alloc, module-state, trap
@@ -410,10 +426,16 @@ examples/dsl/calc.editor.vyrn	vyrnCheckCalc	no, it calls `parseLedger`, which is
 examples/dsl/calc.editor.vyrn	unknownAccounts	no, it calls `placeOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 examples/dsl/calc.editor.vyrn	vyrnHoverCalc	no, it calls `parseLedger`, which is not trap-free	no, its effect set is alloc, fs-read
 examples/dsl/calc.editor.vyrn	accountHover	no, it calls `placeOf`, which is not trap-free	no, its effect set is alloc
+examples/dsl/calc.editor.vyrn	where$pLedgerText	no, it calls `isLedger`, which is not trap-free	no, its effect set is alloc
+examples/dsl/calc.editor.vyrn	where$cLedgerText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/dsl/calc.vyrn	total	no, it keeps an index check	no, its effect set is alloc
 examples/dsl/calc.vyrn	sum	yes	no, `l` is Ledger, not an integer, Bool or a read array of one
 examples/dsl/calc.vyrn	isAccount	yes	no, `name` is String, not an integer, Bool or a read array of one
+examples/dsl/calc.vyrn	where$pLedgerText	no, it calls `isLedger`, which is not trap-free	no, its effect set is alloc
+examples/dsl/calc.vyrn	where$cLedgerText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/dsl/main.vyrn	main	no, it calls `total`, which is not trap-free	no, its effect set is alloc, write-output, fs-read
+examples/dsl/main.vyrn	where$pLedgerText	no, it calls `isLedger`, which is not trap-free	no, its effect set is alloc
+examples/dsl/main.vyrn	where$cLedgerText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/ecs.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/encoding.vyrn	charCount	yes	no, its effect set is alloc
 examples/encoding.vyrn	show	yes	no, its effect set is alloc
@@ -567,18 +589,34 @@ examples/fullstack/client/boot.vyrn	vyrnView	no, it calls `derive$json$jsonEncod
 examples/fullstack/client/boot.vyrn	main	yes	yes, emulated Int64
 examples/fullstack/client/boot.vyrn	where$pAge	yes	yes, emulated Int64
 examples/fullstack/client/boot.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
+examples/fullstack/client/boot.vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/client/boot.vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/fullstack/client/boot.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/fullstack/client/boot.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
+examples/fullstack/client/boot.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/client/boot.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/fullstack/client/boot.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/client/boot.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/fullstack/client/boot.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/client/boot.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/fullstack/server.vyrn	handle	no, it calls `route`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/fullstack/server.vyrn	main	no, it calls `handle`, which is not trap-free	no, its effect set is alloc, write-output, module-state, trap
 examples/fullstack/server.vyrn	where$pAge	yes	yes, emulated Int64
 examples/fullstack/server.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
+examples/fullstack/server.vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/server.vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/fullstack/server.vyrn	where$pInstant	yes	yes, emulated Int64
 examples/fullstack/server.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
 examples/fullstack/server.vyrn	where$pRoutePath	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/fullstack/server.vyrn	where$cRoutePath	no, it calls `panic`	no, its effect set is trap
 examples/fullstack/server.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/fullstack/server.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
+examples/fullstack/server.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/server.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/fullstack/server.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/server.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/fullstack/server.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/server.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/fullstack/server/api/users.http.vyrn	routes	no, it calls `byId`, which is not trap-free	no, its effect set is alloc, trap
 examples/fullstack/server/api/users.http.vyrn	where$pAge	yes	yes, emulated Int64
 examples/fullstack/server/api/users.http.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
@@ -605,8 +643,16 @@ examples/fullstack/server/pages/users/[id].vyrn	fetchUser	yes	no, its effect set
 examples/fullstack/server/pages/users/[id].vyrn	page	yes	no, its effect set is alloc
 examples/fullstack/server/pages/users/[id].vyrn	where$pAge	yes	yes, emulated Int64
 examples/fullstack/server/pages/users/[id].vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
+examples/fullstack/server/pages/users/[id].vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/server/pages/users/[id].vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/fullstack/server/pages/users/[id].vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/fullstack/server/pages/users/[id].vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
+examples/fullstack/server/pages/users/[id].vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/server/pages/users/[id].vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/fullstack/server/pages/users/[id].vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/server/pages/users/[id].vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/fullstack/server/pages/users/[id].vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+examples/fullstack/server/pages/users/[id].vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/fullstack/shared/wire.vyrn	where$pAge	yes	yes, emulated Int64
 examples/fullstack/shared/wire.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
 examples/fullstack/shared/wire.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
@@ -639,6 +685,8 @@ examples/graphql.vyrn	topResolve	yes	no, its effect set is alloc
 examples/graphql.vyrn	reply	no, it calls `graphqlHandle`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/graphql.vyrn	where$pBookId	yes	yes, emulated Int64
 examples/graphql.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
+examples/graphql.vyrn	where$pGqlDocumentText	no, it calls `isGqlDocument`, which is not trap-free	no, its effect set is alloc
+examples/graphql.vyrn	where$cGqlDocumentText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/graphql.vyrn	where$pRating	yes	yes, emulated Int64
 examples/graphql.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
 examples/graphql.vyrn	where$pStars	yes	yes, emulated Int64
@@ -1041,12 +1089,24 @@ examples/pages/items/index.vyrn	page	yes	no, its effect set is alloc
 examples/pages/users/[id].vyrn	data	yes	no, its effect set is alloc
 examples/pages/users/[id].vyrn	fetchUser	yes	no, its effect set is alloc
 examples/pages/users/[id].vyrn	page	yes	no, its effect set is alloc
+examples/pages/users/[id].vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+examples/pages/users/[id].vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/pages/users/[id].vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+examples/pages/users/[id].vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/pages/users/[id].vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+examples/pages/users/[id].vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/pagesdemo.vyrn	show	no, it calls `route`, which is not trap-free	no, its effect set is alloc, write-output, trap
 examples/pagesdemo.vyrn	main	no, it calls `show`, which is not trap-free	no, its effect set is alloc, write-output, trap
 examples/pagesdemo.vyrn	where$pInstant	yes	yes, emulated Int64
 examples/pagesdemo.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
 examples/pagesdemo.vyrn	where$pRoutePath	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/pagesdemo.vyrn	where$cRoutePath	no, it calls `panic`	no, its effect set is trap
+examples/pagesdemo.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+examples/pagesdemo.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/pagesdemo.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+examples/pagesdemo.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/pagesdemo.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+examples/pagesdemo.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/part_of_a_temporary.vyrn	pair	yes	no, its effect set is alloc
 examples/part_of_a_temporary.vyrn	other	yes	no, its effect set is alloc
 examples/part_of_a_temporary.vyrn	line	yes	no, its effect set is alloc
@@ -1174,6 +1234,8 @@ examples/regexredux.vyrn	variants	yes	no, its effect set is alloc
 examples/regexredux.vyrn	substitutions	yes	no, its effect set is alloc
 examples/regexredux.vyrn	compiled	no, it calls `panic`	no, its effect set is alloc, module-state, trap
 examples/regexredux.vyrn	main	no, it keeps an index check	no, its effect set is alloc, read-input, write-output, module-state, trap
+examples/regexredux.vyrn	where$pRegexPatternText	no, it calls `isRegexPattern`, which is not trap-free	no, its effect set is alloc
+examples/regexredux.vyrn	where$cRegexPatternText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/region.vyrn	viaString	yes	no, its effect set is alloc
 examples/region.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/region_consume.vyrn		does not check	does not check
@@ -1331,6 +1393,8 @@ examples/shelf/client/boot.vyrn	vyrnPatch	no, it calls `derive$json$jsonEncoders
 examples/shelf/client/boot.vyrn	main	yes	yes, emulated Int64
 examples/shelf/client/boot.vyrn	where$pBookId	yes	yes, emulated Int64
 examples/shelf/client/boot.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
+examples/shelf/client/boot.vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/shelf/client/boot.vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/shelf/client/boot.vyrn	where$pRating	yes	yes, emulated Int64
 examples/shelf/client/boot.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
 examples/shelf/client/boot.vyrn	where$pStars	yes	yes, emulated Int64
@@ -1347,12 +1411,22 @@ examples/shelf/client/boot.vyrn	where$pTwClass	yes	no, `value` is String, not an
 examples/shelf/client/boot.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
 examples/shelf/client/boot.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/shelf/client/boot.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
+examples/shelf/client/boot.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+examples/shelf/client/boot.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/shelf/client/boot.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+examples/shelf/client/boot.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/shelf/client/boot.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+examples/shelf/client/boot.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/shelf/server.vyrn	runMiddleware	no, it calls a function value	no, its effect set is alloc, write-output, module-state
 examples/shelf/server.vyrn	handle	no, it calls `runMiddleware`, which is not trap-free	no, its effect set is alloc, write-output, module-state, trap
 examples/shelf/server.vyrn	routed	no, it calls `graphqlHandle`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/shelf/server.vyrn	main	no, it calls `handle`, which is not trap-free	no, its effect set is alloc, write-output, module-state, trap
 examples/shelf/server.vyrn	where$pBookId	yes	yes, emulated Int64
 examples/shelf/server.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
+examples/shelf/server.vyrn	where$pGqlDocumentText	no, it calls `isGqlDocument`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server.vyrn	where$cGqlDocumentText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/shelf/server.vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server.vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/shelf/server.vyrn	where$pInstant	yes	yes, emulated Int64
 examples/shelf/server.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server.vyrn	where$pRating	yes	yes, emulated Int64
@@ -1373,6 +1447,12 @@ examples/shelf/server.vyrn	where$pTwClass	yes	no, `value` is String, not an inte
 examples/shelf/server.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/shelf/server.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
+examples/shelf/server.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/shelf/server.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/shelf/server.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/shelf/server/api/books.vyrn	browse	yes	no, its effect set is alloc, module-state
 examples/shelf/server/api/books.vyrn	byId	yes	no, its effect set is alloc, module-state
 examples/shelf/server/api/books.vyrn	add	yes	no, its effect set is alloc, module-state
@@ -1394,6 +1474,8 @@ examples/shelf/server/api/books.vyrn	where$cUrl	no, it calls `panic`	no, its eff
 examples/shelf/server/routes/about.vyrn	page	yes	no, its effect set is alloc, module-state
 examples/shelf/server/routes/about.vyrn	where$pBookId	yes	yes, emulated Int64
 examples/shelf/server/routes/about.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
+examples/shelf/server/routes/about.vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server/routes/about.vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/shelf/server/routes/about.vyrn	where$pRating	yes	yes, emulated Int64
 examples/shelf/server/routes/about.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/routes/about.vyrn	where$pStars	yes	yes, emulated Int64
@@ -1415,6 +1497,8 @@ examples/shelf/server/routes/books/[id].vyrn	fetchBook	yes	no, its effect set is
 examples/shelf/server/routes/books/[id].vyrn	page	yes	no, its effect set is alloc, module-state
 examples/shelf/server/routes/books/[id].vyrn	where$pBookId	yes	yes, emulated Int64
 examples/shelf/server/routes/books/[id].vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
+examples/shelf/server/routes/books/[id].vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server/routes/books/[id].vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/shelf/server/routes/books/[id].vyrn	where$pRating	yes	yes, emulated Int64
 examples/shelf/server/routes/books/[id].vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/routes/books/[id].vyrn	where$pStars	yes	yes, emulated Int64
@@ -1431,9 +1515,17 @@ examples/shelf/server/routes/books/[id].vyrn	where$pTwClass	yes	no, `value` is S
 examples/shelf/server/routes/books/[id].vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/routes/books/[id].vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/shelf/server/routes/books/[id].vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
+examples/shelf/server/routes/books/[id].vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server/routes/books/[id].vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/shelf/server/routes/books/[id].vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server/routes/books/[id].vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+examples/shelf/server/routes/books/[id].vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server/routes/books/[id].vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/shelf/server/routes/index.vyrn	page	yes	no, its effect set is alloc, module-state
 examples/shelf/server/routes/index.vyrn	where$pBookId	yes	yes, emulated Int64
 examples/shelf/server/routes/index.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
+examples/shelf/server/routes/index.vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server/routes/index.vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/shelf/server/routes/index.vyrn	where$pRating	yes	yes, emulated Int64
 examples/shelf/server/routes/index.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/routes/index.vyrn	where$pStars	yes	yes, emulated Int64
@@ -1478,6 +1570,8 @@ examples/shelf/server/view.vyrn	aboutPage	yes	no, its effect set is alloc, modul
 examples/shelf/server/view.vyrn	detailPage	yes	no, its effect set is alloc, module-state
 examples/shelf/server/view.vyrn	where$pBookId	yes	yes, emulated Int64
 examples/shelf/server/view.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
+examples/shelf/server/view.vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+examples/shelf/server/view.vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/shelf/server/view.vyrn	where$pRating	yes	yes, emulated Int64
 examples/shelf/server/view.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/view.vyrn	where$pStars	yes	yes, emulated Int64
@@ -1682,19 +1776,27 @@ examples/syntaxcalc.vyrn	showStmt	yes	no, its effect set is alloc
 examples/syntaxcalc.vyrn	showFn	yes	no, its effect set is alloc
 examples/syntaxcalc.vyrn	check	no, it calls `parseProgram`, which is not trap-free	no, its effect set is alloc, write-output
 examples/syntaxcalc.vyrn	main	no, it calls `check`, which is not trap-free	no, its effect set is alloc, write-output
+examples/syntaxcalc.vyrn	where$pProgramText	no, it calls `isProgram`, which is not trap-free	no, its effect set is alloc
+examples/syntaxcalc.vyrn	where$cProgramText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/syntaxisland.vyrn	say	yes	no, its effect set is alloc
 examples/syntaxisland.vyrn	showItem	yes	no, its effect set is alloc
 examples/syntaxisland.vyrn	showBlock	yes	no, its effect set is alloc
 examples/syntaxisland.vyrn	run	no, it calls `parseDocument`, which is not trap-free	no, its effect set is alloc, write-output
 examples/syntaxisland.vyrn	main	no, it calls `run`, which is not trap-free	no, its effect set is alloc, write-output
+examples/syntaxisland.vyrn	where$pDocumentText	no, it calls `isDocument`, which is not trap-free	no, its effect set is alloc
+examples/syntaxisland.vyrn	where$cDocumentText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/syntaxjson.vyrn	say	yes	no, its effect set is alloc
 examples/syntaxjson.vyrn	show	yes	no, its effect set is alloc
 examples/syntaxjson.vyrn	check	no, it calls `parseDocument`, which is not trap-free	no, its effect set is alloc, write-output
 examples/syntaxjson.vyrn	main	no, it calls `check`, which is not trap-free	no, its effect set is alloc, write-output
+examples/syntaxjson.vyrn	where$pDocumentText	no, it calls `isDocument`, which is not trap-free	no, its effect set is alloc
+examples/syntaxjson.vyrn	where$cDocumentText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/syntaxnest.vyrn	sum	yes	no, its effect set is alloc
 examples/syntaxnest.vyrn	nest	yes	no, its effect set is alloc
 examples/syntaxnest.vyrn	run	no, it calls `parseDocument`, which is not trap-free	no, its effect set is alloc, write-output
 examples/syntaxnest.vyrn	main	no, it calls `run`, which is not trap-free	no, its effect set is alloc, write-output
+examples/syntaxnest.vyrn	where$pDocumentText	no, it calls `isDocument`, which is not trap-free	no, its effect set is alloc
+examples/syntaxnest.vyrn	where$cDocumentText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/tagged.vyrn	sql	yes	no, its effect set is alloc
 examples/tagged.vyrn	showValue	yes	no, its effect set is alloc
 examples/tagged.vyrn	main	yes	no, its effect set is alloc, write-output
@@ -1976,6 +2078,12 @@ site/app/docs.vyrn	apiTests	yes	no, its effect set is alloc
 site/app/docs.vyrn	apiHref	no, it calls `hrefOf`, which is not trap-free	no, its effect set is alloc, trap
 site/app/docs.vyrn	apiSource	yes	no, its effect set is alloc
 site/app/docs.vyrn	apiSourceLine	yes	no, its effect set is alloc
+site/app/docs.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+site/app/docs.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/docs.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+site/app/docs.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/docs.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+site/app/docs.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 site/app/docshell.vyrn		does not check	does not check
 site/app/editors.vyrn	extensionDir	yes	no, the result is String, not an integer, Bool or a read array of one
 site/app/editors.vyrn	serverDir	yes	no, the result is String, not an integer, Bool or a read array of one
@@ -2013,6 +2121,12 @@ site/app/feed.vyrn	monthName	yes	no, its effect set is alloc
 site/app/feed.vyrn	feedFault	no, it calls `feedOf`, which is not trap-free	no, its effect set is alloc, trap
 site/app/feed.vyrn	linkFault	no, it calls `timesIn`, which is not trap-free	no, its effect set is alloc, trap
 site/app/feed.vyrn	timesIn	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
+site/app/feed.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+site/app/feed.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/feed.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+site/app/feed.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/feed.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+site/app/feed.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 site/app/gensrc.vyrn	quotedList	yes	no, its effect set is alloc, gen-only
 site/app/gensrc.vyrn	branch	yes	no, its effect set is gen-only
 site/app/gensrc.vyrn	lookup	yes	no, its effect set is gen-only
@@ -2123,6 +2237,12 @@ site/app/nav.vyrn	published	no, it calls `substring`, which is not trap-free	no,
 site/app/nav.vyrn	hrefOf	no, it calls `published`, which is not trap-free	no, its effect set is alloc, trap
 site/app/nav.vyrn	upTo	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
 site/app/nav.vyrn	navRows	no, it calls `hrefOf`, which is not trap-free	no, its effect set is alloc, trap
+site/app/nav.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+site/app/nav.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/nav.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+site/app/nav.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/nav.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+site/app/nav.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 site/app/packages.vyrn	examplesDir	yes	no, the result is String, not an integer, Bool or a read array of one
 site/app/packages.vyrn	projectSlugs	yes	no, its effect set is alloc, fs-read, fs-list, module-state
 site/app/packages.vyrn	fileText	yes	no, its effect set is alloc, fs-read, module-state
@@ -2150,6 +2270,12 @@ site/app/packages.vyrn	addCommand	no, it calls `offerOf`, which is not trap-free
 site/app/packages.vyrn	artifactsOf	no, it calls `manifestFields`, which is not trap-free	no, its effect set is alloc, fs-read, module-state
 site/app/packages.vyrn	withArtifact	yes	no, its effect set is alloc
 site/app/packages.vyrn	manifestFields	no, it calls `parseJson`, which is not trap-free	no, its effect set is alloc, fs-read, module-state
+site/app/packages.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+site/app/packages.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/packages.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+site/app/packages.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/packages.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+site/app/packages.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 site/app/pagemd.vyrn	mdUrl	no, it calls `swapExtension`, which is not trap-free	no, its effect set is alloc, trap
 site/app/pagemd.vyrn	mdName	no, it calls `published`, which is not trap-free	no, its effect set is alloc, trap
 site/app/pagemd.vyrn	swapExtension	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
@@ -2173,6 +2299,12 @@ site/app/pagemd.vyrn	where$pAge	yes	yes, emulated Int64
 site/app/pagemd.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
 site/app/pagemd.vyrn	where$pPort	yes	yes, emulated Int64
 site/app/pagemd.vyrn	where$cPort	no, it calls `panic`	no, its effect set is trap
+site/app/pagemd.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+site/app/pagemd.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/pagemd.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+site/app/pagemd.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/pagemd.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+site/app/pagemd.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 site/app/play.vyrn	playExamples	yes	no, its effect set is alloc
 site/app/repo.vyrn	exampleCount	yes	yes, emulated Int64
 site/app/repo.vyrn	stdCount	yes	yes, emulated Int64
@@ -2202,6 +2334,12 @@ site/app/search.vyrn	where$pAge	yes	yes, emulated Int64
 site/app/search.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
 site/app/search.vyrn	where$pPort	yes	yes, emulated Int64
 site/app/search.vyrn	where$cPort	no, it calls `panic`	no, its effect set is trap
+site/app/search.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+site/app/search.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/search.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+site/app/search.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/search.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+site/app/search.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 site/app/snippets.vyrn	vyrnHtml	yes	no, its effect set is alloc
 site/app/snippets.vyrn	vyrnLine	no, it keeps an index check	no, its effect set is alloc
 site/app/snippets.vyrn	vyrnSource	yes	no, `id` is String, not an integer, Bool or a read array of one
@@ -2240,6 +2378,12 @@ site/app/stdgraph.vyrn	usedByModule	yes	no, its effect set is alloc
 site/app/stdgraph.vyrn	graphLede	yes	no, its effect set is alloc, module-state
 site/app/stdgraph.vyrn	graphIntro	yes	no, the result is String, not an integer, Bool or a read array of one
 site/app/stdgraph.vyrn	graphCaption	yes	no, its effect set is alloc
+site/app/stdgraph.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+site/app/stdgraph.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/stdgraph.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+site/app/stdgraph.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+site/app/stdgraph.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+site/app/stdgraph.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 site/export.vyrn		does not check	does not check
 site/guide/arrays.vyrn	demo	yes	no, its effect set is alloc
 site/guide/benches.vyrn	hashTo	yes	yes, emulated Int64
@@ -2431,12 +2575,16 @@ std/grammar.editor.vyrn	vyrnCheckGrammar	yes	no, its effect set is gen-only
 std/grammar.editor.vyrn	vyrnDefinitionGrammar	no, it calls `grammarLines`, which is not trap-free	no, its effect set is alloc, fs-read, trap
 std/grammar.editor.vyrn	vyrnHoverGrammar	no, it keeps an index check	no, its effect set is alloc, fs-read, trap
 std/grammar.editor.vyrn	vyrnCompleteGrammar	no, it calls `grammarHead`, which is not trap-free	no, its effect set is alloc, fs-read, trap
+std/grammar.editor.vyrn	where$pFileText	no, it calls `isFile`, which is not trap-free	no, its effect set is alloc
+std/grammar.editor.vyrn	where$cFileText	no, it calls `panic`	no, its effect set is alloc, trap
 std/grammar.vyrn	grammarIsName	yes	yes, packed UInt8
 std/grammar.vyrn	grammarHead	no, it keeps a slice check	no, its effect set is alloc
 std/grammar.vyrn	grammarWordStart	yes	no, its effect set is alloc
 std/grammar.vyrn	grammarWordAt	no, it keeps an index check	no, its effect set is alloc
 std/grammar.vyrn	grammarLineOf	no, it calls `grammarHead`, which is not trap-free	no, its effect set is alloc
 std/grammar.vyrn	grammarTarget	no, it calls `grammarWordAt`, which is not trap-free	no, its effect set is alloc
+std/grammar.vyrn	where$pFileText	no, it calls `isFile`, which is not trap-free	no, its effect set is alloc
+std/grammar.vyrn	where$cFileText	no, it calls `panic`	no, its effect set is alloc, trap
 std/graphql.vyrn	gqlSlice	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlIsWs	yes	yes, packed UInt8
 std/graphql.vyrn	gqlStripBang	yes	no, its effect set is alloc
@@ -2528,6 +2676,8 @@ std/graphql.vyrn	gqlSpyResolve	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlExecTestSchema	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlEmptyRootSchema	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlNullResolve	yes	no, its effect set is alloc
+std/graphql.vyrn	where$pGqlDocumentText	no, it calls `isGqlDocument`, which is not trap-free	no, its effect set is alloc
+std/graphql.vyrn	where$cGqlDocumentText	no, it calls `panic`	no, its effect set is alloc, trap
 std/hash.vyrn	fnv1a	yes	yes, emulated UInt64
 std/hash.vyrn	fnv1aStr	yes	no, its effect set is alloc
 std/hash.vyrn	sha1	yes	no, its effect set is alloc
@@ -2768,6 +2918,8 @@ std/i18n.vyrn	buildT	no, it keeps an index check	no, its effect set is alloc, ge
 std/i18n.vyrn	bodyText	no, it calls `readMessage`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/i18n.vyrn	argsText	no, it calls `readMessage`, which is not trap-free	no, its effect set is alloc, trap
 std/i18n.vyrn	conditionText	yes	no, its effect set is alloc, gen-only
+std/i18n.vyrn	where$pI18nMessageText	no, it calls `isI18nMessage`, which is not trap-free	no, its effect set is alloc
+std/i18n.vyrn	where$cI18nMessageText	no, it calls `panic`	no, its effect set is alloc, trap
 std/icons.vyrn	icons	no, it calls `iconsModule`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/icons.vyrn	iconsAt	no, it calls `iconsModule`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/icons.vyrn	cannotRead	yes	no, its effect set is alloc
@@ -3109,6 +3261,8 @@ std/regex.vyrn	countMatches	no, it calls `nextMatch`, which is not trap-free	no,
 std/regex.vyrn	replaceAll	no, it calls `nextMatch`, which is not trap-free	no, its effect set is alloc, module-state, trap
 std/regex.vyrn	draw	yes	yes, emulated Int64
 std/regex.vyrn	genPattern	no, it keeps an index check	no, its effect set is alloc
+std/regex.vyrn	where$pRegexPatternText	no, it calls `isRegexPattern`, which is not trap-free	no, its effect set is alloc
+std/regex.vyrn	where$cRegexPatternText	no, it calls `panic`	no, its effect set is alloc, trap
 std/rpc.editor.vyrn	vyrnSymbolMapsRpc	yes	no, the result is String, not an integer, Bool or a read array of one
 std/rpc.editor.vyrn	vyrnDevServerRpc	yes	no, the result is String, not an integer, Bool or a read array of one
 std/rpc.vyrn	capFirst	yes	no, its effect set is alloc
@@ -3469,6 +3623,12 @@ std/ui.editor.vyrn	uiChrome	yes	no, its effect set is alloc
 std/ui.editor.vyrn	vyrnChromeUi	yes	no, its effect set is alloc
 std/ui.editor.vyrn	uiPageView	no, it calls `vyxScriptView`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/ui.editor.vyrn	vyrnSourceUi	no, it calls `vyxStemOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/ui.editor.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+std/ui.editor.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+std/ui.editor.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+std/ui.editor.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+std/ui.editor.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+std/ui.editor.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 std/ui.vyrn	pageError	yes	no, its effect set is alloc
 std/ui.vyrn	notFound	yes	no, its effect set is alloc
 std/ui.vyrn	badRequest	yes	no, its effect set is alloc
@@ -3592,6 +3752,12 @@ std/ui.vyrn	pagesClient	no, it calls `uiRouter`, which is not trap-free	no, its 
 std/ui.vyrn	pagesClientThemed	no, it calls `uiRouter`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/ui.vyrn	uiHelperBodyText	no, it calls `uiDynHelperBody`, which is not trap-free	no, its effect set is alloc, gen-only
 std/ui.vyrn	uiTryFnText	no, it calls `uiEmitTryFn`, which is not trap-free	no, its effect set is alloc, gen-only
+std/ui.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+std/ui.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+std/ui.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+std/ui.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+std/ui.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+std/ui.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 std/ui.vyrn	query	yes	no, its effect set is alloc
 std/von.vyrn	copyVonArray	yes	no, its effect set is alloc
 std/von.vyrn	copyVonFields	yes	no, its effect set is alloc
@@ -3724,6 +3890,12 @@ std/vyx-hints.vyrn	vhAnchorCol	no, it calls `vyxAttrValue`, which is not trap-fr
 std/vyx-hints.vyrn	checkText	no, it calls `vhFindings`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx-hints.vyrn	checkOf	no, it calls `checkText`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx-hints.vyrn	fires	no, it calls `checkOf`, which is not trap-free	no, its effect set is alloc, trap
+std/vyx-hints.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+std/vyx-hints.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+std/vyx-hints.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+std/vyx-hints.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+std/vyx-hints.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+std/vyx-hints.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 std/vyx.editor.vyrn	vyxNoCursor	yes	no, its effect set is alloc
 std/vyx.editor.vyrn	vyxOffsetAt	yes	yes, emulated Int64
 std/vyx.editor.vyrn	vyxCharColAt	no, it keeps an index check	no, it is not trap-free
@@ -3746,6 +3918,12 @@ std/vyx.editor.vyrn	vyxStemOf	no, it calls `vyxSlice`, which is not trap-free	no
 std/vyx.editor.vyrn	vyxComponentView	no, it calls `vyxParseScriptAt`, which is not trap-free	no, its effect set is alloc, gen-only
 std/vyx.editor.vyrn	vyrnSourceVyx	no, it calls `vyxStemOf`, which is not trap-free	no, its effect set is alloc, fs-read, gen-only
 std/vyx.editor.vyrn	vyrnDefinitionVyx	no, it keeps an index check	no, its effect set is alloc, fs-read
+std/vyx.editor.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+std/vyx.editor.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+std/vyx.editor.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+std/vyx.editor.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+std/vyx.editor.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+std/vyx.editor.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxSlice	no, it keeps an index check	no, its effect set is alloc
 std/vyx.vyrn	vyxIsWs	yes	yes, packed UInt8
 std/vyx.vyrn	vyxIsIdent	yes	yes, packed UInt8
@@ -3940,3 +4118,9 @@ std/vyx.vyrn	vyxError	no, it calls `vyxErrorOf`, which is not trap-free	no, its 
 std/vyx.vyrn	vyxErrorThemed	no, it calls `vyxErrorOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/vyx.vyrn	vyxScriptBodyOf	no, it calls `vyxOutlineOf`, which is not trap-free	no, its effect set is alloc
 std/vyx.vyrn	vyxTemplateBodyOf	no, it calls `vyxOutlineOf`, which is not trap-free	no, its effect set is alloc
+std/vyx.vyrn	where$pVyxFileText	no, it calls `isVyxFile`, which is not trap-free	no, its effect set is alloc
+std/vyx.vyrn	where$cVyxFileText	no, it calls `panic`	no, its effect set is alloc, trap
+std/vyx.vyrn	where$pVyxOutlineText	no, it calls `isVyxOutline`, which is not trap-free	no, its effect set is alloc
+std/vyx.vyrn	where$cVyxOutlineText	no, it calls `panic`	no, its effect set is alloc, trap
+std/vyx.vyrn	where$pVyxPrefixText	no, it calls `isVyxPrefix`, which is not trap-free	no, its effect set is alloc
+std/vyx.vyrn	where$cVyxPrefixText	no, it calls `panic`	no, its effect set is alloc, trap
