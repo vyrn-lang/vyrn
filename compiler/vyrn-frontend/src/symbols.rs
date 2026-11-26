@@ -157,6 +157,9 @@ pub struct Analysis {
     pub proofs: Vec<(usize, String)>,
     /// The functions that wait, read from [`Judged::waits`]; a function's hover says so.
     pub waits: Vec<String>,
+    /// The root's island literals, read from [`Judged::islands`]: the editor
+    /// colours each with its grammar.
+    pub islands: Vec<crate::gen::IslandSite>,
     /// The hash of every module the document links ([`crate::ast::Program::module_hashes`]),
     /// which stamps a saved profile with the source it ran. Empty when the checks did not run.
     pub module_hashes: std::collections::BTreeMap<String, String>,
@@ -322,6 +325,8 @@ pub struct Judged {
     /// The linked name of each function whose effect set holds `waits`; empty for a program
     /// the kernel did not judge.
     pub waits: Vec<String>,
+    /// The root's island literals ([`crate::checker::Recorded::islands`]).
+    pub islands: Vec<crate::gen::IslandSite>,
 }
 
 /// Like [`analyze_linked`], but runs the pipeline `vyrn check` runs:
@@ -484,6 +489,7 @@ fn analyze_inner(
     let mut memory = HashMap::new();
     let mut cost = Vec::new();
     let mut waits = Vec::new();
+    let mut islands = Vec::new();
     let mut proofs = Vec::new();
     let locals = match &mut checked {
         Some(prog) => {
@@ -499,6 +505,7 @@ fn analyze_inner(
                     cost = judged.cost;
                     proofs = judged.proofs;
                     waits = judged.waits;
+                    islands = judged.islands;
                     (judged.diagnostics, judged.binders)
                 }
                 None => {
@@ -712,6 +719,7 @@ fn analyze_inner(
         cost,
         proofs,
         waits,
+        islands,
         module_hashes,
         symbols,
         tokens: tok_info,
@@ -815,6 +823,7 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         cost: Vec::new(),
         proofs: Vec::new(),
         waits: Vec::new(),
+        islands: Vec::new(),
         module_hashes: Default::default(),
         spellings: Default::default(),
     }

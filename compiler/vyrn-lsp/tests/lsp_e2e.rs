@@ -6829,6 +6829,55 @@ fn a_project_language_file_is_coloured_and_refused_through_its_grammar() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A string literal that crosses into an island type is coloured by its
+/// grammar, from the analysis: the keyword and the number of each ledger line,
+/// at their source columns after an escape.
+#[test]
+fn an_island_literal_is_coloured_by_its_grammar() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_island_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("island.errors")).unwrap();
+    let check = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vyrn-cli/tests/check");
+    for name in ["island.syntax", "island.errors/en.json"] {
+        std::fs::copy(check.join(name), dir.join(name)).unwrap();
+    }
+    let src = "import { syntax } from \"std/syntax\"
+import * as ledger from syntax(\"./island.syntax\")
+
+fn lines(text: ledger.LedgerText) -> Int64 {
+    return ledger.parsedLedger(text).lines.length
+}
+
+fn main() -> Int64 {
+    let a = lines(\"pay rent 5\")
+    return a + lines(\"pay\\trent 7\")
+}
+";
+    let path = dir.join("main.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", src);
+    let diags = read_diags_for(&mut client, "main.vyrn");
+    let none = diags.pointer("/params/diagnostics");
+    assert_eq!(none, Some(&serde_json::json!([])), "{diags}");
+    let toks = semantic_tokens_full(&mut client, &uri);
+    let of = |line: u32, ty: &str| -> Vec<(u32, u32)> {
+        (toks.iter())
+            .filter(|t| t.line == line && t.ty == ty)
+            .map(|t| (t.ch, t.len))
+            .collect()
+    };
+    let line = |n: usize| src.lines().nth(n).unwrap();
+    let col = |n: usize, s: &str| line(n).find(s).unwrap() as u32;
+    assert_eq!(of(8, "keyword"), vec![(col(8, "pay"), 3)], "{toks:?}");
+    assert_eq!(of(8, "number"), vec![(col(8, "5"), 1)], "{toks:?}");
+    assert_eq!(of(9, "number"), vec![(col(9, "7"), 1)], "{toks:?}");
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Every `vyrn.json` under a workspace folder is a module root: with the folder
 /// one level above `dsl/`, the server asks for `dsl/*.calc` at initialize, so a
 /// `.calc` file opened first is coloured and refused. A client whose
