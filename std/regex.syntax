@@ -34,26 +34,42 @@ RegexEscape = '\\' (regexQuote / regexShorthand / regexAnchor / regexSense / reg
 RegexDot = '.'
 RegexLiteral = regexChar
 
-// A class holds a member, so a `]` first is a refusal; a `-` before the `]` is a member.
-RegexClass = '[' negate:regexNegate? (&']' ^EmptyClass)? (!(']' / eof) items:RegexItem)*
-             (']' / ^ClassUnclosed)
-RegexItem = RegexItemEscape / RegexMember
-RegexItemEscape = '\\' (regexItemShorthand / regexItemAnchor / regexSense / regexForeign
-                        / ^ClassBackslash)
-RegexMember = regexChar hi:regexHi?
+// A class is a union of items, and `&&` (in both), `--` (in the left, not the right)
+// and `~~` (in one, not both) combine the unions beside them, left to right. A `[`
+// in a class opens a nested class and `[:` a POSIX class. A class holds a member, so a
+// `]` first is a refusal; a `-` before the `]` is a member.
+nest RegexClass = '[' negate:regexNegate? (&']' ^EmptyClass)?
+                  (sets:RegexSet / &eof ^ClassUnclosed / ^SetOperand)
+                  (ops:regexSetOp (sets:RegexSet / &eof ^ClassUnclosed / ^SetOperand))*
+                  (']' / ^ClassUnclosed)
+RegexSet = (!(']' / eof / '&&' / '--' / '~~') items:RegexItem)+
+RegexItem = RegexPosix / RegexClass / RegexMember
+RegexPosix = '[:' negate:regexPosixNegate? (name:regexPosixName (':]' / ^PosixName) / ^PosixName) regexNoRange?
+RegexMember = lo:RegexBound range:RegexRange?
+RegexRange = regexDash (regexRangeEnd / hi:RegexBound / ^ClassUnclosed)
+RegexBound = RegexItemEscape / RegexSingle
+RegexItemEscape = '\\' (regexItemShorthand / regexItemAnchor / regexSense / regexForeign / ^ClassBackslash)
+RegexSingle = regexChar
 
 regexChar = .
-regexHi = '-' !']' .
 regexNegate = '^'
+regexPosixNegate = '^'
+regexSetOp = '&&' / '--' / '~~'
+regexPosixName = 'alnum' / 'alpha' / 'blank' / 'cntrl' / 'digit' / 'graph' / 'lower' / 'print'
+                 / 'punct' / 'space' / 'upper' / 'xdigit'
 regexInt = [0-9]+
 regexOp = '*' (&'?' ^NonGreedy(op='*'))? / '+' (&'?' ^NonGreedy(op='+'))? / '?'
 
 // An escape is meaningful or refused. In and out of a class it is a shorthand, a
 // control, a code point or ASCII punctuation, which stands for itself.
 regexShorthand = [dDwWsShHNR]
-regexItemShorthand = [dDwWsShHb]
+regexItemShorthand = [dDwWsShH] regexNoRange?
+// A range runs between two characters: a shorthand or a class at either end is refused.
+regexDash = '-' !(']' / '-')
+regexNoRange = &('-' !(']' / '-')) ^ClassRange
+regexRangeEnd = &('[' / '\\' [dDwWsShH]) ^ClassRange
 regexItemAnchor = &[BAzZG1-9] ^ClassAnchor(c=.)
-regexSense = [tnrfvae] / 'c' ([A-Za-z] / ^ControlLetter) / regexCode / [!-/:-@[-`{-~]
+regexSense = [tnrfvaeb] / 'c' ([A-Za-z] / ^ControlLetter) / regexCode / [!-/:-@[-`{-~]
 regexCode = 'x' (&('00' / '{' '0'+ '}') ^NulEscape / hex hex / '{' hex+ '}' / ^HexDigits(e='x'))
             / 'u' (&('0000' / '{' '0'+ '}') ^NulEscape / hex hex hex hex / '{' hex+ '}'
                    / ^HexDigits(e='u'))

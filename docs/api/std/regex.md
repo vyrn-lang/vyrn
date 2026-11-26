@@ -22,9 +22,11 @@ backreferences or lookaround.
 Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
 backtracking engine answers `a`.
 
-Offsets are bytes, and every match starts and ends on a character boundary:
-`.` and a negated class match one whole UTF-8 character. A class that lists
-a non-ASCII character is a set of its bytes.
+A class is a set of code points: it unites its members, ranges, POSIX classes
+such as `[:alpha:]` and nested classes, and `&&`, `--` and `~~` intersect,
+subtract and take the symmetric difference of the unions beside them. A literal,
+a class and `.` each match one whole character, so offsets are bytes and every
+match starts and ends on a character boundary.
 
 ## Regex
 

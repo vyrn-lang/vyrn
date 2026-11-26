@@ -988,6 +988,18 @@ fn the_regex_refusals_are_the_catalogues_sentences() {
             "x10_a_property_class.vyrn",
             "a Unicode property class (`\\p{..}`) is not supported",
         ),
+        (
+            "x11_a_range_that_ends_in_a_shorthand.vyrn",
+            "a range (`-`) whose end is a shorthand or a class",
+        ),
+        (
+            "x12_a_posix_class_of_no_name.vyrn",
+            "a POSIX class (`[:..:]`) whose name is none of alnum, alpha, blank, cntrl, digit, graph, lower, print, punct, space, upper and xdigit",
+        ),
+        (
+            "x13_a_set_operation_with_one_side.vyrn",
+            "a class set operation (`&&`, `--` or `~~`) with no members on one side",
+        ),
     ];
     let dir = dir().join("regex");
     let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
@@ -996,7 +1008,10 @@ fn the_regex_refusals_are_the_catalogues_sentences() {
         .collect();
     on_disk.sort();
     let listed: Vec<String> = rows.iter().map(|r| r.0.to_string()).collect();
-    assert_eq!(on_disk, listed, "a program with no row, or a row with no program");
+    assert_eq!(
+        on_disk, listed,
+        "a program with no row, or a row with no program"
+    );
     for (file, says) in rows {
         let (ok, text) = refusal_in(dir.clone(), file, false);
         assert!(!ok, "{file}: accepted");

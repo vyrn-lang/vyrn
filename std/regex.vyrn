@@ -20,9 +20,11 @@
 /// Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
 /// backtracking engine answers `a`.
 ///
-/// Offsets are bytes, and every match starts and ends on a character boundary:
-/// `.` and a negated class match one whole UTF-8 character. A class that lists
-/// a non-ASCII character is a set of its bytes.
+/// A class is a set of code points: it unites its members, ranges, POSIX classes
+/// such as `[:alpha:]` and nested classes, and `&&`, `--` and `~~` intersect,
+/// subtract and take the symmetric difference of the unions beside them. A literal,
+/// a class and `.` each match one whole character, so offsets are bytes and every
+/// match starts and ends on a character boundary.
 
 import { substring } from "std/strings"
 import { catalogue } from "std/i18n"
@@ -35,8 +37,6 @@ import * as say from catalogue("./regex.errors")
 // `op`/`a`/`b`/`cls`.
 
 /// `op[i]` is a byte-class test: `cls[i]` is the class, `b[i]` the next pc.
-/// `a[i]` is the next pc after a UTF-8 lead byte (0xC0 and up), or -1 when a
-/// lead byte goes to `b[i]` too.
 let opClass = 0
 
 /// `op[i]` is a fork: `a[i]` and `b[i]` are both next pcs, tried as one set.
@@ -136,13 +136,16 @@ fn regexSay(row: rx.Row) -> String {
         TooDeep => say.tTooDeep__En(),
         AnchorPending(a) => say.tAnchorPending__En(a),
         ClassAnchor(c) => say.tClassAnchor__En(c),
+        ClassRange => say.tClassRange__En(),
         CodepointRange => say.tCodepointRange__En(),
         ControlLetter => say.tControlLetter__En(),
         HexDigits(e) => say.tHexDigits__En(e),
         NulEscape => say.tNulEscape__En(),
         OctalEscape => say.tOctalEscape__En(),
         PcreControl(form) => say.tPcreControl__En(form),
+        PosixName => say.tPosixName__En(),
         PropertyClass(form) => say.tPropertyClass__En(form),
+        SetOperand => say.tSetOperand__En(),
         UnknownEscape(c) => say.tUnknownEscape__En(c),
     }
 }
@@ -203,15 +206,6 @@ fn joinHoles(x: Array<Int64>, y: Array<Int64>) -> Array<Int64> {
     return out
 }
 
-/// Adds the bytes of `pattern` from `from` up to `to`.
-fn addBytes(k: modify ByteSet, pattern: String, from: Int64, to: Int64) {
-    let mut i = from
-    while i < to {
-        addByte(k, Int64(pattern[i]))
-        i = i + 1
-    }
-}
-
 /// Adds the bytes from `lo` to `hi`.
 fn addRange(k: modify ByteSet, lo: Int64, hi: Int64) {
     let mut x = lo
@@ -221,39 +215,304 @@ fn addRange(k: modify ByteSet, lo: Int64, hi: Int64) {
     }
 }
 
+// A set of code points is `[lo, hi, lo, hi, ..]`: sorted inclusive ranges of scalar
+// values, apart and not adjacent, so no range holds a surrogate. The compiler's
+// builder states the same sets, `regex::Chars`.
+
+/// The last scalar value.
+let maxChar = 1114111
+
+/// The set of the code points the pairs `ranges` hold, less the surrogates.
+fn charsOf(ranges: Array<Int64>) -> Array<Int64> {
+    // An insertion sort by `lo`: a class holds few ranges.
+    let mut v: Array<Int64> = []
+    let mut i = 0
+    while i + 1 < ranges.length {
+        let lo = ranges[i]
+        let hi = ranges[i + 1]
+        v.push(lo)
+        v.push(hi)
+        let mut j = v.length - 2
+        while j >= 2 && v[j - 2] > lo {
+            v[j] = v[j - 2]
+            v[j + 1] = v[j - 1]
+            j = j - 2
+        }
+        v[j] = lo
+        v[j + 1] = hi
+        i = i + 2
+    }
+    let mut merged: Array<Int64> = []
+    let mut k = 0
+    while k + 1 < v.length {
+        let n = merged.length
+        if n >= 2 && v[k] <= merged[n - 1] + 1 {
+            if v[k + 1] > merged[n - 1] {
+                merged[n - 1] = v[k + 1]
+            }
+        } else {
+            merged.push(v[k])
+            merged.push(v[k + 1])
+        }
+        k = k + 2
+    }
+    let mut out: Array<Int64> = []
+    let mut m = 0
+    while m + 1 < merged.length {
+        let lo = merged[m]
+        let hi = merged[m + 1]
+        let below = if hi < 55295 { hi } else { 55295 }
+        if lo <= below {
+            out.push(lo)
+            out.push(below)
+        }
+        let above = if lo > 57344 { lo } else { 57344 }
+        if above <= hi {
+            out.push(above)
+            out.push(hi)
+        }
+        m = m + 2
+    }
+    return out
+}
+
+fn charsNot(set: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut next = 0
+    let mut i = 0
+    while i + 1 < set.length {
+        if set[i] > next {
+            out.push(next)
+            out.push(set[i] - 1)
+        }
+        next = set[i + 1] + 1
+        i = i + 2
+    }
+    if next <= maxChar {
+        out.push(next)
+        out.push(maxChar)
+    }
+    return charsOf(out)
+}
+
+fn charsOr(x: Array<Int64>, y: Array<Int64>) -> Array<Int64> {
+    return charsOf(joinHoles(x, y))
+}
+
+fn charsAnd(x: Array<Int64>, y: Array<Int64>) -> Array<Int64> {
+    return charsNot(charsOr(charsNot(x), charsNot(y)))
+}
+
+fn charsLess(x: Array<Int64>, y: Array<Int64>) -> Array<Int64> {
+    return charsAnd(x, charsNot(y))
+}
+
+/// The byte ranges of the members of `set` from 0x80 up, as `[lo, hi, ..]`, one
+/// pair per byte: a sequence for each run of code points that encode with one prefix
+/// shape, split as Rust regex-syntax's `Utf8Sequences` splits them.
+fn utf8Seqs(set: Array<Int64>) -> Array<Array<Int64>> {
+    let mut out: Array<Array<Int64>> = []
+    // Pairs `s, e` still to split, the next on top.
+    let mut todo: Array<Int64> = []
+    let mut i = set.length - 2
+    while i >= 0 {
+        if set[i + 1] >= 128 {
+            todo.push(if set[i] < 128 { 128 } else { set[i] })
+            todo.push(set[i + 1])
+        }
+        i = i - 2
+    }
+    // Each split leaves a shorter `s, e` and pushes the rest, so the walk ends.
+    while todo.length >= 2 {
+        let e = todo[todo.length - 1]
+        let s = todo[todo.length - 2]
+        todo.pop()
+        todo.pop()
+        let mut mid = 0 - 1
+        if s <= 2047 && 2047 < e {
+            mid = 2047
+        } else if s <= 65535 && 65535 < e {
+            mid = 65535
+        }
+        let mut k = 1
+        while mid < 0 && k < 4 {
+            let m = (1 << (6 * k)) - 1
+            if s - (s & m) != e - (e & m) {
+                if (s & m) != 0 {
+                    mid = s | m
+                } else if (e & m) != m {
+                    mid = e - (e & m) - 1
+                }
+            }
+            k = k + 1
+        }
+        if mid >= 0 {
+            todo.push(mid + 1)
+            todo.push(e)
+            todo.push(s)
+            todo.push(mid)
+        } else {
+            let a = utf8(s)
+            let b = utf8(e)
+            let mut seq: Array<Int64> = []
+            let mut j = 0
+            while j < a.length && j < b.length {
+                seq.push(a[j])
+                seq.push(b[j])
+                j = j + 1
+            }
+            out.push(seq)
+        }
+    }
+    return out
+}
+
+/// The terms of `set`'s fragment, as the compiler's builder counts them: one for
+/// its ASCII class, one per byte range of each sequence from 0x80 up.
+fn charsSize(set: Array<Int64>) -> Int64 {
+    let mut n = if set.length == 0 || set[0] < 128 { 1 } else { 0 }
+    let seqs = utf8Seqs(set)
+    let mut i = 0
+    while i < seqs.length {
+        n = n + seqs[i].length / 2
+        i = i + 1
+    }
+    return n
+}
+
+/// The fragment of one character of `set`: a class test of its ASCII members, then
+/// for each sequence a test per byte, each an alternative.
+fn fragChars(bd: modify Builder, set: Array<Int64>) -> Frag {
+    let mut f = Frag { start: 0 - 1, holes: [] }
+    if set.length == 0 || set[0] < 128 {
+        let mut k = noBytes()
+        let mut i = 0
+        while i + 1 < set.length && set[i] < 128 {
+            addRange(k, set[i], if set[i + 1] < 127 { set[i + 1] } else { 127 })
+            i = i + 2
+        }
+        f = fragSet(bd, k)
+    }
+    let seqs = utf8Seqs(set)
+    let mut s = 0
+    while s < seqs.length {
+        let mut g = fragRange(bd, seqs[s][0], seqs[s][1])
+        let mut j = 2
+        while j + 1 < seqs[s].length {
+            let h = fragRange(bd, seqs[s][j], seqs[s][j + 1])
+            patch(bd, g.holes, h.start)
+            g = Frag { start: g.start, holes: consume h.holes }
+            j = j + 2
+        }
+        if f.start < 0 {
+            f = g
+        } else {
+            let sp = emit(bd, opSplit, f.start, g.start, noBytes())
+            f = Frag { start: sp, holes: joinHoles(f.holes, g.holes) }
+        }
+        s = s + 1
+    }
+    return f
+}
+
 /// Whether the escape `\c` is a shorthand: `\d`, `\w`, `\s`, `\h`, their capitals,
-/// which negate, and `\N`, any byte but `\n`.
+/// which negate, and `\N`, any character but `\n`.
 fn isShorthand(c: UInt8) -> Bool {
     return c == 'd' || c == 'D' || c == 'w' || c == 'W' || c == 's' || c == 'S' || c == 'h' || c == 'H' || c == 'N'
 }
 
-/// The bytes the shorthand `\c` stands for.
-fn shorthandBytes(c: UInt8) -> ByteSet {
-    let mut k = noBytes()
-    if c == 'd' || c == 'D' || c == 'w' || c == 'W' {
-        addRange(k, '0', '9')
+/// The set of the shorthand `\c`.
+fn shorthandChars(c: UInt8) -> Array<Int64> {
+    if c >= 'A' && c <= 'Z' && c != 'N' {
+        return charsNot(shorthandChars(c + 32))
     }
-    if c == 'w' || c == 'W' {
-        addRange(k, 'a', 'z')
-        addRange(k, 'A', 'Z')
-        addByte(k, '_')
+    if c == 'd' {
+        return [48, 57]
     }
-    if c == 's' || c == 'S' {
-        addRange(k, 9, 13)
+    if c == 'w' {
+        return [48, 57, 65, 90, 95, 95, 97, 122]
     }
-    if c == 's' || c == 'S' || c == 'h' || c == 'H' {
-        addByte(k, ' ')
+    if c == 's' {
+        return [9, 13, 32, 32]
     }
-    if c == 'h' || c == 'H' {
-        addByte(k, 9)
+    if c == 'h' {
+        return [9, 9, 32, 32]
     }
-    if c == 'N' {
-        addByte(k, 10)
+    return charsNot([10, 10])
+}
+
+/// Whether `pattern` holds `word` at `at`.
+fn holdsAt(pattern: String, at: Int64, word: String) -> Bool {
+    let mut i = 0
+    while i < word.byteLength {
+        if at + i >= pattern.byteLength || pattern[at + i] != word[i] {
+            return false
+        }
+        i = i + 1
     }
-    if c >= 'A' && c <= 'Z' {
-        return ByteSet { w0: ~k.w0, w1: ~k.w1, w2: ~k.w2, w3: ~k.w3 }
+    return true
+}
+
+/// The set of the POSIX class named at `at`, a name the grammar admits.
+fn posixNamed(pattern: String, at: Int64) -> Array<Int64> {
+    if holdsAt(pattern, at, "alnum") {
+        return [48, 57, 65, 90, 97, 122]
     }
-    return k
+    if holdsAt(pattern, at, "alpha") {
+        return [65, 90, 97, 122]
+    }
+    if holdsAt(pattern, at, "blank") {
+        return [9, 9, 32, 32]
+    }
+    if holdsAt(pattern, at, "cntrl") {
+        return [0, 31, 127, 127]
+    }
+    if holdsAt(pattern, at, "digit") {
+        return [48, 57]
+    }
+    if holdsAt(pattern, at, "graph") {
+        return [33, 126]
+    }
+    if holdsAt(pattern, at, "lower") {
+        return [97, 122]
+    }
+    if holdsAt(pattern, at, "print") {
+        return [32, 126]
+    }
+    if holdsAt(pattern, at, "punct") {
+        return [33, 47, 58, 64, 91, 96, 123, 126]
+    }
+    if holdsAt(pattern, at, "space") {
+        return [9, 13, 32, 32]
+    }
+    if holdsAt(pattern, at, "upper") {
+        return [65, 90]
+    }
+    return [48, 57, 65, 70, 97, 102]
+}
+
+/// The set of the POSIX class at `start`, `[:name:]` or `[:^name:]`.
+fn posixChars(pattern: String, start: Int64) -> Array<Int64> {
+    if pattern[start + 2] == '^' {
+        return charsNot(posixNamed(pattern, start + 3))
+    }
+    return posixNamed(pattern, start + 2)
+}
+
+/// The code point of the UTF-8 text of `pattern` at `at`.
+fn charAt(pattern: String, at: Int64) -> Int64 {
+    let b = Int64(pattern[at])
+    if b < 128 {
+        return b
+    }
+    let n = if b >= 240 { 3 } else if b >= 224 { 2 } else { 1 }
+    let mut c = b & (63 >> n)
+    let mut i = 1
+    while i <= n {
+        c = (c << 6) | (Int64(pattern[at + i]) & 63)
+        i = i + 1
+    }
+    return c
 }
 
 /// The code point of the escape from `from`, the byte after its backslash, up to
@@ -279,7 +538,7 @@ fn codeOf(pattern: String, from: Int64, to: Int64) -> Int64 {
     while i < end {
         let d = Int64(pattern[i])
         v = v * radix + if d <= '9' { d - '0' } else if d <= 'F' { d - 'A' + 10 } else { d - 'a' + 10 }
-        if v > 1114111 {
+        if v > maxChar {
             return 0 - 1
         }
         i = i + 1
@@ -321,89 +580,105 @@ fn quoteEnd(pattern: String, start: Int64, end: Int64) -> Int64 {
     return end
 }
 
-/// The set a class states. An escape stands for its bytes, and a member's range runs
-/// between the two bytes that touch its `-`.
-fn classBytes(bd: modify Builder, pattern: String, c: rx.RegexClass) -> ByteSet {
-    let mut k = noBytes()
+/// The offset of the last character of the text of `pattern` before `end`.
+fn lastChar(pattern: String, end: Int64) -> Int64 {
+    let mut i = end - 1
+    while i > 0 && pattern[i] >= 128 && pattern[i] < 192 {
+        i = i - 1
+    }
+    return i
+}
+
+/// The code point of the class bound `b`.
+fn boundChar(bd: modify Builder, pattern: String, b: rx.RegexBound) -> Int64 {
+    return match b {
+        RegexBoundRegexItemEscape(e) => escapeChar(bd, pattern, e.start + 1, e.end),
+        RegexBoundRegexSingle(s) => charAt(pattern, s.start),
+    }
+}
+
+/// The set of the class item `item`. A range runs between the code points of its
+/// bounds.
+fn itemChars(bd: modify Builder, pattern: String, item: rx.RegexItem) -> Array<Int64> {
+    return match item {
+        RegexItemRegexPosix(p) => posixChars(pattern, p.start),
+        RegexItemRegexClass(c) => classChars(bd, pattern, c),
+        RegexItemRegexMember(m) => memberChars(bd, pattern, m),
+    }
+}
+
+fn memberChars(bd: modify Builder, pattern: String, m: rx.RegexMember) -> Array<Int64> {
+    match m.lo {
+        RegexBoundRegexItemEscape(e) => {
+            if isShorthand(pattern[e.start + 1]) {
+                return shorthandChars(pattern[e.start + 1])
+            }
+        }
+        RegexBoundRegexSingle(s) => {}
+    }
+    let lo = boundChar(bd, pattern, m.lo)
+    if let Some(r) = m.range {
+        if let Some(h) = r.hi {
+            let hi = boundChar(bd, pattern, h)
+            if hi < lo {
+                refuse(bd, Backwards)
+            }
+            return charsOf([lo, hi])
+        }
+    }
+    return [lo, lo]
+}
+
+/// The set a class states: each union of items, combined left to right by the
+/// operators between them, and negated after.
+fn classChars(bd: modify Builder, pattern: String, c: rx.RegexClass) -> Array<Int64> {
+    let mut acc: Array<Int64> = []
     let mut i = 0
-    while i < c.items.length {
-        match c.items[i] {
-            RegexItemRegexItemEscape(e) => {
-                let s = pattern[e.start + 1]
-                if isShorthand(s) {
-                    let x = shorthandBytes(s)
-                    k = ByteSet { w0: k.w0 | x.w0, w1: k.w1 | x.w1, w2: k.w2 | x.w2, w3: k.w3 | x.w3 }
-                } else {
-                    let bs = utf8(escapeChar(bd, pattern, e.start + 1, e.end))
-                    let mut j = 0
-                    while j < bs.length {
-                        addByte(k, bs[j])
-                        j = j + 1
-                    }
-                }
-            }
-            RegexItemRegexMember(m) => {
-                if let Some(h) = m.hi {
-                    addBytes(k, pattern, m.start, h.start - 1)
-                    let lo = Int64(pattern[h.start - 1])
-                    let hi = Int64(pattern[h.start + 1])
-                    if hi < lo {
-                        refuse(bd, Backwards)
-                    }
-                    addRange(k, lo, hi)
-                    addBytes(k, pattern, h.start + 2, h.end)
-                } else {
-                    addBytes(k, pattern, m.start, m.end)
-                }
-            }
+    while i < c.sets.length {
+        let mut u: Array<Int64> = []
+        let mut j = 0
+        while j < c.sets[i].items.length {
+            u = charsOr(u, itemChars(bd, pattern, c.sets[i].items[j]))
+            j = j + 1
+        }
+        if i == 0 {
+            acc = u
+        } else {
+            let op = c.ops[i - 1].text
+            acc = if op == "&&" { charsAnd(acc, u) } else if op == "--" { charsLess(acc, u) } else { charsOr(charsLess(acc, u), charsLess(u, acc)) }
         }
         i = i + 1
     }
     if let Some(n) = c.negate {
-        return ByteSet { w0: ~k.w0, w1: ~k.w1, w2: ~k.w2, w3: ~k.w3 }
+        return charsNot(acc)
     }
-    return k
+    return acc
+}
+
+/// The set of `.`: every character but `\n` and `\r`.
+fn dotChars() -> Array<Int64> {
+    return charsNot([10, 10, 13, 13])
 }
 
 /// One class test, as a fragment.
 fn fragSet(bd: modify Builder, k: ByteSet) -> Frag {
-    let all: UInt64 = 18446744073709551615
     let pc = emit(bd, opClass, 0 - 1, 0, k)
-    // `.` and a negated class hold every byte from 0x80 up, and they match a
-    // whole character: a byte of the class below 0x80, or a lead byte and then
-    // every continuation byte after it. A `String` is valid UTF-8, so the
-    // longest match takes exactly the character's bytes. A byte alone would
-    // let a match end inside a character, and cutting there traps.
-    if k.w2 != all || k.w3 != all {
-        return Frag { start: pc, holes: [pc * 2 + 1] }
-    }
-    let mut lead = ByteSet { w0: k.w0, w1: k.w1, w2: 0, w3: 0 }
-    let mut x = 194
-    while x <= 244 {
-        addByte(lead, x)
-        x = x + 1
-    }
-    bd.cls[pc] = lead
-    let cont = emit(bd, opClass, 0 - 1, 0, ByteSet { w0: 0, w1: 0, w2: all, w3: 0 })
-    let sp = emit(bd, opSplit, cont, 0, noBytes())
-    bd.a[pc] = cont
-    bd.b[cont] = sp
-    return Frag { start: pc, holes: [pc * 2 + 1, sp * 2 + 1] }
+    return Frag { start: pc, holes: [pc * 2 + 1] }
 }
 
-/// The fragment of byte `c`.
-fn fragByte(bd: modify Builder, c: Int64) -> Frag {
+/// The fragment of the bytes from `lo` to `hi`.
+fn fragRange(bd: modify Builder, lo: Int64, hi: Int64) -> Frag {
     let mut k = noBytes()
-    addByte(k, c)
+    addRange(k, lo, hi)
     return fragSet(bd, k)
 }
 
 /// The fragment of the bytes `bs`, one after another.
 fn fragBytes(bd: modify Builder, bs: Array<Int64>) -> Frag {
-    let mut f = fragByte(bd, bs[0])
+    let mut f = fragRange(bd, bs[0], bs[0])
     let mut i = 1
     while i < bs.length {
-        let g = fragByte(bd, bs[i])
+        let g = fragRange(bd, bs[i], bs[i])
         patch(bd, f.holes, g.start)
         f = Frag { start: f.start, holes: consume g.holes }
         i = i + 1
@@ -412,38 +687,40 @@ fn fragBytes(bd: modify Builder, bs: Array<Int64>) -> Frag {
 }
 
 /// The term of the escape from `start`, its backslash, up to `end`. A quote's last
-/// byte is its term, as a literal's is, and `fragPiece` emits the bytes before it.
+/// character is its term, as in PCRE, and `fragPiece` emits the bytes before it.
 /// `\R` is a line break: CR LF, or one of LF, VT, FF and CR.
 fn fragEscape(bd: modify Builder, pattern: String, start: Int64, end: Int64) -> Frag {
     let c = pattern[start + 1]
     if c == 'Q' {
         let to = quoteEnd(pattern, start, end)
-        return if to == start + 2 { fragEmpty(bd) } else { fragByte(bd, Int64(pattern[to - 1])) }
+        return if to == start + 2 { fragEmpty(bd) } else { fragBytes(bd, utf8(charAt(pattern, lastChar(pattern, to)))) }
     }
     if c == 'R' {
         let crlf = fragBytes(bd, [13, 10])
-        let mut k = noBytes()
-        addRange(k, 10, 13)
-        let one = fragSet(bd, k)
+        let one = fragChars(bd, [10, 13])
         let sp = emit(bd, opSplit, crlf.start, one.start, noBytes())
         return Frag { start: sp, holes: joinHoles(crlf.holes, one.holes) }
     }
     if isShorthand(c) {
-        return fragSet(bd, shorthandBytes(c))
+        return fragChars(bd, shorthandChars(c))
     }
     return fragBytes(bd, utf8(escapeChar(bd, pattern, start + 1, end)))
 }
 
 /// The terms of the escape from `start` up to `end`, as the compiler's builder
-/// counts them: a set or an empty quote is one, `\R` three, a code point a term per
-/// byte. A quote's other bytes are `pieceSize`'s.
+/// counts them: a set's, a byte each for a code point or a quote's last character,
+/// three for `\R` and one for an empty quote.
 fn escapeSize(pattern: String, start: Int64, end: Int64) -> Int64 {
     let c = pattern[start + 1]
     if c == 'R' {
         return 3
     }
-    if c == 'Q' || isShorthand(c) {
-        return 1
+    if c == 'Q' {
+        let to = quoteEnd(pattern, start, end)
+        return if to == start + 2 { 1 } else { to - lastChar(pattern, to) }
+    }
+    if isShorthand(c) {
+        return charsSize(shorthandChars(c))
     }
     let code = codeOf(pattern, start + 1, end)
     return utf8(if code < 0 { 0 } else { code }).length
@@ -467,27 +744,24 @@ fn fragOp(bd: modify Builder, f: consume Frag, op: String) -> Frag {
     return Frag { start: if op == "*" { sp } else { f.start }, holes: [sp * 2 + 1] }
 }
 
-/// The term of `atom` a repeat applies to: the whole atom, or the last byte of a
-/// character outside ASCII, whose other bytes `fragPiece` emits before it.
+/// The term of `atom` a repeat applies to: the whole atom, or a quote's last
+/// character, whose other bytes `fragPiece` emits before it.
 fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
     match atom {
         RegexAtomRegexGroup(g) => {
             return fragAlt(bd, pattern, g.alt)
         }
         RegexAtomRegexClass(c) => {
-            return fragSet(bd, classBytes(bd, pattern, c))
+            return fragChars(bd, classChars(bd, pattern, c))
         }
         RegexAtomRegexEscape(e) => {
             return fragEscape(bd, pattern, e.start, e.end)
         }
         RegexAtomRegexDot(d) => {
-            // Every byte but `\n` and `\r`.
-            let all: UInt64 = 18446744073709551615
-            let k = ByteSet { w0: ~((UInt64(1) << 10) | (UInt64(1) << 13)), w1: all, w2: all, w3: all }
-            return fragSet(bd, k)
+            return fragChars(bd, dotChars())
         }
         RegexAtomRegexLiteral(l) => {
-            return fragByte(bd, Int64(pattern[l.end - 1]))
+            return fragBytes(bd, utf8(charAt(pattern, l.start)))
         }
     }
 }
@@ -539,24 +813,22 @@ fn copiesOf(n: Bounds) -> Int64 {
     return if n.open { n.min + 1 } else { n.max }
 }
 
-/// The terms of `piece` once its counts are expanded: a byte, a class, a dot and
-/// the empty string are one term each, as the compiler's builder counts them.
-fn pieceSize(pattern: String, piece: rx.RegexPiece) -> Int64 {
-    let term = termSize(pattern, piece.atom)
+/// The terms of `piece` once its counts are expanded, as the compiler's builder
+/// counts them: a byte range and the empty string are one term each.
+fn pieceSize(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Int64 {
+    let term = termSize(bd, pattern, piece.atom)
     let mut prefix = 0
     match piece.atom {
         RegexAtomRegexGroup(g) => {}
         RegexAtomRegexClass(c) => {}
         RegexAtomRegexEscape(e) => {
-            if pattern[e.start + 1] == 'Q' {
-                let n = quoteEnd(pattern, e.start, e.end) - e.start - 2
-                prefix = if n > 0 { n - 1 } else { 0 }
+            let q = quoteEnd(pattern, e.start, e.end)
+            if pattern[e.start + 1] == 'Q' && q > e.start + 2 {
+                prefix = lastChar(pattern, q) - e.start - 2
             }
         }
         RegexAtomRegexDot(d) => {}
-        RegexAtomRegexLiteral(l) => {
-            prefix = l.end - l.start - 1
-        }
+        RegexAtomRegexLiteral(l) => {}
     }
     if let Some(c) = piece.count {
         let copies = copiesOf(boundsOf(pattern, c))
@@ -566,7 +838,7 @@ fn pieceSize(pattern: String, piece: rx.RegexPiece) -> Int64 {
 }
 
 /// The terms of `alt` once its counts are expanded.
-fn altSize(pattern: String, alt: rx.RegexAlt) -> Int64 {
+fn altSize(bd: modify Builder, pattern: String, alt: rx.RegexAlt) -> Int64 {
     let mut n = 0
     let mut i = 0
     while i < alt.branches.length {
@@ -575,7 +847,7 @@ fn altSize(pattern: String, alt: rx.RegexAlt) -> Int64 {
         }
         let mut j = 0
         while j < alt.branches[i].pieces.length {
-            n = n + pieceSize(pattern, alt.branches[i].pieces[j])
+            n = n + pieceSize(bd, pattern, alt.branches[i].pieces[j])
             j = j + 1
         }
         i = i + 1
@@ -583,14 +855,15 @@ fn altSize(pattern: String, alt: rx.RegexAlt) -> Int64 {
     return n
 }
 
-/// The terms of `atom`, the term a repeat applies to.
-fn termSize(pattern: String, atom: rx.RegexAtom) -> Int64 {
+/// The terms of `atom`, the term a repeat applies to. A refusal it finds is one the
+/// walk would raise building the atom.
+fn termSize(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Int64 {
     return match atom {
-        RegexAtomRegexGroup(g) => altSize(pattern, g.alt),
-        RegexAtomRegexClass(c) => 1,
+        RegexAtomRegexGroup(g) => altSize(bd, pattern, g.alt),
+        RegexAtomRegexClass(c) => charsSize(classChars(bd, pattern, c)),
         RegexAtomRegexEscape(e) => escapeSize(pattern, e.start, e.end),
-        RegexAtomRegexDot(d) => 1,
-        RegexAtomRegexLiteral(l) => 1,
+        RegexAtomRegexDot(d) => charsSize(dotChars()),
+        RegexAtomRegexLiteral(l) => l.end - l.start,
     }
 }
 
@@ -620,7 +893,7 @@ fn fragRepeat(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag
 /// one.
 fn fragCount(bd: modify Builder, pattern: String, atom: rx.RegexAtom, n: Bounds) -> Frag {
     let copies = copiesOf(n)
-    let cost = copies * termSize(pattern, atom)
+    let cost = copies * termSize(bd, pattern, atom)
     if n.min > 255 || n.max > 255 {
         refuse(bd, CountLarge)
     } else if n.max < n.min {
@@ -644,7 +917,8 @@ fn fragCount(bd: modify Builder, pattern: String, atom: rx.RegexAtom, n: Bounds)
 }
 
 fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag {
-    // A character outside ASCII stands for its bytes, and a repeat takes the last.
+    // A quote's characters before its last are terms of their own: a repeat takes
+    // the last.
     let mut from = 0
     let mut to = 0
     match piece.atom {
@@ -654,19 +928,16 @@ fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag 
             let q = quoteEnd(pattern, e.start, e.end)
             if pattern[e.start + 1] == 'Q' && q > e.start + 2 {
                 from = e.start + 2
-                to = q - 1
+                to = lastChar(pattern, q)
             }
         }
         RegexAtomRegexDot(d) => {}
-        RegexAtomRegexLiteral(l) => {
-            from = l.start
-            to = l.end - 1
-        }
+        RegexAtomRegexLiteral(l) => {}
     }
     let mut f = fragRepeat(bd, pattern, piece)
     let mut i = to - 1
     while i >= from {
-        let g = fragByte(bd, Int64(pattern[i]))
+        let g = fragRange(bd, Int64(pattern[i]), Int64(pattern[i]))
         patch(bd, g.holes, f.start)
         f = Frag { start: g.start, holes: consume f.holes }
         i = i - 1
@@ -703,20 +974,25 @@ fn fragAlt(bd: modify Builder, pattern: String, alt: rx.RegexAlt) -> Frag {
 }
 
 /// Each byte's class: a class is a run of bytes that no instruction's class cuts.
-///
-/// A lead-byte edge needs no cut of its own at 192: its class holds only bytes
-/// below 0x80 and 194 to 244, so every run it holds lies on one side of 192.
+/// Byte `c` is cut when it and `c - 1` differ in some class, a bit of `s ^ (s << 1)`
+/// with the shift carried across the words.
 fn byteClasses(bd: Builder) -> Array<UInt8> {
+    let mut cuts = noBytes()
+    let mut pc = 0
+    while pc < bd.cls.length {
+        let s = bd.cls[pc]
+        cuts = ByteSet {
+            w0: cuts.w0 | (s.w0 ^ (s.w0 << 1)),
+            w1: cuts.w1 | (s.w1 ^ ((s.w1 << 1) | (s.w0 >> 63))),
+            w2: cuts.w2 | (s.w2 ^ ((s.w2 << 1) | (s.w1 >> 63))),
+            w3: cuts.w3 | (s.w3 ^ ((s.w3 << 1) | (s.w2 >> 63))),
+        }
+        pc = pc + 1
+    }
     let mut of: Array<UInt8> = [0]
     let mut c = 1
     while c < 256 {
-        let mut cut = false
-        let mut pc = 0
-        while pc < bd.cls.length && !cut {
-            cut = hasByte(bd.cls[pc], c) != hasByte(bd.cls[pc], c - 1)
-            pc = pc + 1
-        }
-        of.push(if cut { of[c - 1] + 1 } else { of[c - 1] })
+        of.push(if hasByte(cuts, c) { of[c - 1] + 1 } else { of[c - 1] })
         c = c + 1
     }
     return of
@@ -763,7 +1039,7 @@ fn follow(re: Regex, pc: Int64, c: Int64) -> Int64 {
     if re.op[pc] != opClass || !hasByte(re.cls[pc], c) {
         return 0 - 1
     }
-    return if c >= 192 && re.a[pc] >= 0 { re.a[pc] } else { re.b[pc] }
+    return re.b[pc]
 }
 
 /// Adds `pc` and everything reachable from it without consuming, marking each
@@ -1135,6 +1411,29 @@ test "an escape with no meaning is refused" {
         Ok(r) => panic("a backreference in a class compiled"),
         Err(w) => assert(w == "an anchor or a backreference (`\\1`) cannot stand inside a character class"),
     }
+}
+
+test "a class is a set of code points" {
+    let vowels = match compile("[a-z&&[^aeiou]]+") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(vowels, "street", "-"), "-ee-")
+    let posix = match compile("[[:upper:][:digit:]]+") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(posix, "aB1cD"), 2)
+    let wide = match compile("[\\u{e0}-\\u{ff}]") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(wide, "café€", "_"), "caf_€")
+    let rest = match compile("[\\w--\\d]+|[a-c~~b-d]") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(rest, "ab12d", "."), ".12.")
 }
 
 test "the patterns regex-redux counts" {
