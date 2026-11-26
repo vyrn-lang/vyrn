@@ -1,0 +1,8 @@
+import { describe, exports, annotates, clashes, plain, traps } from "./annotation_gens_lib"
+
+fn clash() -> Int64 {
+    return 2
+}
+
+@clashes
+export type T = { a: Int64 }

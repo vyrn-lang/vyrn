@@ -1,0 +1,37 @@
+import { Opt } from "./annotations_lib"
+
+/// Writes `describe<Name>(v) -> String`: the tag, the fields and the annotations.
+export gen fn describe(t: TypeCode, iface: ModuleInterface, tag: String) -> Code {
+    let f = name("describe" + t.info.name)
+    let ty = name(t.info.name)
+    let mut text = tag + " " + t.info.name + ":"
+    for m in t.info.shape[0].members {
+        text = text + " " + m.name
+    }
+    for a in t.info.annotations {
+        text = text + " @" + a.name + "(" + a.member + ")"
+    }
+    text = text + " with \{iface.types.length} more"
+    return vyrn"fn \{f}(v: \{ty}) -> String { return \{text} }"
+}
+
+export gen fn exports(t: TypeCode, iface: ModuleInterface) -> Code {
+    return vyrn"export fn wrote() -> Int64 { return 1 }"
+}
+
+export gen fn annotates(t: TypeCode, iface: ModuleInterface) -> Code {
+    return vyrn"@Opt { short: \"q\", hidden: false, rank: 0 } type Again = { a: Int64 }"
+}
+
+export gen fn clashes(t: TypeCode, iface: ModuleInterface) -> Code {
+    return vyrn"fn clash() -> Int64 { return 1 }"
+}
+
+export gen fn plain(n: Int64) -> Code {
+    return vyrn"fn p() -> Int64 { return \{n} }"
+}
+
+export gen fn traps(t: TypeCode, iface: ModuleInterface) -> Code {
+    panic("traps writes nothing")
+    return vyrn""
+}

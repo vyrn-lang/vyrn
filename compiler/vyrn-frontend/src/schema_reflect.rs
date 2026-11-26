@@ -171,7 +171,11 @@ pub fn module_lit(
         let spec = specifiers.get(&t.module).map(|s| s.as_str()).unwrap_or("");
         let shape = shape_nodes(t, &types);
         let anns = (t.annotations.iter())
-            .map(|a| annotation_lit(t, a, &types, specifiers, &program.spellings, origins))
+            .map(|a| {
+                let name = program.spellings.decls.get(a.name());
+                let name = name.map_or(a.name(), |(written, _)| written);
+                annotation_lit(t, a, types.get(a.name()), name, specifiers, origins)
+            })
             .collect();
         (type_info_lit(t, spec, &shape, anns, &types, origins), shape)
     };
@@ -405,26 +409,34 @@ fn type_info_lit(
     )
 }
 
-/// Builds the `AnnotationInfo` literal for annotation `a` on `t`: its
-/// declaration as written, the specifier of the module declaring it, as
-/// `TypeInfo.module` spells one, and each field the checker found constant.
+/// Builds the `AnnotationInfo` literal for annotation `a` on `t`, which
+/// `name` spells: the specifier of the module declaring its record type
+/// `decl` or its `gen fn`, as `TypeInfo.module` spells one, and each field or
+/// argument that is a constant, an argument named by its parameter.
 fn annotation_lit(
     t: &TypeDecl,
     a: &Annotation,
-    types: &HashMap<String, TypeDecl>,
+    decl: Option<&TypeDecl>,
+    name: &str,
     specifiers: &HashMap<Option<String>, String>,
-    spellings: &Spellings,
     origins: &Origins,
 ) -> Expr {
-    let linked = a.name();
-    let name = spellings.decls.get(linked).map_or(linked, |(written, _)| written);
-    let decl = types.get(linked);
-    let module = decl.and_then(|d| specifiers.get(&d.module)).cloned();
-    let written: &[(String, Expr)] = match &a.expr {
-        Expr::StructLit { fields, .. } => fields,
-        _ => &[],
+    let home = match &a.generator {
+        Some(g) => Some(Some(g.module.clone())),
+        None => decl.map(|d| d.module.clone()),
     };
-    let fields = written.iter().filter_map(|(field, e)| {
+    let module = home.and_then(|m| specifiers.get(&m)).cloned();
+    let written: Vec<(&str, &Expr)> = match (&a.expr, &a.generator) {
+        (Expr::StructLit { fields, .. }, _) => {
+            fields.iter().map(|(f, e)| (f.as_str(), e)).collect()
+        }
+        (Expr::Call { args, form, .. }, Some(g)) => {
+            let args = &args[usize::from(*form == CallForm::Method)..];
+            g.params.iter().map(String::as_str).zip(args).collect()
+        }
+        _ => Vec::new(),
+    };
+    let fields = written.into_iter().filter_map(|(field, e)| {
         let value = match crate::consteval::eval(e, &HashMap::new())? {
             crate::consteval::ConstVal::Int(n) => Expr::call("IntVal", vec![Expr::int(n)], 0),
             crate::consteval::ConstVal::Str(s) => Expr::call("StrVal", vec![Expr::str(s)], 0),
@@ -433,7 +445,7 @@ fn annotation_lit(
             }
             crate::consteval::ConstVal::Float(_) => return None,
         };
-        let pair = vec![("name", Expr::str(field.clone())), ("value", value)];
+        let pair = vec![("name", Expr::str(field)), ("value", value)];
         Some(struct_lit("AnnotationField", pair))
     });
     struct_lit(
@@ -446,6 +458,64 @@ fn annotation_lit(
             ("origin", origins.at(&t.module, name, a.line, a.col)),
         ],
     )
+}
+
+/// Builds what a generator annotation on `t` runs on: `t`'s `TypeCode`, and a
+/// `ModuleInterface` of no functions and the types `t`'s shape names,
+/// transitively, as `types` declares them, in the order the walk reaches
+/// them. A name `types` lacks is a `named` leaf with no `TypeInfo`.
+pub fn annotated_lit(
+    t: &TypeDecl,
+    types: &HashMap<String, TypeDecl>,
+    specifiers: &HashMap<Option<String>, String>,
+    origins: &Origins,
+) -> (Expr, Expr) {
+    let info = |d: &TypeDecl| {
+        let spec = specifiers.get(&d.module).map_or("", String::as_str);
+        let shape = shape_nodes(d, types);
+        let anns = (d.annotations.iter())
+            .map(|a| {
+                let decl = types.get(a.name());
+                let name = decl.map_or(a.name(), |d| d.name.as_str());
+                annotation_lit(d, a, decl, name, specifiers, origins)
+            })
+            .collect();
+        (type_info_lit(d, spec, &shape, anns, types, origins), shape)
+    };
+    let mut seen: HashSet<&str> = HashSet::from([t.name.as_str()]);
+    let mut work: Vec<String> = Vec::new();
+    crate::loader::type_heads(&t.base, &mut |n| work.push(n.clone()));
+    let mut closure = Vec::new();
+    while let Some(n) = work.pop() {
+        let Some((name, d)) = types.get_key_value(&n) else {
+            continue;
+        };
+        if !seen.insert(name) {
+            continue;
+        }
+        crate::loader::type_heads(&d.base, &mut |n| work.push(n.clone()));
+        if d.line != 0 && !is_synthetic(&d.name) {
+            closure.push(info(d).0);
+        }
+    }
+    let (own, shape) = info(t);
+    let nodes = shape.into_iter().map(|(n, spelling)| arg_node(n, spelling));
+    let code = struct_lit(
+        "TypeCode",
+        vec![
+            ("info", own),
+            ("decl", type_code(render_type_decl(t, types))),
+            ("nodes", array_lit(nodes.collect())),
+        ],
+    );
+    let iface = struct_lit(
+        "ModuleInterface",
+        vec![
+            ("functions", array_lit(Vec::new())),
+            ("types", array_lit(closure)),
+        ],
+    );
+    (code, iface)
 }
 
 /// Builds `TypeInfo.shape`: the declaration's base flattened into `TypeNode`s,

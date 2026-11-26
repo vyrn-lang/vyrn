@@ -1,0 +1,8 @@
+import { describe, exports, annotates, clashes, plain, traps } from "./annotation_gens_lib"
+
+fn tag() -> String {
+    return "x"
+}
+
+@describe(tag())
+export type T = { a: Int64 }

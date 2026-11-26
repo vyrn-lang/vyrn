@@ -683,6 +683,17 @@ pub struct Annotation {
     /// Where the `@` is written.
     pub line: usize,
     pub col: usize,
+    /// What the loader ran, where the name is an imported `gen fn`; `None`
+    /// for a data annotation.
+    pub generator: Option<AnnotationGen>,
+}
+
+/// The `gen fn` a generator annotation ran: its module's key and the names
+/// of the parameters its arguments fill.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotationGen {
+    pub module: String,
+    pub params: Vec<String>,
 }
 
 impl Annotation {

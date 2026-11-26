@@ -999,6 +999,7 @@ impl<'a> Build<'a> {
                 expr,
                 line,
                 col,
+                generator: None,
             });
         }
         out

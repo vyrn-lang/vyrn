@@ -1,0 +1,14 @@
+import { describe } from "./annotation_gens_lib"
+import { Opt } from "./annotations_lib"
+
+@describe("pt")
+export type Point = {
+    @Opt { short: "x", hidden: false, rank: 0 }
+    x: Int64,
+    y: Int64,
+}
+
+fn main() -> Int64 {
+    print(describePoint(Point { x: 1, y: 2 }))
+    return 0
+}

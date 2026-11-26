@@ -300,16 +300,19 @@ fn argv_of(
     inputs: &GenInputs<'_>,
 ) -> Result<Vec<String>, String> {
     let target = match program.functions.iter().find(|f| f.name == fn_name) {
-        Some(f) if dispatchable(f) && f.params.len() == args.len() + takes_type_arg(f) as usize => {
-            f
-        }
+        Some(f) if dispatchable(f) && f.params.len() == args.len() + reflected(f) => f,
         _ => return Err("the generator is not one this path serves".to_string()),
     };
-    if takes_type_arg(target) && inputs.type_arg.is_none() {
-        return Err("a `TypeArg` parameter with no type argument".to_string());
+    let n = reflected(target);
+    let given = inputs
+        .reflected
+        .iter()
+        .map(|lit| Some(Type::Named(lit_type(lit)?.into())));
+    if !given.eq(target.params[..n].iter().map(|p| Some(p.ty.clone()))) {
+        return Err("its reflected parameters are not the values the call reflects".to_string());
     }
     let mut argv: Vec<String> = vec![fn_name.to_string()];
-    for (a, p) in args.iter().zip(&target.params) {
+    for (a, p) in args.iter().zip(&target.params[n..]) {
         argv.push(match (a, &p.ty) {
             (ConstVal::Str(s), Type::Str) => s.clone(),
             // Decimal, which `parse` reads.
@@ -383,9 +386,9 @@ pub fn run_pure(
         reads: Vec::new(),
     };
     let run = || -> Result<GenOutput, GenError> {
-        if let Some(arg) = &inputs.type_arg {
-            encode(&Type::Named("TypeArg".into()), arg, &types, &mut atoms)
-                .map_err(GenError::Failed)?;
+        for lit in &inputs.reflected {
+            let ty = Type::Named(lit_type(lit).unwrap_or_default().into());
+            encode(&ty, lit, &types, &mut atoms).map_err(GenError::Failed)?;
         }
         let wrapper = wrapper_program(program).ok_or(GenError::Failed(
             "the wrapper program cannot be synthesized".into(),
@@ -403,25 +406,45 @@ pub fn run_pure(
 
 /// Whether the engine can serve this function: an exported `gen fn` returning
 /// `Code`, a module, or `String`, an editor companion's answer, and taking
-/// `String` or `Int64` parameters (written to argv and read back, `Int64` by
-/// `parse`), or one `TypeArg` (reflected, as `moduleInterface` is). The loader
+/// its reflected parameters ([`reflected`]) and then `String` or `Int64`
+/// parameters (written to argv and read back, `Int64` by `parse`). The loader
 /// links only a `Code` result.
 fn dispatchable(f: &Function) -> bool {
     f.is_gen
         && f.exported
         && (returns_code(f) || f.ret == Type::Str)
-        && (takes_type_arg(f)
-            || f.params
-                .iter()
-                .all(|par| matches!(par.ty, Type::Str | Type::Int)))
+        && f.params[reflected(f)..]
+            .iter()
+            .all(|par| matches!(par.ty, Type::Str | Type::Int))
 }
 
 fn returns_code(f: &Function) -> bool {
     f.ret == Type::Named("Code".into())
 }
 
-fn takes_type_arg(f: &Function) -> bool {
-    matches!(f.params.as_slice(), [p] if p.ty == Type::Named("TypeArg".into()))
+/// The types a gen fn's leading parameters take from the call's reflected
+/// values (`GenInputs::reflected`), as `moduleInterface` answers one: a
+/// `derive` generator's `TypeArg`, an annotation's `TypeCode` and
+/// `ModuleInterface`.
+const REFLECTED: [&str; 3] = ["TypeArg", "TypeCode", "ModuleInterface"];
+
+/// How many leading parameters of `f` take a reflected value.
+fn reflected(f: &Function) -> usize {
+    let is = |p: &&Param| matches!(&p.ty, Type::Named(n) if REFLECTED.contains(&n.as_str()));
+    f.params.iter().take_while(is).count()
+}
+
+/// The type a reflected literal is built as: the record it names.
+fn lit_type(lit: &Expr) -> Option<&str> {
+    match lit {
+        Expr::StructLit { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+/// The entry that decodes reflected value `i` of the call as `ty`.
+fn reflected_entry(i: usize, ty: &Type) -> String {
+    format!("{}{i}_{ty}", vyrn_codegen::GEN_ENTRY_TYPE_ARG)
 }
 
 /// The generator's module with `is_gen` cleared, plus a `main` that dispatches
@@ -466,9 +489,9 @@ fn wrapper_program(program: &Program) -> Option<Program> {
             f.params
                 .iter()
                 .enumerate()
-                .map(|(i, par)| match takes_type_arg(f) {
-                    true => Expr::var("@typeArg", 0),
-                    false => at_type(argv(i + 1), &par.ty),
+                .map(|(i, par)| match i < reflected(f) {
+                    true => Expr::var(format!("@reflected{i}"), 0),
+                    false => at_type(argv(i + 1 - reflected(f)), &par.ty),
                 })
                 .collect(),
             0,
@@ -489,17 +512,13 @@ fn wrapper_program(program: &Program) -> Option<Program> {
             },
             then_block: Block {
                 id: Id::NEW,
-                stmts: takes_type_arg(f)
-                    // Bound, not passed inline: the release of an argument
-                    // temporary is refused.
-                    .then(|| {
-                        Stmt::let_(
-                            "@typeArg",
-                            Expr::call(vyrn_codegen::GEN_ENTRY_TYPE_ARG, vec![], 0),
-                            0,
-                        )
+                // Bound, not passed inline: the release of an argument
+                // temporary is refused.
+                stmts: (f.params.iter().take(reflected(f)).enumerate())
+                    .map(|(i, par)| {
+                        let entry = Expr::call(reflected_entry(i, &par.ty), vec![], 0);
+                        Stmt::let_(format!("@reflected{i}"), entry, 0)
                     })
-                    .into_iter()
                     .chain([hand_over])
                     .chain([Stmt::ret(Expr::int(0), 0)])
                     .collect(),
@@ -625,14 +644,25 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
             &mut dec,
         )?;
     }
-    // `prepare` has cleared `is_gen`, so `dispatchable` no longer answers.
-    if p.functions.iter().any(|f| f.exported && takes_type_arg(f)) {
+    // One entry per reflected parameter's place and type. `prepare` has cleared
+    // `is_gen`, so `dispatchable` no longer answers.
+    let mut wanted: Vec<(usize, Type)> = Vec::new();
+    for f in p.functions.iter().filter(|f| f.exported) {
+        for (i, par) in f.params.iter().take(reflected(f)).enumerate() {
+            if !wanted.contains(&(i, par.ty.clone())) {
+                wanted.push((i, par.ty.clone()));
+            }
+        }
+    }
+    for (i, ty) in wanted {
+        let name = reflected_entry(i, &ty);
+        let at = Expr::str(i.to_string());
         entry(
-            vyrn_codegen::GEN_ENTRY_TYPE_ARG.to_string(),
+            name,
             Vec::new(),
-            named("TypeArg"),
+            ty,
             vyrn_codegen::REFLECT_TYPE_ARG,
-            Expr::str(""),
+            at,
             &mut dec,
         )?;
     }
@@ -1032,8 +1062,8 @@ pub struct GenState {
     /// this thread without the resolver.
     types: std::sync::Arc<std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>>,
     contracts: std::sync::Arc<Vec<vyrn_frontend::ast::ContractDecl>>,
-    /// What the generator's `TypeArg` parameter receives.
-    type_arg: Option<Expr>,
+    /// What the generator's reflected parameters receive, in order.
+    reflected: Vec<Expr>,
     /// The line to the thread that holds the resolver; `None` for a `test`
     /// door, whose `readFile` and `moduleInterface` are refused.
     caps: Option<Caps>,
@@ -1222,7 +1252,7 @@ impl Arena {
             fuel: 0,
             max_output: 0,
             sources_fingerprint: None,
-            type_arg: None,
+            reflected: Vec::new(),
             checked: true,
         };
         let served = serve(&inputs, &mut host.reads, path, mode)?;
@@ -1640,12 +1670,13 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                     let lit = vyrn_frontend::schema_reflect::contract_info_lit(decl);
                     streams.stream(&Type::Named("ContractInfo".into()), &lit)
                 }
+                // The argument is the reflected value's place.
                 vyrn_codegen::REFLECT_TYPE_ARG => {
-                    let lit = streams
-                        .type_arg
-                        .clone()
-                        .ok_or_else(|| Error::msg("no type argument"))?;
-                    streams.stream(&Type::Named("TypeArg".into()), &lit)
+                    let lit = (arg.parse::<usize>().ok())
+                        .and_then(|i| streams.reflected.get(i).cloned())
+                        .ok_or_else(|| Error::msg("no reflected value at that place"))?;
+                    let ty = Type::Named(lit_type(&lit).unwrap_or_default().into());
+                    streams.stream(&ty, &lit)
                 }
                 vyrn_codegen::REFLECT_LEX => {
                     let lit = vyrn_frontend::gen::gen_lex_tokens_lit(&arg);
@@ -1980,13 +2011,13 @@ fn run_hosted(
     let prepared = prepared(key, module, program)?;
     let argv: Vec<String> = argv.to_vec();
     // Cloned because the store's data must be `'static`.
-    let type_arg = inputs.type_arg.clone();
+    let reflected = inputs.reflected.clone();
     let job: Job = Box::new(move || {
         let caps = Caps {
             req: req_tx,
             resp: resp_rx,
         };
-        let _ = done_tx.send(run_wasm(&prepared, &argv, type_arg, fuel, caps));
+        let _ = done_tx.send(run_wasm(&prepared, &argv, reflected, fuel, caps));
     });
     let mut worker = match GUEST.with(|g| g.borrow_mut().take()) {
         Some(w) => w,
@@ -2021,7 +2052,7 @@ fn run_hosted(
 fn run_wasm(
     prepared: &Prepared,
     argv: &[String],
-    type_arg: Option<Expr>,
+    reflected: Vec<Expr>,
     fuel: u64,
     caps: Caps,
 ) -> Result<Written, EngineError> {
@@ -2029,7 +2060,7 @@ fn run_wasm(
         caps: Some(caps),
         types: prepared.types.clone(),
         contracts: prepared.contracts.clone(),
-        type_arg,
+        reflected,
         ..GenState::default()
     };
     // argv[0] is the program name, which `args()` skips.

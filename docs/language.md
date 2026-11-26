@@ -74,6 +74,25 @@ export type Serve = {
 - Reflection carries it: `TypeInfo.annotations` lists each one as an `AnnotationInfo`, with its declaration's written name and the import specifier of that declaration's module, the member it sits on (`""` for the declaration), its fields as `Value`s and the `Origin` of its `@`.
 - An annotation on a function, a parameter, a protocol, an impl, a statement or a field of an anonymous record is refused.
 
+An annotation whose name is an imported `gen fn g(t: TypeCode, iface: ModuleInterface, ..)` is a generator. It sits on a `type` declaration, takes constants for the parameters after the second, and runs once while its module loads:
+
+```vyrn
+import { describe } from "./describe"
+
+@describe("pt")
+type Point = { x: Int64, y: Int64 }
+
+fn main() -> Int64 {
+    print(describePoint(Point { x: 1, y: 2 }))
+    return 0
+}
+```
+
+- `t` is the declaration as written, its annotations included, and `iface.types` holds every type its shape names, transitively, as the module and its imports declare them. A generator reads its own module as written and each imported module whole.
+- What it writes joins the declaration's module: that module's code and its importers see the names as the module's own, and the output sees the module's names and its imports. Everything it writes takes the declaration's visibility, so `@describe export type Point` exports `describePoint`.
+- The output writes no `export`, no annotation and no name its module or another annotation of it declares; each is refused at the annotation. So a module generates in one round, after its imports.
+- A generator reads data annotations through `t.info.annotations`, by name and module.
+
 ## Bindings
 
 `let` binds a value once. `let mut` allows assignment. The type is inferred from the initializer, or written.

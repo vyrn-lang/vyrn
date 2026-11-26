@@ -154,6 +154,12 @@ the playground serves an embedded `std/`. The loader:
   function a reached builtin routes to. A generator's own load also roots each
   builtin its engine calls in what it adds after the load (`loader::GEN_HOST`,
   which `vyrn-genwasm` spells its calls by);
+- runs each generator annotation of a module after its imports load
+  (`annotate`), on a `TypeCode` and a `ModuleInterface` the module's written
+  declarations and its loaded imports give (`schema_reflect::annotated_lit`),
+  and visits the output as a module that joins it (`Module::joins`): the link
+  registers the output's declarations under the module's key, and the output
+  holds a copy of the module's imports;
 - loads a generator's module as its own root, for an import line's generator
   and a `derive` generator alike (`checked_generator`), and links only what its
   gen fn reaches, or for a std module what every gen fn it exports reaches

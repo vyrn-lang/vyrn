@@ -605,9 +605,10 @@ pub struct GenInputs<'a> {
     /// can re-read. An engine that caches compiled generators keys on it instead
     /// of hashing the whole program.
     pub sources_fingerprint: Option<String>,
-    /// The `TypeArg` literal a derived-code generator's one parameter
-    /// receives; `None` for an import target.
-    pub type_arg: Option<Expr>,
+    /// The literals a gen fn's leading parameters receive, in order: a
+    /// `derive` generator's `TypeArg`, or an annotation's `TypeCode` and
+    /// `ModuleInterface`. Empty for an import target.
+    pub reflected: Vec<Expr>,
     /// Whether the program passed its check. An unchecked program runs only
     /// from a compiled module the engine already holds for
     /// `sources_fingerprint`; otherwise the engine answers
@@ -1046,8 +1047,8 @@ pub fn derive(
         // type misses and any other edit of the program hits.
         let call = crate::loader::GenCall {
             consts: &[],
-            type_arg: Some(&arg),
             arg_repr: format!("{arg:?}"),
+            reflected: std::slice::from_ref(&arg),
             importer_dir: String::new(),
             project: crate::loader::project_dir(opts, root).to_string(),
             allowed: Vec::new(),

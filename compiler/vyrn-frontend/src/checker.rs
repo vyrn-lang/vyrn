@@ -1069,7 +1069,7 @@ fn check_accum_inner(
         if let Err(s) = checker.unit(|| checker.check_type_decl(t)) {
             out.extend(s);
         }
-        for a in &t.annotations {
+        for a in t.annotations.iter().filter(|a| a.generator.is_none()) {
             if let Err(s) = checker.unit(|| checker.check_annotation(t, a)) {
                 out.extend(s.map(|d| d.in_file(t.module.clone())));
             }

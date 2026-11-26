@@ -345,7 +345,7 @@ rules! {
     RecordWhere {} "a record type cannot have a `where` clause";
     NotRecord { name } "`{name}` does not resolve to a record";
     AnnotationKind { name }
-        "`@{name}` names no record type: an annotation names an imported record type";
+        "`@{name}` names no record type and no `gen fn`: an annotation names an imported one";
     AnnotationLocal { name }
         "`@{name}` is declared here or by the language: an annotation names an imported record type";
     AnnotationArgs { name } "`@{name}` is a record type: write its fields as `@{name} {{ .. }}`";
@@ -356,6 +356,19 @@ rules! {
         "field `{field}` of `@{name}` is no constant: an annotation holds literals";
     AnnotationMember { name, member, decl }
         "`@{name}` sits on `{member}`, which is no field or variant of `{decl}`";
+    AnnotationGenOnMember { name }
+        "`@{name}` runs a generator, so it sits on a `type` declaration, not on a field or a variant";
+    AnnotationGenSignature { name }
+        "`gen fn {name}` annotates nothing: an annotation's generator takes a `TypeCode` and a \
+        `ModuleInterface` first";
+    AnnotationConstArgs { name }
+        "`@{name}(..)` takes compile-time constants: string, integer or boolean literals";
+    AnnotationWroteExport { name }
+        "`@{name}` wrote an `export`: what an annotation writes takes its declaration's visibility";
+    AnnotationWroteAnnotation { name }
+        "`@{name}` wrote an annotation: generated code holds none, so a module generates in one round";
+    AnnotationWroteTwice { name, other, line }
+        "`@{name}` writes `{other}`, which line {line} declares already";
     ValidatedBaseNotScalar { name }
         "`{name}` must have a scalar base (Int64, sized int, Float64, Bool, or String)";
     PredicateCalls { kind, name } "{kind} predicate for `{name}` may not contain calls (v0.1)";
