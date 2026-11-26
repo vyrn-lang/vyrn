@@ -4204,7 +4204,7 @@ impl<'a> Walk<'a> {
 
     /// A side of a clause as a sum of terms.
     fn side(&self, s: &Side) -> Option<Lin> {
-        (s.0.iter()).try_fold(Lin::k(0), |sum, (k, o)| {
+        (s.terms()).try_fold(Lin::k(0), |sum, (k, o)| {
             sum.add(&self.operand(o)?.scale(*k)?)
         })
     }
@@ -7119,7 +7119,7 @@ fn clause_of(a: &Atom) -> Name {
         Val::Name(n) => Some(n),
         _ => None,
     };
-    (a.l.0.iter().chain(&a.r.0))
+    (a.l.terms().chain(a.r.terms()))
         .find_map(name)
         .unwrap_or(Name(0))
 }
@@ -7761,7 +7761,7 @@ fn guard_names(g: &Guard, f: &mut dyn FnMut(Name)) {
         Guard::Range(s, a, b) => [s, a, b].into_iter().for_each(val),
         Guard::Rule(r) | Guard::Scalar(r, _) => val(&Val::Name(*r)),
         Guard::Clause { atoms, .. } => (atoms.iter())
-            .flat_map(|a| a.l.0.iter().chain(&a.r.0))
+            .flat_map(|a| a.l.terms().chain(a.r.terms()))
             .for_each(|(_, o)| val(&o.of)),
     }
 }

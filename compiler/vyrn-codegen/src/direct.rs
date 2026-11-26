@@ -7571,7 +7571,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::LocalSet(sum));
-        for (k, o) in &side.0 {
+        for (k, o) in side.terms() {
             self.clause_operand(m, b, o, &Type::Int, line)?;
             b.ins(&Instruction::LocalSet(t));
             if *k != 1 {

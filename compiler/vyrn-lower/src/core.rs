@@ -8494,6 +8494,23 @@ pub fn refuses() -> bool {
     !std::env::var("VYRN_NO_KERNEL").is_ok_and(|v| v == "1")
 }
 
+/// Whether a loop of `b` or of a lambda in it states a clause. It allocates
+/// nothing: it runs for every body the typed judgment judges.
+fn loop_clause(b: &Body) -> bool {
+    fn any(ss: &[St]) -> bool {
+        (ss.iter()).any(|s| {
+            matches!(
+                s,
+                St::Loop {
+                    invariant: Some(_),
+                    ..
+                }
+            ) || s.lists().any(|l| any(l))
+        })
+    }
+    any(&b.stmts) || b.lambdas.iter().any(loop_clause)
+}
+
 /// Judges one built body with the typed judgment and answers whether it
 /// refused. The judgment memo serves only the kernel's refusals, so a refused
 /// body is built and judged again next time. `as_written` is false for an
@@ -8529,17 +8546,7 @@ fn typed(
     // states, so a body with a group or a loop invariant, or of a module the
     // manifest proves, states its own copy and decides it by the demanded walk.
     let proved = program.proved.contains(file);
-    let clause = (top.frames().into_iter()).any(|f| {
-        rows(&f.stmts).any(|(s, _)| {
-            matches!(
-                s,
-                St::Loop {
-                    invariant: Some(_),
-                    ..
-                }
-            )
-        })
-    });
+    let clause = loop_clause(top);
     let mut unshown = Vec::new();
     if ended || proved || clause {
         let mut body = stated(program, own, top);

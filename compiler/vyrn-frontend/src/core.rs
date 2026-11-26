@@ -1504,7 +1504,7 @@ impl Body {
                         1 => operand(o),
                         k => format!("{k} * {}", operand(o)),
                     };
-                    s.0.iter().map(term).collect::<Vec<_>>().join(" + ")
+                    s.terms().map(term).collect::<Vec<_>>().join(" + ")
                 };
                 let one = |a: &check::Atom| {
                     let op = crate::parser::binop_text(a.op);

@@ -189,21 +189,46 @@ pub struct Atom {
 /// A side of an [`Atom`]: the sum of its operands, each times its literal
 /// factor. A clause states a fact of mathematical integers, so a run-time
 /// check of a side that is no lone operand fails where the sum leaves
-/// `Int64`, the only type such a side has.
+/// `Int64`, the only type such a side has. A side has at least one operand;
+/// a lone operand allocates nothing.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Side(pub Vec<(i64, Operand)>);
+pub struct Side {
+    pub first: (i64, Operand),
+    pub rest: Vec<(i64, Operand)>,
+}
 
 impl Side {
     /// The side's operand when it is one operand with factor 1.
     pub fn alone(&self) -> Option<&Operand> {
-        match self.0.as_slice() {
-            [(1, o)] => Some(o),
+        match (&self.first, self.rest.is_empty()) {
+            ((1, o), true) => Some(o),
             _ => None,
         }
     }
 
+    /// Each operand with its factor, the first first.
+    pub fn terms(&self) -> impl Iterator<Item = &(i64, Operand)> {
+        std::iter::once(&self.first).chain(&self.rest)
+    }
+
     fn one(o: Operand) -> Side {
-        Side(vec![(1, o)])
+        Side {
+            first: (1, o),
+            rest: Vec::new(),
+        }
+    }
+
+    /// Adds `t` to the side `s`, or makes `s` of it alone.
+    fn push(s: &mut Option<Side>, t: (i64, Operand)) {
+        match s {
+            Some(s) => s.rest.push(t),
+            None => {
+                *s = Some(Side {
+                    first: t,
+                    rest: Vec::new(),
+                })
+            }
+        }
     }
 
     /// The side with each name replaced as [`Atom::with`] replaces it.
@@ -216,7 +241,10 @@ impl Side {
             let part = o.part.clone();
             Some((*f, Operand { of, part }))
         };
-        Some(Side(self.0.iter().map(each).collect::<Option<_>>()?))
+        Some(Side {
+            first: each(&self.first)?,
+            rest: self.rest.iter().map(each).collect::<Option<_>>()?,
+        })
     }
 }
 
@@ -426,12 +454,15 @@ impl Invariant {
             let [m] = m.as_slice() else {
                 return Err(rule!(MeasureForm, line));
             };
-            let (mut terms, mut tys) = (Vec::new(), Vec::new());
-            side(of, m, 1, decls, &mut terms, &mut tys)?;
-            if measure.is_some() || tys.iter().any(|t| *t != Type::Int) {
+            let (mut terms, mut ty) = (None, None);
+            side(of, m, 1, decls, &mut terms, &mut ty)?;
+            let (Some(terms), None | Some(Type::Int)) = (terms, ty) else {
+                return Err(rule!(MeasureForm, line));
+            };
+            if measure.is_some() {
                 return Err(rule!(MeasureForm, line));
             }
-            measure = Some((Side(terms), spelled(m).into()));
+            measure = Some((terms, spelled(m).into()));
         }
         if !facts.is_empty() {
             return Err(of.form());
@@ -745,13 +776,15 @@ fn conjuncts(
         return conjuncts(of, rhs, decls, out, facts);
     }
     op.compare().ok_or_else(form)?;
-    let (mut l, mut r, mut tys) = (Vec::new(), Vec::new(), Vec::new());
-    side(of, lhs, 1, decls, &mut l, &mut tys)?;
-    side(of, rhs, 1, decls, &mut r, &mut tys)?;
-    let ty = tys.first().cloned().unwrap_or(Type::Int);
-    let (l, r) = (Side(l), Side(r));
+    let (mut l, mut r, mut ty) = (None, None, None);
+    side(of, lhs, 1, decls, &mut l, &mut ty)?;
+    side(of, rhs, 1, decls, &mut r, &mut ty)?;
+    let ty = ty.unwrap_or(Type::Int);
+    let (Some(l), Some(r)) = (l, r) else {
+        return Err(of.form());
+    };
     let sum = |s: &Side| s.alone().is_none();
-    if tys.iter().any(|t| *t != ty) || (ty != Type::Int && (sum(&l) || sum(&r))) {
+    if ty != Type::Int && (sum(&l) || sum(&r)) {
         return Err(of.form());
     }
     out.push(Atom { l, op: *op, r, ty });
@@ -759,16 +792,16 @@ fn conjuncts(
 }
 
 /// Appends to `out` the operands of `e`, one side of a comparison in the
-/// clause `of` states, each times `factor`, and to `tys` the integer type of
-/// each that is no literal. A side is a sum of differences of terms; a term
+/// clause `of` states, each times `factor`. Every operand that is no literal
+/// is of the one integer type `ty`, which the first such sets. A side is a sum of differences of terms; a term
 /// is an operand, a literal multiple of a term, or a negated term.
 fn side(
     of: Of,
     e: &Expr,
     factor: i64,
     decls: &dyn Decls,
-    out: &mut Vec<(i64, Operand)>,
-    tys: &mut Vec<Type>,
+    out: &mut Option<Side>,
+    ty: &mut Option<Type>,
 ) -> Result<(), crate::rules::Rule> {
     let lit = |e: &Expr| match e {
         Expr::Int(n, _) => Some(*n),
@@ -786,16 +819,16 @@ fn side(
     match e {
         Expr::Binary { op, lhs, rhs, .. } => match op {
             BinOp::Add => {
-                side(of, lhs, factor, decls, out, tys)?;
-                side(of, rhs, factor, decls, out, tys)
+                side(of, lhs, factor, decls, out, ty)?;
+                side(of, rhs, factor, decls, out, ty)
             }
             BinOp::Sub => {
-                side(of, lhs, factor, decls, out, tys)?;
-                side(of, rhs, times(-1)?, decls, out, tys)
+                side(of, lhs, factor, decls, out, ty)?;
+                side(of, rhs, times(-1)?, decls, out, ty)
             }
             BinOp::Mul => match (lit(lhs), lit(rhs)) {
-                (Some(k), _) => side(of, rhs, times(k)?, decls, out, tys),
-                (None, Some(k)) => side(of, lhs, times(k)?, decls, out, tys),
+                (Some(k), _) => side(of, rhs, times(k)?, decls, out, ty),
+                (None, Some(k)) => side(of, lhs, times(k)?, decls, out, ty),
                 (None, None) => {
                     let (a, b) = (spelled(lhs), spelled(rhs));
                     Err(rule!(ClauseProduct, a, b))
@@ -807,11 +840,15 @@ fn side(
             op: UnOp::Neg,
             expr,
             ..
-        } if lit(e).is_none() => side(of, expr, times(-1)?, decls, out, tys),
+        } if lit(e).is_none() => side(of, expr, times(-1)?, decls, out, ty),
         _ => {
-            let (o, ty) = operand(of, e, decls)?;
-            tys.extend(ty);
-            out.push((factor, o));
+            let (o, t) = operand(of, e, decls)?;
+            match (t, &*ty) {
+                (Some(t), Some(u)) if t != *u => return Err(of.form()),
+                (Some(t), None) => *ty = Some(t),
+                _ => {}
+            }
+            Side::push(out, (factor, o));
             Ok(())
         }
     }
