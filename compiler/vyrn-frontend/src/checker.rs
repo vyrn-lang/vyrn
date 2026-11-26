@@ -14,6 +14,7 @@ use crate::rules::{rule, DeclName, Hole, Rule};
 use crate::types::mentions_param as type_mentions_param;
 use crate::types::walk_type;
 use crate::types::Decls;
+use crate::types::Reach;
 use crate::types::FALLIBLE;
 
 pub mod recheck;
@@ -1918,14 +1919,6 @@ impl std::ops::DerefMut for Scope {
     }
 }
 
-/// What [`Checker::reaches`] does at one type: answer, or look at its parts.
-enum Reach {
-    Yes,
-    /// No, and the parts are not looked at.
-    No,
-    Parts,
-}
-
 impl Decls for Checker<'_> {
     fn decl(&self, name: &str) -> Option<&TypeDecl> {
         let types = self.types;
@@ -2291,42 +2284,8 @@ impl<'a> Checker<'a> {
             .unwrap_or_default()
     }
 
-    /// Whether any part of `ty` answers [`Reach::Yes`]. A named type is read
-    /// through its type arguments and its declaration; each declaration head
-    /// is entered once, so a recursive type terminates. A `fn` type is never
-    /// descended: `at` decides at it.
     fn reaches(&self, ty: &Type, at: &dyn Fn(&Type) -> Reach) -> bool {
-        fn go<'t>(
-            ty: &'t Type,
-            types: &'t dyn Decls,
-            at: &dyn Fn(&Type) -> Reach,
-            seen: &mut Vec<&'t str>,
-        ) -> bool {
-            match at(ty) {
-                Reach::Yes => return true,
-                Reach::No => return false,
-                Reach::Parts => {}
-            }
-            match ty {
-                Type::Named(n) | Type::App(n, _) => {
-                    let args = match ty {
-                        Type::App(_, a) => a.as_slice(),
-                        _ => &[],
-                    };
-                    args.iter().any(|a| go(a, types, at, seen))
-                        || (!seen.contains(&n.as_str())
-                            && types.decl(n).is_some_and(|d| {
-                                seen.push(n);
-                                let r = go(&d.base, types, at, seen);
-                                seen.pop();
-                                r
-                            }))
-                }
-                Type::Fn(..) => false,
-                _ => ty.children().any(|c| go(c, types, at, seen)),
-            }
-        }
-        go(ty, self, at, &mut Vec::new())
+        crate::types::reaches(ty, self, at)
     }
 
     /// Whether `ty` contains a `Stream<T>` anywhere, through named types and
@@ -2365,14 +2324,8 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
-    /// Whether `ty` contains a `Task<T>` anywhere, through named types and
-    /// type arguments. A `fn` type holds none.
     fn contains_task(&self, ty: &Type) -> bool {
-        self.reaches(ty, &|t| match t {
-            Type::Task(_) => Reach::Yes,
-            Type::Fn(_, _) => Reach::No,
-            _ => Reach::Parts,
-        })
+        crate::types::contains_task(ty, self)
     }
 
     /// Whether `ty` contains a function-value type anywhere, for

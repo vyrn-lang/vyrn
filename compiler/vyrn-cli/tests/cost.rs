@@ -49,6 +49,13 @@ fn holds_with(name: &str, file: &str, profiles: &Path) {
     }
 }
 
+/// A call into a generated module names it as a diagnostic does, and a `where` type a
+/// generated module declares states no row and no verdict under the root's lines.
+#[test]
+fn a_generated_module_is_named_and_its_rules_stay_its_own() {
+    holds("generated", "examples/dsl/calc.editor.vyrn");
+}
+
 /// A function that reaches a wait has `waits` in its effect set.
 #[test]
 fn a_waiting_function_has_waits_in_its_effect_set() {

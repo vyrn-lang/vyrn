@@ -53,66 +53,10 @@ examples/bin/client/boot.vyrn	vyrnPatch	no, it calls `derive$json$jsonEncoders$t
 examples/bin/client/boot.vyrn	vyrnRenderPage	no, it calls `renderPage`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/bin/client/boot.vyrn	vyrnResolvePage	no, it calls `resolvePage`, which is not trap-free	no, its effect set is alloc, trap
 examples/bin/client/boot.vyrn	main	yes	yes, emulated Int64
-examples/bin/client/boot.vyrn	where$pBody	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cBody	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pBody__from0	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cBody__from0	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pCreated	yes	yes, emulated Int64
-examples/bin/client/boot.vyrn	where$cCreated	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pCreated__from0	yes	yes, emulated Int64
-examples/bin/client/boot.vyrn	where$cCreated__from0	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/bin/client/boot.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pLang	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cLang	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pLang__from0	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cLang__from0	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pPasteId	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cPasteId	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pPasteId__from0	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cPasteId__from0	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pTitle__from0	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cTitle__from0	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pTransKey	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cTransKey	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pTw	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
-examples/bin/client/boot.vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/client/boot.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
 examples/bin/server.vyrn	runMiddleware	no, it calls a function value	no, its effect set is alloc, write-output, fs-write, clock, random, module-state, trap
 examples/bin/server.vyrn	handle	no, it calls `runMiddleware`, which is not trap-free	no, its effect set is alloc, write-output, fs-write, clock, random, serve, module-state, trap
 examples/bin/server.vyrn	routed	no, it calls `mount`, which is not trap-free	no, its effect set is alloc, write-output, fs-write, clock, random, serve, module-state, trap
 examples/bin/server.vyrn	main	no, it calls `handle`, which is not trap-free	no, its effect set is alloc, write-output, fs-write, clock, random, serve, module-state, trap
-examples/bin/server.vyrn	where$pBody	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cBody	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pCreated	yes	yes, emulated Int64
-examples/bin/server.vyrn	where$cCreated	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/bin/server.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pLang	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cLang	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pPasteId	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cPasteId	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pPathById	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cPathById	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pPathCreate	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cPathCreate	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pPathRecent	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cPathRecent	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pRoutePath__from0	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cRoutePath__from0	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pRoutePath__from1	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cRoutePath__from1	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pTransKey	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cTransKey	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pTw	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
-examples/bin/server.vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
 examples/bin/server/api/pastes.http.vyrn	routes	no, it calls `recent`, which is not trap-free	no, its effect set is alloc, trap
 examples/bin/server/api/pastes.http.vyrn	tailStep	no, it calls `cursorGet`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/bin/server/api/pastes.http.vyrn	tail	yes	no, its effect set is alloc, module-state, trap
@@ -120,69 +64,17 @@ examples/bin/server/api/pastes.http.vyrn	feeds	no, it calls `sse`, which is not 
 examples/bin/server/api/pastes.http.vyrn	socketStep	no, it calls `cursorGet`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/bin/server/api/pastes.http.vyrn	socketTail	yes	no, its effect set is alloc, module-state, trap
 examples/bin/server/api/pastes.http.vyrn	sockets	no, it calls `ws`, which is not trap-free	no, its effect set is alloc, trap
-examples/bin/server/api/pastes.http.vyrn	where$pBody	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.http.vyrn	where$cBody	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.http.vyrn	where$pCreated	yes	yes, emulated Int64
-examples/bin/server/api/pastes.http.vyrn	where$cCreated	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.http.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/bin/server/api/pastes.http.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.http.vyrn	where$pLang	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.http.vyrn	where$cLang	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.http.vyrn	where$pPasteId	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.http.vyrn	where$cPasteId	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.http.vyrn	where$pPathById	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.http.vyrn	where$cPathById	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.http.vyrn	where$pPathCreate	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.http.vyrn	where$cPathCreate	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.http.vyrn	where$pPathRecent	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.http.vyrn	where$cPathRecent	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.http.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.http.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
 examples/bin/server/api/pastes.vyrn	recent	no, it calls `listPastes`, which is not trap-free	no, its effect set is alloc, module-state
 examples/bin/server/api/pastes.vyrn	byId	yes	no, its effect set is alloc, module-state
 examples/bin/server/api/pastes.vyrn	create	no, it calls `createPaste`, which is not trap-free	no, its effect set is alloc, write-output, fs-write, clock, random, module-state, trap
-examples/bin/server/api/pastes.vyrn	where$pBody	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.vyrn	where$cBody	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.vyrn	where$pCreated	yes	yes, emulated Int64
-examples/bin/server/api/pastes.vyrn	where$cCreated	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/bin/server/api/pastes.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.vyrn	where$pLang	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.vyrn	where$cLang	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.vyrn	where$pPasteId	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.vyrn	where$cPasteId	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/api/pastes.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/api/pastes.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
 examples/bin/server/persist.vyrn	loadStore	no, it calls `derive$jsondec$jsonDecoders$t7b41935a1aea7dd7`, which is not trap-free	no, its effect set is alloc, write-output, fs-read, module-state
 examples/bin/server/persist.vyrn	emptyStore	yes	no, its effect set is alloc
 examples/bin/server/persist.vyrn	warnEmpty	yes	no, its effect set is alloc, write-output, module-state
 examples/bin/server/persist.vyrn	saveStore	no, it calls `derive$json$jsonEncoders$t7b41935a1aea7dd7`, which is not trap-free	no, its effect set is alloc, write-output, fs-write, random, module-state, trap
 examples/bin/server/persist.vyrn	logFail	yes	no, its effect set is alloc, write-output
-examples/bin/server/persist.vyrn	where$pBody	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/persist.vyrn	where$cBody	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/persist.vyrn	where$pCreated	yes	yes, emulated Int64
-examples/bin/server/persist.vyrn	where$cCreated	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/persist.vyrn	where$pLang	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/persist.vyrn	where$cLang	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/persist.vyrn	where$pPasteId	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/persist.vyrn	where$cPasteId	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/persist.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/persist.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
 examples/bin/server/routes/raw/[id].vyrn	respond	yes	no, its effect set is alloc, module-state
 examples/bin/server/routes/raw/[id].vyrn	rawOk	yes	no, its effect set is alloc
 examples/bin/server/routes/raw/[id].vyrn	rawMissing	yes	no, its effect set is alloc
-examples/bin/server/routes/raw/[id].vyrn	where$pBody	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/routes/raw/[id].vyrn	where$cBody	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/routes/raw/[id].vyrn	where$pCreated	yes	yes, emulated Int64
-examples/bin/server/routes/raw/[id].vyrn	where$cCreated	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/routes/raw/[id].vyrn	where$pInstant	yes	yes, emulated Int64
-examples/bin/server/routes/raw/[id].vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/routes/raw/[id].vyrn	where$pLang	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/routes/raw/[id].vyrn	where$cLang	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/routes/raw/[id].vyrn	where$pPasteId	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/routes/raw/[id].vyrn	where$cPasteId	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/routes/raw/[id].vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/routes/raw/[id].vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
 examples/bin/server/store.vyrn	copyPaste	yes	no, its effect set is alloc
 examples/bin/server/store.vyrn	snapshot	yes	no, its effect set is alloc, module-state
 examples/bin/server/store.vyrn	idTaken	yes	no, its effect set is module-state
@@ -194,18 +86,6 @@ examples/bin/server/store.vyrn	createPaste	no, it keeps a where rule check	no, i
 examples/bin/server/store.vyrn	pasteCount	yes	no, its effect set is module-state
 examples/bin/server/store.vyrn	pasteAt	no, it keeps an index check	no, its effect set is alloc, module-state
 examples/bin/server/store.vyrn	decodeOrEmpty	no, it calls `derive$jsondec$jsonDecoders$t7b41935a1aea7dd7`, which is not trap-free	no, its effect set is alloc
-examples/bin/server/store.vyrn	where$pBody	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/store.vyrn	where$cBody	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/store.vyrn	where$pCreated	yes	yes, emulated Int64
-examples/bin/server/store.vyrn	where$cCreated	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/store.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/bin/server/store.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/store.vyrn	where$pLang	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/store.vyrn	where$cLang	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/store.vyrn	where$pPasteId	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/store.vyrn	where$cPasteId	no, it calls `panic`	no, its effect set is trap
-examples/bin/server/store.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/bin/server/store.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
 examples/bin/server/util.vyrn	digit36	no, it keeps an index check	no, its effect set is alloc
 examples/bin/server/util.vyrn	base36	no, it calls `digit36`, which is not trap-free	no, its effect set is alloc
 examples/bin/server/util.vyrn	fullDigest	no, it calls `base36`, which is not trap-free	no, its effect set is alloc
@@ -275,20 +155,10 @@ examples/clearkeep.vyrn	fill__from0	yes	no, its effect set is alloc
 examples/clearkeep.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/clidemo.vyrn	report	yes	no, its effect set is alloc, write-output
 examples/clidemo.vyrn	main	no, it calls `parseServe`, which is not trap-free	no, its effect set is alloc, write-output, args, trap
-examples/clidemo.vyrn	where$pPort	yes	yes, emulated Int64
-examples/clidemo.vyrn	where$cPort	no, it calls `panic`	no, its effect set is trap
-examples/clidemo.vyrn	where$pRoot	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/clidemo.vyrn	where$cRoot	no, it calls `panic`	no, its effect set is trap
 examples/clifail.vyrn	main	no, it calls `parseServe`, which is not trap-free	no, its effect set is alloc, write-output, args, trap
 examples/clifail.vyrn	refuse	yes	no, its effect set is alloc, write-output
-examples/clifail.vyrn	where$pPort	yes	yes, emulated Int64
-examples/clifail.vyrn	where$cPort	no, it calls `panic`	no, its effect set is trap
-examples/clifail.vyrn	where$pRoot	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/clifail.vyrn	where$cRoot	no, it calls `panic`	no, its effect set is trap
 examples/clock.vyrn	showFields	yes	no, its effect set is alloc, write-output
 examples/clock.vyrn	main	no, it calls `nextInRange`, which is not trap-free	no, its effect set is alloc, write-output, clock, random
-examples/clock.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/clock.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
 examples/clockorder.vyrn	work	yes	yes, emulated Int64
 examples/clockorder.vyrn	late	yes	no, its effect set is write-output, waits
 examples/clockorder.vyrn	busy	yes	no, its effect set is write-output, waits
@@ -312,10 +182,6 @@ examples/columns.vyrn	moveColumns	no, it keeps an index check	no, it is not trap
 examples/columns.vyrn	run	no, it calls `moveRows`, which is not trap-free	no, its effect set is alloc
 examples/columns.vyrn	numberAt	yes	no, `argv` is Array<String>, not an integer, Bool or a read array of one
 examples/columns.vyrn	main	no, it calls `run`, which is not trap-free	no, its effect set is alloc, write-output, args
-examples/columns.vyrn	where$pBodyColumns	yes	no, `x` is Array<Float64>, and WGSL has no 64-bit float
-examples/columns.vyrn	where$cBodyColumns	no, it calls `panic`	no, its effect set is trap
-examples/columns.vyrn	where$pParticleColumns	yes	no, `x` is Array<Float64>, and WGSL has no 64-bit float
-examples/columns.vyrn	where$cParticleColumns	no, it calls `panic`	no, its effect set is trap
 examples/concurrent.vyrn	pause	yes	no, its effect set is alloc, write-output, waits
 examples/concurrent.vyrn	word	yes	no, its effect set is alloc, waits
 examples/concurrent.vyrn	count	yes	no, its effect set is alloc, waits
@@ -410,17 +276,11 @@ examples/dsl/calc.editor.vyrn	vyrnCheckCalc	no, it calls `parseLedger`, which is
 examples/dsl/calc.editor.vyrn	unknownAccounts	no, it calls `placeOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 examples/dsl/calc.editor.vyrn	vyrnHoverCalc	no, it calls `parseLedger`, which is not trap-free	no, its effect set is alloc, fs-read
 examples/dsl/calc.editor.vyrn	accountHover	no, it calls `placeOf`, which is not trap-free	no, its effect set is alloc
-examples/dsl/calc.editor.vyrn	where$pLedgerText	no, it calls `isLedger`, which is not trap-free	no, its effect set is alloc
-examples/dsl/calc.editor.vyrn	where$cLedgerText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/dsl/calc.vyrn	total	no, it keeps an index check	no, its effect set is alloc
 examples/dsl/calc.vyrn	paid	no, it calls `parsedLedger`, which is not trap-free	no, its effect set is alloc, trap
 examples/dsl/calc.vyrn	sum	yes	no, `l` is Ledger, not an integer, Bool or a read array of one
 examples/dsl/calc.vyrn	isAccount	yes	no, `name` is String, not an integer, Bool or a read array of one
-examples/dsl/calc.vyrn	where$pLedgerText	no, it calls `isLedger`, which is not trap-free	no, its effect set is alloc
-examples/dsl/calc.vyrn	where$cLedgerText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/dsl/main.vyrn	main	no, it calls `total`, which is not trap-free	no, its effect set is alloc, write-output, fs-read, trap
-examples/dsl/main.vyrn	where$pLedgerText	no, it calls `isLedger`, which is not trap-free	no, its effect set is alloc
-examples/dsl/main.vyrn	where$cLedgerText	no, it calls `panic`	no, its effect set is alloc, trap
 examples/ecs.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/encoding.vyrn	charCount	yes	no, its effect set is alloc
 examples/encoding.vyrn	show	yes	no, its effect set is alloc
@@ -572,55 +432,21 @@ examples/fullstack/client/boot.vyrn	removeUser	no, it calls `usersDel`, which is
 examples/fullstack/client/boot.vyrn	showServerIssues	no, it calls `renderIssues`, which is not trap-free	no, its effect set is alloc, module-state
 examples/fullstack/client/boot.vyrn	vyrnView	no, it calls `derive$json$jsonEncoders$t62d5a5c67072e4b3`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/fullstack/client/boot.vyrn	main	yes	yes, emulated Int64
-examples/fullstack/client/boot.vyrn	where$pAge	yes	yes, emulated Int64
-examples/fullstack/client/boot.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/client/boot.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/fullstack/client/boot.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
 examples/fullstack/server.vyrn	handle	no, it calls `route`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/fullstack/server.vyrn	main	no, it calls `handle`, which is not trap-free	no, its effect set is alloc, write-output, module-state, trap
-examples/fullstack/server.vyrn	where$pAge	yes	yes, emulated Int64
-examples/fullstack/server.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/server.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/fullstack/server.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/server.vyrn	where$pRoutePath	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/fullstack/server.vyrn	where$cRoutePath	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/server.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/fullstack/server.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
 examples/fullstack/server/api/users.http.vyrn	routes	no, it calls `byId`, which is not trap-free	no, its effect set is alloc, trap
-examples/fullstack/server/api/users.http.vyrn	where$pAge	yes	yes, emulated Int64
-examples/fullstack/server/api/users.http.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/server/api/users.http.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/fullstack/server/api/users.http.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/server/api/users.http.vyrn	where$pPathById	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/fullstack/server/api/users.http.vyrn	where$cPathById	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/server/api/users.http.vyrn	where$pPathCreate	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/fullstack/server/api/users.http.vyrn	where$cPathCreate	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/server/api/users.http.vyrn	where$pPathDel	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/fullstack/server/api/users.http.vyrn	where$cPathDel	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/server/api/users.http.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/fullstack/server/api/users.http.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
 examples/fullstack/server/api/users.vyrn	byId	yes	no, its effect set is alloc
 examples/fullstack/server/api/users.vyrn	create	yes	no, its effect set is alloc
 examples/fullstack/server/api/users.vyrn	del	yes	no, its effect set is alloc
-examples/fullstack/server/api/users.vyrn	where$pAge	yes	yes, emulated Int64
-examples/fullstack/server/api/users.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/server/api/users.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/fullstack/server/api/users.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
 examples/fullstack/server/pages/index.vyrn	page	yes	no, its effect set is alloc
 examples/fullstack/server/pages/users/[id].vyrn	data	yes	no, its effect set is alloc
 examples/fullstack/server/pages/users/[id].vyrn	fetchUser	yes	no, its effect set is alloc
 examples/fullstack/server/pages/users/[id].vyrn	page	yes	no, its effect set is alloc
-examples/fullstack/server/pages/users/[id].vyrn	where$pAge	yes	yes, emulated Int64
-examples/fullstack/server/pages/users/[id].vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-examples/fullstack/server/pages/users/[id].vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/fullstack/server/pages/users/[id].vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
 examples/fullstack/shared/wire.vyrn	where$pAge	yes	yes, emulated Int64
 examples/fullstack/shared/wire.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
 examples/fullstack/shared/wire.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/fullstack/shared/wire.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
 examples/gendemo.vyrn	main	yes	no, its effect set is write-output
-examples/gendemo.vyrn	where$pCount	yes	yes, emulated Int64
-examples/gendemo.vyrn	where$cCount	no, it calls `panic`	no, its effect set is trap
 examples/genericpayload.vyrn	unwrapInline	yes	no, its effect set is alloc
 examples/genericpayload.vyrn	nested	yes	no, its effect set is alloc
 examples/genericpayload.vyrn	runOps	no, it calls a function value	no, its effect set is module-state
@@ -644,18 +470,6 @@ examples/graphql.vyrn	main	no, it calls `gqlAnswer`, which is not trap-free	no, 
 examples/graphql.vyrn	topSchema	yes	no, its effect set is alloc
 examples/graphql.vyrn	topResolve	yes	no, its effect set is alloc
 examples/graphql.vyrn	reply	no, it calls `graphqlHandle`, which is not trap-free	no, its effect set is alloc, module-state, trap
-examples/graphql.vyrn	where$pBookId	yes	yes, emulated Int64
-examples/graphql.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
-examples/graphql.vyrn	where$pRating	yes	yes, emulated Int64
-examples/graphql.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
-examples/graphql.vyrn	where$pStars	yes	yes, emulated Int64
-examples/graphql.vyrn	where$cStars	no, it calls `panic`	no, its effect set is trap
-examples/graphql.vyrn	where$pTag	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/graphql.vyrn	where$cTag	no, it calls `panic`	no, its effect set is trap
-examples/graphql.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/graphql.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/graphql.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/graphql.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
 examples/handlers.vyrn	fetch	yes	no, its effect set is alloc, waits
 examples/handlers.vyrn	local	yes	no, its effect set is alloc
 examples/handlers.vyrn	step	no, it calls a function value	no, its effect set is alloc, waits
@@ -685,10 +499,6 @@ examples/i18ndemo.vyrn	lookup	yes	no, its effect set is alloc, module-state
 examples/i18ndemo.vyrn	main	yes	no, its effect set is alloc, write-output, module-state
 examples/i18ndemo.vyrn	where$pNavSection	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/i18ndemo.vyrn	where$cNavSection	no, it calls `panic`	no, its effect set is trap
-examples/i18ndemo.vyrn	where$pTStatusState	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/i18ndemo.vyrn	where$cTStatusState	no, it calls `panic`	no, its effect set is trap
-examples/i18ndemo.vyrn	where$pTransKey	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/i18ndemo.vyrn	where$cTransKey	no, it calls `panic`	no, its effect set is trap
 examples/ifexpr.vyrn	loud	yes	no, its effect set is alloc, write-output
 examples/ifexpr.vyrn	tier	yes	no, the result is String, not an integer, Bool or a read array of one
 examples/ifexpr.vyrn	main	yes	no, its effect set is alloc, write-output
@@ -825,10 +635,6 @@ examples/leak/server/main.vyrn	main	yes	no, its effect set is alloc, write-outpu
 examples/leak/shared/format.vyrn	title	yes	no, its effect set is alloc
 examples/leak/shared/format.vyrn	titleOf	yes	no, its effect set is alloc, fs-read
 examples/lib/area_spelling.vyrn	Area__Pt__area	yes	no, `p` is Pt, not an integer, Bool or a read array of one
-examples/lib/bodies.vyrn	where$pBodyColumns	yes	no, `x` is Array<Float64>, and WGSL has no 64-bit float
-examples/lib/bodies.vyrn	where$cBodyColumns	no, it calls `panic`	no, its effect set is trap
-examples/lib/bodies.vyrn	where$pParticleColumns	yes	no, `x` is Array<Float64>, and WGSL has no 64-bit float
-examples/lib/bodies.vyrn	where$cParticleColumns	no, it calls `panic`	no, its effect set is trap
 examples/lib/gen_palette.vyrn	palette	yes	no, its effect set is alloc, fs-read, fs-list, gen-only
 examples/lib/gen_projection_site.vyrn	d1	yes	no, its effect set is write-output
 examples/lib/gen_projection_site.vyrn	probe	yes	no, `q` is Q, not an integer, Bool or a read array of one
@@ -972,8 +778,6 @@ examples/modifyself.vyrn	Counting$Tally$record	yes	no, its effect set is alloc
 examples/modifyself.vyrn	Counting$Tally$sum	yes	no, `self` is Tally, not an integer, Bool or a read array of one
 examples/modifyself.vyrn	feed	yes	no, its effect set is alloc
 examples/modules.vyrn	main	yes	no, its effect set is alloc, write-output
-examples/modules.vyrn	where$pPercent	yes	yes, emulated Int64
-examples/modules.vyrn	where$cPercent	no, it calls `panic`	no, its effect set is trap
 examples/mustuse.vyrn	begin	yes	no, its effect set is alloc, write-output
 examples/mustuse.vyrn	finish	yes	no, its effect set is alloc, write-output
 examples/mustuse.vyrn	carry	yes	no, its effect set is alloc, write-output
@@ -986,8 +790,6 @@ examples/namedplace.vyrn	ensureBench	yes	no, its effect set is alloc, module-sta
 examples/namedplace.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/namespace.vyrn	colorName	yes	no, `c` is Color, not an integer, Bool or a read array of one
 examples/namespace.vyrn	main	no, it calls `derive$jsondec$jsonDecoders$td626a623af1d62f2`, which is not trap-free	no, its effect set is alloc, write-output
-examples/namespace.vyrn	where$pCount	yes	yes, emulated Int64
-examples/namespace.vyrn	where$cCount	no, it calls `panic`	no, its effect set is trap
 examples/nbody.vyrn	fixed9	yes	no, its effect set is alloc
 examples/nbody.vyrn	solarMass	yes	no, the value of line 34 is Float64, and WGSL has no 64-bit float
 examples/nbody.vyrn	daysPerYear	yes	no, the result is Float64, and WGSL has no 64-bit float
@@ -1005,10 +807,6 @@ examples/nbodycols.vyrn	energy	yes	no, `b` is BodyColumns, not an integer, Bool 
 examples/nbodycols.vyrn	advance	yes	no, `bodies` is BodyColumns, not an integer, Bool or a read array of one
 examples/nbodycols.vyrn	integrate	no, it calls `offsetMomentum`, which is not trap-free	no, its effect set is alloc
 examples/nbodycols.vyrn	main	no, it calls `offsetMomentum`, which is not trap-free	no, its effect set is alloc, write-output, module-state
-examples/nbodycols.vyrn	where$pBodyColumns	yes	no, `x` is Array<Float64>, and WGSL has no 64-bit float
-examples/nbodycols.vyrn	where$cBodyColumns	no, it calls `panic`	no, its effect set is trap
-examples/nbodycols.vyrn	where$pParticleColumns	yes	no, `x` is Array<Float64>, and WGSL has no 64-bit float
-examples/nbodycols.vyrn	where$cParticleColumns	no, it calls `panic`	no, its effect set is trap
 examples/nestedsum.vyrn	wrapOpt	yes	no, its effect set is alloc
 examples/nestedsum.vyrn	wrapRes	yes	no, its effect set is alloc
 examples/nestedsum.vyrn	optOfRes	yes	no, its effect set is alloc
@@ -1050,10 +848,6 @@ examples/pages/users/[id].vyrn	fetchUser	yes	no, its effect set is alloc
 examples/pages/users/[id].vyrn	page	yes	no, its effect set is alloc
 examples/pagesdemo.vyrn	show	no, it calls `route`, which is not trap-free	no, its effect set is alloc, write-output, trap
 examples/pagesdemo.vyrn	main	no, it calls `show`, which is not trap-free	no, its effect set is alloc, write-output, trap
-examples/pagesdemo.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/pagesdemo.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/pagesdemo.vyrn	where$pRoutePath	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/pagesdemo.vyrn	where$cRoutePath	no, it calls `panic`	no, its effect set is trap
 examples/part_of_a_temporary.vyrn	pair	yes	no, its effect set is alloc
 examples/part_of_a_temporary.vyrn	other	yes	no, its effect set is alloc
 examples/part_of_a_temporary.vyrn	line	yes	no, its effect set is alloc
@@ -1223,18 +1017,6 @@ examples/rest.vyrn	hitIfNoneMatch	no, it calls `handle`, which is not trap-free	
 examples/rest.vyrn	show	yes	no, its effect set is alloc, write-output
 examples/rest.vyrn	header	yes	no, its effect set is alloc
 examples/rest.vyrn	main	no, it calls `hit`, which is not trap-free	no, its effect set is alloc, write-output, serve, module-state, trap
-examples/rest.vyrn	where$pAge	yes	yes, emulated Int64
-examples/rest.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-examples/rest.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/rest.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/rest.vyrn	where$pPathById	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/rest.vyrn	where$cPathById	no, it calls `panic`	no, its effect set is trap
-examples/rest.vyrn	where$pPathCreate	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/rest.vyrn	where$cPathCreate	no, it calls `panic`	no, its effect set is trap
-examples/rest.vyrn	where$pPathDel	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/rest.vyrn	where$cPathDel	no, it calls `panic`	no, its effect set is trap
-examples/rest.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/rest.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
 examples/results.vyrn	measure	yes	no, its effect set is alloc, waits
 examples/results.vyrn	report	no, it calls `measure`, which has no body to judge	no, its effect set is alloc, module-state, trap, waits
 examples/results.vyrn	total	yes	no, its effect set is alloc, waits
@@ -1250,31 +1032,15 @@ examples/rpc.vyrn	onGetUser	yes	no, its effect set is alloc, module-state
 examples/rpc.vyrn	onCreateUser	yes	no, its effect set is alloc, module-state
 examples/rpc.vyrn	onDeleteUser	yes	no, its effect set is alloc, module-state
 examples/rpc.vyrn	main	no, it calls `usersById`, which is not trap-free	no, its effect set is alloc, write-output, module-state
-examples/rpc.vyrn	where$pAge	yes	yes, emulated Int64
-examples/rpc.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-examples/rpc.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/rpc.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
 examples/rpcsplit.vyrn	onGetItem	yes	no, its effect set is alloc, module-state
 examples/rpcsplit.vyrn	main	no, it calls `itemsById`, which is not trap-free	no, its effect set is alloc, write-output, module-state
-examples/rpcsplit.vyrn	where$pId	yes	yes, emulated Int64
-examples/rpcsplit.vyrn	where$cId	no, it calls `panic`	no, its effect set is trap
 examples/rpcsplit/server/api/items.vyrn	byId	yes	no, its effect set is alloc, module-state
-examples/rpcsplit/server/api/items.vyrn	where$pId	yes	yes, emulated Int64
-examples/rpcsplit/server/api/items.vyrn	where$cId	no, it calls `panic`	no, its effect set is trap
 examples/rpcsplit/server/store.vyrn	getItem	yes	no, its effect set is alloc, module-state
-examples/rpcsplit/server/store.vyrn	where$pId	yes	yes, emulated Int64
-examples/rpcsplit/server/store.vyrn	where$cId	no, it calls `panic`	no, its effect set is trap
 examples/rpcsplit/shared/wire.vyrn	where$pId	yes	yes, emulated Int64
 examples/rpcsplit/shared/wire.vyrn	where$cId	no, it calls `panic`	no, its effect set is trap
 examples/scan.vyrn	main	no, it calls `ident`, which is not trap-free	no, its effect set is alloc, write-output, trap
 examples/schemaimport.vyrn	mk	yes	no, its effect set is alloc
 examples/schemaimport.vyrn	main	yes	no, its effect set is alloc, write-output
-examples/schemaimport.vyrn	where$pPort	yes	yes, emulated Int64
-examples/schemaimport.vyrn	where$cPort	no, it calls `panic`	no, its effect set is trap
-examples/schemaimport.vyrn	where$pUser.age	yes	yes, emulated Int64
-examples/schemaimport.vyrn	where$cUser.age	no, it calls `panic`	no, its effect set is trap
-examples/schemaimport.vyrn	where$pUser.name	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/schemaimport.vyrn	where$cUser.name	no, it calls `panic`	no, its effect set is trap
 examples/server.vyrn	main	yes	no, its effect set is alloc, write-output, module-state
 examples/server.vyrn	handle	yes	no, its effect set is alloc, module-state
 examples/sha1.vyrn	check	no, it calls `panic`	no, its effect set is alloc, write-output, trap
@@ -1336,127 +1102,21 @@ examples/shelf/client/boot.vyrn	toggleLang	yes	no, its effect set is module-stat
 examples/shelf/client/boot.vyrn	vyrnView	no, it calls `derive$json$jsonEncoders$t62d5a5c67072e4b3`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/shelf/client/boot.vyrn	vyrnPatch	no, it calls `derive$json$jsonEncoders$t086736aeab103791`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/shelf/client/boot.vyrn	main	yes	yes, emulated Int64
-examples/shelf/client/boot.vyrn	where$pBookId	yes	yes, emulated Int64
-examples/shelf/client/boot.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
-examples/shelf/client/boot.vyrn	where$pRating	yes	yes, emulated Int64
-examples/shelf/client/boot.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
-examples/shelf/client/boot.vyrn	where$pStars	yes	yes, emulated Int64
-examples/shelf/client/boot.vyrn	where$cStars	no, it calls `panic`	no, its effect set is trap
-examples/shelf/client/boot.vyrn	where$pTag	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/client/boot.vyrn	where$cTag	no, it calls `panic`	no, its effect set is trap
-examples/shelf/client/boot.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/client/boot.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/shelf/client/boot.vyrn	where$pTransKey	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/client/boot.vyrn	where$cTransKey	no, it calls `panic`	no, its effect set is trap
-examples/shelf/client/boot.vyrn	where$pTw	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/client/boot.vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
-examples/shelf/client/boot.vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/client/boot.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
-examples/shelf/client/boot.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/client/boot.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server.vyrn	runMiddleware	no, it calls a function value	no, its effect set is alloc, write-output, module-state
 examples/shelf/server.vyrn	handle	no, it calls `runMiddleware`, which is not trap-free	no, its effect set is alloc, write-output, module-state, trap
 examples/shelf/server.vyrn	routed	no, it calls `graphqlHandle`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/shelf/server.vyrn	main	no, it calls `handle`, which is not trap-free	no, its effect set is alloc, write-output, module-state, trap
-examples/shelf/server.vyrn	where$pBookId	yes	yes, emulated Int64
-examples/shelf/server.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/shelf/server.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server.vyrn	where$pRating	yes	yes, emulated Int64
-examples/shelf/server.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server.vyrn	where$pRoutePath	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server.vyrn	where$cRoutePath	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server.vyrn	where$pStars	yes	yes, emulated Int64
-examples/shelf/server.vyrn	where$cStars	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server.vyrn	where$pTag	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server.vyrn	where$cTag	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server.vyrn	where$pTransKey	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server.vyrn	where$cTransKey	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server.vyrn	where$pTw	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server.vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server.vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/api/books.vyrn	browse	yes	no, its effect set is alloc, module-state
 examples/shelf/server/api/books.vyrn	byId	yes	no, its effect set is alloc, module-state
 examples/shelf/server/api/books.vyrn	add	yes	no, its effect set is alloc, module-state
 examples/shelf/server/api/books.vyrn	del	yes	no, its effect set is alloc, module-state
 examples/shelf/server/api/books.vyrn	rate	no, it calls `rateBook`, which is not trap-free	no, its effect set is alloc, module-state
 examples/shelf/server/api/books.vyrn	tags	yes	no, its effect set is alloc, module-state
-examples/shelf/server/api/books.vyrn	where$pBookId	yes	yes, emulated Int64
-examples/shelf/server/api/books.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/api/books.vyrn	where$pRating	yes	yes, emulated Int64
-examples/shelf/server/api/books.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/api/books.vyrn	where$pStars	yes	yes, emulated Int64
-examples/shelf/server/api/books.vyrn	where$cStars	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/api/books.vyrn	where$pTag	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/api/books.vyrn	where$cTag	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/api/books.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/api/books.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/api/books.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/api/books.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/routes/about.vyrn	page	yes	no, its effect set is alloc, module-state
-examples/shelf/server/routes/about.vyrn	where$pBookId	yes	yes, emulated Int64
-examples/shelf/server/routes/about.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/about.vyrn	where$pRating	yes	yes, emulated Int64
-examples/shelf/server/routes/about.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/about.vyrn	where$pStars	yes	yes, emulated Int64
-examples/shelf/server/routes/about.vyrn	where$cStars	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/about.vyrn	where$pTag	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/about.vyrn	where$cTag	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/about.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/about.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/about.vyrn	where$pTransKey	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/about.vyrn	where$cTransKey	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/about.vyrn	where$pTw	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/about.vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/about.vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/about.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/about.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/about.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/routes/books/[id].vyrn	data	yes	no, its effect set is alloc
 examples/shelf/server/routes/books/[id].vyrn	fetchBook	yes	no, its effect set is alloc, module-state
 examples/shelf/server/routes/books/[id].vyrn	page	yes	no, its effect set is alloc, module-state
-examples/shelf/server/routes/books/[id].vyrn	where$pBookId	yes	yes, emulated Int64
-examples/shelf/server/routes/books/[id].vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/books/[id].vyrn	where$pRating	yes	yes, emulated Int64
-examples/shelf/server/routes/books/[id].vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/books/[id].vyrn	where$pStars	yes	yes, emulated Int64
-examples/shelf/server/routes/books/[id].vyrn	where$cStars	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/books/[id].vyrn	where$pTag	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/books/[id].vyrn	where$cTag	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/books/[id].vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/books/[id].vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/books/[id].vyrn	where$pTransKey	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/books/[id].vyrn	where$cTransKey	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/books/[id].vyrn	where$pTw	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/books/[id].vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/books/[id].vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/books/[id].vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/books/[id].vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/books/[id].vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/routes/index.vyrn	page	yes	no, its effect set is alloc, module-state
-examples/shelf/server/routes/index.vyrn	where$pBookId	yes	yes, emulated Int64
-examples/shelf/server/routes/index.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/index.vyrn	where$pRating	yes	yes, emulated Int64
-examples/shelf/server/routes/index.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/index.vyrn	where$pStars	yes	yes, emulated Int64
-examples/shelf/server/routes/index.vyrn	where$cStars	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/index.vyrn	where$pTag	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/index.vyrn	where$cTag	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/index.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/index.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/index.vyrn	where$pTransKey	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/index.vyrn	where$cTransKey	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/index.vyrn	where$pTw	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/index.vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/index.vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/index.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/routes/index.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/routes/index.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/store.vyrn	copyBook	yes	no, its effect set is alloc
 examples/shelf/server/store.vyrn	listBooks	yes	no, its effect set is alloc, module-state
 examples/shelf/server/store.vyrn	getBook	yes	no, its effect set is alloc, module-state
@@ -1465,42 +1125,12 @@ examples/shelf/server/store.vyrn	deleteBook	yes	no, its effect set is alloc, mod
 examples/shelf/server/store.vyrn	rateBook	no, it keeps an index check	no, its effect set is alloc, module-state
 examples/shelf/server/store.vyrn	tagCounts	yes	no, its effect set is alloc, module-state
 examples/shelf/server/store.vyrn	countOf	yes	no, `m` is TagCounts, not an integer, Bool or a read array of one
-examples/shelf/server/store.vyrn	where$pBookId	yes	yes, emulated Int64
-examples/shelf/server/store.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/store.vyrn	where$pRating	yes	yes, emulated Int64
-examples/shelf/server/store.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/store.vyrn	where$pStars	yes	yes, emulated Int64
-examples/shelf/server/store.vyrn	where$cStars	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/store.vyrn	where$pTag	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/store.vyrn	where$cTag	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/store.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/store.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/store.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/store.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
 examples/shelf/server/view.vyrn	navLink	yes	no, its effect set is alloc
 examples/shelf/server/view.vyrn	bookRow	yes	no, its effect set is alloc, module-state
 examples/shelf/server/view.vyrn	homePage	yes	no, its effect set is alloc, module-state
 examples/shelf/server/view.vyrn	pluralRow	yes	no, its effect set is alloc, module-state
 examples/shelf/server/view.vyrn	aboutPage	yes	no, its effect set is alloc, module-state
 examples/shelf/server/view.vyrn	detailPage	yes	no, its effect set is alloc, module-state
-examples/shelf/server/view.vyrn	where$pBookId	yes	yes, emulated Int64
-examples/shelf/server/view.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/view.vyrn	where$pRating	yes	yes, emulated Int64
-examples/shelf/server/view.vyrn	where$cRating	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/view.vyrn	where$pStars	yes	yes, emulated Int64
-examples/shelf/server/view.vyrn	where$cStars	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/view.vyrn	where$pTag	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/view.vyrn	where$cTag	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/view.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/view.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/view.vyrn	where$pTransKey	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/view.vyrn	where$cTransKey	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/view.vyrn	where$pTw	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/view.vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/view.vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/view.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
-examples/shelf/server/view.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/shelf/server/view.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
 examples/shelf/shared/util.vyrn	splitTrim	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
 examples/shelf/shared/wire.vyrn	where$pBookId	yes	yes, emulated Int64
 examples/shelf/shared/wire.vyrn	where$cBookId	no, it calls `panic`	no, its effect set is trap
@@ -1734,10 +1364,6 @@ examples/tryplace.vyrn	ensureSlab	yes	no, its effect set is alloc, module-state
 examples/tryplace.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output, module-state, trap
 examples/twdemo.vyrn	badge	no, it calls `toHtmlString`, which is not trap-free	no, its effect set is alloc, trap
 examples/twdemo.vyrn	main	no, it calls `badge`, which is not trap-free	no, its effect set is alloc, write-output, trap
-examples/twdemo.vyrn	where$pTw	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/twdemo.vyrn	where$cTw	no, it calls `panic`	no, its effect set is trap
-examples/twdemo.vyrn	where$pTwClass	yes	no, `value` is String, not an integer, Bool or a read array of one
-examples/twdemo.vyrn	where$cTwClass	no, it calls `panic`	no, its effect set is trap
 examples/unionfind.vyrn	forest	yes	no, its effect set is alloc
 examples/unionfind.vyrn	find	no, it keeps an index check	no, it is not trap-free
 examples/unionfind.vyrn	union	no, it keeps an index check	no, it is not trap-free
@@ -1843,8 +1469,6 @@ examples/vlog.vyrn	cmdOverview	no, it calls `cmdFmt`, which is not trap-free	no,
 examples/vlog.vyrn	usage	yes	no, its effect set is write-output
 examples/vlog.vyrn	loadLines	no, it calls `opt`, which is not trap-free	no, its effect set is alloc, read-input, fs-read, trap
 examples/vlog.vyrn	main	no, it calls `opt`, which is not trap-free	no, its effect set is alloc, read-input, write-output, fs-read, args, trap
-examples/vlog.vyrn	where$pInstant	yes	yes, emulated Int64
-examples/vlog.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
 examples/vlog.vyrn	where$pMillis	yes	yes, emulated Int64
 examples/vlog.vyrn	where$cMillis	no, it calls `panic`	no, its effect set is trap
 examples/vondemo.vyrn	main	yes	no, its effect set is write-output
@@ -2068,10 +1692,6 @@ site/app/guide.vyrn	demoFor	no, it calls `demosFor`, which is not trap-free	no, 
 site/app/guide.vyrn	guideUseCount	no, it calls `demosFor`, which is not trap-free	no, its effect set is alloc, trap
 site/app/guide.vyrn	demosFor	no, it calls `playHref`, which is not trap-free	no, its effect set is alloc, trap
 site/app/guide.vyrn	outsideCode	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
-site/app/guide.vyrn	where$pAge	yes	yes, emulated Int64
-site/app/guide.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-site/app/guide.vyrn	where$pPort	yes	yes, emulated Int64
-site/app/guide.vyrn	where$cPort	no, it calls `panic`	no, its effect set is trap
 site/app/guidecode.vyrn	mainTail	yes	no, the result is String, not an integer, Bool or a read array of one
 site/app/guidecode.vyrn	hasDemo	yes	no, `toks` is Array<Token>, not an integer, Bool or a read array of one
 site/app/guidecode.vyrn	fromAfter	no, it keeps an index check	no, it is not trap-free
@@ -2176,10 +1796,6 @@ site/app/pagemd.vyrn	attr__from0	no, it calls `substring`, which is not trap-fre
 site/app/pagemd.vyrn	upTo__from0	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
 site/app/pagemd.vyrn	collapse__from1	no, it calls `replace`, which is not trap-free	no, its effect set is alloc, trap
 site/app/pagemd.vyrn	askClaudeUrl	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
-site/app/pagemd.vyrn	where$pAge	yes	yes, emulated Int64
-site/app/pagemd.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-site/app/pagemd.vyrn	where$pPort	yes	yes, emulated Int64
-site/app/pagemd.vyrn	where$cPort	no, it calls `panic`	no, its effect set is trap
 site/app/play.vyrn	playExamples	yes	no, its effect set is alloc
 site/app/repo.vyrn	exampleCount	yes	yes, emulated Int64
 site/app/repo.vyrn	stdCount	yes	yes, emulated Int64
@@ -2205,10 +1821,6 @@ site/app/search.vyrn	indexJsonOf	no, it calls `emit`, which is not trap-free	no,
 site/app/search.vyrn	indexName	yes	no, the result is String, not an integer, Bool or a read array of one
 site/app/search.vyrn	sectionCount	yes	no, its effect set is alloc
 site/app/search.vyrn	exportCount	yes	no, its effect set is alloc
-site/app/search.vyrn	where$pAge	yes	yes, emulated Int64
-site/app/search.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-site/app/search.vyrn	where$pPort	yes	yes, emulated Int64
-site/app/search.vyrn	where$cPort	no, it calls `panic`	no, its effect set is trap
 site/app/snippets.vyrn	vyrnHtml	yes	no, its effect set is alloc
 site/app/snippets.vyrn	vyrnLine	no, it keeps an index check	no, its effect set is alloc
 site/app/snippets.vyrn	vyrnSource	yes	no, `id` is String, not an integer, Bool or a read array of one
@@ -2324,8 +1936,6 @@ std/bench.vyrn	padRight	yes	no, its effect set is alloc
 std/bench.vyrn	benchMeasure	no, it calls a function value	no, its effect set is alloc, clock
 std/bench.vyrn	benchOne	no, it calls `benchMeasure`, which is not trap-free	no, its effect set is alloc, write-output, clock
 std/bench.vyrn	benchJson	no, it calls `emit`, which is not trap-free	no, its effect set is alloc, trap
-std/bench.vyrn	where$pInstant	yes	yes, emulated Int64
-std/bench.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
 std/cli.vyrn	cliIssueOf	yes	no, its effect set is alloc
 std/cli.vyrn	cliOptAt	yes	no, `opts` is Array<CliOpt>, not an integer, Bool or a read array of one
 std/cli.vyrn	readArgv	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
@@ -2703,8 +2313,6 @@ std/http.vyrn	Wire$Live$resumable	yes	no, its effect set is alloc
 std/http.vyrn	Frames$Socket$closeCode	yes	no, its effect set is alloc
 std/http.vyrn	Frames$Socket$subprotocol	yes	no, its effect set is alloc
 std/http.vyrn	Frames$Socket$maxFrame	yes	no, its effect set is alloc
-std/http.vyrn	where$pInstant	yes	yes, emulated Int64
-std/http.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
 std/i18n.vyrn	upperFirst	yes	no, its effect set is alloc
 std/i18n.vyrn	keyTypeBase	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
 std/i18n.vyrn	keyFnName	no, it calls `keyTypeBase`, which is not trap-free	no, its effect set is alloc, trap
@@ -3354,6 +2962,7 @@ std/task.vyrn	task$waitAt	yes	no, its effect set is module-state
 std/task.vyrn	task$taskEnd	no, it keeps an index check	no, its effect set is alloc, module-state
 std/task.vyrn	task$taskBegin	yes	no, its effect set is alloc, module-state
 std/task.vyrn	task$taskFork	yes	no, its effect set is alloc, module-state
+std/task.vyrn	task$taskHold	no, it keeps an index check	no, its effect set is module-state
 std/task.vyrn	task$taskForked	no, it calls `taskEnd`, which is not trap-free	no, its effect set is alloc, module-state
 std/task.vyrn	task$newOp	yes	no, its effect set is module-state
 std/task.vyrn	task$stateOf	no, it keeps an index check	no, its effect set is module-state
@@ -3379,6 +2988,7 @@ std/task.vyrn	task$exitDue	yes	no, its effect set is module-state
 std/task.vyrn	task$deliver	no, it keeps an index check	no, its effect set is alloc, module-state
 std/task.vyrn	task$drain	no, it keeps an index check	no, its effect set is alloc, module-state, trap
 std/task.vyrn	task$taskTrapped	no, it keeps an index check	no, its effect set is alloc, module-state, trap
+std/task.vyrn	task$releaseHeld	no, it keeps an index check	no, its effect set is module-state, trap
 std/task.vyrn	task$regionSwap	no, it calls `arenaSwap`, which is not trap-free	no, it is not trap-free
 std/task.vyrn	task$regionClose	no, it calls `regionExit`, which is not trap-free	no, it is not trap-free
 std/task.vyrn	task$regionCarry	no, it calls `arenaSwap`, which is not trap-free	no, it is not trap-free

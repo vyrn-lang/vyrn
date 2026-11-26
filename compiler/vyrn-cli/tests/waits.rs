@@ -456,6 +456,25 @@ fn a_trap_in_a_holder_leaves_its_held_task_running() {
     );
 }
 
+/// A trap releases every handle its task held, as scope end would, and a handle a fork
+/// argument moved belongs to the forked task: under `vyrn test`, a resident instance, each held
+/// result is freed once, across fifty traps.
+#[test]
+fn a_trap_releases_the_handles_its_task_held() {
+    let out = vyrn()
+        .args(["test", "trapheld.vyrn"])
+        .env("VYRN_LEAK_CHECK", "1")
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn test");
+    assert!(
+        out.status.success() && norm(&out.stdout).contains("4 passed, 0 failed"),
+        "{}{}",
+        norm(&out.stdout),
+        norm(&out.stderr)
+    );
+}
+
 /// A fork of a call whose result crosses in its words (`Option<Int64>`, a record of two
 /// `Int64`), or in the parameter it returns, lands the result in the task's block on every host.
 #[test]
