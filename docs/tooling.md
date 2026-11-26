@@ -668,6 +668,13 @@ Settings:
   restarts the server.
 - `vyrn.hints.style`: `compact` (the default) or `full`, the server's
   `hintStyle`. A change restarts the server.
+- `vyrn.hints.render`: `decorations` (the default) or `inlay`. With
+  `decorations` the extension sends `costRendering`, asks `vyrn/costRows` when
+  a file opens, changes or is saved, and draws each glyph as its own decoration
+  after the line's text, with its own hover, and each fact's expression as a
+  decoration with the glyph's hover, so the pointer moving from one glyph to the
+  next switches the hover. With `inlay` the server's line hints show them. A
+  change restarts the server.
 - `vyrn.path`: the compiler. When empty: `compiler/target/release/vyrn`, then
   the debug build, then `cargo run -p vyrn-cli`.
 
