@@ -29,37 +29,26 @@ const at = (line, a, b) => ({
 });
 
 test("no rows, no decorations", () => {
-  assert.deepEqual(costDecorations([]), { glyphs: [], spans: [] });
+  assert.deepEqual(costDecorations([]), []);
 });
 
-test("each anchor is a glyph with its own hover, and each span carries the row's hover", () => {
+test("each anchor is a glyph with its own hover", () => {
   const pos = (line, character) => ({ line, character });
   const rows = [
-    {
-      anchors: [{ at: pos(72, 35), glyph: "↗", hover: "grows" }],
-      spans: [at(72, 4, 35)],
-      hover: "grows 1",
-    },
+    { anchors: [{ at: pos(72, 35), glyph: "↗", hover: "grows" }], spans: [at(72, 4, 35)] },
     {
       anchors: [
         { at: pos(72, 28), glyph: "⇒", hover: "proved a" },
         { at: pos(72, 33), glyph: "⇒", hover: "proved b" },
       ],
       spans: [at(72, 21, 28), at(72, 20, 33)],
-      hover: "proved 2",
     },
-    { anchors: [{ at: pos(80, 12), glyph: "×3", hover: "run" }], spans: [], hover: "run" },
+    { anchors: [{ at: pos(80, 12), glyph: "×3", hover: "run" }], spans: [] },
   ];
-  const { glyphs, spans } = costDecorations(rows);
-  assert.deepEqual(glyphs, [
+  assert.deepEqual(costDecorations(rows), [
     { at: pos(72, 35), glyph: "↗", hover: "grows" },
     { at: pos(72, 28), glyph: "⇒", hover: "proved a" },
     { at: pos(72, 33), glyph: "⇒", hover: "proved b" },
     { at: pos(80, 12), glyph: "×3", hover: "run" },
-  ]);
-  assert.deepEqual(spans, [
-    { range: at(72, 4, 35), hover: "grows 1" },
-    { range: at(72, 21, 28), hover: "proved 2" },
-    { range: at(72, 20, 33), hover: "proved 2" },
   ]);
 });

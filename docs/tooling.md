@@ -689,8 +689,8 @@ Settings:
   `decorations` the extension sends `costRendering`, asks `vyrn/costRows` when
   a file opens, changes or is saved, and draws each glyph as its own decoration
   at its anchor, after the expression it is about, with the hover of the facts
-  that end there, and each fact's expression as a decoration with the row's
-  hover. Glyphs about one expression share its hover. With `inlay` the server's line hints show them. A
+  that end there. Glyphs about one expression share its hover, and inside an
+  expression the server's hover answers. With `inlay` the server's line hints show them. A
   change restarts the server.
 - `vyrn.path`: the compiler. When empty: `compiler/target/release/vyrn`, then
   the debug build, then `cargo run -p vyrn-cli`.

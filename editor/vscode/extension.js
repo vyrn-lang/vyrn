@@ -751,20 +751,14 @@ function costRendering(cfg) {
 /**
  * The decorations of the rows `vyrn/costRows` answers: per row a glyph at each of its anchors,
  * the end of an expression its facts are about or the end of its line, with the hover of the
- * facts that end there, and each span of its facts with the row's hover. VS Code finds a hover
- * by text position, so glyphs at one position share a hover; anchoring each glyph to its own
- * expression gives each its own hover.
+ * facts that end there. VS Code finds a hover by text position and shows every decoration's
+ * hover at it, so a glyph anchored to its own expression has its own hover, and the facts'
+ * expressions carry no decoration: the server's hover answers inside them.
  *
- * @param {{ anchors: { at: object, glyph: string, hover: string }[], spans: { start: object, end: object }[], hover: string }[]} rows
+ * @param {{ anchors: { at: object, glyph: string, hover: string }[] }[]} rows
  */
 function costDecorations(rows) {
-  const glyphs = [];
-  const spans = [];
-  for (const r of rows) {
-    for (const a of r.anchors) glyphs.push({ at: a.at, glyph: a.glyph, hover: a.hover });
-    for (const range of r.spans) spans.push({ range, hover: r.hover });
-  }
-  return { glyphs, spans };
+  return rows.flatMap((r) => r.anchors.map((a) => ({ at: a.at, glyph: a.glyph, hover: a.hover })));
 }
 
 /**
@@ -786,15 +780,12 @@ function registerCostDecorations(context, vsc, lspState) {
       margin: "0 0 0 1ch",
     },
   });
-  const spanType = vsc.window.createTextEditorDecorationType({});
-  context.subscriptions.push(glyphType, spanType);
+  context.subscriptions.push(glyphType);
   const hover = (text) => {
     const md = new vsc.MarkdownString(text);
     md.isTrusted = { enabledCommands: ["vyrn.whyCost"] };
     return md;
   };
-  const range = (r) =>
-    new vsc.Range(r.start.line, r.start.character, r.end.line, r.end.character);
   /** @param {import("vscode").TextEditor} editor */
   const draw = async (editor) => {
     const doc = editor.document;
@@ -808,18 +799,13 @@ function registerCostDecorations(context, vsc, lspState) {
         rows = []; // server down or not ready: no decorations, no error noise.
       }
     }
-    const { glyphs, spans } = costDecorations(rows || []);
     editor.setDecorations(
       glyphType,
-      glyphs.map((g) => ({
-        range: range({ start: g.at, end: g.at }),
+      costDecorations(rows || []).map((g) => ({
+        range: new vsc.Range(g.at.line, g.at.character, g.at.line, g.at.character),
         hoverMessage: hover(g.hover),
         renderOptions: { after: { contentText: g.glyph } },
       }))
-    );
-    editor.setDecorations(
-      spanType,
-      spans.map((s) => ({ range: range(s.range), hoverMessage: hover(s.hover) }))
     );
   };
   const drawDoc = (doc) =>
