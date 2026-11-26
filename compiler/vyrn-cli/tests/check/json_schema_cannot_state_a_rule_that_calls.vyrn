@@ -1,0 +1,10 @@
+fn isShort(value: String) -> Bool {
+    return value.byteLength < 4
+}
+
+type Short = String where isShort(value)
+
+fn main() -> Int64 {
+    print(jsonSchema<Short>())
+    return 0
+}

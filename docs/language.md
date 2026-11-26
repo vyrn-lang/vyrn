@@ -251,7 +251,7 @@ type User = {
 } where age < 150
 ```
 
-- A predicate uses comparisons, `&&`, `||`, arithmetic, `value.byteLength` and `=~`. On a record, a trailing `where` states a rule across fields, and a `where` on a field constrains that field.
+- A predicate uses comparisons, `&&`, `||`, arithmetic, `value.byteLength` and `=~`, and a call of a function of the same module that takes the predicate's binds, returns `Bool` and is comptime-pure. A constant entering a type whose rule calls keeps its run-time check. On a record, a trailing `where` states a rule across fields, and a `where` on a field constrains that field.
 - `Port(n)` constructs. A constant that satisfies the rule is proven at compile time and costs nothing; a constant that breaks it is refused; a runtime value that breaks it traps. The compiler drops the check where the facts before it prove the rule, and a value of an integer refinement type gives the compiler its rule's comparisons as facts: with `i: Idx` and `type Idx = Int64 where value >= 0 && value < 8`, `xs[i]` on an `Array<Int64, 8>` runs no index check.
 - `Port?(n)` answers `Option<Port>`: `None` when the rule fails. Use it for input the program does not control.
 - Every boundary checks the rule without a call: a `let` annotation, an assignment, an argument, a return, a record field, an array element and a map insert.
@@ -276,7 +276,7 @@ type User = {
 - An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a refinement type, or a generic record applied to another argument (see Records). A record with one field is not distinct: it fits wherever a record with that one field is wanted.
 - A `String` type whose regular expression denotes a finite language is a finite string type. An interpolation whose holes are all finite types has a finite type too, and assigning it to a refinement type over `String` is proven by automaton containment at compile time, or refused with the key that escapes.
 
-`schemaOf<T>()` reads a refinement type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type, and a union's as the `anyOf` of its members' schemas. `schemaOf` of a union is refused, because one `Schema` describes one declaration. Either is refused over a type parameter, because the answer is computed where the call is checked. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
+`schemaOf<T>()` reads a refinement type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type, and a union's as the `anyOf` of its members' schemas. `schemaOf` of a union is refused, because one `Schema` describes one declaration. Either is refused over a type whose rule calls a function, because no schema keyword states a call. Either is refused over a type parameter, because the answer is computed where the call is checked. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
 
 ### Proofs
 
@@ -329,7 +329,7 @@ fn twice(ms: Int64) -> Result<Int64, String> {
 - `await` marks the call after it, as `consume` marks a place. `await f(x)?` is `(await f(x))?`. It takes no name from programs: `let await = 1` is a binding, and `await(x)` is a call of it.
 - A waiting call without `await` or `fork` is refused, and its fix says to write `await` to wait for it there or `fork` to run it in a task of its own. `await` before a call that does not wait is refused too, so the mark stands exactly where other code may run.
 - A call through a function value, or one that passes a function value into a body that calls through one, waits or not by the value. Its `await` is never refused: where the value does not wait, the call finishes at its start. So `twice(x, f)` with `await f(x)` takes a waiting function and a lambda alike.
-- A `gen fn`, a module-state initializer and a `where` predicate cannot wait: a build is deterministic, state is set before `main` runs, and a predicate calls nothing.
+- A `gen fn`, a module-state initializer and a `where` predicate cannot wait: a build is deterministic, state is set before `main` runs, and a predicate calls only comptime-pure functions.
 - Other tasks may run while one waits, so an `await` may write every global. It ends every borrow of module state and every fact about it, as a call that writes the global does: a borrow of a module-state field held across an `await` and read after it is refused.
 - `vyrn why --cost` shows `waits` in a function's effect set, and the editor's hover of a function that waits says so.
 

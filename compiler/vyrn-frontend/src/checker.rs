@@ -2971,8 +2971,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks a type's `where` predicate: no call, and Bool in a scope holding
-    /// only `binds`. `kind` names it in a refusal ("cross-field" or
+    /// Checks a type's `where` predicate: Bool in a scope holding only
+    /// `binds`, and each call one of a `-> Bool` function of the declaring
+    /// module whose arguments are binds. `check_comptime_purity` holds the
+    /// callee pure. `kind` names it in a refusal ("cross-field" or
     /// "refinement").
     fn check_predicate(
         &self,
@@ -2984,7 +2986,18 @@ impl<'a> Checker<'a> {
             return Ok(());
         };
         let decl = DeclName(&t.name);
-        if consteval::contains_call(pred) {
+        let binds: Vec<(String, Type)> = binds.collect();
+        let is_bind =
+            |a: &Expr| matches!(a, Expr::Var { name, .. } if binds.iter().any(|(b, _)| b == name));
+        let allowed = |c: &Expr| match c {
+            Expr::Call { name, args, .. } => {
+                let f = self.resolve_fn(name).map(|d| &self.functions[d.index()]);
+                f.is_some_and(|f| f.module == t.module && f.ret == Type::Bool)
+                    && args.iter().all(is_bind)
+            }
+            _ => false,
+        };
+        if !consteval::calls(pred).is_some_and(|cs| cs.into_iter().all(allowed)) {
             return Err(cerr!(t.line, PredicateCalls, kind, name = decl));
         }
         let mut scope = Scope::closed();
@@ -5849,6 +5862,17 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, SchemaOfParam, name, t));
             }
         }
+        // No schema keyword states a call.
+        if let ("schemaOf" | "jsonSchema", [Type::Named(n)]) = (name, written) {
+            let calls = |p: &Expr| consteval::calls(p).is_some_and(|cs| !cs.is_empty());
+            if self
+                .decl(n)
+                .and_then(|d| d.predicate.as_ref())
+                .is_some_and(calls)
+            {
+                return Err(cerr!(line, SchemaOfCall, name, t = n));
+            }
+        }
         // A `Schema` describes one declaration, and a union is none of its own.
         if let ("schemaOf", [t]) = (name, written) {
             if crate::types::union_of(t, self).is_some() {
@@ -7363,34 +7387,49 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
     ty.is_scalar() || (allow_unit && *ty == Type::Unit)
 }
 
-/// Refuses a `gen fn` that reaches, through any call chain, an `extern`,
-/// module state, or an atom [`crate::effects::gen_refusal`] refuses, naming
-/// the effect and the chain. Every `gen fn` is checked, even one called only
-/// at run time, because any may be an import target.
+/// Refuses a `gen fn`, or a function a `where` predicate calls, that reaches,
+/// through any call chain, an `extern`, module state, or an atom
+/// [`crate::effects::gen_refusal`] refuses, naming the effect and the chain.
+/// Every `gen fn` is checked, even one called only at run time, because any
+/// may be an import target.
 fn check_comptime_purity<'a>(
     program: &'a Program,
     through: &'a HashSet<NodeId>,
     dispatched: impl Iterator<Item = &'a (String, String)>,
     out: &mut Vec<Diagnostic>,
 ) {
-    // A given gen fn's verdict is its module's own load's.
-    let gen_fns: Vec<&Function> = (program.functions.iter())
-        .filter(|f| f.is_gen && matches!(f.body, Body::Written(_)))
-        .collect();
-    if gen_fns.is_empty() {
-        return;
-    }
     let fn_map: HashMap<&str, &Function> = program
         .functions
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
+    let written = |f: &&Function| matches!(f.body, Body::Written(_));
+    // A given function's verdict is its module's own load's.
+    let gen_fns = (program.functions.iter().filter(|f| f.is_gen))
+        .filter(written)
+        .map(|g| (g, None));
+    let predicated = (program.type_decls.iter()).filter(|t| t.line != 0);
+    let fns = &fn_map;
+    let callees = predicated.flat_map(|t| {
+        let calls = t.predicate.as_ref().and_then(consteval::calls);
+        (calls.into_iter().flatten()).filter_map(move |c| match c {
+            // Another module's callee is refused by `check_predicate`.
+            Expr::Call { name, .. } => (fns.get(name.as_str()).copied())
+                .filter(|f| written(f) && f.module == t.module)
+                .map(|f| (f, Some(t))),
+            _ => None,
+        })
+    });
+    let roots: Vec<(&Function, Option<&TypeDecl>)> = gen_fns.chain(callees).collect();
+    if roots.is_empty() {
+        return;
+    }
     let cx = FenceCx::new(program, through, dispatched);
     // A function's own violation and call edges depend on its body alone, so
-    // they are computed once and shared by every generator's search.
+    // they are computed once and shared by every root's search.
     let mut facts: HashMap<String, Fenced> = HashMap::new();
 
-    for g in gen_fns {
+    for (g, pred) in roots {
         // Breadth-first, so the reported chain is the shortest.
         let mut queue: std::collections::VecDeque<Vec<&str>> =
             std::collections::VecDeque::from([vec![g.name.as_str()]]);
@@ -7409,15 +7448,26 @@ fn check_comptime_purity<'a>(
             }
             let Fenced { impure, calls } = &facts[cur];
             if let Some(reason) = impure.clone() {
-                let msg = if path.len() == 1 {
-                    cerr!(g.line, GenImpure, name = DeclName(&g.name), reason)
-                } else {
-                    let written = path.iter().map(|n| program.spellings.written(n));
-                    let chain = written.collect::<Vec<_>>().join(" -> ");
-                    let (name, cur) = (DeclName(&g.name), DeclName(cur));
-                    cerr!(g.line, GenImpureVia, name, cur, chain, reason)
+                let spelled = path.iter().map(|n| program.spellings.written(n));
+                let msg = match pred {
+                    Some(t) => {
+                        let chain = spelled.map(|n| format!("`{n}`")).collect::<Vec<_>>();
+                        let (name, chain) = (DeclName(&t.name), chain.join(" -> "));
+                        cerr!(t.line, PredicateImpure, name, chain, reason)
+                            .in_file(t.module.clone())
+                    }
+                    None if path.len() == 1 => {
+                        let msg = cerr!(g.line, GenImpure, name = DeclName(&g.name), reason);
+                        on_name(msg, g.col).in_file(g.module.clone())
+                    }
+                    None => {
+                        let chain = spelled.collect::<Vec<_>>().join(" -> ");
+                        let (name, cur) = (DeclName(&g.name), DeclName(cur));
+                        let msg = cerr!(g.line, GenImpureVia, name, cur, chain, reason);
+                        on_name(msg, g.col).in_file(g.module.clone())
+                    }
                 };
-                out.push(on_name(msg, g.col).in_file(g.module.clone()));
+                out.push(msg);
                 break;
             }
             for callee in calls.clone() {

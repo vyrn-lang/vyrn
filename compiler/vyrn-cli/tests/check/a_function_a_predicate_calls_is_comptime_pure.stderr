@@ -1,0 +1,1 @@
+a_function_a_predicate_calls_is_comptime_pure.vyrn:11:0: the predicate for `Short` is not comptime-pure: it calls `isShort` -> `under`, which reads or writes module state

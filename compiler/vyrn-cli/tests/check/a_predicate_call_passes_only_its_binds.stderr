@@ -1,0 +1,1 @@
+a_predicate_call_passes_only_its_binds.vyrn:5:0: refinement predicate for `Short` may call only a `-> Bool` function of its own module, passing its binds

@@ -1,0 +1,1 @@
+schema_of_cannot_state_a_rule_that_calls.vyrn:8:13: `schemaOf` cannot state the rule of `Short`: it calls a function, and no schema keyword does
