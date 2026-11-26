@@ -119,7 +119,7 @@ checker-rules.vyrn:615:34: `match` is missing variant `A`
 checker-rules.vyrn:623:17: duplicate `A` arm
 checker-rules.vyrn:628:13: `match` is missing variant `A`
 checker-rules.vyrn:637:5: `print` needs a number, Bool, or String, found Plain: say how it renders with `impl Show for Plain`
-checker-rules.vyrn:641:12: `toString` needs a number, Bool, or String, found T
+checker-rules.vyrn:641:16: `toString` needs a number, Bool, or String, found T
 checker-rules.vyrn:653:12: `declaredOne` expects 1 argument(s), got 2
 checker-rules.vyrn:656:12: `declaredOne` declares no type parameters, so it takes no type arguments
 checker-rules.vyrn:659:12: `declaredGeneric` takes 1 type argument(s), got 2

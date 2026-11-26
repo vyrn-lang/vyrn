@@ -38,7 +38,7 @@ use vyrn_frontend::core::check::{Ensures, Guard, Invariant, Promise, Raises, Ver
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, AtRead, Await, Body, BorrowKind, Callee, Cand, Copied,
     Ctor, Facts, Forked, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Said,
-    Site, Spelled, St, Target, Test, Use, Val, Walk,
+    Site, Span, Spelled, St, Target, Test, Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::{DeclName, Rule};
@@ -940,6 +940,14 @@ fn unbound(
             let written = node_solved(own, e.id()).unwrap_or_default();
             let shown = prelude::method_surface(name).trim_start_matches('@');
             let solved = facts.solved.get(&e.id())?;
+            // A call no source spells, as `@str` of an interpolation hole, is refused at its
+            // one argument, the value whose type fails.
+            let subject = match e {
+                Expr::Call { name, args, .. } if name.starts_with('@') && args.len() == 1 => {
+                    &args[0]
+                }
+                e => e,
+            };
             solved.iter().find_map(|(tp, t)| {
                 let w = written.iter().find(|(p, _)| p == tp).map_or(t, |(_, w)| w);
                 if [t, w]
@@ -950,7 +958,7 @@ fn unbound(
                 }
                 bounds.get(tp)?.iter().find_map(|b| {
                     let named = [w, t].into_iter().find(|t| fails(t, b))?;
-                    Some(Said::of(e.line(), e, sentence(shown, named, b)))
+                    Some(Said::of(e.line(), subject, sentence(shown, named, b)))
                 })
             })
         })
@@ -1629,6 +1637,7 @@ impl<'a> Builder<'a> {
             line,
             binder: None,
             value_col: 0,
+            value_span: Span::NONE,
             stmt: self.frame.stmt,
             binding: None,
             receiver: None,
@@ -3309,6 +3318,7 @@ impl<'a> Builder<'a> {
     /// temporary by the key.
     fn keyed_binding(&mut self, n: Name, s: Option<&Stmt>, value: &Expr) {
         self.body.names[n.index()].value_col = start_col(value);
+        self.body.names[n.index()].value_span = Span::of(value);
         match s {
             Some(s) => self.keyed_let(n, s),
             None => {
@@ -3916,6 +3926,7 @@ impl<'a> Builder<'a> {
                     rhs,
                     line: e.line(),
                     col: start_col(e),
+                    end: e.end(),
                     site: sid,
                 });
                 if let Some((r, _, malloc)) = self.frame.pending_receiver.take() {
@@ -3931,6 +3942,7 @@ impl<'a> Builder<'a> {
                     let t = self.temp(ty, e.line());
                     self.quote(t, e);
                     self.body.names[t.index()].value_col = start_col(e);
+                    self.body.names[t.index()].value_span = Span::of(e);
                     self.bind(t, rhs, out);
                     if owns && self.discards(e) {
                         out.push(St::Drop(t, Site::Node(sid), 0, None));
@@ -3943,6 +3955,7 @@ impl<'a> Builder<'a> {
                             rhs,
                             line: e.line(),
                             col: start_col(e),
+                            end: e.end(),
                             site: sid,
                         });
                     }
@@ -5551,7 +5564,21 @@ impl<'a> Builder<'a> {
 
     /// An expression in a take position: a `let`, a `return`, a store, a part
     /// of a literal, a `consume` argument.
+    /// The value of `e`. A name the lowering of `e` made, and no inner expression placed, stands
+    /// at `e` ([`NameInfo::value_span`]).
     fn val(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
+        let made = self.body.names.len();
+        let v = self.val_here(e, out)?;
+        if let Val::Name(t) = v {
+            let info = &mut self.body.names[t.index()];
+            if t.index() >= made && info.value_span == Span::NONE {
+                info.value_span = Span::of(e);
+            }
+        }
+        Ok(v)
+    }
+
+    fn val_here(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         // The rebind flag covers this expression only: in
         // `n = n + size(if c { names } else { .. })` the join still owns.
         let rebinding = std::mem::take(&mut self.frame.rebinding);
@@ -6479,6 +6506,7 @@ impl<'a> Builder<'a> {
                     rhs: r,
                     line: *line,
                     col: 0,
+                    end: (0, 0),
                     site: NodeId::NONE,
                 });
                 out.push(St::Trap);
@@ -8705,6 +8733,7 @@ fn rule_check(to: String, n: Name, line: usize) -> St {
         },
         line,
         col: 0,
+        end: (0, 0),
         site: NodeId::NONE,
     }
 }

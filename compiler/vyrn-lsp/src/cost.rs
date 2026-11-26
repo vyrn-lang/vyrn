@@ -8,7 +8,10 @@
 //! In the compact style ([`crate::compact_hints`]) a row is one glyph of [`GLYPHS`] with its
 //! count, and its text moves to the glyph's hover.
 
-use lsp_types::{InlayHint, InlayHintLabel, InlayHintTooltip, MarkupContent, MarkupKind, Position};
+use lsp_types::{
+    InlayHint, InlayHintLabel, InlayHintTooltip, MarkupContent, MarkupKind, Position, Range,
+};
+use vyrn_frontend::core::Span;
 use vyrn_frontend::{Analysis, CostLine, FnCost};
 use vyrn_lower::lastrun::{self, Found, Sites};
 
@@ -89,10 +92,6 @@ const GLYPHS: [(&str, &str, &str); 9] = [
 /// The glyph of the blocks the last run made on a line.
 const LAST_RUN: &str = "×";
 
-/// The space on each side of a compact glyph. It widens the glyph's hover target, which is the
-/// label alone, by at most a space a side.
-const THIN: char = '\u{2009}';
-
 /// `n` in superscript digits; empty for 1, as a noun of one fact has no `x1`.
 fn superscript(n: usize) -> String {
     const DIGITS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
@@ -113,57 +112,177 @@ fn markdown(value: String) -> MarkupContent {
 
 /// The link that ends each compact hover. The extension's `vyrn.whyCost` command runs the
 /// report on the active file.
-const WHY_COST: &str = "[vyrn why --cost](command:vyrn.whyCost)";
+pub const WHY_COST: &str = "[vyrn why --cost](command:vyrn.whyCost)";
 
-/// One row as a compact glyph: its glyph and count, and a hover with a bold title, one line per
-/// noun with its reason, the loops around it, a fix where one is plain, and the report's link.
-/// A verb [`GLYPHS`] lacks shows its words.
-fn compact(row: &CostLine) -> (String, String) {
-    let Some(&(_, glyph, title)) = GLYPHS.iter().find(|g| g.0 == row.verb) else {
-        return (row.label.clone(), row.text.clone());
+/// One cost row of the document in the compact style: a verb's glyph on a line, or the blocks
+/// the last run made there. The line hint, the expression hover and `vyrn/costRows` read it.
+pub struct Row {
+    /// 1-based line.
+    pub line: usize,
+    /// The glyph with its count in superscript.
+    pub glyph: String,
+    pub count: usize,
+    /// Where each fact of the row stands; empty for the last run's blocks.
+    pub spans: Vec<Range>,
+    /// A bold title with the glyph and count, a line per noun with its reason, each linked to
+    /// its span, the loops around it and a fix where one is plain. [`WHY_COST`] is not in it.
+    pub hover: String,
+    /// Whether the row is a proof glyph, whose proofs [`resolve`] adds.
+    pub proof: bool,
+}
+
+/// `span` as an LSP range of `src`; `None` for [`Span::NONE`].
+fn range(src: &str, span: &Span) -> Option<Range> {
+    let at = |(line, col): (usize, usize)| Position {
+        line: (line - 1) as u32,
+        character: char_col_to_utf16(line_of_text(src, line - 1), col - 1),
     };
-    let mut tip = format!("**{glyph} {title} {}**\n", row.count);
-    for item in &row.items {
-        tip += &format!("\n- {item}");
-    }
-    match row.depth {
-        0 => {}
-        1 => tip += "\n\nIn a loop.",
-        d => tip += &format!("\n\nIn {d} nested loops."),
-    }
-    if row.verb == "grows" && row.depth > 0 {
-        tip += "\n\nFix: `reserve` the capacity before the loop.";
-    }
-    (
-        format!("{glyph}{}", superscript(row.count)),
-        format!("{tip}\n\n{WHY_COST}"),
+    (span.start.1 > 0 && span.end.1 > 0).then(|| Range {
+        start: at(span.start),
+        end: at(span.end),
+    })
+}
+
+/// A Markdown link to range `r` of the document `uri`, in the fragment VS Code opens: 1-based
+/// lines and UTF-16 columns.
+fn link(text: &str, uri: &str, r: &Range) -> String {
+    let (s, e) = (r.start, r.end);
+    format!(
+        "[{text}]({uri}#L{},{}-L{},{})",
+        s.line + 1,
+        s.character + 1,
+        e.line + 1,
+        e.character + 1
     )
 }
 
-/// The compact glyphs of one line's rows of `f`, each with its hover: one per row, then, after a
-/// fresh run, the blocks it made on the line.
-fn compact_glyphs(f: &FnCost, rows: &[&CostLine], run: Option<&Sites>) -> Vec<(String, String)> {
-    let mut glyphs: Vec<(String, String)> = rows.iter().map(|r| compact(r)).collect();
+/// One row as a compact glyph: its glyph and count, and a hover with a bold title, one line per
+/// noun linked to its first span with a numbered link to each further one, the loops around it
+/// and a fix where one is plain. A verb [`GLYPHS`] lacks shows its words.
+fn compact(row: &CostLine, uri: &str, src: &str) -> Row {
+    let item_ranges: Vec<Vec<Range>> = (row.items.iter())
+        .map(|(_, spans)| spans.iter().filter_map(|s| range(src, s)).collect())
+        .collect();
+    let spans: Vec<Range> = item_ranges.iter().flatten().copied().collect();
+    let proof = PROOFS.contains(&row.verb);
+    let Some(&(_, glyph, title)) = GLYPHS.iter().find(|g| g.0 == row.verb) else {
+        let (glyph, hover) = (row.label.clone(), row.text.clone());
+        let (line, count) = (row.line, row.count);
+        return Row {
+            line,
+            glyph,
+            count,
+            spans,
+            hover,
+            proof,
+        };
+    };
+    let mut hover = format!("**{glyph} {title} {}**\n", row.count);
+    for ((item, _), ranges) in row.items.iter().zip(&item_ranges) {
+        let linked = match ranges.split_first() {
+            Some((first, rest)) => {
+                let more = (rest.iter().enumerate())
+                    .map(|(k, r)| format!(" {}", link(&(k + 2).to_string(), uri, r)));
+                link(item, uri, first) + &more.collect::<String>()
+            }
+            None => item.clone(),
+        };
+        hover += &format!("\n- {linked}");
+    }
+    match row.depth {
+        0 => {}
+        1 => hover += "\n\nIn a loop.",
+        d => hover += &format!("\n\nIn {d} nested loops."),
+    }
+    if row.verb == "grows" && row.depth > 0 {
+        hover += "\n\nFix: `reserve` the capacity before the loop.";
+    }
+    Row {
+        line: row.line,
+        glyph: format!("{glyph}{}", superscript(row.count)),
+        count: row.count,
+        spans,
+        hover,
+        proof,
+    }
+}
+
+/// The compact rows of one line's rows of `f`: one per row, then, after a fresh run, the
+/// blocks it made on the line.
+fn compact_rows(
+    f: &FnCost,
+    rows: &[&CostLine],
+    run: Option<&Sites>,
+    uri: &str,
+    src: &str,
+) -> Vec<Row> {
+    let mut out: Vec<Row> = rows.iter().map(|r| compact(r, uri, src)).collect();
     // A check or a kept call makes no block, so a run counts none for it.
     let blocking: Vec<&&CostLine> = rows.iter().filter(|r| blocks(r.verb)).collect();
     if let Some(run) = run.filter(|_| !blocking.is_empty()) {
         let [blocks, bytes] = (blocking.iter())
             .map(|r| ran(run, f, r))
             .fold([0, 0], |a, b| [a[0] + b[0], a[1] + b[1]]);
-        let tip = format!(
-            "**{LAST_RUN} last run {blocks}**\n\n{blocks} blocks, {bytes} bytes on this line in \
-             the last `vyrn run --profile`.\n\n{WHY_COST}"
-        );
-        glyphs.push((format!("{LAST_RUN}{blocks}"), tip));
+        out.push(Row {
+            line: rows[0].line,
+            glyph: format!("{LAST_RUN}{blocks}"),
+            count: blocks as usize,
+            spans: Vec::new(),
+            hover: format!(
+                "**{LAST_RUN} last run {blocks}**\n\n{blocks} blocks, {bytes} bytes on this line \
+                 in the last `vyrn run --profile`."
+            ),
+            proof: false,
+        });
     }
-    glyphs
+    out
+}
+
+/// The compact rows of lines `from..=to` (1-based) of the document `uri` at `path`, whose
+/// buffer is `src`: by function, then by line.
+pub fn rows(
+    analysis: &Analysis,
+    uri: &str,
+    path: Option<&str>,
+    src: &str,
+    from: usize,
+    to: usize,
+) -> Vec<Row> {
+    let mut out = Vec::new();
+    let mut run = None;
+    for f in &analysis.cost {
+        let rows: Vec<&CostLine> = (f.lines.iter())
+            .filter(|r| (from..=to).contains(&r.line))
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let fresh = match run.get_or_insert_with(|| last_run(path, src, analysis)) {
+            Found::Fresh(sites) => Some(&*sites),
+            _ => None,
+        };
+        for line_rows in rows.chunk_by(|a, b| a.line == b.line) {
+            out.extend(compact_rows(f, line_rows, fresh, uri, src));
+        }
+    }
+    out
+}
+
+/// The position just past the last character of 1-based `line` of `src`.
+fn line_end(src: &str, line: usize) -> Position {
+    let text = line_of_text(src, line - 1);
+    Position {
+        line: (line - 1) as u32,
+        character: char_col_to_utf16(text, text.chars().count()),
+    }
 }
 
 /// The hints for lines `from..=to` (1-based), at the end of each line that allocates, copies,
 /// grows a container, enters an allocating function, keeps a check, proves one or erases a
-/// call: one in the full style, one per glyph in the compact style. A line with none of them
-/// has no hint. A line's first proof glyph carries the document's `uri` and its line as `data`,
-/// for [`resolve`].
+/// call; a line with none of them has no hint. In the compact style a line's hint shows its
+/// rows' glyphs, and its hover every row's, then [`WHY_COST`]. A line with a proof glyph
+/// carries the document's `uri` and its line as `data`, for [`resolve`]. The full style shows
+/// only costs, in words.
 pub fn hints(
     analysis: &Analysis,
     uri: &str,
@@ -172,54 +291,48 @@ pub fn hints(
     from: usize,
     to: usize,
 ) -> Vec<InlayHint> {
+    let hint = |line: usize, label: String, tip: String, data| InlayHint {
+        position: line_end(src, line),
+        label: InlayHintLabel::String(label),
+        kind: None,
+        text_edits: None,
+        tooltip: Some(InlayHintTooltip::MarkupContent(markdown(tip))),
+        padding_left: Some(true),
+        padding_right: None,
+        data,
+    };
+    if crate::compact_hints() {
+        let rows = rows(analysis, uri, path, src, from, to);
+        return (rows.chunk_by(|a, b| a.line == b.line))
+            .map(|line| {
+                let at = line[0].line;
+                let glyphs: Vec<&str> = line.iter().map(|r| r.glyph.as_str()).collect();
+                let hovers: Vec<&str> = line.iter().map(|r| r.hover.as_str()).collect();
+                let data = (line.iter().any(|r| r.proof))
+                    .then(|| serde_json::json!({ "uri": uri, "line": at }));
+                let tip = format!("{}\n\n{WHY_COST}", hovers.join("\n\n"));
+                hint(at, glyphs.join(" "), tip, data)
+            })
+            .collect();
+    }
     let mut out = Vec::new();
     let mut run = None;
     for f in &analysis.cost {
-        // The proof glyph has no words: the full style shows only costs.
         let rows: Vec<&CostLine> = (f.lines.iter())
-            .filter(|r| (from..=to).contains(&r.line))
-            .filter(|r| crate::compact_hints() || !PROOFS.contains(&r.verb))
+            .filter(|r| (from..=to).contains(&r.line) && !PROOFS.contains(&r.verb))
             .collect();
         if rows.is_empty() {
             continue;
         }
-        if run.is_none() {
-            run = Some(last_run(path, src, analysis));
-        }
-        let fresh = match &run {
-            Some(Found::Fresh(sites)) => Some(sites),
+        let fresh = match run.get_or_insert_with(|| last_run(path, src, analysis)) {
+            Found::Fresh(sites) => Some(&*sites),
             _ => None,
         };
         for line_rows in rows.chunk_by(|a, b| a.line == b.line) {
-            let line = line_rows[0].line;
-            let text = line_of_text(src, line - 1);
-            let position = Position {
-                line: (line - 1) as u32,
-                character: char_col_to_utf16(text, text.chars().count()),
-            };
-            let hint = |label: String, tip: String, data| InlayHint {
-                position,
-                label: InlayHintLabel::String(label),
-                kind: None,
-                text_edits: None,
-                tooltip: Some(InlayHintTooltip::MarkupContent(markdown(tip))),
-                padding_left: Some(true),
-                padding_right: None,
-                data,
-            };
-            if !crate::compact_hints() {
-                let labels: Vec<String> = line_rows.iter().map(|r| label(f, r, fresh)).collect();
-                let tips: Vec<String> = line_rows.iter().map(|r| tooltip(f, r, fresh)).collect();
-                out.push(hint(labels.join(", "), tips.join("\n\n"), None));
-                continue;
-            }
-            // A hint per glyph: VS Code keeps one hover per hint, and the padding between two
-            // hints belongs to neither, so the pointer that crosses it opens the next hover.
-            let mut proof = Some(serde_json::json!({ "uri": uri, "line": line }));
-            for (glyph, tip) in compact_glyphs(f, line_rows, fresh) {
-                let data = glyph.starts_with(PROVED).then(|| proof.take()).flatten();
-                out.push(hint(format!("{THIN}{glyph}{THIN}"), tip, data));
-            }
+            let labels: Vec<String> = line_rows.iter().map(|r| label(f, r, fresh)).collect();
+            let tips: Vec<String> = line_rows.iter().map(|r| tooltip(f, r, fresh)).collect();
+            let at = line_rows[0].line;
+            out.push(hint(at, labels.join(", "), tips.join("\n\n"), None));
         }
     }
     out

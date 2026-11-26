@@ -527,6 +527,7 @@ pub(crate) fn type_text(tokens: &[Token], answers: &HashSet<String>) -> String {
         tok: Tok::Eof,
         line: 0,
         col: 0,
+        end: (0, 0),
     });
     recognizer::read_type(&toks, answers, |view| {
         Build::read(view, 0, answers).type_().to_string()
@@ -796,6 +797,27 @@ impl<'a> Build<'a> {
     /// hole does ([`crate::recognizer`]). Every binder's position comes from here.
     fn binder_pos(&self) -> (usize, usize) {
         (self.line(), self.col())
+    }
+
+    /// The last token the run consumed: the last of an expression the parser just built.
+    fn last_token(&self) -> Option<&Token> {
+        let events = &self.events[..self.at.min(self.events.len())];
+        (events.iter().rev()).find_map(|e| match *e {
+            Event::Token(i) | Event::Word(i) | Event::Bound(i) | Event::Rest(i) => {
+                Some(&self.toks()[i as usize])
+            }
+            _ => None,
+        })
+    }
+
+    /// Where [`Build::last_token`] ends; `(0, 0)` before the first.
+    fn last_end(&self) -> (usize, usize) {
+        self.last_token().map_or((0, 0), |t| t.end)
+    }
+
+    /// Where [`Build::last_token`] starts; `(0, 0)` before the first.
+    fn last_start(&self) -> (usize, usize) {
+        self.last_token().map_or((0, 0), |t| (t.line, t.col))
     }
 
     /// The slot of a node that spells the name here: its column, as
@@ -2305,13 +2327,14 @@ impl<'a> Build<'a> {
     /// typecheck, because `a ?? b` yields an unwrapped `T`.
     fn expr(&mut self) -> Expr {
         self.at += 1;
+        // A binary node starts at its first token, the `(` of a parenthesized left operand.
+        let at = self.binder_pos();
         let mut lhs = self.unary();
         while !matches!(self.event(), Event::Close(_)) {
             let line = self.line();
             let op = binop(self.peek());
             self.at += 1;
             let rhs = self.expr();
-            let at = lhs.start();
             lhs = match op {
                 Some(op) => Expr::Binary {
                     id: Id::NEW,
@@ -2323,6 +2346,7 @@ impl<'a> Build<'a> {
                 None => Self::nullish(lhs, rhs, line),
             };
             lhs.starts(at);
+            lhs.ends(self.last_end());
         }
         self.at += 1;
         lhs
@@ -2355,6 +2379,7 @@ impl<'a> Build<'a> {
         let at = self.binder_pos();
         let mut e = self.unary_here();
         e.starts(at);
+        e.ends(self.last_end());
         e
     }
 
@@ -2416,6 +2441,7 @@ impl<'a> Build<'a> {
         let mut e = self.primary();
         loop {
             e.starts(at);
+            e.ends(self.last_end());
             let line = match self.peek() {
                 Tok::Question | Tok::Dot | Tok::LBracket | Tok::ColonColon => self.line(),
                 _ => return e,
@@ -2782,17 +2808,23 @@ impl<'a> Build<'a> {
 
     /// Desugars an untagged interpolated string `"a\{e}b"` into a
     /// `@concat`/`@str` chain. `parts.len() == exprs.len() + 1`.
+    /// Each `@str` spans its hole, `\{` to `}`, and each `@concat` the whole literal, which
+    /// the parser just consumed.
     fn template(&mut self, mut parts: Vec<String>, exprs: &[Hole], line: usize) -> Expr {
+        let (start, end) = (self.last_start(), self.last_end());
         let mut pieces: Vec<Expr> = Vec::new();
         if !parts[0].is_empty() {
             pieces.push(Expr::str(std::mem::take(&mut parts[0])));
         }
-        for k in 0..exprs.len() {
+        for (k, h) in exprs.iter().enumerate() {
             let e = self.hole();
             // `@str` and `@concat` are unlexable, so a user call to `str` or `concat`
             // gets the migration hint. The loader's `mentions_runtime` reads a
             // template as a mention of `@str`.
-            pieces.push(Expr::call("@str", vec![e], line));
+            let mut s = Expr::call("@str", vec![e], line);
+            s.starts((h.line, h.col - 2));
+            s.ends(h.end());
+            pieces.push(s);
             if !parts[k + 1].is_empty() {
                 pieces.push(Expr::str(std::mem::take(&mut parts[k + 1])));
             }
@@ -2804,6 +2836,8 @@ impl<'a> Build<'a> {
         let mut acc = first.unwrap_or_else(|| unreachable!("a template has a hole"));
         for p in iter {
             acc = Expr::call("@concat", vec![acc, p], line);
+            acc.starts(start);
+            acc.ends(end);
         }
         acc
     }

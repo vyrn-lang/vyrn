@@ -160,6 +160,7 @@ pub(crate) fn row_stores(
             line,
             col,
             site,
+            ..
         } => {
             let key = Some(*site).filter(|k| *k != NodeId::NONE);
             modified(rhs)

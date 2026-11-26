@@ -560,9 +560,12 @@ shows the props. The module is analysed as a file beside its root, with each
 relative import respelled from there (`loader::generated_modules`).
 
 Each line that allocates, copies, grows a container, enters an allocating
-function of another file or keeps a check ends in inlay hints for its rows of
+function of another file or keeps a check ends in one inlay hint for its rows of
 `vyrn why --cost`. A line with none of these has no hint. The hints show
-every row, in a loop or not.
+every row, in a loop or not. Each fact of a row carries the span of the
+expression it costs at: the parser gives every expression the end of its last
+token, the core keeps the span of a `let`'s value and of a statement, and a
+check takes the span of the row it guards.
 
 The client's `hintStyle` initialization option picks how a row reads. In the
 `compact` style, the default, a row is one glyph with its count in superscript;
@@ -575,11 +578,15 @@ blocks of the last run. The proof glyph's hover is resolved on demand
 proofs traced (`vyrn_lower::JUDGE_PROOFS`) and adds the proofs of the line as
 `vyrn why --proofs` prints them. Measured on 2026-11-26, the CLI's `why
 --proofs` takes 297 ms on `site/export.vyrn` against 173 ms for `check`, so a
-hover costs about one analysis and an edit nothing. Each glyph
-is its own hint, so VS Code opens a hover per glyph: a bold title with the
-count, a line per noun with its reason, the loops around it, a fix where one
-is plain (`reserve` before a loop that grows), and a link that runs `vyrn why
---cost` on the file. In the `full` style a row is a few plain words, such as `copies String, allocates String x3`
+hover costs about one analysis and an edit nothing. The hint's label holds the
+line's glyphs, and its hover groups the facts by glyph: per glyph a bold title
+with the count, a line per noun with its reason, linked to its expression as a
+file URI with a range fragment (`#L73,9-L73,40`, 1-based lines and UTF-16
+columns), the loops around it and a fix where one is plain (`reserve` before a
+loop that grows); one link at the end runs `vyrn why --cost` on the file. A
+hover inside a costly expression adds, after the name's own hover, the hover
+of the innermost row whose span holds the position, and its range is that
+expression, so the client highlights it. In the `full` style a row is a few plain words, such as `copies String, allocates String x3`
 or `index checked`, and the tooltip holds each row of `vyrn why --cost` in
 Markdown, with the full reason and the loops around it.
 
@@ -595,8 +602,35 @@ document has no error. They cost about 9 ms of a 230 ms keystroke on
 `site/export.vyrn`. The client's `costHints` initialization option turns them
 off, and the server then skips the work.
 
+A client that draws the rows itself reads them from the request
+`vyrn/costRows`, which the server advertises as the experimental capability
+`vyrn/costRows`. The request takes `{ uri }` and answers the document's rows in
+source order, the same rows the hints and the expression hover read: one
+`{ line, glyph, count, spans, hover }` per glyph of a line, `line` 0-based,
+`glyph` the label with its count in superscript, `spans` the LSP ranges of its
+facts (empty for the last run's blocks and for a fact no expression spells),
+and `hover` the glyph's Markdown, ending with the `vyrn why --cost` link. A proof
+glyph's hover lists the proved checks without their proofs, which only
+`inlayHint/resolve` traces. The answer is empty when `costHints` is off and
+while the document has an error. A client that sends the initialization option
+`costRendering` as `decorations` gets no cost inlay hints; the expression hover
+stays.
+
 A move of a `let` name ends in a hint naming what took the value, such as
 `moved into take(..)`. A move the source writes as `consume x` has none.
+
+A namespace that names a generated module, such as
+`import * as reported from syntaxReport("./calc.syntax")`, has no file to
+jump to. The definition of the namespace's name, or of a member such as
+`reported.reportLedger`, is a location in the read-only document
+`vyrn-gen:/<call>.vyrn?owner=<root>&module=<key>`: `call` is the generator
+call (`loader::generator_call`) without the characters a path cannot hold,
+`owner` the root that generates the module and `module` its banner key. The
+request `vyrn/generatedSource` takes `{ uri }` with such a URI and answers the
+module's text, as `vyrn emit-gen` prints it, or `null` when the root does not
+generate it. The VS Code extension serves the scheme as a read-only Vyrn
+document. The definition of the generator's path string opens the file it
+names. The namespace's hover lists each member's signature.
 
 The server is outside the Cargo workspace. Build and test it explicitly:
 
@@ -647,6 +681,13 @@ Settings:
   restarts the server.
 - `vyrn.hints.style`: `compact` (the default) or `full`, the server's
   `hintStyle`. A change restarts the server.
+- `vyrn.hints.render`: `decorations` (the default) or `inlay`. With
+  `decorations` the extension sends `costRendering`, asks `vyrn/costRows` when
+  a file opens, changes or is saved, and draws each glyph as its own decoration
+  after the line's text, with its own hover, and each fact's expression as a
+  decoration with the glyph's hover, so the pointer moving from one glyph to the
+  next switches the hover. With `inlay` the server's line hints show them. A
+  change restarts the server.
 - `vyrn.path`: the compiler. When empty: `compiler/target/release/vyrn`, then
   the debug build, then `cargo run -p vyrn-cli`.
 

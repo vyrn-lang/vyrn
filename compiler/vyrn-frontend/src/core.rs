@@ -54,6 +54,9 @@ pub struct NameInfo {
     /// this name to starts, where a removal's refusal sits; 0 for any other
     /// name.
     pub value_col: usize,
+    /// Where the expression the name is bound to stands; [`Span::NONE`] where no source
+    /// expression spells it. A cost row of the binding points at it.
+    pub value_span: Span,
     /// The statement the name was made under, [`NodeId::NONE`] outside one.
     /// With the name, it keys [`Body::ends`].
     pub stmt: NodeId,
@@ -793,6 +796,9 @@ pub enum St {
         /// The 1-based column the expression starts at, where a removal's
         /// refusal sits; 0 for a row this pass made up.
         col: usize,
+        /// The line and column just past the expression ([`crate::ast::Expr::end`]); `(0, 0)`
+        /// for a row this pass made up.
+        end: (usize, usize),
         site: NodeId,
     },
     /// A refusal or a `panic`: the path ends here and owes nothing.
@@ -918,7 +924,48 @@ macro_rules! lists {
     }};
 }
 
+/// Where an expression stands in the source: the 1-based line and column of its first
+/// character and of the position just past its last. [`Span::NONE`] for a row no source
+/// expression spells.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Span {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+}
+
+impl Span {
+    pub const NONE: Span = Span {
+        start: (0, 0),
+        end: (0, 0),
+    };
+
+    /// Where the parser placed `e`.
+    pub fn of(e: &crate::ast::Expr) -> Span {
+        Span {
+            start: e.start(),
+            end: e.end(),
+        }
+    }
+}
+
 impl St {
+    /// The span of the expression a `let` binds or a statement evaluates, over the body's
+    /// `names`; [`Span::NONE`] for any other row and for a row this pass made up.
+    pub fn span(&self, names: &[NameInfo]) -> Span {
+        let (start, end) = match self {
+            St::Let(n, _) => {
+                let s = names[n.index()].value_span;
+                (s.start, s.end)
+            }
+            St::Do { line, col, end, .. } => ((*line, *col), *end),
+            _ => return Span::NONE,
+        };
+        match start.1 > 0 && end.0 > 0 {
+            true => Span { start, end },
+            false => Span::NONE,
+        }
+    }
+
     /// The lists of rows this row holds, in program order: an `if`'s then
     /// and else, a loop's or a block's body, each arm's body, an awaited
     /// call's cancellation edge.

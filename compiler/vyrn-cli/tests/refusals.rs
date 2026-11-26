@@ -738,11 +738,18 @@ fn census() -> Vec<Row> {
             "`consume s` takes apart a `Slot`, and another module declares the release of `Slot`",
             Kernel::Its,
         ),
+        row(
+            "r113_an_interpolated_value_with_no_to_string.vyrn",
+            "a value a template interpolates has a toString",
+            "`toString` needs a number, Bool, or String, found T",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 
 /// A refusal sits where the source spells what it refuses: a must-use
-/// temporary at the call that made it, a variant at its pattern.
+/// temporary at the call that made it, a variant at its pattern, an
+/// interpolated value at its hole.
 #[test]
 fn a_refusal_sits_where_its_subject_is_spelled() {
     for (file, at) in [
@@ -755,6 +762,7 @@ fn a_refusal_sits_where_its_subject_is_spelled() {
             "4:10",
         ),
         ("r99_a_dropped_must_use_method_call_result.vyrn", "9:5"),
+        ("r113_an_interpolated_value_with_no_to_string.vyrn", "4:16"),
         (
             "r100_a_variant_of_an_enum_the_module_does_not_import.vyrn",
             "12:9",

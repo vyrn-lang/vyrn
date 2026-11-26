@@ -5488,10 +5488,18 @@ fn inlay_hints(client: &mut LspClient, uri: &str) -> Vec<(u32, u32, String)> {
             (
                 h.pointer("/position/line").unwrap().as_u64().unwrap() as u32,
                 h.pointer("/position/character").unwrap().as_u64().unwrap() as u32,
-                h["label"].as_str().unwrap().to_string(),
+                label_text(&h["label"]),
             )
         })
         .collect()
+}
+
+/// A hint's label as one string: a plain label, or its parts' values joined.
+fn label_text(label: &serde_json::Value) -> String {
+    match label.as_array() {
+        Some(parts) => parts.iter().map(|p| p["value"].as_str().unwrap()).collect(),
+        None => label.as_str().unwrap().to_string(),
+    }
 }
 
 /// The type hints only; a type hint's label starts with `: `.
@@ -5534,6 +5542,60 @@ fn a_binding_gets_a_type_hint_when_its_line_hides_the_type() {
     let on_o: Vec<&(u32, u32, String)> = hints.iter().filter(|(l, _, _)| *l == oline).collect();
     assert!(on_o.is_empty(), "a record literal names its type: {on_o:?}");
 
+    let _ = client.child.kill();
+}
+
+/// A declared type in a type hint is its own label part, located at its declaration; a
+/// built-in type around it stays plain.
+#[test]
+fn a_type_hint_names_its_declared_types_with_their_locations() {
+    let src = "type Json = { s: String }
+
+fn make() -> Array<Json> {
+    [Json { s: \"a\" }]
+}
+
+fn main() {
+    let xs = make()
+    print(xs.length.toString())
+}
+";
+    let uri = "file:///typeparts.vyrn";
+    let mut client = spawn_client();
+    did_open(&mut client, uri, "vyrn", src);
+    let _ = read_diags_for(&mut client, "typeparts.vyrn");
+    let id = serde_json::json!("typeparts");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/inlayHint",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 99, "character": 0 } }
+        }
+    }));
+    let resp = client.read_response(&id);
+    let hint = (resp["result"].as_array().expect("hints").iter())
+        .find(|h| h["position"]["line"] == 7 && label_text(&h["label"]).starts_with(": "))
+        .expect("the type hint on `xs`")
+        .clone();
+    let parts: Vec<(String, Option<u64>)> = (hint["label"].as_array().expect("label parts").iter())
+        .map(|p| {
+            let at = p
+                .pointer("/location/range/start/line")
+                .and_then(|l| l.as_u64());
+            (p["value"].as_str().unwrap().to_string(), at)
+        })
+        .collect();
+    let want: Vec<(String, Option<u64>)> = vec![
+        (": Array<".into(), None),
+        ("Json".into(), Some(0)),
+        (">".into(), None),
+    ];
+    assert_eq!(parts, want, "{hint}");
+    assert_eq!(hint["label"][1]["location"]["uri"], uri);
+    assert_eq!(
+        hint["label"][1]["location"]["range"]["start"]["character"],
+        5
+    );
     let _ = client.child.kill();
 }
 
@@ -6422,14 +6484,29 @@ fn compact_hints(client: &mut LspClient, uri: &str) -> Vec<(u64, String, String)
     }));
     let resp = client.read_response(&serde_json::json!(93));
     (resp["result"].as_array().expect("hints").iter())
-        .filter_map(|h| {
+        .filter(|h| h.get("tooltip").is_some())
+        .map(|h| {
             let line = h["position"]["line"].as_u64().unwrap() + 1;
-            let label = h["label"].as_str().unwrap();
-            let glyph = label.strip_prefix('\u{2009}')?.strip_suffix('\u{2009}')?;
-            let tip = h["tooltip"]["value"].as_str().unwrap().to_string();
-            Some((line, glyph.to_string(), tip))
+            let label = h["label"].as_str().unwrap().to_string();
+            (
+                line,
+                label,
+                h["tooltip"]["value"].as_str().unwrap().to_string(),
+            )
         })
         .collect()
+}
+
+/// The text of `src` a hover link's `#Lline,col-Lline,col` fragment selects, 1-based lines
+/// and columns; every line of the probes is ASCII.
+fn linked_text<'a>(src: &'a str, link: &str) -> &'a str {
+    let frag = link.rsplit_once("#L").expect("a line fragment").1;
+    let num = |t: &str| t.parse::<usize>().unwrap();
+    let (a, b) = frag.split_once("-L").unwrap();
+    let ((l1, c1), (l2, c2)) = (a.split_once(',').unwrap(), b.split_once(',').unwrap());
+    assert_eq!(l1, l2, "one-line span: {link}");
+    let line = src.lines().nth(num(l1) - 1).unwrap();
+    &line[num(c1) - 1..num(c2) - 1]
 }
 
 /// In the compact style each row is a glyph with its count; the rows are the full style's.
@@ -6438,12 +6515,7 @@ fn knucleotide_lines_carry_their_cost_as_glyphs() {
     let (path, text) = knucleotide();
     let (mut client, uri) = open_with_style(&path, &text, "compact");
     let hints = compact_hints(&mut client, &uri);
-    let rows: Vec<String> = (hints.chunk_by(|a, b| a.0 == b.0))
-        .map(|line| {
-            let glyphs: Vec<&str> = line.iter().map(|h| h.1.as_str()).collect();
-            format!("{} {}", line[0].0, glyphs.join(" "))
-        })
-        .collect();
+    let rows: Vec<String> = (hints.iter()).map(|h| format!("{} {}", h.0, h.1)).collect();
     holds_pin("knucleotide-compact", &rows);
 }
 
@@ -6478,56 +6550,188 @@ fn a_proof_glyph_resolves_to_the_proofs_of_its_line() {
     assert!(tip.starts_with("```\n   73  division check: "), "{tip}");
 }
 
-/// A glyph's hover has a bold title with the count, a line per noun with its reason, the loops
-/// around it, a plain fix and the report's link.
+/// A line's one hover groups its facts by glyph: a bold title with the count, a line per noun
+/// with its reason linked to its span, the loops around it, a plain fix, and the report's link
+/// once, at the end.
 #[test]
-fn a_glyph_hover_names_each_fact_and_links_the_report() {
+fn a_line_hover_groups_its_facts_by_glyph_and_links_the_report() {
     let (path, text) = knucleotide();
     let (mut client, uri) = open_with_style(&path, &text, "compact");
     let hints = compact_hints(&mut client, &uri);
     let line: Vec<&(u64, String, String)> = hints.iter().filter(|h| h.0 == 73).collect();
-    let glyphs: Vec<&str> = line.iter().map(|h| h.1.as_str()).collect();
-    assert_eq!(glyphs, ["\u{2197}", "?", "\u{21d2}\u{b3}"]);
-    let grows = &line[0].2;
+    assert_eq!(line.len(), 1, "one hint per line: {line:?}");
+    let (label, tip) = (&line[0].1, &line[0].2);
+    assert_eq!(label, "\u{2197} ? \u{21d2}\u{b3}");
     assert!(
-        grows.starts_with("**\u{2197} may grow 1**\n\n- `push(..)`"),
-        "{grows}"
+        tip.starts_with(&format!(
+            "**\u{2197} may grow 1**\n\n- [`push(..)`]({uri}#L73,"
+        )),
+        "{tip}"
     );
     assert!(
-        grows.contains("In a loop.") && grows.contains("Fix: `reserve`"),
-        "{grows}"
+        tip.contains("In a loop.") && tip.contains("Fix: `reserve`"),
+        "{tip}"
     );
     assert!(
-        grows.ends_with("[vyrn why --cost](command:vyrn.whyCost)"),
-        "{grows}"
+        tip.contains("\n\n**? check kept 1**\n\n- [index check: "),
+        "{tip}"
     );
-    let check = &line[1].2;
-    assert!(check.contains("- index check: "), "{check}");
     assert!(
-        check.contains("the result of `modulusOf(..)` at line 71"),
-        "{check}"
+        tip.contains("the result of `modulusOf(..)` at line 71"),
+        "{tip}"
+    );
+    assert_eq!(tip.matches("command:vyrn.whyCost").count(), 1, "{tip}");
+    assert!(
+        tip.ends_with("[vyrn why --cost](command:vyrn.whyCost)"),
+        "{tip}"
     );
 }
 
-/// A line with two glyphs ends in two hints at one position, each with its own hover, so VS Code
-/// opens a hover per glyph.
+/// Each fact's link selects the expression that costs, not the line.
 #[test]
-fn each_glyph_of_a_line_is_its_own_hint() {
+fn a_hover_link_selects_the_costly_expression() {
     let (path, text) = knucleotide();
     let (mut client, uri) = open_with_style(&path, &text, "compact");
     let hints = compact_hints(&mut client, &uri);
-    let line: Vec<&(u64, String, String)> = hints.iter().filter(|h| h.0 == 95).collect();
-    let glyphs: Vec<&str> = line.iter().map(|h| h.1.as_str()).collect();
-    assert_eq!(glyphs, ["\u{29c9}", "\u{229e}"]);
+    let mut found = Vec::new();
+    for (line, _, tip) in hints.iter().filter(|h| [73, 95].contains(&h.0)) {
+        for link in tip
+            .split("](")
+            .skip(1)
+            .filter(|l| l.starts_with(uri.as_str()))
+        {
+            let link = &link[..link.find(')').unwrap()];
+            found.push(format!("{line} {}", linked_text(&text, link)));
+        }
+    }
+    assert_eq!(found, PROBE_LINKS, "{found:#?}");
+}
+
+/// The expressions of the facts on lines 73 and 95 of `examples/knucleotide.vyrn`, in hover
+/// order: the push, its index check, the division's two proved checks and the modulus's, then
+/// the hole a template copies and the literal it allocates.
+const PROBE_LINKS: [&str; 7] = [
+    "73 w.push(alphabet[(key / d) % 4])",
+    "73 alphabet[(key / d) % 4]",
+    "73 key / d",
+    "73 key / d",
+    "73 (key / d) % 4",
+    r"95 \{frac}",
+    r#"95 "0\{frac}""#,
+];
+
+/// Every line's hover in the compact style, the document's URI written `URI`.
+#[test]
+fn knucleotide_line_hovers_hold_their_pin() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_with_style(&path, &text, "compact");
+    let rows: Vec<String> = (compact_hints(&mut client, &uri).iter())
+        .map(|h| format!("{} {}\n{}\n", h.0, h.1, h.2.replace(uri.as_str(), "URI")))
+        .collect();
+    holds_pin("knucleotide-hovers", &rows);
+}
+
+/// A hover inside a costly expression answers the innermost row that holds it, after the
+/// name's own hover, and its range is that expression's.
+#[test]
+fn a_hover_on_a_costly_expression_answers_its_row_with_its_range() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_with_style(&path, &text, "compact");
+    let line = text.lines().nth(72).unwrap();
+    let mut answer = |needle: &str| {
+        let ch = line.find(needle).unwrap() as u32;
+        let id = serde_json::json!(format!("cost-hover-{ch}"));
+        client.send(&serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "textDocument/hover",
+            "params": { "textDocument": { "uri": uri }, "position": { "line": 72, "character": ch } }
+        }));
+        let resp = client.read_response(&id);
+        let range = &resp["result"]["range"];
+        let (a, b) = (
+            range["start"]["character"].as_u64().unwrap(),
+            range["end"]["character"].as_u64().unwrap(),
+        );
+        let value = resp["result"]["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (line[a as usize..b as usize].to_string(), value)
+    };
+    let (held, value) = answer("alphabet");
+    assert_eq!(held, "alphabet[(key / d) % 4]");
+    let (name, cost) = value
+        .split_once("\n\n---\n\n")
+        .expect("the name's hover, then the row's");
+    assert!(name.contains("alphabet"), "{name}");
+    assert!(cost.starts_with("**? check kept 1**"), "{cost}");
     assert!(
-        line[0].2.starts_with("**\u{29c9} copies 1**"),
-        "{}",
-        line[0].2
+        cost.ends_with("[vyrn why --cost](command:vyrn.whyCost)"),
+        "{cost}"
     );
+    let (held, value) = answer("push");
+    assert_eq!(held, "w.push(alphabet[(key / d) % 4])");
+    assert!(value.contains("**\u{2197} may grow 1**"), "{value}");
+}
+
+/// `vyrn/costRows` of `uri`.
+fn cost_rows(client: &mut LspClient, uri: &str) -> Vec<serde_json::Value> {
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 96, "method": "vyrn/costRows", "params": { "uri": uri }
+    }));
+    let resp = client.read_response(&serde_json::json!(96));
+    resp["result"].as_array().expect("cost rows").clone()
+}
+
+/// The rows of `vyrn/costRows` over knucleotide, one JSON object a line, the document's URI
+/// written `URI`.
+#[test]
+fn knucleotide_cost_rows_hold_their_pin() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_with_style(&path, &text, "compact");
+    let rows: Vec<String> = (cost_rows(&mut client, &uri).iter())
+        .map(|r| r.to_string().replace(uri.as_str(), "URI"))
+        .collect();
+    holds_pin("knucleotide-rows", &rows);
+}
+
+/// A client that draws decorations gets the rows and the capability, and no cost hint.
+#[test]
+fn a_decorations_client_gets_cost_rows_and_no_cost_hints() {
+    let (path, text) = knucleotide();
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null,
+                    "initializationOptions": { "costRendering": "decorations" } }
+    }));
+    let init = client.read_response(&serde_json::json!(1));
+    assert_eq!(
+        init["result"]["capabilities"]["experimental"]["vyrn/costRows"],
+        true
+    );
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    let uri = file_uri(&path);
+    did_open(&mut client, &uri, "vyrn", &text);
+    let _ = read_diags_for(&mut client, "");
+    assert_eq!(compact_hints(&mut client, &uri), Vec::new());
+    let rows = cost_rows(&mut client, &uri);
+    let row = (rows.iter())
+        .find(|r| r["line"] == 72 && r["glyph"] == "?")
+        .expect("the kept check");
+    assert_eq!(row["count"], 1);
+    let span = &row["spans"][0];
+    let line = text.lines().nth(72).unwrap();
+    let (a, b) = (
+        span["start"]["character"].as_u64().unwrap(),
+        span["end"]["character"].as_u64().unwrap(),
+    );
+    assert_eq!(&line[a as usize..b as usize], "alphabet[(key / d) % 4]");
     assert!(
-        line[1].2.starts_with("**\u{229e} allocates 1**"),
-        "{}",
-        line[1].2
+        row["hover"]
+            .as_str()
+            .unwrap()
+            .ends_with("(command:vyrn.whyCost)"),
+        "{row}"
     );
 }
 
@@ -6539,8 +6743,8 @@ fn a_fresh_profile_adds_a_last_run_glyph() {
     let (mut client, uri) = open_with_style(&path, WORD, "compact");
     let hints = compact_hints(&mut client, &uri);
     let glyphs: Vec<(u64, &str)> = hints.iter().map(|h| (h.0, h.1.as_str())).collect();
-    assert_eq!(glyphs, [(2, "\u{229e}\u{b2}"), (2, "\u{d7}3")]);
-    let run = &hints[1].2;
+    assert_eq!(glyphs, [(2, "\u{229e}\u{b2} \u{d7}3")]);
+    let run = &hints[0].2;
     assert!(run.contains("3 blocks, 40 bytes"), "{run}");
 }
 
@@ -6971,6 +7175,121 @@ pay power x
     assert_eq!(gone, Some(4), "{drop}");
     let _ = client.child.kill();
     let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// `examples/dsl` copied to a scratch directory, with `calc.editor.vyrn` open: its text, its
+/// URI and the client.
+fn open_calc_editor(tag: &str) -> (String, String, LspClient) {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_{tag}_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("calc.errors")).unwrap();
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/dsl");
+    for name in [
+        "vyrn.json",
+        "calc.vyrn",
+        "calc.editor.vyrn",
+        "calc.syntax",
+        "calc.errors/en.json",
+    ] {
+        std::fs::copy(example.join(name), dir.join(name)).unwrap();
+    }
+    let text = std::fs::read_to_string(dir.join("calc.editor.vyrn")).unwrap();
+    let uri = file_uri(&dir.join("calc.editor.vyrn"));
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", &text);
+    let _ = read_diags_for(&mut client, "calc.editor.vyrn");
+    (text, uri, client)
+}
+
+/// The definition response at the first `needle` of `text`, the cursor `skip` characters in.
+fn definition_at(
+    client: &mut LspClient,
+    uri: &str,
+    text: &str,
+    needle: &str,
+    skip: u32,
+) -> serde_json::Value {
+    let (line, col) = text
+        .lines()
+        .enumerate()
+        .find_map(|(i, l)| l.find(needle).map(|c| (i as u32, c as u32)))
+        .expect("the needle is in the text");
+    let id = serde_json::json!(format!("def-{line}-{col}"));
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/definition",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": col + skip } }
+    }));
+    client.read_response(&id)["result"].clone()
+}
+
+/// The text `vyrn/generatedSource` answers for `uri`.
+fn generated_source(client: &mut LspClient, uri: &str) -> String {
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": "gen-src", "method": "vyrn/generatedSource", "params": { "uri": uri }
+    }));
+    let resp = client.read_response(&serde_json::json!("gen-src"));
+    resp["result"]
+        .as_str()
+        .expect("the generated text")
+        .to_string()
+}
+
+/// A member of a generated namespace jumps into the generated module's read-only document,
+/// at the member's declaration; the namespace's own name jumps to its first line.
+#[test]
+fn a_generated_namespace_member_jumps_into_its_generated_document() {
+    let (text, uri, mut client) = open_calc_editor("gendef");
+    let member = definition_at(&mut client, &uri, &text, "reported.reportLedger", 9);
+    let target = member["uri"].as_str().expect("a location").to_string();
+    assert!(
+        target.starts_with("vyrn-gen:/syntaxReport(.calc.syntax).vyrn?owner="),
+        "{member}"
+    );
+    let source = generated_source(&mut client, &target);
+    let line = member["range"]["start"]["line"].as_u64().unwrap() as usize;
+    let declared = source.lines().nth(line).unwrap_or("");
+    assert!(
+        declared.contains("fn reportLedger("),
+        "line {line}: {declared}"
+    );
+    let ns = definition_at(&mut client, &uri, &text, "as reported", 3);
+    assert_eq!(ns["uri"], member["uri"], "{ns}");
+    assert_eq!(ns["range"]["start"]["line"], 0, "{ns}");
+}
+
+/// The generator's path string jumps to the file it names.
+#[test]
+fn a_generator_path_jumps_to_its_file() {
+    let (text, uri, mut client) = open_calc_editor("genpath");
+    let link = definition_at(
+        &mut client,
+        &uri,
+        &text,
+        "syntaxReport(\"./calc.syntax\")",
+        15,
+    );
+    let target = link[0]["targetUri"].as_str().unwrap_or("");
+    assert!(target.ends_with("/calc.syntax"), "{link}");
+}
+
+/// A namespace's hover lists each member's signature.
+#[test]
+fn a_namespace_hover_lists_its_members_signatures() {
+    let (text, uri, mut client) = open_calc_editor("genhover");
+    let line = text
+        .lines()
+        .position(|l| l.contains("as reported"))
+        .unwrap() as u32;
+    let col = text
+        .lines()
+        .nth(line as usize)
+        .unwrap()
+        .find("reported")
+        .unwrap() as u32;
+    let v = hover_value(&mut client, &uri, line, col + 1).expect("a hover");
+    assert!(v.contains("reportLedger(path: String) -> Code"), "{v}");
+    assert!(!v.contains("exported member(s)"), "{v}");
 }
 
 /// A language module's companion replaces the default check: `calc.editor.vyrn`

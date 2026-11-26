@@ -1,0 +1,10 @@
+// A value a template interpolates needs a toString; the refusal sits on the
+// hole's first token, not at the opening quote.
+fn labelOf<T>(x: T) -> String {
+    return "[\{x}]"
+}
+
+fn main() -> Int64 {
+    print(labelOf(1))
+    return 0
+}

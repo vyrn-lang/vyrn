@@ -34,15 +34,15 @@ use lsp_types::{
     DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     Documentation, FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverContents, HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel,
-    InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InsertTextFormat, Location,
-    LocationLink, MarkupContent, MarkupKind, OneOf, Position, PrepareRenameResponse,
-    PublishDiagnosticsParams, Range, Registration, RegistrationParams, RelativePattern,
-    RenameOptions, RenameParams, SemanticToken, SemanticTokenModifier, SemanticTokenType,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
-    WorkspaceEdit,
+    InlayHintLabelPart, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
+    InsertTextFormat, Location, LocationLink, MarkupContent, MarkupKind, OneOf, Position,
+    PrepareRenameResponse, PublishDiagnosticsParams, Range, Registration, RegistrationParams,
+    RelativePattern, RenameOptions, RenameParams, SemanticToken, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 
 use vyrn_frontend::audience::ClaimKind;
@@ -68,6 +68,15 @@ static COMPACT_HINTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 fn compact_hints() -> bool {
     COMPACT_HINTS.get().copied().unwrap_or(true)
+}
+
+/// Whether the client draws the cost rows itself from `vyrn/costRows`: the
+/// `costRendering` initialization option is `decorations`. Such a client gets no cost
+/// inlay hints.
+static COST_DECORATIONS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn cost_decorations() -> bool {
+    COST_DECORATIONS.get().copied().unwrap_or(false)
 }
 
 /// The pipeline every analysis runs. It computes the cost of each function only when a hint
@@ -433,7 +442,8 @@ struct AnalyzedSynth {
 
 /// Answers `initialize`, and asks a client that can send file events for them
 /// under its workspace folders and the std root. Returns those directories, or
-/// none when the client cannot. Reads the `costHints` and `hintStyle` initialization options.
+/// none when the client cannot. Reads the `costHints`, `hintStyle` and `costRendering`
+/// initialization options.
 fn handle_initialize(
     connection: &Connection,
 ) -> Result<(Vec<String>, serde_json::Value, Vec<std::path::PathBuf>), ()> {
@@ -446,6 +456,8 @@ fn handle_initialize(
     let _ = COST_HINTS.set(off.and_then(|o| o.as_bool()).unwrap_or(true));
     let style = params.pointer("/initializationOptions/hintStyle");
     let _ = COMPACT_HINTS.set(style.and_then(|s| s.as_str()) != Some("full"));
+    let rendering = params.pointer("/initializationOptions/costRendering");
+    let _ = COST_DECORATIONS.set(rendering.and_then(|s| s.as_str()) == Some("decorations"));
 
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -483,6 +495,8 @@ fn handle_initialize(
                 full: Some(SemanticTokensFullOptions::Bool(true)),
             },
         )),
+        // The richer layer: a client that draws the cost rows asks `vyrn/costRows`.
+        experimental: Some(serde_json::json!({ "vyrn/costRows": true })),
         ..Default::default()
     };
     let result = InitializeResult {
@@ -841,6 +855,10 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
             Response::new_ok(req.id, Some(handle_is_dev_entry(server, req.params)))
         }
         "vyrn/costLenses" => Response::new_ok(req.id, Some(handle_cost_lenses(server, req.params))),
+        "vyrn/costRows" => Response::new_ok(req.id, Some(handle_cost_rows(server, req.params))),
+        "vyrn/generatedSource" => {
+            Response::new_ok(req.id, handle_generated_source(server, req.params))
+        }
         // A custom request, not `code_lens_provider`: `extension.js` builds
         // every lens from answers like this one.
         "vyrn/routeLenses" => {
@@ -887,6 +905,37 @@ fn handle_cost_lenses(server: &Server, params: serde_json::Value) -> Vec<serde_j
         return Vec::new();
     };
     cost::lenses(analysis, uri_path(&uri).as_deref(), &src)
+}
+
+/// `vyrn/costRows`: the cost rows of the document `uri` ([`cost::rows`]), each
+/// `{ line, glyph, count, spans, hover }`, `line` 0-based and `spans` LSP ranges, `hover`
+/// ending with the report's link. Empty when the client turned cost hints off, and for a
+/// document that does not check. The line hints and the expression hover read the same rows.
+fn handle_cost_rows(server: &Server, params: serde_json::Value) -> Vec<serde_json::Value> {
+    let uri = (params.get("uri"))
+        .and_then(|v| v.as_str())
+        .and_then(|u| Url::parse(u).ok());
+    let Some(uri) = uri.filter(|u| cost_hints() && is_vyrn_uri(u)) else {
+        return Vec::new();
+    };
+    let (Some((analysis, _)), Some(src)) = (lookup(server, &uri), doc_text(server, &uri)) else {
+        return Vec::new();
+    };
+    let path = uri_path(&uri);
+    let rows = cost::rows(analysis, uri.as_str(), path.as_deref(), &src, 1, usize::MAX);
+    (rows.into_iter())
+        .map(|r| {
+            serde_json::json!({
+                "line": r.line - 1,
+                "glyph": r.glyph,
+                "count": r.count,
+                "spans": r.spans,
+                "hover": format!("{}
+
+{}", r.hover, cost::WHY_COST),
+            })
+        })
+        .collect()
 }
 
 /// `vyrn/routeLenses`: one `{ line, title, method, path, source }` per mounted
@@ -969,19 +1018,51 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
             }
         })
     };
-    let value = match (ordinary, note) {
-        (Some(o), Some(n)) => format!("{o}\n\n---\n\n{n}"),
-        (Some(o), None) => o,
-        (None, Some(n)) => n,
-        (None, None) => return None,
-    };
+    let cost = cost_hover(server, uri, &text, p.text_document_position_params.position);
+    let parts: Vec<String> = [ordinary, note, cost.as_ref().map(|c| c.0.clone())]
+        .into_iter()
+        .flatten()
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
-            value,
+            value: parts.join("\n\n---\n\n"),
         }),
-        range: None,
+        range: cost.map(|c| c.1),
     })
+}
+
+/// The cost row whose expression holds `pos` in the Vyrn document `uri`, the innermost where
+/// several do: its hover and that expression's range. `None` without cost hints.
+fn cost_hover(server: &Server, uri: &Url, text: &str, pos: Position) -> Option<(String, Range)> {
+    if !is_vyrn_uri(uri) || !cost_hints() {
+        return None;
+    }
+    let (analysis, _) = lookup(server, uri)?;
+    let line = pos.line as usize + 1;
+    let path = uri_path(uri);
+    let rows = cost::rows(analysis, uri.as_str(), path.as_deref(), text, line, line);
+    let key = |p: Position| (p.line, p.character);
+    let holds = |r: &Range| key(r.start) <= key(pos) && key(pos) < key(r.end);
+    // A span inside another starts no earlier and ends no later, so it is the shorter.
+    let width = |r: &Range| {
+        (
+            r.end.line - r.start.line,
+            r.end.character.abs_diff(r.start.character),
+        )
+    };
+    (rows.iter())
+        .flat_map(|row| {
+            row.spans
+                .iter()
+                .filter(|r| holds(r))
+                .map(move |r| (row, *r))
+        })
+        .min_by_key(|(_, r)| width(r))
+        .map(|(row, r)| (format!("{}\n\n{}", row.hover, cost::WHY_COST), r))
 }
 
 fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoDefinitionResponse> {
@@ -1020,6 +1101,15 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     // A built-in method resolves for hover but has no declaration.
     if !r.definition {
         return None;
+    }
+    if let Some(module) = &r.generated {
+        let owner = home_uri?;
+        let target_uri = generated_uri(&owner, module);
+        let target_text = generated_source(server, &owner, module)?;
+        return Some(GotoDefinitionResponse::Scalar(Location {
+            uri: target_uri,
+            range: lsp_range(&target_text, r.target_line, r.target_col, r.target_end_col),
+        }));
     }
     // A remote module key (`github:...`) is no file, so it has no definition.
     let target_uri = match &r.target_file {
@@ -1112,6 +1202,48 @@ fn import_path_definition(
     }]))
 }
 
+/// The scheme of a generated module's read-only document ([`generated_uri`]).
+const GENERATED_SCHEME: &str = "vyrn-gen";
+
+/// The document of the generated module `module` that the root `owner` generates:
+/// `vyrn-gen:/<call>.vyrn?owner=<owner>&module=<module>`, `call` the generator call of the
+/// module's key without the characters a path segment cannot hold, so the editor's tab names
+/// it. `vyrn/generatedSource` answers its text.
+fn generated_uri(owner: &Url, module: &str) -> Url {
+    let call = vyrn_frontend::loader::generator_call(module).unwrap_or(module);
+    let call: String = (call.chars())
+        .filter(|c| c.is_alphanumeric() || "._()".contains(*c))
+        .collect();
+    let mut uri = Url::parse(&format!("{GENERATED_SCHEME}:/{call}.vyrn"))
+        .unwrap_or_else(|_| unreachable!("the path holds only unreserved characters"));
+    uri.query_pairs_mut()
+        .append_pair("owner", owner.as_str())
+        .append_pair("module", module);
+    uri
+}
+
+/// The text of the generated module `module` of the root `owner`, as `vyrn emit-gen`
+/// prints it.
+fn generated_source(server: &Server, owner: &Url, module: &str) -> Option<String> {
+    Some(synth_for(server, owner, module)?.gen_source.clone())
+}
+
+/// `vyrn/generatedSource`: the text of the generated module a [`generated_uri`] `{ uri }`
+/// names; `null` for another URI and for a module its owner does not generate.
+fn handle_generated_source(server: &Server, params: serde_json::Value) -> Option<String> {
+    let uri = Url::parse(params.get("uri")?.as_str()?).ok()?;
+    if uri.scheme() != GENERATED_SCHEME {
+        return None;
+    }
+    let pair = |k: &str| {
+        uri.query_pairs()
+            .find(|(q, _)| q == k)
+            .map(|(_, v)| v.into_owned())
+    };
+    let owner = Url::parse(&pair("owner")?).ok()?;
+    generated_source(server, &owner, &pair("module")?)
+}
+
 /// The local file an import specifier names. A generator's directory argument
 /// resolves to a `.vyrn` guess that does not exist, so it falls back to
 /// [`dir_target`]. `None` when nothing on disk matches.
@@ -1124,8 +1256,12 @@ fn import_target_file(
     if std::path::Path::new(&resolved).is_file() {
         return Some(resolved);
     }
-    let dir = resolved.strip_suffix(".vyrn").unwrap_or(&resolved);
-    dir_target(dir)
+    // A generator's file argument (`./calc.syntax`) is no module: the guess adds `.vyrn`.
+    let bare = resolved.strip_suffix(".vyrn").unwrap_or(&resolved);
+    if std::path::Path::new(bare).is_file() {
+        return Some(bare.to_string());
+    }
+    dir_target(bare)
 }
 
 /// A jump target for a directory a generator consumes, which claims every file
@@ -2051,8 +2187,10 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
         })
         .collect();
     if let Some(src) = src.as_deref() {
-        hints.extend(type_hints(analysis, src, from, to));
-        if cost_hints() {
+        let home = &p.text_document.uri;
+        let locate = |name: &str| type_location(server, analysis, Some(home), name);
+        hints.extend(type_hints(analysis, src, from, to, &locate));
+        if cost_hints() && !cost_decorations() {
             let path = uri_path(&p.text_document.uri);
             let uri = p.text_document.uri.as_str();
             hints.extend(cost::hints(analysis, uri, path.as_deref(), src, from, to));
@@ -2083,7 +2221,13 @@ fn handle_inlay_resolve(server: &Server, params: serde_json::Value) -> Option<In
 /// A `: Type` label after the name of every binding in lines `from..=to` whose
 /// source does not already say its type (`let p = o.copy()` -> `p: Outer`). The
 /// type is the analysis's, as hover renders it.
-fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<InlayHint> {
+fn type_hints(
+    analysis: &Analysis,
+    src: &str,
+    from: usize,
+    to: usize,
+    locate: &dyn Fn(&str) -> Option<Location>,
+) -> Vec<InlayHint> {
     let lines: Vec<&str> = src.lines().collect();
     let mut out = Vec::new();
     for b in &analysis.locals {
@@ -2096,7 +2240,7 @@ fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<Inl
         let Some(label) = type_hint_label(b, &analysis.spellings, line, b.end_col) else {
             continue;
         };
-        out.push(type_hint_at(line, b.line, b.end_col, label));
+        out.push(type_hint_at(line, b.line, b.end_col, &label, locate));
     }
     out
 }
@@ -2125,14 +2269,21 @@ fn type_hint_label(
 }
 
 /// One type hint just past a name at 1-based `(line, end_col)`, `end_col` a char
-/// column of `line_text`.
-fn type_hint_at(line_text: &str, line: usize, end_col: usize, label: String) -> InlayHint {
+/// column of `line_text`. Each type name of `label` that `locate` finds is its own label part,
+/// with the declaration's location; the rest, a built-in type and the punctuation, stays plain.
+fn type_hint_at(
+    line_text: &str,
+    line: usize,
+    end_col: usize,
+    label: &str,
+    locate: &dyn Fn(&str) -> Option<Location>,
+) -> InlayHint {
     InlayHint {
         position: Position {
             line: (line - 1) as u32,
             character: char_col_to_utf16(line_text, end_col - 1),
         },
-        label: InlayHintLabel::String(format!(": {label}")),
+        label: InlayHintLabel::LabelParts(type_label_parts(label, locate)),
         kind: Some(InlayHintKind::TYPE),
         text_edits: None,
         tooltip: None,
@@ -2140,6 +2291,65 @@ fn type_hint_at(line_text: &str, line: usize, end_col: usize, label: String) -> 
         padding_right: None,
         data: None,
     }
+}
+
+/// `: label` as label parts: a part per name `locate` finds, carrying its location, and a
+/// plain part for each run between them.
+fn type_label_parts(
+    label: &str,
+    locate: &dyn Fn(&str) -> Option<Location>,
+) -> Vec<InlayHintLabelPart> {
+    let part = |value: String, location| InlayHintLabelPart {
+        value,
+        tooltip: None,
+        location,
+        command: None,
+    };
+    let mut parts = Vec::new();
+    let mut plain = String::from(": ");
+    let mut rest = label;
+    while !rest.is_empty() {
+        let word = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(rest.len());
+        let take = word.max(rest.chars().next().map_or(1, char::len_utf8));
+        let (head, tail) = rest.split_at(take);
+        match (word > 0).then(|| locate(head)).flatten() {
+            Some(at) => {
+                if !plain.is_empty() {
+                    parts.push(part(std::mem::take(&mut plain), None));
+                }
+                parts.push(part(head.to_string(), Some(at)));
+            }
+            None => plain.push_str(head),
+        }
+        rest = tail;
+    }
+    if !plain.is_empty() {
+        parts.push(part(plain, None));
+    }
+    parts
+}
+
+/// The declaration of the type `name` among `analysis`'s symbols: in its module's file, or in
+/// `home` for one the document declares. `None` for a built-in type and for a declaration with
+/// no file, such as one of a generated module.
+fn type_location(
+    server: &Server,
+    analysis: &Analysis,
+    home: Option<&Url>,
+    name: &str,
+) -> Option<Location> {
+    let s = (analysis.symbols.iter()).find(|s| s.kind == SymbolKind::Type && s.name == name)?;
+    let uri = match &s.file {
+        Some(f) => Url::from_file_path(f.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?,
+        None => home?.clone(),
+    };
+    let text = doc_text(server, &uri).unwrap_or_default();
+    Some(Location {
+        range: lsp_range(&text, s.line, s.col, s.end_col),
+        uri,
+    })
 }
 
 /// Type hints for a generator input: bindings of the generated module mapped back through
@@ -2169,11 +2379,14 @@ fn input_type_hints(server: &Server, input_uri: &Url, from: usize, to: usize) ->
                 else {
                     continue;
                 };
+                let analysis = &sp.synth.analysis;
+                let locate = |name: &str| type_location(server, analysis, None, name);
                 out.push(type_hint_at(
                     sp.input_line,
                     sp.region.origin.line,
                     col,
-                    label,
+                    &label,
+                    &locate,
                 ));
             }
         },

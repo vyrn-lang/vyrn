@@ -1,0 +1,298 @@
+12 ⊞
+**⊞ allocates 1**
+
+- [`Array<String>`](URI#L12,12-L12,75)
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+34 ⊞
+**⊞ allocates 1**
+
+- [`Option<String>`](URI#L34,25-L34,35)
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+38 ⊞ ↘ ⇒
+**⊞ allocates 1**
+
+- [`Array<UInt8>`](URI#L38,22-L38,39)
+
+In a loop.
+
+**↘ enters an allocating function 1**
+
+- [`toUpper(..)` from std/strings](URI#L38,28-L38,38)
+
+In a loop.
+
+**⇒ check proved 1**
+
+- index check proved
+
+In 2 nested loops.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+39 ↗
+**↗ may grow 1**
+
+- [`push(..)`](URI#L39,17-L39,28)
+
+In 2 nested loops.
+
+Fix: `reserve` the capacity before the loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+50 ⊞
+**⊞ allocates 1**
+
+- [`Map<Int64, Int64>`](URI#L50,36-L50,39)
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+58 ⇒
+**⇒ check proved 1**
+
+- [index check proved](URI#L58,31-L58,37)
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+60 ↗
+**↗ may grow 1**
+
+- [`tally(..)`](URI#L60,13-L60,28)
+
+In a loop.
+
+Fix: `reserve` the capacity before the loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+68 ⊞
+**⊞ allocates 1**
+
+- [`Array<UInt8>`](URI#L68,20-L68,33)
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+70 ↗
+**↗ may grow 1**
+
+- [`reserve(..)`](URI#L70,5-L70,17)
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+71 ⇒²
+**⇒ check proved 2**
+
+- [division check proved x2](URI#L71,17-L71,33) [2](URI#L71,17-L71,33)
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+73 ↗ ? ⇒³
+**↗ may grow 1**
+
+- [`push(..)`](URI#L73,9-L73,40)
+
+In a loop.
+
+Fix: `reserve` the capacity before the loop.
+
+**? check kept 1**
+
+- [index check: it needs the value of line 73 >= 0, and that value is the result of `modulusOf(..)` at line 71, whose signature does not state it](URI#L73,16-L73,39)
+
+In a loop.
+
+**⇒ check proved 3**
+
+- [division check proved x3](URI#L73,26-L73,33) [2](URI#L73,26-L73,33) [3](URI#L73,25-L73,38)
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+74 ⇒²
+**⇒ check proved 2**
+
+- [division check proved x2](URI#L74,13-L74,18) [2](URI#L74,13-L74,18)
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+76 ⊞
+**⊞ allocates 1**
+
+- [`Result<String, String>`](URI#L76,18-L76,36)
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+84 ⊞ ⇒
+**⊞ allocates 1**
+
+- [`Array<UInt8>`](URI#L84,14-L84,25)
+
+**⇒ check proved 1**
+
+- index check proved
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+92 ⇒²
+**⇒ check proved 2**
+
+- [division check proved x2](URI#L92,17-L92,30) [2](URI#L92,17-L92,30)
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+93 ⊞ ⇒
+**⊞ allocates 1**
+
+- [`String`](URI#L93,21-L93,37)
+
+**⇒ check proved 1**
+
+- [division check proved](URI#L93,23-L93,36)
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+95 ⧉ ⊞
+**⧉ copies 1**
+
+- [`String`: interpolating a `String` copies it](URI#L95,18-L95,25)
+
+In a loop.
+
+**⊞ allocates 1**
+
+- [`String`](URI#L95,16-L95,26)
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+97 ⧉ ⊞³
+**⧉ copies 1**
+
+- [`String`: interpolating a `String` copies it](URI#L97,22-L97,29)
+
+**⊞ allocates 3**
+
+- [`String` x3](URI#L97,13-L97,21) [2](URI#L97,12-L97,30) [3](URI#L97,12-L97,30)
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+102 ⊞ ⇒
+**⊞ allocates 1**
+
+- [`Array<Int64>`](URI#L102,16-L102,24)
+
+**⇒ check proved 1**
+
+- index check proved
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+107 ↗
+**↗ may grow 1**
+
+- [`push(..)`](URI#L107,9-L107,46)
+
+In a loop.
+
+Fix: `reserve` the capacity before the loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+115 ⇒
+**⇒ check proved 1**
+
+- index check proved
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+116 ⧉² ⊞²
+**⧉ copies 2**
+
+- [`String` x2: interpolating a `String` copies it](URI#L116,16-L116,35) [2](URI#L116,36-L116,88)
+
+In a loop.
+
+**⊞ allocates 2**
+
+- [`String` x2](URI#L116,15-L116,89) [2](URI#L116,15-L116,89)
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+130 ⊞
+**⊞ allocates 1**
+
+- [`Array<UInt8>`](URI#L130,20-L130,33)
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+135 ⇒
+**⇒ check proved 1**
+
+- [division check proved](URI#L135,17-L135,48)
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+136 ↗ ⇒³
+**↗ may grow 1**
+
+- [`push(..)`](URI#L136,9-L136,49)
+
+In a loop.
+
+Fix: `reserve` the capacity before the loop.
+
+**⇒ check proved 3**
+
+- [division check proved x2](URI#L136,27-L136,47) [2](URI#L136,27-L136,47)
+- [index check proved](URI#L136,18-L136,48)
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+156 ⇒
+**⇒ check proved 1**
+
+- index check proved
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+157 ⧉ ⊞³
+**⧉ copies 1**
+
+- [`String`: interpolating a `String` copies it](URI#L157,39-L157,46)
+
+In a loop.
+
+**⊞ allocates 3**
+
+- [`String` x3](URI#L157,16-L157,37) [2](URI#L157,15-L157,47) [3](URI#L157,15-L157,47)
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+

@@ -29,7 +29,7 @@ use vyrn_frontend::prelude::Indexes;
 use vyrn_frontend::trap::Rule;
 
 use vyrn_frontend::core::check::{scalar_arg, Check, Guard, Invariant, Raises, Site, Verdict, Why};
-use vyrn_frontend::core::{Arg, Body, Callee, Name, Op, Place, Rhs, St, Val};
+use vyrn_frontend::core::{Arg, Body, Callee, Name, Op, Place, Rhs, Span, St, Val};
 
 /// What a build does with its check rows, from the environment variable
 /// `VYRN_CHECKS`, which this function alone reads.
@@ -77,7 +77,13 @@ pub fn state(body: &mut Body, tys: &Types<'_>) {
         .filter(|_| !crate::core::returns(&stmts))
     {
         let guard = ensured(body, None);
-        stmts.push(St::Check(row(&mut lines, e.line, Raises::Result, guard)));
+        stmts.push(St::Check(row(
+            &mut lines,
+            e.line,
+            Span::NONE,
+            Raises::Result,
+            guard,
+        )));
     }
     body.stmts = stmts;
     for l in &mut body.lambdas {
@@ -127,8 +133,9 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
             .chain(ruled.map(|g| (Raises::Where, g)))
             .chain(clauses.into_iter().map(|g| (Raises::Clause, g)))
             .chain(returned.map(|g| (Raises::Result, g)));
+        let span = s.span(&body.names);
         for (rule, guard) in guards {
-            out.push(St::Check(row(lines, line, rule, guard)));
+            out.push(St::Check(row(lines, line, span, rule, guard)));
         }
         let kept = promised(body, &s);
         match &mut s {
@@ -175,7 +182,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
         }
         out.push(s);
         for guard in kept {
-            out.push(St::Check(row(lines, line, Raises::Let, guard)));
+            out.push(St::Check(row(lines, line, span, Raises::Let, guard)));
         }
     }
     *ss = out;
@@ -234,7 +241,7 @@ fn proofs(
         }),
     };
     guard
-        .map(|g| St::Check(row(lines, line, rule, g)))
+        .map(|g| St::Check(row(lines, line, Span::NONE, rule, g)))
         .into_iter()
 }
 
@@ -271,8 +278,14 @@ fn turns(ss: &mut Vec<St>, inv: &Invariant, lines: &mut BTreeMap<usize, u32>) {
     *ss = out;
 }
 
-/// A kept check row of `guard` on `line`, numbered after the line's others.
-fn row(lines: &mut BTreeMap<usize, u32>, line: usize, rule: Raises, guard: Guard) -> Check {
+/// A kept check row of `guard` on `line` over `span`, numbered after the line's others.
+fn row(
+    lines: &mut BTreeMap<usize, u32>,
+    line: usize,
+    span: Span,
+    rule: Raises,
+    guard: Guard,
+) -> Check {
     let ordinal = lines.entry(line).or_insert(0);
     let site = Site {
         line,
@@ -283,6 +296,7 @@ fn row(lines: &mut BTreeMap<usize, u32>, line: usize, rule: Raises, guard: Guard
         rule,
         guard,
         site,
+        span,
         verdict: Verdict::Kept,
         why: Why::Unsaid,
     }
