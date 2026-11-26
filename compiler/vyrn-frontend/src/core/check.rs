@@ -176,7 +176,8 @@ pub struct Atom {
 }
 
 /// An operand of an [`Atom`]: the value `of`, or the `part` of it a read
-/// gives: `length`, `byteLength` or an integer field.
+/// gives: `length`, `byteLength`, an integer field, or the length of an
+/// array or String field, spelled `f.length` or `f.byteLength`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Operand {
     pub of: Val,
@@ -595,24 +596,40 @@ fn operand(
         },
         Expr::Var { name, .. } => (name, None),
         Expr::Field { expr, field, .. } => match &**expr {
-            Expr::Var { name, .. } => (name, Some(field)),
+            Expr::Var { name, .. } => (name, Some(field.clone())),
+            // A field's length, one level deep: `value.shape.length`.
+            Expr::Field { expr, field: f, .. } if field == "length" || field == "byteLength" => {
+                match &**expr {
+                    Expr::Var { name, .. } => (name, Some(format!("{f}.{field}"))),
+                    _ => return Err(form()),
+                }
+            }
             _ => return Err(form()),
         },
         _ => return Err(form()),
     };
     let (j, ty) = sibling(of, name)?;
     let base = crate::types::resolve(ty, decls);
-    let ty = match (&base, part.map(String::as_str)) {
-        (_, None) => integer(base)?,
-        (t, Some("length")) if t.is_seq() => Type::Int,
-        (Type::Str, Some("byteLength")) => Type::Int,
-        (_, Some(field)) => {
-            let fs = crate::types::record_fields(&base, decls).ok_or_else(form)?;
-            let t = &fs.iter().find(|x| x.name == field).ok_or_else(form)?.ty;
-            integer(crate::types::resolve(t, decls))?
-        }
+    let field = |name: &str| {
+        let fs = crate::types::record_fields(&base, decls).ok_or_else(form)?;
+        let t = &fs.iter().find(|x| x.name == name).ok_or_else(form)?.ty;
+        Ok(crate::types::resolve(t, decls))
     };
-    let (of, part) = (Val::Name(Name(j as u32)), part.cloned());
+    let length = |t: &Type, part: &str| match (t, part) {
+        (t, "length") if t.is_seq() => true,
+        (Type::Str, "byteLength") => true,
+        _ => false,
+    };
+    let ty = match part.as_deref() {
+        None => integer(base)?,
+        Some(p) if length(&base, p) => Type::Int,
+        Some(p) => match p.split_once('.') {
+            Some((f, len)) if length(&field(f)?, len) => Type::Int,
+            Some(_) => return Err(form()),
+            None => integer(field(p)?)?,
+        },
+    };
+    let of = Val::Name(Name(j as u32));
     Ok((Operand { of, part }, Some(ty)))
 }
 /// Whether `decl` is a validated integer type: a construction of it from a

@@ -29,6 +29,7 @@ compiler/vyrn-cli/tests/check/a_borrow_of_module_state_ends_at_an_await.vyrn	0	c
 compiler/vyrn-cli/tests/check/a_both_without_await_is_refused.vyrn	0	cbf29ce484222325	20	17	66fa53e010c1b070
 compiler/vyrn-cli/tests/check/a_bounded_receiver_cannot_dispatch_a_projection.vyrn	0	cbf29ce484222325	20	17	b22218861c83683d
 compiler/vyrn-cli/tests/check/a_braced_enum_takes_a_trailing_comma.vyrn	0	cbf29ce484222325	20	15	f7761912d315a13f
+compiler/vyrn-cli/tests/check/a_clause_names_a_fields_length_but_no_deeper_part.vyrn	0	cbf29ce484222325	20	17	a8ec14d84f5560fd
 compiler/vyrn-cli/tests/check/a_concrete_chain_dispatches.vyrn	0	cbf29ce484222325	20	19	cefbe67e9f588396
 compiler/vyrn-cli/tests/check/a_constant_outside_every_member_of_a_union_is_refused.vyrn	0	cbf29ce484222325	20	20	db51976e4a1d78df
 compiler/vyrn-cli/tests/check/a_consume_of_an_element_names_its_container_at_depth_1.vyrn	0	cbf29ce484222325	20	16	9690968e75af0554

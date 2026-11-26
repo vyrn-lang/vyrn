@@ -258,6 +258,26 @@ fn third(xs: Array<Int64> where value.length >= 3) -> Int64 {
     assert_eq!(verdicts(src, "third"), ["proved array-index"]);
 }
 
+/// A clause may name the length of a field: `t.dims.length >= 2` proves both
+/// reads, and a caller that passes a shorter field keeps the clause check.
+#[test]
+fn a_clause_on_a_field_length_proves_the_reads_it_bounds() {
+    let src = "type T = { dims: Array<Int64> }
+fn area(t: T where value.dims.length >= 2) -> Int64 {
+    return t.dims[0] * t.dims[1]
+}
+fn pick(t: T) -> Int64 {
+    return area(t)
+}
+";
+    assert_eq!(
+        verdicts(src, "area"),
+        ["proved array-index", "proved array-index"]
+    );
+    let (_dir, file) = program(src, "    print(pick(T { dims: [1] }).toString())");
+    assert_eq!(rows_of(&file, "pick"), ["check where-arg"]);
+}
+
 /// A kept check over a sum that may wrap names the sum, not the callee whose
 /// result is one addend, where that callee states a result clause.
 #[test]

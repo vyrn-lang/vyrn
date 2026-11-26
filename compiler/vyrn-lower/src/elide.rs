@@ -4208,6 +4208,11 @@ impl<'a> Walk<'a> {
             (Val::Name(n), Some("length" | "byteLength")) => {
                 self.length(&Place::Name(*n)).map(Lin::of)
             }
+            (Val::Name(n), Some(p)) if p.contains('.') => {
+                let (f, _) = p.split_once('.')?;
+                let at = Place::Field(Box::new(Place::Name(*n)), f.to_string());
+                self.length(&at).map(Lin::of)
+            }
             (Val::Name(n), Some(f)) => self.field(&Place::Name(*n), f).map(Lin::of),
             _ => None,
         }

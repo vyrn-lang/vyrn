@@ -1,0 +1,5 @@
+type T = { inner: { n: Int64 } }
+
+export fn deep(t: T where value.inner.n >= 1) -> Int64 {
+    return t.inner.n
+}
