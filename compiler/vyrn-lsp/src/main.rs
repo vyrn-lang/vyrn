@@ -1206,9 +1206,10 @@ fn import_path_definition(
 const GENERATED_SCHEME: &str = "vyrn-gen";
 
 /// The document of the generated module `module` that the root `owner` generates:
-/// `vyrn-gen:/<call>.vyrn?owner=<owner>&module=<module>`, `call` the generator call of the
+/// `vyrn-gen:/<call>.vyrn?<hex of owner, newline, module>`, `call` the generator call of the
 /// module's key without the characters a path segment cannot hold, so the editor's tab names
-/// it. `vyrn/generatedSource` answers its text.
+/// it. `vyrn/generatedSource` answers its text. The query is hex because VS Code re-encodes
+/// a URI's `=`, `&` and `%` when it sends the URI back, which breaks a key-value query.
 fn generated_uri(owner: &Url, module: &str) -> Url {
     let call = vyrn_frontend::loader::generator_call(module).unwrap_or(module);
     let call: String = (call.chars())
@@ -1216,9 +1217,10 @@ fn generated_uri(owner: &Url, module: &str) -> Url {
         .collect();
     let mut uri = Url::parse(&format!("{GENERATED_SCHEME}:/{call}.vyrn"))
         .unwrap_or_else(|_| unreachable!("the path holds only unreserved characters"));
-    uri.query_pairs_mut()
-        .append_pair("owner", owner.as_str())
-        .append_pair("module", module);
+    let key = format!("{owner}\n{module}");
+    uri.set_query(Some(
+        &key.bytes().map(|b| format!("{b:02x}")).collect::<String>(),
+    ));
     uri
 }
 
@@ -1235,13 +1237,13 @@ fn handle_generated_source(server: &Server, params: serde_json::Value) -> Option
     if uri.scheme() != GENERATED_SCHEME {
         return None;
     }
-    let pair = |k: &str| {
-        uri.query_pairs()
-            .find(|(q, _)| q == k)
-            .map(|(_, v)| v.into_owned())
-    };
-    let owner = Url::parse(&pair("owner")?).ok()?;
-    generated_source(server, &owner, &pair("module")?)
+    let hex = uri.query()?.as_bytes();
+    let bytes: Option<Vec<u8>> = (hex.chunks(2))
+        .map(|d| u8::from_str_radix(std::str::from_utf8(d).ok()?, 16).ok())
+        .collect();
+    let key = String::from_utf8(bytes?).ok()?;
+    let (owner, module) = key.split_once('\n')?;
+    generated_source(server, &Url::parse(owner).ok()?, module)
 }
 
 /// The local file an import specifier names. A generator's directory argument

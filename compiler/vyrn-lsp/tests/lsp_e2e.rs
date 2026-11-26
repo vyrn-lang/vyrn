@@ -7242,10 +7242,12 @@ fn a_generated_namespace_member_jumps_into_its_generated_document() {
     let (text, uri, mut client) = open_calc_editor("gendef");
     let member = definition_at(&mut client, &uri, &text, "reported.reportLedger", 9);
     let target = member["uri"].as_str().expect("a location").to_string();
-    assert!(
-        target.starts_with("vyrn-gen:/syntaxReport(.calc.syntax).vyrn?owner="),
+    let (path, query) = target.split_once('?').expect("a query");
+    assert_eq!(
+        path, "vyrn-gen:/syntaxReport(.calc.syntax).vyrn",
         "{member}"
     );
+    assert!(query.bytes().all(|b| b.is_ascii_hexdigit()), "{query}");
     let source = generated_source(&mut client, &target);
     let line = member["range"]["start"]["line"].as_u64().unwrap() as usize;
     let declared = source.lines().nth(line).unwrap_or("");
