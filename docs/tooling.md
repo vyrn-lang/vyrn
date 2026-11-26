@@ -606,10 +606,14 @@ A client that draws the rows itself reads them from the request
 `vyrn/costRows`, which the server advertises as the experimental capability
 `vyrn/costRows`. The request takes `{ uri }` and answers the document's rows in
 source order, the same rows the hints and the expression hover read: one
-`{ line, glyph, count, spans, hover }` per glyph of a line, `line` 0-based,
+`{ line, glyph, count, spans, hover, anchors }` per glyph of a line, `line` 0-based,
 `glyph` the label with its count in superscript, `spans` the LSP ranges of its
 facts (empty for the last run's blocks and for a fact no expression spells),
-and `hover` the glyph's Markdown, ending with the `vyrn why --cost` link. A proof
+`hover` the glyph's Markdown, ending with the `vyrn why --cost` link, and
+`anchors`, one `{ at, glyph, hover }` per end of an expression the facts are
+about (one at the line's end for a row with no span), with the hover of the
+facts that end there. An editor finds a hover by text position, so a client
+that draws glyphs apart anchors each at its `at`. A proof
 glyph's hover lists the proved checks without their proofs, which only
 `inlayHint/resolve` traces. The answer is empty when `costHints` is off and
 while the document has an error. A client that sends the initialization option
@@ -684,9 +688,9 @@ Settings:
 - `vyrn.hints.render`: `decorations` (the default) or `inlay`. With
   `decorations` the extension sends `costRendering`, asks `vyrn/costRows` when
   a file opens, changes or is saved, and draws each glyph as its own decoration
-  after the line's text, with its own hover, and each fact's expression as a
-  decoration with the glyph's hover, so the pointer moving from one glyph to the
-  next switches the hover. With `inlay` the server's line hints show them. A
+  at its anchor, after the expression it is about, with the hover of the facts
+  that end there, and each fact's expression as a decoration with the row's
+  hover. Glyphs about one expression share its hover. With `inlay` the server's line hints show them. A
   change restarts the server.
 - `vyrn.path`: the compiler. When empty: `compiler/target/release/vyrn`, then
   the debug build, then `cargo run -p vyrn-cli`.

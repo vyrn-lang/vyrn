@@ -129,6 +129,18 @@ pub struct Row {
     pub hover: String,
     /// Whether the row is a proof glyph, whose proofs [`resolve`] adds.
     pub proof: bool,
+    /// Where the row's glyphs stand when each is drawn apart: one per end of an expression a
+    /// fact is about, or one at the line's end for a row with no span. An editor keeps one
+    /// hover per position, so facts that end at one position share a glyph.
+    pub anchors: Vec<Anchor>,
+}
+
+/// One glyph of a [`Row`] at the end of the expressions it is about, with the hover of the
+/// facts that end there. [`WHY_COST`] is not in the hover.
+pub struct Anchor {
+    pub at: Position,
+    pub glyph: String,
+    pub hover: String,
 }
 
 /// `span` as an LSP range of `src`; `None` for [`Span::NONE`].
@@ -167,43 +179,84 @@ fn compact(row: &CostLine, uri: &str, src: &str) -> Row {
     let proof = PROOFS.contains(&row.verb);
     let Some(&(_, glyph, title)) = GLYPHS.iter().find(|g| g.0 == row.verb) else {
         let (glyph, hover) = (row.label.clone(), row.text.clone());
-        let (line, count) = (row.line, row.count);
-        return Row {
-            line,
-            glyph,
-            count,
-            spans,
-            hover,
-            proof,
-        };
+        return line_row(row.line, glyph, row.count, spans, hover, proof, src);
     };
-    let mut hover = format!("**{glyph} {title} {}**\n", row.count);
-    for ((item, _), ranges) in row.items.iter().zip(&item_ranges) {
-        let linked = match ranges.split_first() {
+    let items: Vec<String> = (row.items.iter().zip(&item_ranges))
+        .map(|((item, _), ranges)| match ranges.split_first() {
             Some((first, rest)) => {
                 let more = (rest.iter().enumerate())
                     .map(|(k, r)| format!(" {}", link(&(k + 2).to_string(), uri, r)));
-                link(item, uri, first) + &more.collect::<String>()
+                format!("\n- {}{}", link(item, uri, first), more.collect::<String>())
             }
-            None => item.clone(),
-        };
-        hover += &format!("\n- {linked}");
-    }
-    match row.depth {
-        0 => {}
-        1 => hover += "\n\nIn a loop.",
-        d => hover += &format!("\n\nIn {d} nested loops."),
-    }
+            None => format!("\n- {item}"),
+        })
+        .collect();
+    let mut tail = match row.depth {
+        0 => String::new(),
+        1 => "\n\nIn a loop.".to_string(),
+        d => format!("\n\nIn {d} nested loops."),
+    };
     if row.verb == "grows" && row.depth > 0 {
-        hover += "\n\nFix: `reserve` the capacity before the loop.";
+        tail += "\n\nFix: `reserve` the capacity before the loop.";
     }
+    let counted = format!("{glyph}{}", superscript(row.count));
+    let hover = format!(
+        "**{glyph} {title} {}**\n{}{tail}",
+        row.count,
+        items.concat()
+    );
+    let mut ends: Vec<Position> = spans.iter().map(|r| r.end).collect();
+    ends.sort_by_key(|p| (p.line, p.character));
+    ends.dedup();
+    if ends.is_empty() {
+        return line_row(row.line, counted, row.count, spans, hover, proof, src);
+    }
+    let anchors = (ends.into_iter())
+        .map(|at| {
+            let here = (items.iter().zip(&item_ranges))
+                .filter(|(_, ranges)| ranges.iter().any(|r| r.end == at))
+                .map(|(item, _)| item.as_str());
+            Anchor {
+                at,
+                glyph: glyph.to_string(),
+                hover: format!("**{glyph} {title}**\n{}{tail}", here.collect::<String>()),
+            }
+        })
+        .collect();
     Row {
         line: row.line,
-        glyph: format!("{glyph}{}", superscript(row.count)),
+        glyph: counted,
         count: row.count,
         spans,
         hover,
         proof,
+        anchors,
+    }
+}
+
+/// A row whose one glyph stands at the end of its line.
+fn line_row(
+    line: usize,
+    glyph: String,
+    count: usize,
+    spans: Vec<Range>,
+    hover: String,
+    proof: bool,
+    src: &str,
+) -> Row {
+    let anchors = vec![Anchor {
+        at: line_end(src, line),
+        glyph: glyph.clone(),
+        hover: hover.clone(),
+    }];
+    Row {
+        line,
+        glyph,
+        count,
+        spans,
+        hover,
+        proof,
+        anchors,
     }
 }
 
@@ -223,17 +276,18 @@ fn compact_rows(
         let [blocks, bytes] = (blocking.iter())
             .map(|r| ran(run, f, r))
             .fold([0, 0], |a, b| [a[0] + b[0], a[1] + b[1]]);
-        out.push(Row {
-            line: rows[0].line,
-            glyph: format!("{LAST_RUN}{blocks}"),
-            count: blocks as usize,
-            spans: Vec::new(),
-            hover: format!(
+        out.push(line_row(
+            rows[0].line,
+            format!("{LAST_RUN}{blocks}"),
+            blocks as usize,
+            Vec::new(),
+            format!(
                 "**{LAST_RUN} last run {blocks}**\n\n{blocks} blocks, {bytes} bytes on this line \
                  in the last `vyrn run --profile`."
             ),
-            proof: false,
-        });
+            false,
+            src,
+        ));
     }
     out
 }

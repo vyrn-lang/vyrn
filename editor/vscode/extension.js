@@ -749,17 +749,19 @@ function costRendering(cfg) {
 }
 
 /**
- * The decorations of the rows `vyrn/costRows` answers: per row its glyph at the end of its
- * 0-based `line`, and each span of its facts, both with the row's hover. A glyph is its own
- * decoration, so the pointer that moves to the next glyph leaves the first one's hover.
+ * The decorations of the rows `vyrn/costRows` answers: per row a glyph at each of its anchors,
+ * the end of an expression its facts are about or the end of its line, with the hover of the
+ * facts that end there, and each span of its facts with the row's hover. VS Code finds a hover
+ * by text position, so glyphs at one position share a hover; anchoring each glyph to its own
+ * expression gives each its own hover.
  *
- * @param {{ line: number, glyph: string, spans: { start: object, end: object }[], hover: string }[]} rows
+ * @param {{ anchors: { at: object, glyph: string, hover: string }[], spans: { start: object, end: object }[], hover: string }[]} rows
  */
 function costDecorations(rows) {
   const glyphs = [];
   const spans = [];
   for (const r of rows) {
-    glyphs.push({ line: r.line, glyph: r.glyph, hover: r.hover });
+    for (const a of r.anchors) glyphs.push({ at: a.at, glyph: a.glyph, hover: a.hover });
     for (const range of r.spans) spans.push({ range, hover: r.hover });
   }
   return { glyphs, spans };
@@ -809,14 +811,11 @@ function registerCostDecorations(context, vsc, lspState) {
     const { glyphs, spans } = costDecorations(rows || []);
     editor.setDecorations(
       glyphType,
-      glyphs.map((g) => {
-        const end = doc.lineAt(Math.min(g.line, doc.lineCount - 1)).range.end;
-        return {
-          range: new vsc.Range(end, end),
-          hoverMessage: hover(g.hover),
-          renderOptions: { after: { contentText: g.glyph } },
-        };
-      })
+      glyphs.map((g) => ({
+        range: range({ start: g.at, end: g.at }),
+        hoverMessage: hover(g.hover),
+        renderOptions: { after: { contentText: g.glyph } },
+      }))
     );
     editor.setDecorations(
       spanType,
