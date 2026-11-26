@@ -7258,6 +7258,21 @@ fn a_generated_namespace_member_jumps_into_its_generated_document() {
     assert_eq!(ns["range"]["start"]["line"], 0, "{ns}");
 }
 
+/// The generator's path string jumps to the file it names.
+#[test]
+fn a_generator_path_jumps_to_its_file() {
+    let (text, uri, mut client) = open_calc_editor("genpath");
+    let link = definition_at(
+        &mut client,
+        &uri,
+        &text,
+        "syntaxReport(\"./calc.syntax\")",
+        15,
+    );
+    let target = link[0]["targetUri"].as_str().unwrap_or("");
+    assert!(target.ends_with("/calc.syntax"), "{link}");
+}
+
 /// A language module's companion replaces the default check: `calc.editor.vyrn`
 /// refuses an account the ledger does not know, keeps the grammar's own
 /// refusal, and gives an account's hover.

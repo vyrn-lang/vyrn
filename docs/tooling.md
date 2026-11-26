@@ -629,7 +629,8 @@ call (`loader::generator_call`) without the characters a path cannot hold,
 request `vyrn/generatedSource` takes `{ uri }` with such a URI and answers the
 module's text, as `vyrn emit-gen` prints it, or `null` when the root does not
 generate it. The VS Code extension serves the scheme as a read-only Vyrn
-document.
+document. The definition of the generator's path string opens the file it
+names.
 
 The server is outside the Cargo workspace. Build and test it explicitly:
 

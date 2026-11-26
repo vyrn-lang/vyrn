@@ -1256,8 +1256,12 @@ fn import_target_file(
     if std::path::Path::new(&resolved).is_file() {
         return Some(resolved);
     }
-    let dir = resolved.strip_suffix(".vyrn").unwrap_or(&resolved);
-    dir_target(dir)
+    // A generator's file argument (`./calc.syntax`) is no module: the guess adds `.vyrn`.
+    let bare = resolved.strip_suffix(".vyrn").unwrap_or(&resolved);
+    if std::path::Path::new(bare).is_file() {
+        return Some(bare.to_string());
+    }
+    dir_target(bare)
 }
 
 /// A jump target for a directory a generator consumes, which claims every file
