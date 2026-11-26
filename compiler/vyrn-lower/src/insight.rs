@@ -17,6 +17,8 @@ use vyrn_frontend::core::{
 
 use vyrn_frontend::symbols::{CostLine, FnCost};
 
+use crate::elide::Proof;
+use crate::facts::{Premise, Src};
 use crate::verdict::Erased;
 use crate::World;
 
@@ -355,6 +357,66 @@ pub fn root(program: &Program, world: &World) -> Vec<(FnId, Vec<Fact>)> {
         })
         .filter(|(_, facts)| !facts.is_empty())
         .collect()
+}
+
+/// The `vyrn why --proofs` lines of the removed checks `proofs` of `body`, in
+/// source order: per goal, its line, the check and the goal, then each
+/// premise with its source, indented by its depth in the tree.
+pub fn proof_lines(program: &Program, world: &World, body: &Body, proofs: &[Proof]) -> Vec<String> {
+    let mut sorted: Vec<&Proof> = proofs.iter().collect();
+    sorted.sort_by_key(|p| (p.site.line, p.site.ordinal));
+    let mut out = Vec::new();
+    for p in sorted {
+        let what = guarded(&p.guard);
+        let goal = p.goal.as_deref().unwrap_or("no path reaches it");
+        out.push(format!("{:>5}  {what} check: {goal}", p.site.line));
+        for l in &p.tree {
+            let pad = " ".repeat(9 + 2 * l.depth as usize);
+            let src = match l.again {
+                true => "(above)".to_string(),
+                false => source(program, world, body, l.src),
+            };
+            out.push(format!("{pad}{:<24} {src}", l.fact));
+        }
+    }
+    out
+}
+
+/// Where a premise comes from, over the names the body's source spells.
+pub fn source(program: &Program, world: &World, body: &Body, src: Src) -> String {
+    let at = src.line;
+    let code = |n: Name| format!("`{}`", body.spoken(n));
+    let callee = |f: Option<FnId>| match f.and_then(|f| world.fn_rows().get(f.index())) {
+        Some(r) => format!("`{}`", program.spellings.written(&r.name)),
+        None => "the callee".into(),
+    };
+    match src.kind {
+        Premise::Clause(p) => format!("parameter clause of {}", code(p)),
+        Premise::Ensures(f) => format!("result clause of {}, at the call on line {at}", callee(f)),
+        Premise::Test(true) => format!("test on line {at}, true"),
+        Premise::Test(false) => format!("test on line {at}, false"),
+        Premise::Passed => format!("a check that stays, line {at}"),
+        Premise::Invariant => "invariant the loop head inferred".into(),
+        Premise::Let(n) => format!("let {}, line {at}", code(n)),
+        Premise::Type(n) => format!("the type of {}", code(n)),
+        Premise::Builtin => format!("what the builtin states, line {at}"),
+        Premise::Store => format!("the store on line {at}"),
+        Premise::Element(a) => format!("an element bound of {}, line {at}", code(a)),
+        Premise::Axiom => "length axiom".into(),
+        Premise::Entry => "inferred: an entry fact every caller proves".into(),
+        Premise::Summary(f) => {
+            format!(
+                "inferred: the summary of {}, at the call on line {at}",
+                callee(f)
+            )
+        }
+        Premise::Record(r) => format!("inferred: a record fact of {}", code(r)),
+        Premise::Join => "on every path into this row".into(),
+        Premise::Sum(n) => format!("a sum that eliminated {}", code(n)),
+        Premise::Raised => "a bound a disequality raised".into(),
+        Premise::Moved => "moved by a length change".into(),
+        Premise::Untraced => "untraced".into(),
+    }
 }
 
 /// One printed row of `why --cost`: what one verb does on one line of a function.

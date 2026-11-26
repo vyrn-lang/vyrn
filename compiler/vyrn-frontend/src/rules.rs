@@ -653,7 +653,8 @@ rules! {
     ClauseForm { param }
         "the `where` clause of parameter `{param}` may compare only `value`, an \
         earlier `read` parameter, the `.length`, `.byteLength` or integer field of \
-        one, and integer literals, of one integer type, joined by `&&`";
+        one, the `.length` of a field of one, and integer literals, of one integer \
+        type, joined by `&&`";
     ClauseLater { param, name }
         "the `where` clause of parameter `{param}` names `{name}`, which is no \
         parameter declared before it";
@@ -699,8 +700,8 @@ rules! {
         may break it";
     LetClauseForm { name }
         "the `where` clause of `{name}` may compare only `value`, its `.length`, \
-        `.byteLength` or integer field, and integer literals, of one integer type, \
-        and state facts of `value`, joined by `&&`";
+        `.byteLength` or integer field, the `.length` of its field, and integer \
+        literals, of one integer type, and state facts of `value`, joined by `&&`";
     LetClauseName { binding, name }
         "the `where` clause of `{binding}` names `{name}`: a `let` clause states a rule \
         of `value` alone";
@@ -713,8 +714,9 @@ rules! {
         fix "drop the promise first: `let mut ys: {ty} = {name}`";
     ResultClauseForm { name }
         "the `where` clause on the result of `{name}` may compare only `value`, a \
-        `read` parameter, the `.length`, `.byteLength` or integer field of one, and \
-        integer literals, of one integer type, joined by `&&`";
+        `read` parameter, the `.length`, `.byteLength` or integer field of one, the \
+        `.length` of a field of one, and integer literals, of one integer type, joined \
+        by `&&`";
     ResultClauseName { name, param }
         "the `where` clause on the result of `{name}` names `{param}`, which is no \
         parameter of `{name}`";
@@ -752,11 +754,6 @@ rules! {
     InitializerWaits { callee }
         "a module-state initializer cannot wait, and `{callee}` waits: state is set \
         before `main` runs";
-    ProveValue {}
-        "`prove` cannot be used as a function value: a call through a value proves \
-        nothing";
-    ProveForm {}
-        "`prove` takes one comparison, or comparisons joined by `&&`";
     ModifyNotMut { fname, arg, vn }
         "`{fname}` argument {arg} is `modify`, so `{vn}` must be \
         declared `mut`";
@@ -1318,7 +1315,6 @@ rules! {
         than `{name}.{short}`, which breaks the `where` rule of `{n}`"
         fix "store into `{name}.{short}` before any statement after line {k} that does not \
             store into `{name}`";
-    ProveUnshown { why } "`prove` cannot show its comparison here: {why}";
     ProvedKept { what, why }
         "the {what} check stays at run time, and this module is in `proved` (vyrn.json): {why}";
     RemoveNotMut { op, name } "cannot `{op}` from `{name}` (declared without `mut`)";

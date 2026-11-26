@@ -407,8 +407,8 @@ fn census() -> Vec<Row> {
             "r55_a_clause_with_arithmetic.vyrn",
             "a parameter's clause compares single operands",
             "the `where` clause of parameter `i` may compare only `value`, an earlier `read` parameter, \
-             the `.length`, `.byteLength` or integer field of one, and integer literals, of one \
-             integer type, joined by `&&`",
+             the `.length`, `.byteLength` or integer field of one, the `.length` of a field of \
+             one, and integer literals, of one integer type, joined by `&&`",
             Kernel::Elsewhere,
         ),
         row(
@@ -491,8 +491,8 @@ fn census() -> Vec<Row> {
             "r68_a_result_clause_with_arithmetic.vyrn",
             "a result clause compares single operands",
             "the `where` clause on the result of `half` may compare only `value`, a `read` \
-             parameter, the `.length`, `.byteLength` or integer field of one, and integer \
-             literals, of one integer type, joined by `&&`",
+             parameter, the `.length`, `.byteLength` or integer field of one, the `.length` of \
+             a field of one, and integer literals, of one integer type, joined by `&&`",
             Kernel::Elsewhere,
         ),
         row(

@@ -7485,11 +7485,11 @@ impl<'p> Fn_<'_, 'p> {
                     (Val::Lit(Lit::Str(s)), Some("byteLength")) => {
                         b.ins(&Instruction::I64Const(s.len() as i64));
                     }
-                    (Val::Name(x), Some(f)) => {
-                        let at = vyrn_frontend::core::Place::Field(
-                            Box::new(vyrn_frontend::core::Place::Name(*x)),
-                            f.to_string(),
-                        );
+                    (Val::Name(x), Some(path)) => {
+                        let at = (path.split('.'))
+                            .fold(vyrn_frontend::core::Place::Name(*x), |p, f| {
+                                vyrn_frontend::core::Place::Field(Box::new(p), f.to_string())
+                            });
                         self.core_read(m, b, &at, line)?;
                     }
                     _ => return unsupported("a clause operand of a literal", line),
@@ -7525,9 +7525,9 @@ impl<'p> Fn_<'_, 'p> {
             _ => match row.rule {
                 Raises::Row(rule) => self.trap_row(b, rule, val),
                 // A kept `where` check traps inside its type's constructor
-                // ([`Fn_::core_rule_check`]), and a kept clause or `prove`
-                // check prints its sentence ([`Fn_::clause_check`]).
-                Raises::Where | Raises::Clause | Raises::Result | Raises::Let | Raises::Prove => {
+                // ([`Fn_::core_rule_check`]), and a kept clause check prints
+                // its sentence ([`Fn_::clause_check`]).
+                Raises::Where | Raises::Clause | Raises::Result | Raises::Let => {
                     b.ins(&Instruction::Unreachable);
                 }
             },

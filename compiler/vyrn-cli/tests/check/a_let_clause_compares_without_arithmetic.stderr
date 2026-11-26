@@ -1,1 +1,1 @@
-a_let_clause_compares_without_arithmetic.vyrn:2:13: the `where` clause of `i` may compare only `value`, its `.length`, `.byteLength` or integer field, and integer literals, of one integer type, and state facts of `value`, joined by `&&`
+a_let_clause_compares_without_arithmetic.vyrn:2:13: the `where` clause of `i` may compare only `value`, its `.length`, `.byteLength` or integer field, the `.length` of its field, and integer literals, of one integer type, and state facts of `value`, joined by `&&`

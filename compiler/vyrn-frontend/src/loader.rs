@@ -512,10 +512,6 @@ pub fn builtin_alias_exports(spec: &str) -> Option<Vec<&'static str>> {
     (!names.is_empty()).then_some(names)
 }
 
-/// The module whose `prove` the compiler knows by its declaration
-/// ([`Program::prove`]).
-pub const PROOF: &str = "std/proof";
-
 /// Resolves an import specifier written inside `importer` to a module key.
 ///
 /// The editor reuses it for go-to-definition on an import path. The
@@ -1927,7 +1923,6 @@ fn load_modules(
                     expansions: Default::default(),
                     spellings: Default::default(),
                     orders: Default::default(),
-                    prove: None,
                     proved: Default::default(),
                     given: Default::default(),
                     session: Default::default(),
@@ -5834,12 +5829,13 @@ fn link(
         m.program.imports.retain(|_| kept.next().unwrap_or(true));
         m.import_targets.retain(|t| !unlinked.contains(t));
     }
-    // The keys of `std/order` and `std/proof`, whose declarations the
-    // compiler reads. The root's key may spell the file another way
-    // (`std/order.vyrn` run as the root of its own tests); only a root of that
-    // file name pays the path lookup.
-    let std_key = |spec: &str| {
-        resolve_spec(spec, root_key, opts).ok().map(|k| {
+    // The key of `std/order`, whose declarations the compiler reads. The
+    // root's key may spell the file another way (`std/order.vyrn` run as the
+    // root of its own tests); only a root of that file name pays the path
+    // lookup.
+    let order_key = resolve_spec(crate::order::SPEC, root_key, opts)
+        .ok()
+        .map(|k| {
             let file = |p: &str| {
                 std::path::Path::new(p)
                     .file_name()
@@ -5850,10 +5846,7 @@ fn link(
                 true => root_key.to_string(),
                 false => k,
             }
-        })
-    };
-    let order_key = std_key(crate::order::SPEC);
-    let proof_key = std_key(PROOF);
+        });
     // Fold import aliases into the flat namespace first.
     let alias_span = crate::prof::phase("link: resolve_aliases");
     let spellings = resolve_aliases(&mut modules, &mut errors, root_key, opts);
@@ -6350,10 +6343,6 @@ fn link(
     program.spellings = std::sync::Arc::new(spellings);
     let ours = |m: &Option<String>| order_key.as_deref() == Some(m.as_deref().unwrap_or(root_key));
     program.orders = crate::order::Names::of(&program, &ours);
-    let proof = |m: &Option<String>| proof_key.as_deref() == Some(m.as_deref().unwrap_or(root_key));
-    program.prove = (program.functions.iter())
-        .find(|f| proof(&f.module) && program.spellings.written(&f.name) == "prove")
-        .map(|f| f.name.clone());
     if !opts.proved.is_empty() {
         let keys: BTreeSet<&Option<String>> = (program.functions.iter().map(|f| &f.module))
             .chain(program.globals.iter().map(|g| &g.module))

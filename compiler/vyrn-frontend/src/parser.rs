@@ -576,7 +576,6 @@ fn build(
         expansions: Default::default(),
         spellings: Default::default(),
         orders: Default::default(),
-        prove: None,
         proved: Default::default(),
         given: Default::default(),
         session: Default::default(),

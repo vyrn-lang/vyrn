@@ -13,13 +13,20 @@
 //! goal exceeds by a constant.
 //! [`Cert::verify`] checks that sum again in `i128`, sharing no code with the
 //! search.
+//!
+//! A traced state ([`Tags`]) also names where each fact comes from, for
+//! `vyrn why --proofs` (`elide::proofs`). Every insert takes a [`Src`], so no
+//! fact enters untagged; a state whose `tags` are off tags nothing, and no tag
+//! changes what a state proves.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Deref;
 use std::rc::Rc;
 
+use vyrn_frontend::ast::FnId;
 use vyrn_frontend::core::Name;
 
 /// A value the facts speak about: an integer name, the length of an array or
@@ -234,6 +241,173 @@ impl Fact {
     }
 }
 
+/// Where a fact of a traced walk comes from, and the line of the row that
+/// stated it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Src {
+    pub kind: Premise,
+    pub line: u32,
+}
+
+/// The kinds of [`Src`]: the leaves of a proof, then the steps that derive a
+/// fact from others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Premise {
+    /// The `where` clause of this parameter.
+    Clause(Name),
+    /// The declared result clause of this callee, at the call.
+    Ensures(Option<FnId>),
+    /// A branch test or a loop guard, and whether its true side was taken.
+    Test(bool),
+    /// A check that stays and passed before.
+    Passed,
+    /// An invariant the loop head inferred.
+    Invariant,
+    /// The definition of this name.
+    Let(Name),
+    /// The range or the refinement rule of this name's type.
+    Type(Name),
+    /// What a builtin's row states.
+    Builtin,
+    /// The value a store wrote.
+    Store,
+    /// A bound of the elements of this array, at an element read.
+    Element(Name),
+    /// A length axiom: `length >= 0` or `length <= LENGTH_LIMIT`.
+    Axiom,
+    /// Inferred: a fact every caller proves at entry.
+    Entry,
+    /// Inferred: the summary of this callee, at the call.
+    Summary(Option<FnId>),
+    /// Inferred: a record fact every write of the record proved.
+    Record(Name),
+    /// A fact every live path into the row holds.
+    Join,
+    /// A sum that eliminated this name.
+    Sum(Name),
+    /// A bound a disequality raised.
+    Raised,
+    /// A fact moved by a length change.
+    Moved,
+    /// A premise the traced walk found no tag for: a defect of the trace.
+    Untraced,
+}
+
+impl Premise {
+    /// Whether only the emitting walk reads it: a change to another body can
+    /// take it away.
+    pub fn inferred(self) -> bool {
+        matches!(
+            self,
+            Premise::Entry | Premise::Summary(_) | Premise::Record(_)
+        )
+    }
+}
+
+/// One fact of a traced walk: what it states, where it comes from, and the
+/// nodes it follows from. A node's parents have smaller ids, so a tree of
+/// nodes ends.
+#[derive(Debug, Clone)]
+pub struct Node {
+    pub src: Src,
+    pub said: Said,
+    pub parents: Vec<u32>,
+}
+
+/// What a [`Node`] states.
+#[derive(Debug, Clone)]
+pub enum Said {
+    Ge(Lin),
+    Ne(Lin),
+    Def(Term, Lin),
+    /// A dead state: no path reaches the row.
+    Dead,
+}
+
+/// The sources of a state's facts in a traced walk; off in every other walk.
+/// Every `Tags` equals every other and hashes as nothing, so no tag splits a
+/// memo key, a Houdini round or a join, and none decides a verdict.
+#[derive(Debug, Clone, Default)]
+pub struct Tags(Option<Box<Traced>>);
+
+#[derive(Debug, Clone, Default)]
+struct Traced {
+    of: BTreeMap<Lin, u32>,
+    ne: BTreeMap<Lin, u32>,
+    defs: BTreeMap<Term, u32>,
+    dead: Option<u32>,
+    arena: Rc<RefCell<Vec<Node>>>,
+}
+
+impl PartialEq for Tags {
+    fn eq(&self, _: &Tags) -> bool {
+        true
+    }
+}
+
+impl Eq for Tags {}
+
+impl std::hash::Hash for Tags {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
+impl Tags {
+    /// Tags on, over a fresh arena.
+    pub fn traced() -> Tags {
+        Tags(Some(Box::default()))
+    }
+
+    /// Tags on, over the arena of `t`, with no fact tagged; off where `t` is.
+    fn sharing(t: &Tags) -> Tags {
+        Tags(t.0.as_ref().map(|t| {
+            Box::new(Traced {
+                arena: t.arena.clone(),
+                ..Traced::default()
+            })
+        }))
+    }
+
+    pub fn on(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// The nodes so far.
+    pub fn nodes(&self) -> Vec<Node> {
+        self.0
+            .as_ref()
+            .map(|t| t.arena.borrow().clone())
+            .unwrap_or_default()
+    }
+
+    /// A new node; `None` with tags off, where `parents` is not called.
+    fn node(
+        &self,
+        src: Src,
+        said: impl FnOnce() -> Said,
+        parents: impl FnOnce() -> Vec<u32>,
+    ) -> Option<u32> {
+        let t = self.0.as_ref()?;
+        let (said, parents) = (said(), parents());
+        let mut a = t.arena.borrow_mut();
+        a.push(Node { src, said, parents });
+        Some(u32::try_from(a.len() - 1).expect("a traced walk has fewer than 2^32 facts"))
+    }
+
+    /// One node for a fact each of `tags` states, or the one they share.
+    fn merge(&self, src: Src, said: impl FnOnce() -> Said, tags: Vec<u32>) -> Option<u32> {
+        match tags.as_slice() {
+            [t, rest @ ..] if rest.iter().all(|r| r == t) => Some(*t),
+            _ => self.node(src, said, || tags),
+        }
+    }
+}
+
+/// A step a state takes on its own facts: a join, a sum, a raised or moved
+/// bound. It names no line; its parents do.
+fn step(kind: Premise) -> Src {
+    Src { kind, line: 0 }
+}
+
 /// Why a goal holds: `goal = sum(k * use) + slack`, `slack >= 0`, each use a
 /// fact of the state or a length axiom and each `k >= 1`. A dead state proves
 /// every goal.
@@ -400,6 +574,8 @@ pub struct State {
     /// (`elide::Walk::element_read`), whose check shows the element exists.
     pub elems: Shared<BTreeMap<Name, BTreeSet<Lin>>>,
     pub dead: bool,
+    /// Where each fact comes from, in a traced walk.
+    pub tags: Tags,
 }
 
 thread_local! {
@@ -413,6 +589,7 @@ thread_local! {
         fresh: Shared::default(),
         elems: Shared::default(),
         dead: false,
+        tags: Tags(None),
     };
 }
 
@@ -466,17 +643,50 @@ impl State {
         Some(Cow::Owned(Lin { terms, c }))
     }
 
-    /// Adds `l >= 0`. A fact that does not normalize is dropped: it would
-    /// prove nothing.
-    pub fn assume(&mut self, l: &Lin) {
+    /// Adds `l >= 0`, which `src` states. A fact that does not normalize is
+    /// dropped: it would prove nothing.
+    pub fn assume(&mut self, l: &Lin, src: Src) {
+        let tag = self.leaf(src, || Said::Ge(l.clone()), l);
+        self.put(l, tag);
+    }
+
+    /// A leaf node for a fact over `l`, whose parents are the definitions its
+    /// normal form substitutes.
+    fn leaf(&self, src: Src, said: impl FnOnce() -> Said, l: &Lin) -> Option<u32> {
+        self.tags.node(src, said, || self.def_tags(l))
+    }
+
+    /// The tags of the definitions `l`'s normal form substitutes.
+    fn def_tags(&self, l: &Lin) -> Vec<u32> {
+        let Some(t) = &self.tags.0 else {
+            return Vec::new();
+        };
+        (l.terms.iter())
+            .filter(|(x, _)| self.defs.contains_key(x))
+            .filter_map(|(x, _)| t.defs.get(x).copied())
+            .collect()
+    }
+
+    /// Adds `l >= 0` with the tag `tag`.
+    fn put(&mut self, l: &Lin, tag: Option<u32>) {
         match self.norm(l) {
             Some(n) if n.is_const() => {
                 if n.c < 0 {
-                    *self = State::dead();
+                    self.die(tag);
                 }
             }
             Some(n) => {
-                if !self.facts.contains(&*n) {
+                let new = !self.facts.contains(&*n);
+                if let (Some(t), Some(tag)) = (self.tags.0.as_mut(), tag) {
+                    // A stated source replaces an inferred one of the same
+                    // fact, so a proof names the clause before the summary.
+                    let inferred = |id: u32| t.arena.borrow()[id as usize].src.kind.inferred();
+                    let keep = |old: u32| !(inferred(old) && !inferred(tag));
+                    if new || !t.of.get(&*n).is_some_and(|old| keep(*old)) {
+                        t.of.insert(n.clone().into_owned(), tag);
+                    }
+                }
+                if new {
                     self.facts.insert(n.into_owned());
                 }
             }
@@ -484,23 +694,39 @@ impl State {
         }
     }
 
-    /// Adds `f`.
-    pub fn add(&mut self, f: &Fact) {
-        match f {
-            Fact::Ge(l) => self.assume(l),
-            Fact::Ne(l) => self.differ(l),
+    /// Makes the state dead, keeping its arena and the tag of the fact that
+    /// killed it.
+    fn die(&mut self, tag: Option<u32>) {
+        let tags = Tags::sharing(&self.tags);
+        *self = State::dead();
+        self.tags = tags;
+        if let Some(t) = self.tags.0.as_mut() {
+            t.dead = tag;
         }
     }
 
-    /// Adds `l != 0`, then raises the bounds it touches ([`State::tighten`]).
-    pub fn differ(&mut self, l: &Lin) {
+    /// Adds `f`, which `src` states.
+    pub fn add(&mut self, f: &Fact, src: Src) {
+        match f {
+            Fact::Ge(l) => self.assume(l, src),
+            Fact::Ne(l) => self.differ(l, src),
+        }
+    }
+
+    /// Adds `l != 0`, which `src` states, then raises the bounds it touches
+    /// ([`State::tighten`]).
+    pub fn differ(&mut self, l: &Lin, src: Src) {
+        let tag = self.leaf(src, || Said::Ne(l.clone()), l);
         match self.norm(l).map(Cow::into_owned).and_then(canon) {
             Some(n) if n.is_const() => {
                 if n.c == 0 {
-                    *self = State::dead();
+                    self.die(tag);
                 }
             }
             Some(n) => {
+                if let (Some(t), Some(tag)) = (self.tags.0.as_mut(), tag) {
+                    t.ne.entry(n.clone()).or_insert(tag);
+                }
                 self.ne.insert(n);
                 self.tighten();
             }
@@ -525,35 +751,116 @@ impl State {
     fn tighten(&mut self) {
         for _ in 0..=2 * self.ne.len() {
             let p = self.prover();
-            let raised: Vec<Lin> = (self.ne.iter())
-                .flat_map(|d| [Some(d.clone()), d.scale(-1)])
+            let raised: Vec<(Lin, Option<u32>)> = (self.ne.iter())
+                .flat_map(|d| [Some(d.clone()), d.scale(-1)].map(|e| e.map(|e| (d, e))))
                 .flatten()
-                .filter_map(|e| {
+                .filter_map(|(d, e)| {
                     let up = e.plus(-1)?;
-                    (p.proves(&e) && !p.proves(&up)).then_some(up)
+                    if !p.proves(&e) || p.proves(&up) {
+                        return None;
+                    }
+                    let tag = self.tags.node(
+                        step(Premise::Raised),
+                        || Said::Ge(up.clone()),
+                        || {
+                            let ne = self.tags.0.as_ref().and_then(|t| t.ne.get(d).copied());
+                            self.because(&e).into_iter().chain(ne).collect()
+                        },
+                    );
+                    Some((up, tag))
                 })
                 .collect();
             if raised.is_empty() {
                 return;
             }
-            raised.iter().for_each(|l| self.assume(l));
+            raised.iter().for_each(|(l, tag)| self.put(l, *tag));
         }
     }
 
-    /// Adds `a = b` as two facts.
-    pub fn assume_eq(&mut self, a: &Lin, b: &Lin) {
+    /// Adds `a = b`, which `src` states, as two facts.
+    pub fn assume_eq(&mut self, a: &Lin, b: &Lin, src: Src) {
         if let (Some(x), Some(y)) = (a.sub(b), b.sub(a)) {
-            self.assume(&x);
-            self.assume(&y);
+            self.assume(&x, src);
+            self.assume(&y, src);
         }
     }
 
-    /// Defines the fresh term `t` as `v`. `t` must hold no definition and
-    /// appear in no fact: the caller has [`State::kill`]ed it.
-    pub fn define(&mut self, t: Term, v: &Lin) {
+    /// Defines the fresh term `t` as `v`, which `src` states. `t` must hold no
+    /// definition and appear in no fact: the caller has [`State::kill`]ed it.
+    pub fn define(&mut self, t: Term, v: &Lin, src: Src) {
+        let tag = self.leaf(src, || Said::Def(t, v.clone()), v);
         if let Some(n) = self.norm(v).filter(|n| n.coef(t) == 0) {
+            if let (Some(x), Some(tag)) = (self.tags.0.as_mut(), tag) {
+                x.defs.insert(t, tag);
+            }
             self.defs.insert(t, n.into_owned());
         }
+    }
+
+    /// The tag of the premise `u` of a certificate of this state: a fact's
+    /// tag, or a leaf for a length axiom; `Untraced` for neither.
+    fn premise_tag(&self, u: &Lin) -> Option<u32> {
+        let t = self.tags.0.as_ref()?;
+        if let Some(tag) = t.of.get(u) {
+            return Some(*tag);
+        }
+        let kind = match self.facts.contains(u) {
+            false if axioms(u.terms.iter().map(|(t, _)| *t)).contains(u) => Premise::Axiom,
+            _ => Premise::Untraced,
+        };
+        self.tags.node(step(kind), || Said::Ge(u.clone()), Vec::new)
+    }
+
+    /// The tags `cert` reads in this state to prove `goal`: its premises and
+    /// the definitions the goal's normal form substitutes. Empty with tags off.
+    pub fn uses(&self, cert: &Cert, goal: &Lin) -> Vec<u32> {
+        let Some(t) = &self.tags.0 else {
+            return Vec::new();
+        };
+        let mut out = self.def_tags(goal);
+        let mut c = cert;
+        loop {
+            match c {
+                Cert::Dead => {
+                    out.extend(t.dead.or_else(|| {
+                        self.tags
+                            .node(step(Premise::Untraced), || Said::Dead, Vec::new)
+                    }));
+                    return out;
+                }
+                Cert::Sum { uses, .. } => {
+                    out.extend(uses.iter().filter_map(|(_, u)| self.premise_tag(u)));
+                    return out;
+                }
+                Cert::Scaled { inner, .. } => c = inner,
+            }
+        }
+    }
+
+    /// The tags a proof of `goal` reads in this state; empty with tags off or
+    /// where the search finds none.
+    fn because(&self, goal: &Lin) -> Vec<u32> {
+        if !self.tags.on() {
+            return Vec::new();
+        }
+        let p = self.prover();
+        match p.ge0(goal).or_else(|| p.ge0_deep(goal)) {
+            Some(cert) => self.uses(&cert, goal),
+            None => Vec::new(),
+        }
+    }
+
+    /// The tag of `l >= 0` in this state: its own, or a node over what proves
+    /// it.
+    fn tag_of(&self, l: &Lin) -> Option<u32> {
+        let t = self.tags.0.as_ref()?;
+        let n = self.norm(l)?;
+        if let Some(tag) = t.of.get(&*n) {
+            return Some(*tag);
+        }
+        let parents = self.because(l);
+        self.tags
+            .merge(step(Premise::Join), || Said::Ge(n.into_owned()), parents)
     }
 
     /// Whether `u` is a premise of this state: a fact, or a length axiom.
@@ -653,27 +960,40 @@ impl State {
     /// through a name `b` bound. The false side keeps no sum; no check needed
     /// one.
     pub fn eliminate(&mut self, n: Name) {
-        let mut sums = BTreeSet::new();
+        let mut sums: BTreeMap<Lin, Option<u32>> = BTreeMap::new();
         let mut said: Vec<(Name, Lin)> = Vec::new();
         for t in [Term::Val(n), Term::Len(n)] {
             let alias = self.defs.values().any(|v| matches!(v.coef(t), 1 | -1));
             if alias || self.defs.contains_key(&t) {
                 continue;
             }
-            let through: Vec<Lin> = (self.facts.iter().filter(|f| f.mentions(t)).cloned())
+            let tags = self.tags.0.as_ref();
+            let fact_tag = |f: &Lin| tags.and_then(|x| x.of.get(f).copied());
+            let def_tag = |d: &Term| tags.and_then(|x| x.defs.get(d).copied());
+            let through: Vec<(Lin, Option<u32>)> = (self.facts.iter())
+                .filter(|f| f.mentions(t))
+                .map(|f| (f.clone(), fact_tag(f)))
                 .chain(
                     (self.defs.iter())
                         .filter(|(_, v)| v.mentions(t))
-                        .flat_map(|(d, v)| [Lin::of(*d).sub(v), v.sub(&Lin::of(*d))])
+                        .flat_map(|(d, v)| {
+                            [Lin::of(*d).sub(v), v.sub(&Lin::of(*d))]
+                                .map(|l| l.map(|l| (l, def_tag(d))))
+                        })
                         .flatten(),
                 )
                 .collect();
-            for p in through.iter().filter(|p| p.coef(t) > 0) {
-                for q in through.iter().filter(|q| q.coef(t) < 0) {
+            for (p, tp) in through.iter().filter(|(p, _)| p.coef(t) > 0) {
+                for (q, tq) in through.iter().filter(|(q, _)| q.coef(t) < 0) {
                     let (a, b) = (p.coef(t), q.coef(t).checked_neg());
                     let sum = b.and_then(|b| p.scale(b)?.add(&q.scale(a)?));
                     if let Some(s) = sum {
-                        sums.insert(s);
+                        let tag = self.tags.node(
+                            step(Premise::Sum(n)),
+                            || Said::Ge(s.clone()),
+                            || tp.iter().chain(tq).copied().collect(),
+                        );
+                        sums.entry(s).or_insert(tag);
                     }
                 }
             }
@@ -691,7 +1011,10 @@ impl State {
                     if k == 0 {
                         continue;
                     }
-                    for p in through.iter().filter(|p| p.coef(t).signum() == -k.signum()) {
+                    for (p, _) in through
+                        .iter()
+                        .filter(|(p, _)| p.coef(t).signum() == -k.signum())
+                    {
                         let (a, b) = (k.checked_abs(), p.coef(t).checked_abs());
                         let sum = a.zip(b).and_then(|(a, b)| l.scale(b)?.add(&p.scale(a)?));
                         if let Some(l) = sum.filter(kept) {
@@ -702,8 +1025,8 @@ impl State {
             }
         }
         self.kill(n);
-        for s in sums.iter().filter(|s| !s.mentions_name(n)) {
-            self.assume(s);
+        for (s, tag) in sums.iter().filter(|(s, _)| !s.mentions_name(n)) {
+            self.put(s, *tag);
         }
         for (c, l) in said.into_iter().filter(|(_, l)| !l.mentions_name(n)) {
             if let Some(s) = self.conds.get_mut().get_mut(&c) {
@@ -733,9 +1056,25 @@ impl State {
             .partition(|(d, v)| *d == t || v.coef(t) != 0);
         *self.defs.get_mut() = defs;
         let mut facts = std::mem::take(self.facts.get_mut());
+        // In a traced walk, the tag of each fact and of each definition's two
+        // facts; empty, and allocated never, with tags off.
+        let mut tagged: BTreeMap<Lin, u32> = BTreeMap::new();
+        if let Some(t) = &self.tags.0 {
+            tagged.extend(
+                facts
+                    .iter()
+                    .filter_map(|f| Some((f.clone(), *t.of.get(f)?))),
+            );
+        }
         for (d, v) in through {
-            facts.extend(Lin::of(d).sub(&v));
-            facts.extend(v.sub(&Lin::of(d)));
+            let tag = self.tags.0.as_ref().and_then(|t| t.defs.get(&d).copied());
+            for l in [Lin::of(d).sub(&v), v.sub(&Lin::of(d))]
+                .into_iter()
+                .flatten()
+            {
+                tagged.extend(tag.map(|tag| (l.clone(), tag)));
+                facts.insert(l);
+            }
         }
         self.ne.retain(|d| !d.mentions(t));
         self.unsay(|l| l.mentions(t));
@@ -749,8 +1088,17 @@ impl State {
             f.plus(least.checked_neg()?)
         };
         for f in facts {
-            if let Some(f) = moved(&f) {
-                self.assume(&f);
+            let tag = tagged.get(&f).copied();
+            if let Some(m) = moved(&f) {
+                let tag = match m == f {
+                    true => tag,
+                    false => self.tags.node(
+                        step(Premise::Moved),
+                        || Said::Ge(m.clone()),
+                        || tag.into_iter().collect(),
+                    ),
+                };
+                self.put(&m, tag);
             }
         }
         if !self.elems.is_empty() {
@@ -789,6 +1137,12 @@ impl State {
         let sub = |l: &Lin| l.subst(x, &by);
         let moved = |l: Lin| if l.mentions(x) { sub(&l) } else { Some(l) };
         // A length's axioms outlive the length: they bound the renamed value.
+        if let Some(t) = self.tags.0.as_mut() {
+            let of = std::mem::take(&mut t.of);
+            t.of = (of.into_iter())
+                .filter_map(|(l, tag)| Some((moved(l)?, tag)))
+                .collect();
+        }
         let facts = self.facts.get_mut();
         *facts = (std::mem::take(facts).into_iter())
             .chain(axioms([x].into_iter()))
@@ -905,7 +1259,11 @@ impl State {
         let Some(first) = live.first() else {
             return State::dead();
         };
-        let mut out = State::default();
+        let mut out = State {
+            tags: Tags::sharing(&first.tags),
+            ..State::default()
+        };
+        let join = step(Premise::Join);
         for n in (first.fresh.iter()).filter(|n| live.iter().all(|s| s.fresh.contains(n))) {
             out.fresh.insert(*n);
         }
@@ -930,6 +1288,16 @@ impl State {
                 }
             }
         }
+        if out.tags.on() {
+            for (t, v) in out.defs.iter() {
+                let tags = (live.iter())
+                    .filter_map(|s| s.tags.0.as_ref()?.defs.get(t).copied())
+                    .collect();
+                if let Some(tag) = out.tags.merge(join, || Said::Def(*t, v.clone()), tags) {
+                    out.tags.0.as_mut().expect("tags on").defs.insert(*t, tag);
+                }
+            }
+        }
         // Live states with equal facts, disequalities and definitions join
         // to them: each fact proves itself, names no defined term and is no
         // constant, which `assume` would drop.
@@ -939,6 +1307,18 @@ impl State {
                 .all(|l| matches!(first.norm(l), Some(Cow::Borrowed(_)))));
             out.facts = first.facts.clone();
             out.ne = first.ne.clone();
+            if out.tags.on() {
+                for f in first.facts.iter() {
+                    let tags = live.iter().filter_map(|s| s.tag_of(f)).collect();
+                    let tag = out.tags.merge(join, || Said::Ge(f.clone()), tags);
+                    out.tags
+                        .0
+                        .as_mut()
+                        .expect("tags on")
+                        .of
+                        .extend(tag.map(|t| (f.clone(), t)));
+                }
+            }
             return out;
         }
         let mut cands: BTreeSet<Cow<Lin>> = BTreeSet::new();
@@ -949,7 +1329,12 @@ impl State {
         let provers: Vec<Prover> = live.iter().map(|s| s.prover()).collect();
         for c in cands {
             if provers.iter().all(|p| p.proves(&c)) {
-                out.assume(&c);
+                let tag = out.tags.on().then(|| {
+                    let tags = live.iter().filter_map(|s| s.tag_of(&c)).collect();
+                    out.tags
+                        .merge(join, || Said::Ge(c.clone().into_owned()), tags)
+                });
+                out.put(&c, tag.flatten());
             }
         }
         let ne: BTreeSet<&Lin> = live.iter().flat_map(|s| s.ne.iter()).collect();
@@ -985,7 +1370,7 @@ impl State {
                     at(&v, lo)
                         .iter()
                         .chain(&at(&neg, hi))
-                        .for_each(|f| out.assume(f));
+                        .for_each(|f| out.assume(f, join));
                 }
                 continue;
             }
@@ -1059,7 +1444,7 @@ impl State {
                     defs: s.defs.clone(),
                     ..State::default()
                 };
-                g.iter().for_each(|f| s.add(f));
+                g.iter().for_each(|f| s.add(f, step(Premise::Join)));
                 s
             })
             .filter(|s| !s.dead)
@@ -1364,6 +1749,11 @@ fn axioms(terms: impl Iterator<Item = Term>) -> Vec<Lin> {
 mod tests {
     use super::*;
 
+    const T: Src = Src {
+        kind: Premise::Passed,
+        line: 0,
+    };
+
     fn v(n: u32) -> Lin {
         Lin::of(Term::Val(Name(n)))
     }
@@ -1398,9 +1788,9 @@ mod tests {
     fn a_goal_follows_from_two_facts_and_the_certificate_checks() {
         let mut st = State::default();
         // i >= 0, len(b) - i - 1 >= 0
-        st.assume(&v(0));
+        st.assume(&v(0), T);
         let len = Lin::of(Term::Len(Name(1)));
-        st.assume(&len.sub(&v(0)).unwrap().plus(-1).unwrap());
+        st.assume(&len.sub(&v(0)).unwrap().plus(-1).unwrap(), T);
         let goal = Lin::k(1 << 40).sub(&v(0)).unwrap();
         let cert = st.ge0(&goal).expect("i < len <= LEN_MAX");
         assert!(cert.verify(&st, &goal));
@@ -1412,7 +1802,7 @@ mod tests {
         let mut st = State::default();
         // len(a) - len(b) - i >= 0
         let (a, b) = (Lin::of(Term::Len(Name(1))), Lin::of(Term::Len(Name(2))));
-        st.assume(&a.sub(&b).and_then(|d| d.sub(&v(0))).unwrap());
+        st.assume(&a.sub(&b).and_then(|d| d.sub(&v(0))).unwrap(), T);
         let goal = Lin::k(LEN_MAX).sub(&v(0)).unwrap();
         let cert = st.ge0(&goal).expect("i <= len(a) <= LEN_MAX");
         assert!(cert.verify(&st, &goal));
@@ -1432,8 +1822,8 @@ mod tests {
     #[test]
     fn a_kill_restates_through_an_exact_definition() {
         let mut st = State::default();
-        st.assume(&v(0));
-        st.define(Term::Val(Name(1)), &v(0).plus(1).unwrap());
+        st.assume(&v(0), T);
+        st.define(Term::Val(Name(1)), &v(0).plus(1).unwrap(), T);
         st.kill(Name(0));
         assert!(st.ge0(&v(1).plus(-1).unwrap()).is_some());
     }
@@ -1442,7 +1832,7 @@ mod tests {
     fn a_kill_forgets_a_defined_field_length() {
         let mut st = State::default();
         let col = Term::Col(Name(0), 1);
-        st.define(col, &Lin::k(3));
+        st.define(col, &Lin::k(3), T);
         st.kill(Name(0));
         assert!(st.ge0(&Lin::of(col).plus(-3).unwrap()).is_none());
     }
@@ -1450,7 +1840,7 @@ mod tests {
     #[test]
     fn a_kill_of_a_length_keeps_its_axioms_on_the_rename() {
         let mut st = State::default();
-        st.define(Term::Val(Name(0)), &Lin::of(Term::Len(Name(1))));
+        st.define(Term::Val(Name(0)), &Lin::of(Term::Len(Name(1))), T);
         st.kill(Name(1));
         assert!(st.ge0(&v(0)).is_some());
     }
@@ -1459,7 +1849,7 @@ mod tests {
     fn a_shrink_by_at_most_one_keeps_the_old_length_as_a_bound() {
         let mut st = State::default();
         let len = Lin::of(Term::Len(Name(1)));
-        st.define(Term::Val(Name(0)), &len);
+        st.define(Term::Val(Name(0)), &len, T);
         st.shift(Term::Len(Name(1)), -1, Some(0));
         assert!(st.ge0(&v(0).sub(&len).unwrap()).is_some());
         assert!(st.ge0(&len.sub(&v(0)).unwrap().plus(1).unwrap()).is_some());
@@ -1470,8 +1860,8 @@ mod tests {
     fn an_elimination_keeps_the_sum_of_opposite_bounds() {
         let mut st = State::default();
         // j - w >= 0 and w >= 0 give j >= 0 once w is gone.
-        st.assume(&v(0).sub(&v(1)).unwrap());
-        st.assume(&v(1));
+        st.assume(&v(0).sub(&v(1)).unwrap(), T);
+        st.assume(&v(1), T);
         st.eliminate(Name(1));
         assert!(st.facts.iter().all(|f| !f.mentions_name(Name(1))));
         assert!(st.ge0(&v(0)).is_some());
@@ -1483,7 +1873,7 @@ mod tests {
         // Where c is true, len(a) - w - 1 >= 0; with w >= 0, len(a) - 1 >= 0
         // once w is gone.
         let len = Lin::of(Term::Len(Name(0)));
-        st.assume(&v(1));
+        st.assume(&v(1), T);
         let side = vec![Fact::Ge(len.sub(&v(1)).unwrap().plus(-1).unwrap())];
         st.conds.insert(Name(2), Sides::from((side, Vec::new())));
         st.eliminate(Name(1));
@@ -1493,8 +1883,8 @@ mod tests {
     #[test]
     fn a_join_keeps_only_what_every_branch_proves() {
         let (mut a, mut b) = (State::default(), State::default());
-        a.assume(&v(0).plus(-2).unwrap());
-        b.assume(&v(0).plus(-1).unwrap());
+        a.assume(&v(0).plus(-2).unwrap(), T);
+        b.assume(&v(0).plus(-1).unwrap(), T);
         let j = State::join(&mut [a, b]);
         assert!(j.ge0(&v(0).plus(-1).unwrap()).is_some());
         assert!(j.ge0(&v(0).plus(-2).unwrap()).is_none());
@@ -1504,13 +1894,13 @@ mod tests {
     fn a_join_of_constants_keeps_the_values_between_out() {
         let at = |c: i64| {
             let mut s = State::default();
-            s.define(Term::Val(Name(0)), &Lin::k(c));
+            s.define(Term::Val(Name(0)), &Lin::k(c), T);
             s
         };
         let inner = State::join(&mut [at(0), at(4)]);
         let mut j = State::join(&mut [at(2), at(3), inner]);
         assert!(j.ge0(&Lin::k(4).sub(&v(0)).unwrap()).is_some());
-        j.differ(&v(0));
+        j.differ(&v(0), T);
         assert!(j.ge0(&v(0).plus(-2).unwrap()).is_some());
         assert!(j.ge0(&v(0).plus(-3).unwrap()).is_none());
     }
@@ -1543,12 +1933,12 @@ mod tests {
             let mut st = State::default();
             (0..facts.len())
                 .filter(|i| small & 1 << i != 0)
-                .for_each(|i| st.assume(&facts[i]));
+                .for_each(|i| st.assume(&facts[i], T));
             for big in (0u32..1 << facts.len()).filter(|b| b & small == small) {
                 let mut more = st.clone();
                 (0..facts.len())
                     .filter(|i| big & 1 << i != 0)
-                    .for_each(|i| more.assume(&facts[i]));
+                    .for_each(|i| more.assume(&facts[i], T));
                 for g in &goals {
                     if st.ge0(g).is_some() {
                         let cert = more

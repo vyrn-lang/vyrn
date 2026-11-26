@@ -206,7 +206,8 @@ pub fn table(program: &Program, world: &World) -> Vec<Verdicts> {
     let tops: Vec<(FnId, &Body)> = frames
         .filter(|(_, b)| !b.name.contains("@lambda"))
         .collect();
-    let graph = Graph::of(program, world, &tops);
+    let erased = erased(program, world);
+    let graph = Graph::of(program, world, &tops, Some(&erased));
     let causes = graph.causes();
     let unfit = graph.judged(program, world, &causes, Rules::Kernel);
     (tops.into_iter())
@@ -235,7 +236,14 @@ struct Graph<'w> {
 struct Call(String, usize, usize);
 
 impl<'w> Graph<'w> {
-    fn of(program: &Program, world: &'w World, tops: &[(FnId, &'w Body)]) -> Graph<'w> {
+    /// The graph from the frames `tops`. A call row `erased` removes is no
+    /// edge: the emitter runs none of it.
+    fn of(
+        program: &Program,
+        world: &'w World,
+        tops: &[(FnId, &'w Body)],
+        erased: Option<&Erased>,
+    ) -> Graph<'w> {
         let mut g = Graph {
             at: HashMap::new(),
             frames: Vec::new(),
@@ -251,7 +259,7 @@ impl<'w> Graph<'w> {
         // ends.
         let mut next = 0;
         while let Some(&(_, b)) = g.frames.get(next) {
-            (g.own[next], g.calls[next]) = g.walk(program, world, b);
+            (g.own[next], g.calls[next]) = g.walk(program, world, b, erased);
             next += 1;
         }
         g
@@ -274,6 +282,7 @@ impl<'w> Graph<'w> {
         program: &Program,
         world: &'w World,
         b: &'w Body,
+        erased: Option<&Erased>,
     ) -> (Option<Cause>, Vec<Call>) {
         let sums = world.summaries();
         let mut own: Option<Cause> = None;
@@ -305,6 +314,7 @@ impl<'w> Graph<'w> {
                     cause(Trap::Kept(crate::insight::guarded(&c.guard)), last);
                     continue;
                 }
+                _ if erased.is_some_and(|e| e.erases(world, s)) => continue,
                 St::Let(_, rhs) | St::Do { rhs, .. } => rhs,
                 _ => continue,
             };
@@ -430,7 +440,7 @@ pub struct TrapFree<'w> {
 impl<'w> TrapFree<'w> {
     pub fn of(program: &'w Program, world: &'w World) -> TrapFree<'w> {
         let tops = crate::insight::root_frames(program, world);
-        let graph = Graph::of(program, world, &tops);
+        let graph = Graph::of(program, world, &tops, None);
         let causes = graph.causes();
         let free = (graph.at.iter())
             .map(|(id, i)| (*id, causes[*i].is_none()))
@@ -604,7 +614,7 @@ pub fn erased(program: &Program, world: &World) -> Erased {
             (local, _) => _ = at.insert(f, local.or(Some(Unfit::Effects(None)))),
         }
     }
-    let graph = Graph::of(program, world, &tops);
+    let graph = Graph::of(program, world, &tops, None);
     let causes = graph.causes();
     let unfit = graph.judged(program, world, &causes, Rules::Erased);
     for (f, b) in tops {

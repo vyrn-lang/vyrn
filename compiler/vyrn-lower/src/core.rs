@@ -34,7 +34,7 @@ use crate::fact_flow::Built;
 use crate::kernel::{MissingKind, Root};
 use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
-use vyrn_frontend::core::check::{Ensures, Promise, Raises, Verdict};
+use vyrn_frontend::core::check::{Ensures, Promise, Verdict};
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, AtRead, Await, Body, BorrowKind, Callee, Cand, Copied,
     Ctor, Facts, Forked, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Said,
@@ -7104,30 +7104,6 @@ impl<'a> Builder<'a> {
                 return Ok(Rhs::Read(p));
             }
         }
-        // `prove(a && b)` is `prove(a)` and then `prove(b)`: each comparison
-        // is a call of its own, checked where it stands
-        // ([`crate::check::state`]), so each is a premise of the next.
-        if let (Some(_), [Expr::Binary { op, lhs, rhs, .. }]) =
-            (self.program.prove.as_deref().filter(|p| *p == name), args)
-        {
-            if *op == BinOp::And {
-                let first = self.call(
-                    name,
-                    std::slice::from_ref(&**lhs),
-                    line,
-                    ret.clone(),
-                    None,
-                    out,
-                )?;
-                out.push(St::Do {
-                    rhs: first,
-                    line,
-                    col: 0,
-                    site: NodeId::NONE,
-                });
-                return self.call(name, std::slice::from_ref(&**rhs), line, ret, dest, out);
-            }
-        }
         if name == vyrn_frontend::order::BEFORE_BUILTIN {
             let order = (dest
                 .and_then(|e| self.solved.get(&e.id()))
@@ -8373,7 +8349,6 @@ fn stated(program: &Program, own: &Ownership, body: &Body) -> Body {
             decls: own.proto.types(),
             global: &global,
             fns: &program.functions,
-            prove: program.prove.as_deref(),
         },
     );
     out
@@ -8514,21 +8489,12 @@ fn typed(
     // of its constructor, and the instances of a generic function share
     // their groups.
     let (mut groups, ended) = crate::typed::groups(top, &rules, &[]);
-    let proves = program.prove.as_deref().is_some_and(|p| {
-        let called = |rhs: &Rhs| {
-            matches!(rhs, Rhs::Call { kind: Callee::Fn(g), .. }
-                if program.functions.get(g.index()).is_some_and(|f| f.name == p))
-        };
-        (top.frames().into_iter())
-            .any(|f| rows(&f.stmts).any(|(s, _)| matches!(s, St::Do { rhs, .. } if called(rhs))))
-    });
     // The facts come from the check rows, which only an emitter's body
-    // states, so a body with a group or a `prove`, or of a module the
-    // manifest proves, states its own copy and decides it by the demanded
-    // walk.
+    // states, so a body with a group, or of a module the manifest proves,
+    // states its own copy and decides it by the demanded walk.
     let proved = program.proved.contains(file);
     let mut unshown = Vec::new();
-    if ended || proves || proved {
+    if ended || proved {
         let mut body = stated(program, own, top);
         let declared = declared(program, own, &body);
         let mut refuted = Vec::new();
@@ -8539,17 +8505,14 @@ fn typed(
             groups = crate::typed::groups(&body, &rules, &refuted).0;
         }
         let named = |g: FnId| Some(program.functions.get(g.index())?.name.as_str());
-        for f in body.frames() {
+        for f in body.frames().into_iter().filter(|_| proved) {
             for (s, _) in rows(&f.stmts) {
                 let St::Check(c) = s else { continue };
-                if c.verdict == Verdict::Proved || !(proved || c.rule == Raises::Prove) {
+                if c.verdict == Verdict::Proved {
                     continue;
                 }
                 let why = crate::insight::said(&c.why, f, &named);
-                let rule = match c.rule {
-                    Raises::Prove => rule!(ProveUnshown, why),
-                    _ => rule!(ProvedKept, what = crate::insight::guarded(&c.guard), why),
-                };
+                let rule = rule!(ProvedKept, what = crate::insight::guarded(&c.guard), why);
                 let d = Diagnostic::refusal(c.site.line, 0, "check", rule).in_file(file.clone());
                 let same =
                     |x: &Diagnostic| (&x.file, x.line, &x.message) == (&d.file, d.line, &d.message);

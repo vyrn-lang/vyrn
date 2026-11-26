@@ -249,7 +249,8 @@ examples/branchtypes.vyrn	head	yes	no, `pick` is Option<Int64>, not an integer, 
 examples/branchtypes.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output
 examples/branchtypes.vyrn	where$pAge	yes	yes, emulated Int64
 examples/branchtypes.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
-examples/bsearch.vyrn	mid	yes	no, it calls `prove`, which is not a kernel
+examples/bsearch.vyrn	half	yes	yes, emulated Int64
+examples/bsearch.vyrn	mid	yes	yes, emulated Int64
 examples/bsearch.vyrn	bsearch	yes	no, the loop is no counter loop
 examples/bsearch.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/bytecount.vyrn	countDigits	yes	no, `s` is String, not an integer, Bool or a read array of one
@@ -3066,7 +3067,6 @@ std/openapi.vyrn	oaRequestSchema	yes	no, its effect set is alloc
 std/openapi.vyrn	oaPathValue	yes	no, its effect set is alloc
 std/openapi.vyrn	oaTypeNames	yes	no, its effect set is alloc
 std/openapi.vyrn	openapi	yes	no, its effect set is alloc, gen-only
-std/proof.vyrn	prove	yes	no, the result is Unit, not an integer, Bool or a read array of one
 std/random.vyrn	randomSeed	yes	no, its effect set is random
 std/random.vyrn	seededRng	yes	no, the value of line 27 is Rng, not an integer, Bool or a read array of one
 std/random.vyrn	nextInt	yes	no, `rng` is Rng, not an integer, Bool or a read array of one

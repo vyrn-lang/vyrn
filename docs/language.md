@@ -216,7 +216,7 @@ type User = {
 - `Port(n)` constructs. A constant that satisfies the rule is proven at compile time and costs nothing; a constant that breaks it is refused; a runtime value that breaks it traps. The compiler drops the check where the facts before it prove the rule, and a value of an integer refinement type gives the compiler its rule's comparisons as facts: with `i: Idx` and `type Idx = Int64 where value >= 0 && value < 8`, `xs[i]` on an `Array<Int64, 8>` runs no index check.
 - `Port?(n)` answers `Option<Port>`: `None` when the rule fails. Use it for input the program does not control.
 - Every boundary checks the rule without a call: a `let` annotation, an assignment, an argument, a return, a record field, an array element and a map insert.
-- A parameter may state a rule over its argument and the arguments before it: `fn at(b: Array<Int64>, i: Int64 where value >= 0 && value < b.length)`. A comparison's side is an integer literal, or `value` or an earlier `read` parameter: the integer itself, or its `.length`, `.byteLength` or integer field. So `skip: Array<UInt32> where value.length >= 256` states the parameter's own length. `&&` joins the comparisons, and only a `read` parameter carries a clause. Every call checks the clause and the body assumes it. The compiler drops the check where the caller's facts prove it; otherwise a failure traps at the call with ``validation failed for parameter `i` of `at` ``.
+- A parameter may state a rule over its argument and the arguments before it: `fn at(b: Array<Int64>, i: Int64 where value >= 0 && value < b.length)`. A comparison's side is an integer literal, or `value` or an earlier `read` parameter: the integer itself, its `.length`, `.byteLength` or integer field, or the `.length` of its field. So `skip: Array<UInt32> where value.length >= 256` states the parameter's own length, and `t: Tensor where value.shape.length >= 1` the length of its field `shape`. `&&` joins the comparisons, and only a `read` parameter carries a clause. Every call checks the clause and the body assumes it. The compiler drops the check where the caller's facts prove it; otherwise a failure traps at the call with ``validation failed for parameter `i` of `at` ``.
 - A function may state a rule over its result after the result type: `fn mid(lo: Int64, hi: Int64 where value > lo) -> Int64 where value >= lo && value < hi`. `value` is the result, and the clause may name every `read` parameter, in the grammar of a parameter clause. Each `return` checks it, as does the end of a body that falls off it, and every direct caller assumes it, its arguments in place of the parameters. The compiler drops a check the body's facts prove; otherwise a failure traps at the return with ``validation failed for the result of `mid` ``. A clause on `-> Unit` that names only parameters (`-> Unit where i >= 0 && i < n`) is a lemma: a call proves it for the caller. Write the clause on the signature's line: `vyrn fmt` indents a line by its open brackets alone, so a `where` that starts a line sits in column 0.
 - A clause may state a fact of an array: `sorted<O>(value)`, no element before the one ahead of it under the order `O`, or `strict<O>(value)`, each element before the next. An order is a type from `std/order`: `Asc<Person, age>` orders people by age, `Desc<O>` reverses `O`, and `Then<A, B>` breaks `A`'s ties by `B`. A fact is a conjunct of its clause, never under `||` or `!`, and has no run-time check: every call proves a parameter's fact and every return the result's, or the program is refused. The proof follows the flow. A `std/order` establisher such as `sort` gives a sorted result, so does a private function whose every return the flow shows sorted, an empty array holds every fact, a `push` keeps a fact where a `before` answer or a pop shows the value in order, and any other write drops it. So `lowerBound<ByAge>(sort<ByAge>(ps), p)` is accepted, and `lowerBound` on an array no row shows sorted is refused with ``` `lowerBound` needs `xs` sorted by `Asc<Int64>`, and nothing shows it is ```.
 - A `let` with a type may state a clause in the same grammar over `value` alone: `let mut ys: Array<Person> where sorted<ByAge>(value) = sort<ByAge>(raw)`. It is a promise. Every write of the binding keeps it: the `let`'s value, an assignment, a store into a part, a `push` and a call that modifies it. A comparison is checked after each write unless the compiler proves it, and a failure traps with ``validation failed for the `where` clause of `i` ``. A fact is never checked, so a write that may break it is refused at the write: ``the push on line 8 may break the promise of `ys` on line 6, `sorted<ByAge>(value)` ``. `insertSorted` keeps the order.
@@ -239,28 +239,26 @@ type User = {
 
 ### Proofs
 
-`prove(c)` from `std/proof` asks the compiler to show `c` where the call stands. `c` is one integer comparison, or several joined by `&&`.
+A proof is code the program already has: a parameter clause, a result clause, a refinement type, a `let` clause, and a function whose result clause states one step. The prover sums at most two premises, three for a check's goal. A chain longer than that is split by a helper whose result clause states the middle step, so each caller's proof is short.
 
 ```vyrn
-import { prove } from "std/proof"
+fn half(d: Int64 where value >= 1, n: Int64 where value >= d) -> Int64 where value >= 0 && value < d && value < n {
+    return d / 2
+}
 
-fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64 where value >= lo && value < hi && value < xs.length {
-    prove(lo < xs.length)
-    let q = (hi - lo) / 2
-    prove(q < xs.length)
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0 && value < xs.length, hi: Int64 where value > lo && value <= xs.length) -> Int64 where value >= lo && value < hi && value < xs.length {
+    let q = half(hi - lo, xs.length)
     return lo + q
 }
 ```
 
-- The compiler proves `c` from the body, the parameters' clauses, the refinement types of the names it reads and the result clauses of the functions the body calls. It reads nothing it inferred about another function, so the proof holds in every program that links the module. A comparison it cannot show is refused with the reason: ``` `prove` cannot show its comparison here: it needs `i < n`, and `i` is a parameter, so the function cannot know what its callers pass ```.
-- Every check after the call assumes `c`. So a `prove` splits a chain the prover cannot take in one step into steps it can: in `mid`, every check and the result clause are proved, and a binary search that calls `mid` runs no index check.
-- A sum or difference in `c` states a fact only where the compiler shows it stays within `-2^62..=2^62`. Elsewhere it may wrap, and the refusal says ``the sum `a + b` may wrap``.
-- The call runs nothing: the emitter erases it as it erases a lemma call (below). `prove` is no function value, because a call through a value proves nothing.
+- `half` bounds half a width by the array's length, and `lo` states that it is in range, so `lo + q` is a sum the compiler shows stays within `-2^62..=2^62`. In `mid`, every clause check and the result clause are proved, and a binary search that calls `mid` runs no index check (`examples/bsearch.vyrn`).
+- A sum or difference states a fact only where the compiler shows it exact. Elsewhere it may wrap, and `vyrn why --cost` says ``the sum `a + b` may wrap``.
 
 A project demands a proof of every check in a module by naming it in the `proved` key of `vyrn.json`: `{ "main": "main.vyrn", "proved": ["core/**", "scan.vyrn"] }`. Each entry is a glob relative to the manifest's directory: `*` and `?` match within one name, and `**` matches any number of directories.
 
 - A check that a body of such a module keeps is refused with its reason and the fix, if one exists: ``` the index check stays at run time, and this module is in `proved` (vyrn.json): it needs `i >= 0`, and `i` is a parameter, so the function cannot know what its callers pass; add `where value >= 0` to `i`, and each call checks it where the caller cannot show it ```.
-- The proof reads what a `prove` reads: the body, the clauses, the refinement types and the declared result clauses of the callees. A fact the compiler infers about a callee does not count, so a callee's result needs its clause written: `-> Int64 where value < hi`.
+- The proof reads the body, the clauses, the refinement types and the declared result clauses of the callees. A fact the compiler infers about a callee does not count, so a callee's result needs its clause written: `-> Int64 where value < hi`.
 - A parameter's clause is the module's boundary. A call from a module outside `proved` keeps its clause check at run time; a call inside one must prove it.
 
 The emitter erases a call whose result is `Unit` or unused when its callee, after elision, has an empty effect set, takes every parameter by `read`, is trap-free, is not recursive, runs only counter loops and calls only such functions. Such a call writes nothing, traps nowhere and ends, so the program prints the same without it. A lemma whose clause the compiler proves costs no call at run time; its arguments are still evaluated.
@@ -840,7 +838,6 @@ Each line is a program the compiler refuses, and the reason.
 - A parameter's `where` clause that names a later or a `modify` parameter: it would not hold for the whole call.
 - A call whose argument the flow does not show sorted, by the order a fact clause names: a fact has no run-time check.
 - A write that may break a fact a `let` promises: the promise holds at every write, and nothing checks a fact at run time.
-- A `prove` the compiler cannot show from the body, the clauses and the declared result clauses of its callees: it checks nothing at run time.
 - A check kept in a module the `proved` key of `vyrn.json` names: the project asked for none at run time there.
 - Assignment to a binding without `mut`.
 - `?` in a function whose return kind differs from the operand's.

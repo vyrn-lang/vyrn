@@ -195,19 +195,18 @@ export fn get(xs: Array<Int64>, i: Int64) -> Int64 {
     );
 }
 
-/// `prove(c)` is a check of `c` that no build runs: the prover shows it, and
-/// every row after it assumes `c`. The binary search of the manual-proofs
-/// research proves every check of `mid` and `bsearch` with two `prove` rows
-/// and `mid`'s result clause, which `bsearch` reads at the call.
+/// A chain longer than the search is split by a helper's result clause:
+/// `half` bounds half a width by the array's length, so `lo + q` is an exact
+/// sum, and `mid`'s result clause proves every check of `bsearch`.
 #[test]
-fn prove_rows_and_a_result_clause_prove_a_binary_search() {
-    let src = "import { prove } from \"std/proof\"
-fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64
+fn helper_clauses_prove_a_binary_search() {
+    let src = "fn half(d: Int64 where value >= 1, n: Int64 where value >= d) -> Int64 where value >= 0 && value < d && value < n {
+    return d / 2
+}
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0 && value < xs.length, hi: Int64 where value > lo && value <= xs.length) -> Int64
     where value >= lo && value < hi && value < xs.length
 {
-    prove(lo < xs.length)
-    let q = (hi - lo) / 2
-    prove(q < xs.length)
+    let q = half(hi - lo, xs.length)
     return lo + q
 }
 export fn bsearch(xs: Array<Int64>, v: Int64) -> Int64 {
@@ -225,34 +224,95 @@ export fn bsearch(xs: Array<Int64>, v: Int64) -> Int64 {
 }
 ";
     let mid = [
-        "proved prove",
-        "proved int-div-zero",
-        "proved int-div-overflow",
-        "proved prove",
+        "proved where-arg",
+        "proved where-arg",
         "proved where-result",
     ];
     assert_eq!(verdicts(src, "mid"), mid);
     let bsearch = ["proved where-arg", "proved where-arg", "proved array-index"];
     assert_eq!(verdicts(src, "bsearch"), bsearch);
     let (err, rows) = oracle(src, "    print(bsearch(xs, 20).toString())", "mid");
-    assert_eq!((err.as_str(), rows.len()), ("", 5));
+    assert_eq!((err.as_str(), rows.len()), ("", 3));
+}
+
+/// A caller assumes the declared result clause of a callee that takes a
+/// function value: the clause holds whatever value the call binds, because
+/// the callee checks it before each return.
+#[test]
+fn a_call_that_binds_a_function_value_assumes_the_result_clause() {
+    let src = "fn applyAll(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> where value.length == xs.length {
+    let mut out: Array<Int64> = []
+    for x in xs {
+        out.push(f(x))
+    }
+    return out
+}
+fn add7(x: Int64) -> Int64 {
+    return x + 7
+}
+fn third(xs: Array<Int64> where value.length >= 3) -> Int64 {
+    let b = applyAll(xs, add7)
+    return b[2]
+}
+";
+    assert_eq!(verdicts(src, "third"), ["proved array-index"]);
+}
+
+/// A clause may name the length of a field: `t.dims.length >= 2` proves both
+/// reads, and a caller that passes a shorter field keeps the clause check.
+#[test]
+fn a_clause_on_a_field_length_proves_the_reads_it_bounds() {
+    let src = "type T = { dims: Array<Int64> }
+fn area(t: T where value.dims.length >= 2) -> Int64 {
+    return t.dims[0] * t.dims[1]
+}
+fn pick(t: T) -> Int64 {
+    return area(t)
+}
+";
+    assert_eq!(
+        verdicts(src, "area"),
+        ["proved array-index", "proved array-index"]
+    );
+    let (_dir, file) = program(src, "    print(pick(T { dims: [1] }).toString())");
+    assert_eq!(rows_of(&file, "pick"), ["check where-arg"]);
+}
+
+/// A kept check over a sum that may wrap names the sum, not the callee whose
+/// result is one addend, where that callee states a result clause.
+#[test]
+fn a_sum_that_may_wrap_is_named_before_a_callee_that_states_a_clause() {
+    let src = "fn half(d: Int64 where value >= 1) -> Int64 where value >= 0 && value < d {
+    return d / 2
+}
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64
+    where value >= lo && value < hi && value < xs.length
+{
+    let q = half(hi - lo)
+    return lo + q
+}
+";
+    let (_dir, file) = program(src, "    print(mid(xs, 0, 3).toString())");
+    let why = vyrn().args(["why", "--cost"]).arg(&file).output().unwrap();
+    let out = norm(&why.stdout);
+    assert!(
+        out.contains("where clause check: the sum `lo + q` may wrap"),
+        "{out}"
+    );
 }
 
 /// A quotient by a literal of `d >= 1` is at most `d - 1` (`facts::divided`),
-/// so the research's `goalQd` proves its `prove` and the read it bounds.
+/// so the research's `goalQd` proves the read it bounds.
 #[test]
-fn a_prove_of_a_quotient_bound_holds() {
-    let src = "import { prove } from \"std/proof\"
-export fn goalQd(d: Int64 where value >= 1, xs: Array<Int64> where value.length >= d) -> Int64 {
+fn a_quotient_bound_proves_a_read() {
+    let src = "export fn goalQd(d: Int64 where value >= 1, xs: Array<Int64> where value.length >= d) -> Int64 {
     let q = d / 2
-    prove(q <= d - 1)
     return xs[d - 1 - q]
 }
 ";
     let rows = [
         "proved int-div-zero",
         "proved int-div-overflow",
-        "proved prove",
         "proved array-index",
     ];
     assert_eq!(verdicts(src, "goalQd"), rows);
@@ -7921,6 +7981,24 @@ fn a_proved_module_refuses_a_kept_check_with_its_fix() {
     assert!(norm(&why.stdout).contains("    3           index check refused: it needs `i >= 0`"));
 }
 
+/// A proved module reads a callee's declared result clause and not its
+/// inferred summary, so only the call through the unstated clamp is refused.
+#[test]
+fn a_proved_module_reads_a_declared_result_clause_not_an_inferred_summary() {
+    let out = vyrn()
+        .arg("check")
+        .arg(proved("core/locality.vyrn"))
+        .output()
+        .unwrap();
+    let err = norm(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    let says = "core/locality.vyrn:27:0: the where clause check stays at run time, and this \
+                module is in `proved` (vyrn.json): it needs the value of line 27 >= 0, and that \
+                value is the result of `clampInferred(..)` at line 27, whose signature does not \
+                state it\n";
+    assert!(err.ends_with(says), "{err}");
+}
+
 /// A proved module's own checks are proved, its call rows' clause checks
 /// included. A call into it from an unproved module keeps the clause check at
 /// run time, and it traps there.
@@ -7989,6 +8067,79 @@ fn lemma_calls() -> Vec<String> {
         .filter(|c| ["ordered", "positive", "inRange", "down"].contains(c))
         .map(str::to_string)
         .collect()
+}
+
+/// `vyrn why --proofs` prints each removed check with each premise and its
+/// source: here a parameter clause, a callee's result clause at its call, a
+/// loop guard and an invariant the loop head inferred.
+#[test]
+fn why_proofs_names_the_source_of_each_premise() {
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bsearch.vyrn");
+    let why = vyrn()
+        .args(["why", "--proofs"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    let out = norm(&why.stdout);
+    let lines = [
+        "         d <= n                   parameter clause of `n`\n",
+        "         q < the value of line 10 result clause of `half`, at the call on line 10\n",
+        "         lo < hi                  test on line 17, true\n",
+        "         hi <= xs.length          invariant the loop head inferred\n",
+        "summary: 9 checks removed, 1 resting on an inferred fact\n",
+    ];
+    for line in lines {
+        assert!(out.contains(line), "{out}");
+    }
+}
+
+/// `--uses` lists the removed checks that rest on a function's clauses, and
+/// refuses a name the program does not declare.
+#[test]
+fn why_proofs_uses_lists_the_checks_a_clause_pays_for() {
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bsearch.vyrn");
+    let uses = |name: &str| {
+        let args = ["why", "--proofs", "--uses", name];
+        vyrn().args(args).arg(&file).output().unwrap()
+    };
+    let half = uses("half");
+    assert!(
+        norm(&half.stdout).contains("  mid  `lo + q < hi`  rests on q < the value of line 10\n")
+    );
+    let none = uses("nope");
+    assert_eq!(none.status.code(), Some(1));
+    assert_eq!(
+        norm(&none.stderr),
+        "error: `--uses` names `nope`, and the program declares no function `nope`\n"
+    );
+}
+
+/// A call the emitter erases is no call of the kernel rule: `mid` calls the
+/// theorem `below` twice, the emitter removes both, and `mid` is a kernel.
+#[test]
+fn an_erased_call_does_not_block_the_kernel_verdict() {
+    let src = "fn below(a: Int64, b: Int64 where value > a, n: Int64 where value >= b) -> Unit where a < n {
+    return
+}
+fn half(d: Int64 where value >= 1) -> Int64 where value >= 0 && value < d {
+    return d / 2
+}
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64
+    where value >= lo && value < hi && value < xs.length
+{
+    below(lo, hi, xs.length)
+    let q = half(hi - lo)
+    below(q, hi - lo, xs.length)
+    return lo + q
+}
+";
+    let (_dir, file) = program(src, "    print(mid(xs, 0, 3).toString())");
+    let why = vyrn().args(["why", "--cost"]).arg(&file).output().unwrap();
+    let out = norm(&why.stdout);
+    assert!(
+        out.contains("  mid: trap-free: yes; kernel: yes, emulated Int64\n"),
+        "{out}"
+    );
 }
 
 /// A call for its effect into a pure, read-only, trap-free function that
