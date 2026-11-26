@@ -479,11 +479,13 @@ pub fn refused(body: &Body, as_written: bool) -> Vec<Said> {
 /// Every `drop` a reader wrote that cannot release what it names, as the
 /// sentence `vyrn check` gives and its line. A name no binding answers is module
 /// state, which lives for the whole module, or no name at all. A bound name
-/// needs a type that owns heap: a String, an array, a map, a built-in sum
-/// that carries heap, a type declaring `impl Owned`, or a type declaring
-/// `impl MustUse`, whose drop is its disposal. A type parameter is
-/// refused, because no instance check runs on the body. The types are read
-/// as written, so the caller passes no instance of a generic function.
+/// needs a type the compiler releases ([`Owned::release_kind`]), which `drop`
+/// releases as the scope's end would, or a type declaring `impl MustUse`,
+/// whose drop is its disposal. A type parameter is refused, because no
+/// instance check runs on the body. The types are read as written, so the
+/// caller passes no instance of a generic function.
+///
+/// [`Owned::release_kind`]: vyrn_frontend::declared::Owned::release_kind
 pub fn drops(
     body: &Body,
     program: &vyrn_frontend::ast::Program,
@@ -508,24 +510,19 @@ pub fn drops(
         });
         for (n, line) in written {
             let info = &f.names[n.index()];
-            let owned = types::type_key(&info.ty)
-                .is_some_and(|k| program.impls.get(types::OWNED, &k).is_some());
             let t = types::resolve(&info.ty, decls);
-            let heap = matches!(
-                t,
-                Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..) | Type::Task(_)
-            ) || (types::is_sum_alias(&t)
-                && vyrn_frontend::declared::owns_heap(&t, decls));
+            let param = matches!(t, Type::Param(_));
+            let owned = !param && proto.release_kind(&info.ty).is_some();
             // A must-use value's last owner has no other way to discharge
             // it, whatever its representation, and a record that holds one
             // may release it. `Err` is a name the checker could not type, and
             // its refusal is the unknown name's (`refused`).
             let must_use = matches!(info.linear, Some(vyrn_frontend::own::Linear::Declared(_)))
                 || proto.holds_must_use(&info.ty);
-            if owned || heap || must_use || t == Type::Err {
+            if owned || must_use || t == Type::Err {
                 continue;
             }
-            let (name, param) = (&info.source, matches!(t, Type::Param(_)));
+            let name = &info.source;
             let t = body.speech().ty(&t).to_string();
             let rule = match param {
                 true => rule!(DropTypeParam, name, t),

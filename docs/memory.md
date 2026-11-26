@@ -251,8 +251,8 @@ its blocks out.
 
 ## The compiler places every release
 
-A program never frees memory by hand. `drop x` releases a value early; it is
-never required for a value that owns heap.
+A program never frees memory by hand. `drop x` releases any value that owns
+heap early, as the end of its scope would; it is never required.
 
 The compiler releases an owned value at each exit where it is still held:
 

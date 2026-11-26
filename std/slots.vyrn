@@ -175,24 +175,6 @@ impl<T> Iterate for Slots<T> {
     }
 }
 
-/// Releases the four buffers, declared so that a holder may `drop` a
-/// `Slots`: `drop` takes a record only by its declared release. `drop vals`
-/// also releases every live payload:
-/// `insert` consumes each and `remove` hands each back. Do not add a loop over
-/// `vals` as well: it frees each payload twice.
-impl<T> Owned for Slots<T> {
-    fn release(consume self) {
-        let vals = consume self.vals
-        drop vals
-        let gens = consume self.gens
-        drop gens
-        let dense = consume self.dense
-        drop dense
-        let denseAt = consume self.denseAt
-        drop denseAt
-    }
-}
-
 /// A copy is a second container with its own identity, so a handle from the
 /// original is dead in the copy.
 impl<T> Copy for Slots<T> {
