@@ -280,7 +280,7 @@ Break = 'break' ';'?
 Continue = 'continue' ';'?
 If = 'if' ('let' Pattern '=' +nostruct(Expr) Block Else? / +nostruct(Expr) Block Else?)
 Else = 'else' ('if' ('let' Pattern '=' +nostruct(Expr) Block Else? / +nostruct(Expr) Block Else?) / Block)
-While = 'while' ('let' Pattern '=' +nostruct(Expr) Block / +nostruct(Expr) Block)
+While = 'while' ('let' Pattern '=' +nostruct(Expr) Block / +nostruct(Expr) ('where' +nostruct(Expr))? Block)
 For = 'for' Ident 'in' (&('consume' ident) 'consume')? +nostruct(Expr) Block
 Region = 'region' Block
 Drop = 'drop' Ident ';'?

@@ -1518,7 +1518,7 @@ impl<'b> Walk<'_, '_, 'b> {
                         }
                     }
                 }
-                St::Loop { body, site } => {
+                St::Loop { body, site, .. } => {
                     let mut inner = env.clone();
                     let exit = body.iter().position(|s| {
                         matches!(s, St::If { then, els, .. }

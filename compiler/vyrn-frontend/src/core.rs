@@ -730,6 +730,9 @@ pub enum St {
     Loop {
         body: Vec<St>,
         site: NodeId,
+        /// A `while`'s invariant; `vyrn_lower::check::state` states its proof
+        /// rows.
+        invariant: Option<Box<check::Invariant>>,
     },
     /// A source block: its own scope, and the site the plan keys its
     /// fall-through release rows by.
@@ -1492,9 +1495,16 @@ impl Body {
             G::Rule(n) => format!("{} holds its rule", self.spell(*n)),
             G::Scalar(n, t) => format!("{} holds the rule of {t}", self.spell(*n)),
             G::Clause { atoms, .. } => {
-                let side = |o: &check::Operand| match &o.part {
+                let operand = |o: &check::Operand| match &o.part {
                     Some(f) => format!("{}.{f}", self.val(&o.of)),
                     None => self.val(&o.of),
+                };
+                let side = |s: &check::Side| {
+                    let term = |(k, o): &(i64, check::Operand)| match k {
+                        1 => operand(o),
+                        k => format!("{k} * {}", operand(o)),
+                    };
+                    s.terms().map(term).collect::<Vec<_>>().join(" + ")
                 };
                 let one = |a: &check::Atom| {
                     let op = crate::parser::binop_text(a.op);

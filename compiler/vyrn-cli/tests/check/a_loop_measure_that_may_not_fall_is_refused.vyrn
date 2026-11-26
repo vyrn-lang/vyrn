@@ -1,0 +1,10 @@
+fn spin(n: Int64) -> Int64 {
+    let mut k = n
+    while k > 0 where decreases(k) {
+        k = k + 0
+    }
+    return k
+}
+fn main() -> Int64 {
+    return 0
+}

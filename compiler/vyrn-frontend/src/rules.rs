@@ -654,7 +654,10 @@ rules! {
         "the `where` clause of parameter `{param}` may compare only `value`, an \
         earlier `read` parameter, the `.length`, `.byteLength` or integer field of \
         one, the `.length` of a field of one, and integer literals, of one integer \
-        type, joined by `&&`";
+        type, or sums and literal multiples of them over `Int64`, joined by `&&`";
+    ClauseProduct { a, b }
+        "a `where` clause multiplies `{a}` by `{b}`, and only a literal factor keeps \
+        the comparison linear";
     ClauseLater { param, name }
         "the `where` clause of parameter `{param}` names `{name}`, which is no \
         parameter declared before it";
@@ -701,7 +704,8 @@ rules! {
     LetClauseForm { name }
         "the `where` clause of `{name}` may compare only `value`, its `.length`, \
         `.byteLength` or integer field, the `.length` of its field, and integer \
-        literals, of one integer type, and state facts of `value`, joined by `&&`";
+        literals, of one integer type, or sums and literal multiples of them over \
+        `Int64`, and state facts of `value`, joined by `&&`";
     LetClauseName { binding, name }
         "the `where` clause of `{binding}` names `{name}`: a `let` clause states a rule \
         of `value` alone";
@@ -715,8 +719,33 @@ rules! {
     ResultClauseForm { name }
         "the `where` clause on the result of `{name}` may compare only `value`, a \
         `read` parameter, the `.length`, `.byteLength` or integer field of one, the \
-        `.length` of a field of one, and integer literals, of one integer type, joined \
-        by `&&`";
+        `.length` of a field of one, and integer literals, of one integer type, or sums \
+        and literal multiples of them over `Int64`, joined by `&&`";
+    MeasureForm { line }
+        "the loop on line {line} states at most one measure, `decreases(m)` with `m` an \
+        `Int64` sum of its names and integer literals";
+    MeasureStart { line, m, why }
+        "the measure of the loop on line {line}, `{m}`, may be negative where the loop \
+        turns: {why}";
+    MeasureFall { line, m, at, why }
+        "the measure of the loop on line {line}, `{m}`, may not fall on a turn that ends \
+        on line {at}: {why}";
+    InvariantForm { line }
+        "the invariant of the loop on line {line} may compare only names in scope, \
+        their `.length`, `.byteLength` or integer field, the `.length` of a field of \
+        one, and integer literals, of one integer type, or sums and literal multiples \
+        of them over `Int64`, joined by `&&`";
+    InvariantName { line, name }
+        "the invariant of the loop on line {line} names `{name}`, which is no local \
+        in scope";
+    InvariantBinds { line, name }
+        "the invariant of the loop on line {line} names `{name}`, which the loop binds";
+    InvariantEntry { line, inv, why }
+        "the invariant of the loop on line {line}, `{inv}`, does not hold where the \
+        loop starts: {why}";
+    InvariantTurn { line, inv, at, why }
+        "the invariant of the loop on line {line}, `{inv}`, may not hold after a turn \
+        that ends on line {at}: {why}";
     ResultClauseName { name, param }
         "the `where` clause on the result of `{name}` names `{param}`, which is no \
         parameter of `{name}`";

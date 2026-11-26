@@ -404,11 +404,10 @@ fn census() -> Vec<Row> {
             Kernel::Elsewhere,
         ),
         row(
-            "r55_a_clause_with_arithmetic.vyrn",
-            "a parameter's clause compares single operands",
-            "the `where` clause of parameter `i` may compare only `value`, an earlier `read` parameter, \
-             the `.length`, `.byteLength` or integer field of one, the `.length` of a field of \
-             one, and integer literals, of one integer type, joined by `&&`",
+            "r55_a_clause_multiplies_two_values.vyrn",
+            "a clause side is a sum of literal multiples",
+            "a `where` clause multiplies `value` by `n`, and only a literal factor keeps the \
+             comparison linear",
             Kernel::Elsewhere,
         ),
         row(
@@ -488,11 +487,12 @@ fn census() -> Vec<Row> {
             Kernel::Elsewhere,
         ),
         row(
-            "r68_a_result_clause_with_arithmetic.vyrn",
-            "a result clause compares single operands",
+            "r68_a_result_clause_sums_only_int64.vyrn",
+            "a sum in a result clause is over Int64",
             "the `where` clause on the result of `half` may compare only `value`, a `read` \
              parameter, the `.length`, `.byteLength` or integer field of one, the `.length` of \
-             a field of one, and integer literals, of one integer type, joined by `&&`",
+             a field of one, and integer literals, of one integer type, or sums and literal \
+             multiples of them over `Int64`, joined by `&&`",
             Kernel::Elsewhere,
         ),
         row(

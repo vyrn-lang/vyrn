@@ -1,0 +1,1 @@
+an_invariant_names_only_locals_in_scope.vyrn:3:0: the invariant of the loop on line 3 names `k`, which is no local in scope

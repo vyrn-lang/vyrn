@@ -1,0 +1,1 @@
+an_invariant_a_turn_may_break_is_refused.vyrn:7:0: the invariant of the loop on line 4, `j == i && i <= n && j <= n`, may not hold after a turn that ends on line 7: it needs the value of line 5 <= j, and the compiler cannot show that here

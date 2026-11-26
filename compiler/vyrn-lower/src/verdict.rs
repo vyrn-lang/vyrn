@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::{FnId, Program, Type};
-use vyrn_frontend::core::check::Verdict;
+use vyrn_frontend::core::check::{Invariant, Verdict};
 use vyrn_frontend::core::{rows, Body, BorrowKind, Callee, Rhs, St};
 use vyrn_frontend::effects::{atom, extern_effect, Effect, Effects};
 
@@ -96,8 +96,8 @@ pub enum Unfit {
     /// A parameter, local or result is not an integer or `Bool`, or a `read`
     /// array of one: who, its type as spelled, and the type's kind.
     Type(String, String, Scalar),
-    /// A loop that is no counter loop ([`crate::elide::counter_loop`]), at
-    /// its first line.
+    /// A loop that is no counter loop ([`crate::elide::counter_loop`]) and
+    /// states no measure, at its first line.
     Loop(usize),
     /// A call into a function that is not a kernel, by name and line.
     Callee(String, usize),
@@ -708,10 +708,15 @@ fn kernel_form(program: &Program, world: &World, id: FnId, b: &Body) -> Result<F
     }
 }
 
-/// The first loop of `b` that is no counter loop, at its first line.
+/// The first loop of `b` that may not end, at its first line: no counter
+/// loop, and no measure. A measure ends its loop: the typed judgment refuses
+/// a program whose measure the demanded walk does not prove.
 fn unfit_loop(b: &Body) -> Option<Unfit> {
+    let measured = |i: &Option<Box<Invariant>>| i.as_ref().is_some_and(|i| i.measure.is_some());
     rows(&b.stmts).find_map(|(s, _)| match s {
-        St::Loop { body, .. } if !crate::elide::counter_loop(body, &b.names) => {
+        St::Loop {
+            body, invariant, ..
+        } if !measured(invariant) && !crate::elide::counter_loop(body, &b.names) => {
             let line = rows(body).find_map(|(s, _)| line_of(s, b));
             Some(Unfit::Loop(line.unwrap_or(0)))
         }

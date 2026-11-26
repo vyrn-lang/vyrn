@@ -278,6 +278,80 @@ fn pick(t: T) -> Int64 {
     assert_eq!(rows_of(&file, "pick"), ["check where-arg"]);
 }
 
+/// A clause side may be a sum of literal multiples: `value + 1 < b.length`
+/// proves the read `b[i + 1]`, and a caller that passes a larger index keeps
+/// the clause check.
+#[test]
+fn a_clause_sum_proves_the_read_it_bounds() {
+    let src =
+        "fn next(b: Array<Int64>, i: Int64 where value >= 0 && value + 1 < b.length) -> Int64 {
+    return b[i + 1]
+}
+fn pick(b: Array<Int64>) -> Int64 {
+    return next(b, 2 * b.length)
+}
+";
+    assert_eq!(verdicts(src, "next"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(pick(xs).toString())", "pick");
+    assert!(
+        err.contains("validation failed for parameter `i` of `next`"),
+        "{err}"
+    );
+    assert_eq!(rows.len(), 1);
+}
+
+/// A clause states a fact of mathematical integers, so its check fails where a
+/// side leaves `Int64`: `value + 1 < 0` wraps to true for the largest `Int64`,
+/// and the check traps there.
+#[test]
+fn a_clause_sum_that_leaves_int64_fails_its_check() {
+    let src = "fn edge(i: Int64 where value + 1 < 0 && 3 * value != 1) -> Int64 {
+    return i
+}
+";
+    let (_dir, file) = program(
+        src,
+        "    print(edge(-5).toString())
+    let big = 9223372036854775807
+    print(edge(big).toString())",
+    );
+    let out = vyrn().arg("run").arg(&file).output().unwrap();
+    assert_eq!(
+        norm(&out.stdout),
+        "-5
+"
+    );
+    assert!(norm(&out.stderr).contains("validation failed for parameter `i` of `edge`"));
+}
+
+/// A loop invariant is a premise at every head: `i < j` with the guard
+/// `j < xs.length` proves `xs[i]`, which the loop alone keeps. The state
+/// before the loop and the end of each turn prove it, and nothing runs it.
+#[test]
+fn a_loop_invariant_proves_the_read_it_bounds() {
+    let src = |inv: &str| {
+        format!(
+            "fn lag(xs: Array<Int64>) -> Int64 {{
+    let mut s = 0
+    let mut i = 0
+    let mut j = 1
+    while j < xs.length{inv} {{
+        s = s + xs[i]
+        i = i + 1
+        j = j + 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    assert_eq!(verdicts(&src(""), "lag"), ["check array-index"]);
+    let held = ["proved invariant", "proved array-index", "proved invariant"];
+    assert_eq!(verdicts(&src(" where i < j"), "lag"), held);
+    let (err, rows) = oracle(&src(" where i < j"), "    print(lag(xs).toString())", "lag");
+    assert_eq!((err.as_str(), rows.len()), ("", 1));
+}
+
 /// A kept check over a sum that may wrap names the sum, not the callee whose
 /// result is one addend, where that callee states a result clause.
 #[test]
@@ -8139,6 +8213,45 @@ fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo 
     assert!(
         out.contains("  mid: trap-free: yes; kernel: yes, emulated Int64\n"),
         "{out}"
+    );
+}
+
+/// A loop that states a measure the walk proves ends, so a function whose
+/// only loop halves its counter is a kernel; without the measure it is no
+/// counter loop.
+#[test]
+fn a_loop_measure_makes_a_kernel() {
+    let src = |clause: &str| {
+        format!(
+            "fn halve(n: Int64 where value >= 0) -> Int64 {{
+    let mut k = n
+    let mut steps = 0
+    while k > 0{clause} {{
+        k = k / 2
+        steps = steps + 1
+    }}
+    return steps
+}}
+"
+        )
+    };
+    let cost = |clause: &str| {
+        let (_dir, file) = program(&src(clause), "    print(halve(100).toString())");
+        let why = vyrn().args(["why", "--cost"]).arg(&file).output().unwrap();
+        norm(&why.stdout)
+    };
+    let measured = cost(" where k >= 0 && decreases(k)");
+    assert!(
+        measured.contains(
+            "  halve: trap-free: yes; kernel: yes, emulated Int64
+"
+        ),
+        "{measured}"
+    );
+    let bare = cost("");
+    assert!(
+        bare.contains("kernel: no, the loop at line 4 is no counter loop"),
+        "{bare}"
     );
 }
 

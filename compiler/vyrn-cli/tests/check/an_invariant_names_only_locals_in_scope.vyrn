@@ -1,0 +1,7 @@
+fn main() -> Int64 {
+    let mut i = 0
+    while i < 3 where k >= 0 {
+        i = i + 1
+    }
+    return i
+}

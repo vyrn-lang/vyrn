@@ -1975,6 +1975,12 @@ impl Recognizer<'_> {
                 || ({
                     let p0 = me.save();
                     (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit })
+                        && ({ let _ = ({
+                        let p0 = me.save();
+                        (me.eat(&Tok::Where)
+                            && (({ let old = std::mem::replace(&mut me.flags.nostruct, true); let hit = me._expr()?; me.flags.nostruct = old; hit }) || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(UnexpectedToken, found = me.found()))?)))
+                        || { me.back(p0); false }
+                    }); true })
                         && (me._block()? || (me.committed(p0) && me.expected("LBrace")?)))
                     || { me.back(p0); false }
                 })

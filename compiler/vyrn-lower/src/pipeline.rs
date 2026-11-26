@@ -124,6 +124,7 @@ fn check(
                     binders: Default::default(),
                     memory: Default::default(),
                     cost: Vec::new(),
+                    proofs: Vec::new(),
                     waits: Vec::new(),
                 };
                 return (judged, None);
@@ -182,6 +183,7 @@ fn check(
         binders,
         memory,
         cost: Vec::new(),
+        proofs: Vec::new(),
         waits: Vec::new(),
     };
     (out, judged)
@@ -235,23 +237,45 @@ pub fn gen_refusal(program: &ast::Program) -> Option<GenError> {
 /// The pipeline the editor runs after its load: [`check_and_synthesize`] with
 /// the load's floor decision.
 pub const JUDGE: symbols::Judge = symbols::Judge {
-    check: |program, engine, pending, linker| for_editor(program, engine, pending, linker, false),
+    check: |program, engine, pending, linker| {
+        for_editor(program, engine, pending, linker, Shows::Plain)
+    },
 };
 
 /// [`JUDGE`] and the cost of each function of the root file ([`crate::insight::fn_costs`]),
 /// which decides the root's bodies: about 9 ms of a keystroke on `site/export.vyrn`.
 pub const JUDGE_COST: symbols::Judge = symbols::Judge {
-    check: |program, engine, pending, linker| for_editor(program, engine, pending, linker, true),
+    check: |program, engine, pending, linker| {
+        for_editor(program, engine, pending, linker, Shows::Cost)
+    },
 };
 
-/// [`check`] with what the editor shows of the World: the functions that wait, and the cost of
-/// each function of the root file when `cost` holds.
+/// [`JUDGE_COST`] and the proof of each check the root file removes
+/// ([`crate::insight::root_proofs`]): one more walk of each root body, for a hover.
+pub const JUDGE_PROOFS: symbols::Judge = symbols::Judge {
+    check: |program, engine, pending, linker| {
+        for_editor(program, engine, pending, linker, Shows::Proofs)
+    },
+};
+
+/// What the editor shows of the World beside the functions that wait, each level with the
+/// ones before it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Shows {
+    Plain,
+    /// The cost of each function of the root file.
+    Cost,
+    /// The proof of each check the root file removes.
+    Proofs,
+}
+
+/// [`check`] with what the editor `shows` of the World.
 fn for_editor(
     program: &mut ast::Program,
     engine: Option<&GenEngine>,
     pending: Option<floor::Pending>,
     linker: Option<symbols::Linker<'_>>,
-    cost: bool,
+    shows: Shows,
 ) -> symbols::Judged {
     let (mut judged, world) = check(program, engine, pending, linker);
     if let Some(world) = world {
@@ -259,8 +283,11 @@ fn for_editor(
             .waiting(program)
             .map(|(f, _)| f.name.clone())
             .collect();
-        if cost {
+        if shows >= Shows::Cost {
             judged.cost = crate::insight::fn_costs(program, &world);
+        }
+        if shows >= Shows::Proofs {
+            judged.proofs = crate::insight::root_proofs(program, &world);
         }
     }
     judged

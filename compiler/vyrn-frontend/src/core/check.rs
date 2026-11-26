@@ -75,6 +75,15 @@ pub enum Raises {
     /// The failure of a `let`'s `where` clause after a write of its binding
     /// ([`crate::trap::let_clause`]), which [`Guard::Clause`] carries.
     Let,
+    /// The measure of the loop on `line`, at least zero after the guard holds
+    /// (`start`) or below its value there where a turn ends. [`Guard::Clause`]
+    /// carries it as `m >= 0`, with the measure as its `says`. No build runs
+    /// it: a program that keeps one is refused.
+    Measure { line: usize, start: bool },
+    /// The invariant of the loop on `line` where the loop starts (`entry`) or
+    /// where a turn ends, which [`Guard::Clause`] carries with the invariant as
+    /// its `says`. No build runs it: a program that keeps one is refused.
+    Invariant { line: usize, entry: bool },
 }
 
 impl Raises {
@@ -86,6 +95,8 @@ impl Raises {
             Raises::Clause => "where-arg",
             Raises::Result => "where-result",
             Raises::Let => "where-let",
+            Raises::Invariant { .. } => "invariant",
+            Raises::Measure { .. } => "measure",
         }
     }
 }
@@ -166,13 +177,75 @@ pub struct Ensures {
 }
 
 /// One comparison a parameter's `where` clause states, `l op r`: `op` is a
-/// comparison operator, and both operands are of the integer type `ty`.
+/// comparison operator, and both sides are of the integer type `ty`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Atom {
-    pub l: Operand,
+    pub l: Side,
     pub op: BinOp,
-    pub r: Operand,
+    pub r: Side,
     pub ty: Type,
+}
+
+/// A side of an [`Atom`]: the sum of its operands, each times its literal
+/// factor. A clause states a fact of mathematical integers, so a run-time
+/// check of a side that is no lone operand fails where the sum leaves
+/// `Int64`, the only type such a side has. A side has at least one operand;
+/// a lone operand allocates nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Side {
+    pub first: (i64, Operand),
+    pub rest: Vec<(i64, Operand)>,
+}
+
+impl Side {
+    /// The side's operand when it is one operand with factor 1.
+    pub fn alone(&self) -> Option<&Operand> {
+        match (&self.first, self.rest.is_empty()) {
+            ((1, o), true) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// Each operand with its factor, the first first.
+    pub fn terms(&self) -> impl Iterator<Item = &(i64, Operand)> {
+        std::iter::once(&self.first).chain(&self.rest)
+    }
+
+    fn one(o: Operand) -> Side {
+        Side {
+            first: (1, o),
+            rest: Vec::new(),
+        }
+    }
+
+    /// Adds `t` to the side `s`, or makes `s` of it alone.
+    fn push(s: &mut Option<Side>, t: (i64, Operand)) {
+        match s {
+            Some(s) => s.rest.push(t),
+            None => {
+                *s = Some(Side {
+                    first: t,
+                    rest: Vec::new(),
+                })
+            }
+        }
+    }
+
+    /// The side with each name replaced as [`Atom::with`] replaces it.
+    pub fn with(&self, by: &dyn Fn(usize) -> Option<Val>) -> Option<Side> {
+        let each = |(f, o): &(i64, Operand)| {
+            let of = match &o.of {
+                Val::Name(k) => by(k.index())?,
+                lit => lit.clone(),
+            };
+            let part = o.part.clone();
+            Some((*f, Operand { of, part }))
+        };
+        Some(Side {
+            first: each(&self.first)?,
+            rest: self.rest.iter().map(each).collect::<Option<_>>()?,
+        })
+    }
 }
 
 /// An operand of an [`Atom`]: the value `of`, or the `part` of it a read
@@ -189,20 +262,10 @@ impl Atom {
     /// `by(k)`: a call's argument or a body's parameter. `None` when `by`
     /// has none.
     pub fn with(&self, by: &dyn Fn(usize) -> Option<Val>) -> Option<Atom> {
-        let put = |o: &Operand| {
-            let of = match &o.of {
-                Val::Name(k) => by(k.index())?,
-                lit => lit.clone(),
-            };
-            Some(Operand {
-                of,
-                part: o.part.clone(),
-            })
-        };
         Some(Atom {
-            l: put(&self.l)?,
+            l: self.l.with(by)?,
             op: self.op,
-            r: put(&self.r)?,
+            r: self.r.with(by)?,
             ty: self.ty.clone(),
         })
     }
@@ -340,6 +403,167 @@ impl Promise {
     }
 }
 
+/// A `while` loop's invariant: comparisons that hold at the loop's head. The
+/// state before the loop proves them, and so does the end of each turn; the
+/// head assumes them. Nothing checks them at run time: a program whose proof
+/// fails is refused ([`Raises::Invariant`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Invariant {
+    /// The comparisons, over the body's names.
+    pub atoms: Vec<Atom>,
+    /// The invariant in source form.
+    pub says: Arc<str>,
+    /// `decreases(m)`: the measure `m`, an `Int64` sum that is at least zero
+    /// after the guard holds and falls on every turn, so the loop ends; and
+    /// `m` in source form.
+    pub measure: Option<(Side, Arc<str>)>,
+    /// The loop's line.
+    pub line: usize,
+    /// The line of the body's last statement, where a turn that falls off the
+    /// body ends.
+    pub end: usize,
+}
+
+impl Invariant {
+    /// The clause `e` of the `while` on `line`, whose body's last statement
+    /// is on `end`, over `Val::Name(Name(j))` for `names[j]`, the names in
+    /// scope it reads and their types ([`Atom::with`]). A `decreases(m)`
+    /// conjunct is the measure, at most one. The error is the rule the
+    /// checker refuses the clause with.
+    pub fn of(
+        e: &Expr,
+        line: usize,
+        end: usize,
+        names: &[(String, Type)],
+        decls: &dyn Decls,
+    ) -> Result<Invariant, crate::rules::Rule> {
+        let of = Of::Loop { line, names };
+        let mut parts = Vec::new();
+        split(e, &mut parts);
+        let (mut atoms, mut facts, mut measure) = (Vec::new(), Vec::new(), None);
+        let mut says = Vec::new();
+        for p in parts {
+            let m = match p {
+                Expr::Call { name, args, .. } if name == "decreases" => args,
+                _ => {
+                    conjuncts(of, p, decls, &mut atoms, &mut facts)?;
+                    says.push(spelled(p));
+                    continue;
+                }
+            };
+            let [m] = m.as_slice() else {
+                return Err(rule!(MeasureForm, line));
+            };
+            let (mut terms, mut ty) = (None, None);
+            side(of, m, 1, decls, &mut terms, &mut ty)?;
+            let (Some(terms), None | Some(Type::Int)) = (terms, ty) else {
+                return Err(rule!(MeasureForm, line));
+            };
+            if measure.is_some() {
+                return Err(rule!(MeasureForm, line));
+            }
+            measure = Some((terms, spelled(m).into()));
+        }
+        if !facts.is_empty() {
+            return Err(of.form());
+        }
+        Ok(Invariant {
+            atoms,
+            says: says.join(" && ").into(),
+            measure,
+            line,
+            end,
+        })
+    }
+
+    /// The invariant with each name replaced as [`Atom::with`] replaces it.
+    pub fn with(&self, by: &dyn Fn(usize) -> Option<Val>) -> Option<Invariant> {
+        let measure = match &self.measure {
+            Some((m, says)) => Some((m.with(by)?, says.clone())),
+            None => None,
+        };
+        Some(Invariant {
+            atoms: self
+                .atoms
+                .iter()
+                .map(|a| a.with(by))
+                .collect::<Option<_>>()?,
+            measure,
+            ..self.clone()
+        })
+    }
+
+    /// `m >= 0` for the measure `m`, the comparison its proof rows carry.
+    pub fn nonnegative(&self) -> Option<Atom> {
+        let (m, _) = self.measure.as_ref()?;
+        let zero = Operand {
+            of: Val::Lit(Lit::Int(0)),
+            part: None,
+        };
+        Some(Atom {
+            l: m.clone(),
+            op: BinOp::GtEq,
+            r: Side::one(zero),
+            ty: Type::Int,
+        })
+    }
+}
+
+/// Appends to `out` the `&&` operands of `e`, each no `&&` itself.
+fn split<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match e {
+        Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } => {
+            split(lhs, out);
+            split(rhs, out);
+        }
+        _ => out.push(e),
+    }
+}
+
+/// `e` in source form, for the operators of a clause.
+pub fn spelled(e: &Expr) -> String {
+    let rank = |e: &Expr| match e {
+        Expr::Binary { op, .. } => match op {
+            BinOp::Or => 1,
+            BinOp::And => 2,
+            BinOp::Add | BinOp::Sub => 4,
+            BinOp::Mul | BinOp::Div | BinOp::Rem => 5,
+            _ => 3,
+        },
+        _ => 6,
+    };
+    match e {
+        Expr::Var { name, .. } => name.clone(),
+        Expr::Field { expr, field, .. } => format!("{}.{field}", spelled(expr)),
+        Expr::Int(n, _) => n.to_string(),
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } if rank(expr) == 6 => format!("-{}", spelled(expr)),
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } => format!("-({})", spelled(expr)),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let at = rank(e);
+            let wrap = |x: &Expr, tight: bool| match rank(x) < at || (tight && rank(x) == at) {
+                true => format!("({})", spelled(x)),
+                false => spelled(x),
+            };
+            let op = crate::parser::binop_text(*op);
+            format!("{} {op} {}", wrap(lhs, false), wrap(rhs, true))
+        }
+        _ => "..".into(),
+    }
+}
+
 /// What a result's fact clause guarantees of the result. The body
 /// establishes it at every return.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,7 +685,8 @@ impl Ensures {
 /// `Name(k)`; the result's of `f`, whose `value` is `Name(0)` and whose
 /// parameter `k` is `Name(k + 1)`; or the `let` of `name`'s, of type `ty`,
 /// in a body whose type parameters `bounds` bounds, whose `value` is
-/// `Name(0)`.
+/// `Name(0)`; or the invariant of the `while` on `line`, whose names are
+/// `Name(j)` for `names[j]`.
 #[derive(Clone, Copy)]
 enum Of<'f> {
     Param(&'f Function, usize),
@@ -470,6 +695,10 @@ enum Of<'f> {
         name: &'f str,
         ty: &'f Type,
         bounds: Option<&'f Bounds>,
+    },
+    Loop {
+        line: usize,
+        names: &'f [(String, Type)],
     },
 }
 
@@ -483,6 +712,7 @@ impl<'f> Of<'f> {
             Of::Param(f, k) => rule!(ClauseForm, param = f.params[k].name.as_str()),
             Of::Result(f) => rule!(ResultClauseForm, name = crate::rules::DeclName(&f.name)),
             Of::Let { name, .. } => rule!(LetClauseForm, name),
+            Of::Loop { line, .. } => rule!(InvariantForm, line),
         }
     }
 
@@ -492,6 +722,7 @@ impl<'f> Of<'f> {
             Of::Param(f, k) => &f.params[k].ty,
             Of::Result(f) => &f.ret,
             Of::Let { ty, .. } => ty,
+            Of::Loop { .. } => &Type::Unit,
         }
     }
 
@@ -500,6 +731,7 @@ impl<'f> Of<'f> {
         match self {
             Of::Param(f, _) | Of::Result(f) => Some(&f.type_bounds),
             Of::Let { bounds, .. } => bounds,
+            Of::Loop { .. } => None,
         }
     }
 }
@@ -544,16 +776,82 @@ fn conjuncts(
         return conjuncts(of, rhs, decls, out, facts);
     }
     op.compare().ok_or_else(form)?;
-    let (l, lt) = operand(of, lhs, decls)?;
-    let (r, rt) = operand(of, rhs, decls)?;
-    let ty = match (lt, rt) {
-        (Some(a), Some(b)) if a == b => a,
-        (Some(a), None) | (None, Some(a)) => a,
-        (None, None) => Type::Int,
-        _ => return Err(of.form()),
+    let (mut l, mut r, mut ty) = (None, None, None);
+    side(of, lhs, 1, decls, &mut l, &mut ty)?;
+    side(of, rhs, 1, decls, &mut r, &mut ty)?;
+    let ty = ty.unwrap_or(Type::Int);
+    let (Some(l), Some(r)) = (l, r) else {
+        return Err(of.form());
     };
+    let sum = |s: &Side| s.alone().is_none();
+    if ty != Type::Int && (sum(&l) || sum(&r)) {
+        return Err(of.form());
+    }
     out.push(Atom { l, op: *op, r, ty });
     Ok(())
+}
+
+/// Appends to `out` the operands of `e`, one side of a comparison in the
+/// clause `of` states, each times `factor`. Every operand that is no literal
+/// is of the one integer type `ty`, which the first such sets. A side is a sum of differences of terms; a term
+/// is an operand, a literal multiple of a term, or a negated term.
+fn side(
+    of: Of,
+    e: &Expr,
+    factor: i64,
+    decls: &dyn Decls,
+    out: &mut Option<Side>,
+    ty: &mut Option<Type>,
+) -> Result<(), crate::rules::Rule> {
+    let lit = |e: &Expr| match e {
+        Expr::Int(n, _) => Some(*n),
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } => match &**expr {
+            Expr::Int(n, _) => n.checked_neg(),
+            _ => None,
+        },
+        _ => None,
+    };
+    let times = |k: i64| factor.checked_mul(k).ok_or_else(|| of.form());
+    match e {
+        Expr::Binary { op, lhs, rhs, .. } => match op {
+            BinOp::Add => {
+                side(of, lhs, factor, decls, out, ty)?;
+                side(of, rhs, factor, decls, out, ty)
+            }
+            BinOp::Sub => {
+                side(of, lhs, factor, decls, out, ty)?;
+                side(of, rhs, times(-1)?, decls, out, ty)
+            }
+            BinOp::Mul => match (lit(lhs), lit(rhs)) {
+                (Some(k), _) => side(of, rhs, times(k)?, decls, out, ty),
+                (None, Some(k)) => side(of, lhs, times(k)?, decls, out, ty),
+                (None, None) => {
+                    let (a, b) = (spelled(lhs), spelled(rhs));
+                    Err(rule!(ClauseProduct, a, b))
+                }
+            },
+            _ => Err(of.form()),
+        },
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } if lit(e).is_none() => side(of, expr, times(-1)?, decls, out, ty),
+        _ => {
+            let (o, t) = operand(of, e, decls)?;
+            match (t, &*ty) {
+                (Some(t), Some(u)) if t != *u => return Err(of.form()),
+                (Some(t), None) => *ty = Some(t),
+                _ => {}
+            }
+            Side::push(out, (factor, o));
+            Ok(())
+        }
+    }
 }
 
 /// The first fact word `e` calls, at any depth.
@@ -707,9 +1005,9 @@ fn scalar_conjuncts(e: &Expr, ty: &Type, out: &mut Vec<Atom>) -> bool {
     match (op.compare(), operand(lhs), operand(rhs)) {
         (Some(_), Some(l), Some(r)) => {
             out.push(Atom {
-                l,
+                l: Side::one(l),
                 op: *op,
-                r,
+                r: Side::one(r),
                 ty: ty.clone(),
             });
             true
@@ -721,12 +1019,19 @@ fn scalar_conjuncts(e: &Expr, ty: &Type, out: &mut Vec<Atom>) -> bool {
 /// The name `name` names in the clause `of`, as [`Of`] numbers it, and its
 /// declared type. `value` is the clause's own subject. A parameter clause
 /// may name an earlier `read` parameter, a result clause any `read`
-/// parameter, and a `let` clause nothing else.
+/// parameter, a `let` clause nothing else, and an invariant a name in scope.
 fn sibling<'f>(of: Of<'f>, name: &str) -> Result<(usize, &'f Type), crate::rules::Rule> {
     let (f, before, shift) = match of {
         Of::Param(_, k) if name == "value" => return Ok((k, of.subject())),
         Of::Result(_) | Of::Let { .. } if name == "value" => return Ok((0, of.subject())),
         Of::Let { name: binding, .. } => return Err(rule!(LetClauseName, binding, name)),
+        Of::Loop { line, names } => {
+            let at = names.iter().position(|(n, _)| n == name);
+            return match at {
+                Some(j) => Ok((j, &names[j].1)),
+                None => Err(rule!(InvariantName, line, name)),
+            };
+        }
         Of::Param(f, k) => (f, k, 0),
         Of::Result(f) => (f, f.params.len(), 1),
     };
