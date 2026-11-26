@@ -969,19 +969,51 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
             }
         })
     };
-    let value = match (ordinary, note) {
-        (Some(o), Some(n)) => format!("{o}\n\n---\n\n{n}"),
-        (Some(o), None) => o,
-        (None, Some(n)) => n,
-        (None, None) => return None,
-    };
+    let cost = cost_hover(server, uri, &text, p.text_document_position_params.position);
+    let parts: Vec<String> = [ordinary, note, cost.as_ref().map(|c| c.0.clone())]
+        .into_iter()
+        .flatten()
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
-            value,
+            value: parts.join("\n\n---\n\n"),
         }),
-        range: None,
+        range: cost.map(|c| c.1),
     })
+}
+
+/// The cost row whose expression holds `pos` in the Vyrn document `uri`, the innermost where
+/// several do: its hover and that expression's range. `None` without cost hints.
+fn cost_hover(server: &Server, uri: &Url, text: &str, pos: Position) -> Option<(String, Range)> {
+    if !is_vyrn_uri(uri) || !cost_hints() {
+        return None;
+    }
+    let (analysis, _) = lookup(server, uri)?;
+    let line = pos.line as usize + 1;
+    let path = uri_path(uri);
+    let rows = cost::rows(analysis, uri.as_str(), path.as_deref(), text, line, line);
+    let key = |p: Position| (p.line, p.character);
+    let holds = |r: &Range| key(r.start) <= key(pos) && key(pos) < key(r.end);
+    // A span inside another starts no earlier and ends no later, so it is the shorter.
+    let width = |r: &Range| {
+        (
+            r.end.line - r.start.line,
+            r.end.character.abs_diff(r.start.character),
+        )
+    };
+    (rows.iter())
+        .flat_map(|row| {
+            row.spans
+                .iter()
+                .filter(|r| holds(r))
+                .map(move |r| (row, *r))
+        })
+        .min_by_key(|(_, r)| width(r))
+        .map(|(row, r)| (format!("{}\n\n{}", row.hover, cost::WHY_COST), r))
 }
 
 fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoDefinitionResponse> {

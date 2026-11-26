@@ -6620,6 +6620,59 @@ const PROBE_LINKS: [&str; 7] = [
     r#"95 "0\{frac}""#,
 ];
 
+/// Every line's hover in the compact style, the document's URI written `URI`.
+#[test]
+fn knucleotide_line_hovers_hold_their_pin() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_with_style(&path, &text, "compact");
+    let rows: Vec<String> = (compact_hints(&mut client, &uri).iter())
+        .map(|h| format!("{} {}\n{}\n", h.0, h.1, h.2.replace(uri.as_str(), "URI")))
+        .collect();
+    holds_pin("knucleotide-hovers", &rows);
+}
+
+/// A hover inside a costly expression answers the innermost row that holds it, after the
+/// name's own hover, and its range is that expression's.
+#[test]
+fn a_hover_on_a_costly_expression_answers_its_row_with_its_range() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_with_style(&path, &text, "compact");
+    let line = text.lines().nth(72).unwrap();
+    let mut answer = |needle: &str| {
+        let ch = line.find(needle).unwrap() as u32;
+        let id = serde_json::json!(format!("cost-hover-{ch}"));
+        client.send(&serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "textDocument/hover",
+            "params": { "textDocument": { "uri": uri }, "position": { "line": 72, "character": ch } }
+        }));
+        let resp = client.read_response(&id);
+        let range = &resp["result"]["range"];
+        let (a, b) = (
+            range["start"]["character"].as_u64().unwrap(),
+            range["end"]["character"].as_u64().unwrap(),
+        );
+        let value = resp["result"]["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (line[a as usize..b as usize].to_string(), value)
+    };
+    let (held, value) = answer("alphabet");
+    assert_eq!(held, "alphabet[(key / d) % 4]");
+    let (name, cost) = value
+        .split_once("\n\n---\n\n")
+        .expect("the name's hover, then the row's");
+    assert!(name.contains("alphabet"), "{name}");
+    assert!(cost.starts_with("**? check kept 1**"), "{cost}");
+    assert!(
+        cost.ends_with("[vyrn why --cost](command:vyrn.whyCost)"),
+        "{cost}"
+    );
+    let (held, value) = answer("push");
+    assert_eq!(held, "w.push(alphabet[(key / d) % 4])");
+    assert!(value.contains("**\u{2197} may grow 1**"), "{value}");
+}
+
 /// After a fresh profile the compact line ends in the blocks the run made there.
 #[test]
 fn a_fresh_profile_adds_a_last_run_glyph() {
