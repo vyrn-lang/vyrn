@@ -7291,6 +7291,30 @@ fn a_generated_namespace_member_jumps_into_its_generated_document() {
     assert_eq!(ns["range"]["start"]["line"], 0, "{ns}");
 }
 
+/// A field of a generated record jumps to its name in the generated module's document, and
+/// a field of a record the document declares to its name there. A builtin field has no
+/// declaration.
+#[test]
+fn a_declared_field_jumps_to_its_name() {
+    let (text, uri, mut client) = open_calc_editor("fielddef");
+    let account = definition_at(&mut client, &uri, &text, "x.account.text", 2);
+    let target = account["uri"].as_str().expect("a location").to_string();
+    assert!(target.starts_with("vyrn-gen:/syntax(.calc.syntax).vyrn?"), "{account}");
+    let source = generated_source(&mut client, &target);
+    let start = &account["range"]["start"];
+    let line = source.lines().nth(start["line"].as_u64().unwrap() as usize);
+    let col = start["character"].as_u64().unwrap() as usize;
+    assert!(line.unwrap_or("")[col..].starts_with("account:"), "{line:?}");
+    let col = definition_at(&mut client, &uri, &text, "at.col,", 3);
+    assert_eq!(col["uri"], uri, "{col}");
+    let place = text.lines().position(|l| l.starts_with("type Place")).unwrap();
+    assert_eq!(col["range"]["start"]["line"], place, "{col}");
+    let at = text.lines().nth(place).unwrap().find("col:").unwrap();
+    assert_eq!(col["range"]["start"]["character"], at, "{col}");
+    let length = definition_at(&mut client, &uri, &text, "name.byteLength", 5);
+    assert!(length.is_null(), "{length}");
+}
+
 /// The generator's path string jumps to the file it names.
 #[test]
 fn a_generator_path_jumps_to_its_file() {

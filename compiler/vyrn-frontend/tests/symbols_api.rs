@@ -575,6 +575,37 @@ fn import_collision_errors_but_root_index_survives() {
     assert_eq!(r.target_line, 3, "jumps to the local `fn helper`");
 }
 
+/// A field of an imported record jumps to its name in the declaring file, past a nested
+/// record's field of the same name; a field of an inline record has no declaration.
+#[test]
+fn an_imported_field_resolves_to_its_name() {
+    let lib = "export type P = {
+    inner: { col: Int64 },
+    col: Int64,
+}
+";
+    let root = "import { P } from \"./lib\"
+
+fn f(p: P) -> Int64 {
+    return p.col + p.inner.col
+}
+";
+    let resolver = vyrn_frontend::loader::MapResolver(
+        [("lib.vyrn".to_string(), lib.to_string())]
+            .into_iter()
+            .collect(),
+    );
+    let opts = vyrn_frontend::loader::LoadOptions::default();
+    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver, None);
+    assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+    let r = resolve(&a, 4, 14).expect("`p.col` resolves");
+    assert!(r.definition);
+    assert_eq!(r.target_file.as_deref(), Some("lib.vyrn"));
+    assert_eq!((r.target_line, r.target_col, r.target_end_col), (3, 5, 8));
+    let inline = resolve(&a, 4, 28);
+    assert!(inline.as_ref().is_none_or(|r| !r.definition), "{inline:?}");
+}
+
 #[test]
 fn analyze_linked_adopts_foreign_errors() {
     let root = "import { bad } from \"./lib\"\n\nfn main() -> Int64 {\n    return bad(1)\n}\n";
