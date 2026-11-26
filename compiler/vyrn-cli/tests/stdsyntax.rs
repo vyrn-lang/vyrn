@@ -18,7 +18,7 @@ fn format_grammar() -> PathBuf {
 fn written(grammar: &Path) -> String {
     let text = std::fs::read_to_string(grammar).expect("the grammar reads");
     let g = vyrn_syntax::load(&text).expect("the grammar loads");
-    vyrn_syntax::parser(&g).expect("the grammar lowers")
+    vyrn_syntax::parser(&g).expect("the grammar lowers").0
 }
 
 /// Runs `main` in a new directory that holds the two grammars this crate owns,

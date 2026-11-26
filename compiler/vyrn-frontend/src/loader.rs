@@ -2129,7 +2129,19 @@ fn load_modules(
                 if let Some(d) = audience_objection(key, &gen_key, *line, opts, &mut w.real_paths) {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
-                if let Some(g) = generated {
+                if let Some(mut g) = generated {
+                    // An island's declarations join the written module only where
+                    // this module spells one of their names, so a program that
+                    // names no island pays nothing for them.
+                    let spelled = |n: &String| {
+                        let qualified = |ns: &String| parsed.refs.contains(&format!("{ns}.{n}"));
+                        imp.names.iter().any(|x| &x.original == n)
+                            || imp.namespace.as_ref().is_some_and(qualified)
+                    };
+                    g.written.islands.retain(|i| i.names.iter().any(spelled));
+                    for i in &g.written.islands {
+                        g.written.source.push_str(&i.decls);
+                    }
                     visit(
                         &gen_key,
                         Some(&g.written.source),
@@ -4644,8 +4656,9 @@ fn render_cache_entry(
 /// A span table, the reports, the grammars and the islands as cache lines: the row
 /// count, then one `offset<TAB>author<TAB>shown` line per row; then the report
 /// count, then one `offset<TAB>line` line per report; then the grammar count, then
-/// one key per line; then the island count, then one `ty<TAB>start<TAB>grammar`
-/// line per island. An author is `-` for the call site or
+/// one key per line; then the island count, then per island a
+/// `ty<TAB>start<TAB>grammar` line, a line of its names split by tabs, the
+/// count of its declarations' lines and those lines. An author is `-` for the call site or
 /// `line:col:key`; a shown position is `-` or `line:col:path`. The key, the
 /// path and the report's line come last, so a colon or a tab in them splits
 /// nothing.
@@ -4673,6 +4686,14 @@ fn written_table(w: &Written) -> String {
     out.push_str(&format!("{}\n", w.islands.len()));
     for i in &w.islands {
         out.push_str(&format!("{}\t{}\t{}\n", i.ty, i.start, i.grammar));
+        out.push_str(&format!(
+            "{}\n{}\n",
+            i.names.join("\t"),
+            i.decls.lines().count()
+        ));
+        i.decls
+            .lines()
+            .for_each(|l| out.push_str(&format!("{l}\n")));
     }
     out
 }
@@ -4739,7 +4760,20 @@ fn read_written_table<'a>(
         let mut cols = next()?.splitn(3, '\t');
         let (ty, start) = (cols.next()?.to_string(), cols.next()?.to_string());
         let grammar = cols.next()?.to_string();
-        islands.push(Island { ty, grammar, start });
+        let names = next()?.split('\t').map(str::to_string).collect();
+        let mut decls = String::new();
+        for _ in 0..next()?.parse::<usize>().ok()? {
+            decls.push_str(next()?);
+            decls.push('\n');
+        }
+        let island = Island {
+            ty,
+            grammar,
+            start,
+            names,
+            decls,
+        };
+        islands.push(island);
     }
     Some((rows, reports, grammars, islands))
 }
@@ -7990,6 +8024,8 @@ mod tests {
                 ty: "FileText".to_string(),
                 grammar: "C:/p/a:b.syntax".to_string(),
                 start: "file".to_string(),
+                names: vec!["FileText".to_string(), "isFile".to_string()],
+                decls: "\nexport type FileText = String where isFile(value)\n".to_string(),
             }],
         };
         let gens = vec![

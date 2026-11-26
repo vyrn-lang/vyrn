@@ -115,12 +115,16 @@ pub struct Written {
 }
 
 /// A refinement type a written parser declares, `ty`, whose value start rule
-/// `start` of the grammar keyed `grammar` accepts.
+/// `start` of the grammar keyed `grammar` accepts: [`vyrn_syntax::Island`]
+/// with its grammar. The loader adds `decls` to the written module only for an
+/// importer that spells one of `names`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Island {
     pub ty: String,
     pub grammar: String,
     pub start: String,
+    pub names: Vec<String>,
+    pub decls: String,
 }
 
 impl Written {
@@ -295,13 +299,14 @@ pub enum Writes<'a> {
 /// Returns what `syntaxParser` or `syntaxReporter` answers for the grammar at
 /// `path`, whose `bytes` the run read, `None` when it could not: the module
 /// `writes` names as code by module `key`, or a report at the place the grammar
-/// or its catalogue goes wrong; with a parser's islands, each `(type, start)`.
+/// or its catalogue goes wrong; with a parser's islands, whose grammar the
+/// caller fills in.
 pub fn syntax_span(
     key: &str,
     path: &str,
     bytes: Option<&[u8]>,
     writes: Writes<'_>,
-) -> Result<(Span, Vec<(String, String)>), String> {
+) -> Result<(Span, Vec<Island>), String> {
     let report = |at: String, sentence: &str| {
         diag_span("error", &at, &sentence.replace('\n', " ")).map(|s| (s, Vec::new()))
     };
@@ -323,7 +328,16 @@ pub fn syntax_span(
         },
     };
     let written = vyrn_syntax::load(src).and_then(|g| match &sentences {
-        None => vyrn_syntax::parser(&g).map(|text| (text, g.islands())),
+        None => vyrn_syntax::parser(&g).map(|(text, islands)| {
+            let island = |i: vyrn_syntax::Island| Island {
+                ty: i.ty,
+                grammar: String::new(),
+                start: i.start,
+                names: i.names,
+                decls: i.decls,
+            };
+            (text, islands.into_iter().map(island).collect())
+        }),
         Some(sentences) => vyrn_syntax::report(&g, path, sentences).map(|t| (t, Vec::new())),
     });
     match written {

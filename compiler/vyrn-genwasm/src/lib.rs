@@ -1225,10 +1225,9 @@ impl Arena {
         match served {
             Served::Bytes(status, bytes) => Ok(((status as i64) << 32 | bytes.len() as i64, bytes)),
             Served::Parser(key, span, islands) => {
-                let island = |(ty, start)| Island {
-                    ty,
+                let island = |i| Island {
                     grammar: key.clone(),
-                    start,
+                    ..i
                 };
                 self.islands.extend(islands.into_iter().map(island));
                 self.grammars.push(key);
@@ -1434,8 +1433,8 @@ pub enum Served {
     Bytes(i32, Vec<u8>),
     Copy(String, Vec<u8>),
     /// A grammar's parser or its report, the grammar's key, and the parser's
-    /// islands, each `(type, start)`.
-    Parser(String, Box<Span>, Vec<(String, String)>),
+    /// islands.
+    Parser(String, Box<Span>, Vec<Island>),
     /// Encoded on the guest thread, so one [`encode`] call serves all three
     /// structured builtins.
     Lit(Box<Expr>),

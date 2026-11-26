@@ -31,7 +31,7 @@ use std::rc::Rc;
 
 pub use gen::{bytes, lexer};
 pub use load::load;
-pub use parser::{island_report_fn, parser, report};
+pub use parser::{island_report_fn, parser, report, Island};
 pub use recognizer::recognizer;
 pub use textmate::{language_configuration, textmate, Naming, Scope};
 
@@ -246,16 +246,6 @@ impl Grammar {
     /// text at `path`.
     pub fn report_fn(&self) -> Option<String> {
         Some(parser::report_fn(self.rule_name(self.start()?)))
-    }
-
-    /// Returns, per start rule, the refinement type [`crate::parser`] writes for it,
-    /// `<Start>Text`, and the rule's name. A grammar with no start rule has none.
-    pub fn islands(&self) -> Vec<(String, String)> {
-        let starts = parser::start_rules(self).unwrap_or_default();
-        let name = |r: RuleId| self.rule_name(r).to_string();
-        (starts.into_iter())
-            .map(|r| (parser::island_type(&name(r)), name(r)))
-            .collect()
     }
 
     /// Returns the name of rule `id`.
