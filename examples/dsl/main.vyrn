@@ -1,7 +1,7 @@
 // A project's own language: `vyrn.json` names `calc` as the module that reads
 // `*.calc` files, so the editor colours `orders.calc` and refuses a broken line.
 
-import { total } from "./calc"
+import { paid, total } from "./calc"
 
 fn main() -> Int64 {
     let text = readFile("orders.calc") ?? ""
@@ -9,5 +9,7 @@ fn main() -> Int64 {
         Ok(t) => print("total \{t.toString()}"),
         Err(line) => print("refused at line \{line.toString()}"),
     }
+    let fixed = paid("pay rent 5 pay power 3")
+    print("fixed \{fixed.toString()}")
     return 0
 }
