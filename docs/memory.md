@@ -108,9 +108,7 @@ A receiver follows the same rule: `read self`, `modify self`, `consume self`.
 A prefix `consume` at an argument takes a field out of a value the caller
 holds: `take(consume p.name)` moves `p.name` and leaves `p` with a hole at
 `.name`. The rest of `p` stays usable. A use of `p` as a whole, or a `drop p`,
-is refused while the hole is open, and so is the end of `p`'s scope when `p`'s
-type declares `release`, which takes `p` whole. A store into `p.name` fills
-the hole. An element is not a place a take reaches: `consume xs[0]` is
+is refused while the hole is open. A store into `p.name` fills the hole. An element is not a place a take reaches: `consume xs[0]` is
 refused. A part read as a statement, `p.name` or `xs[0].s`, takes nothing and
 leaves no hole.
 
@@ -195,10 +193,17 @@ Vyrn.
 ## A type can say how it is released and that it must be used
 
 `impl Owned for T { fn release(consume self) { .. } }` gives `T` its own
-release. A type that reaches itself needs one: the structural release walk has
-no bottom on a cycle, so without a declared release its values are never
-freed. The editor's hover names such a binding, "nothing releases the type
-Tree yet". `examples/binarytrees.vyrn` shows the declaration.
+release. A type without one is released part by part, a type that reaches
+itself included: the compiler writes one release walk per type, and the walk
+of a part on the cycle calls it again. Declare a release only when it does more
+than release the parts.
+
+A declared release takes its value whole, so only the module that declares
+the type takes a value of it apart. There, `consume x.field` and a `match`
+that takes `x` are allowed, and the block's exit releases the parts left one
+by one, without the declared release. Elsewhere both are refused: take the
+part out through a function of the type's module, or move the release onto the
+part.
 
 A release takes `self` apart: `consume self.field` takes a part, and one
 `match consume self` takes an enum. Every other move of `self` is refused, and
@@ -227,8 +232,7 @@ A `Task<T>` is an owned value with a release and no obligation. Its release,
 `std/task`'s `release`, gives up the right to the result and leaves the task
 running; the task's root frees the task's block when it ends. `drop`, a
 store, `clear`, a cancellation edge and the release of a holder place it as
-any release. `std/task`'s `Child<T>` holds a handle and declares
-`impl Owned`, whose release cancels the task.
+any release.
 
 ## A region frees a group at once
 
@@ -338,9 +342,7 @@ one owner is not enough:
 Each sentence is followed by `fix:` lines. `compiler/vyrn-cli/tests/refusals.rs`
 holds one minimal program per refusal and pins its whole sentence.
 
-One leak is not refused: a recursive type with no `impl Owned`. The hover
-reports it. Module state is not released at exit; it lives until
-the process ends.
+Module state is not released at exit; it lives until the process ends.
 
 ## The run-time layout
 

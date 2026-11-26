@@ -17,13 +17,6 @@ impl Counting for Tally {
     }
 }
 
-impl Owned for Tally {
-    fn release(consume self) {
-        let counts = consume self.counts
-        drop counts
-    }
-}
-
 fn feed<T: Counting>(t: modify T, xs: Array<Int64>) -> Unit {
     for x in xs {
         t.record(x)

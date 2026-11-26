@@ -29,9 +29,9 @@ Expr::TryConstruct	1	4	0	0	6	0	0	0	11
 Expr::ArrayLit	3	2	0	0	7	0	0	1	13
 Expr::MapLit	2	2	0	0	4	0	0	0	8
 Expr::Lambda	1	7	0	0	15	0	0	0	23
-Expr::Consume	1	2	0	0	11	0	0	0	14
+Expr::Consume	1	2	0	0	12	0	0	0	15
 Pattern::Variant	10	2	0	0	3	0	0	0	15
 Pattern::Success	1	3	0	0	4	0	0	0	8
 Pattern::Failure	1	2	0	0	2	0	0	0	5
 Pattern::Other	2	3	0	0	2	0	0	0	7
-all	88	134	0	0	295	0	0	9	526
+all	88	134	0	0	296	0	0	9	527

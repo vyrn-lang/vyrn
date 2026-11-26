@@ -1597,7 +1597,6 @@ impl<'a> Builder<'a> {
                 mistyped,
                 ends: HashMap::new(),
                 consumes: HashMap::new(),
-                sealed: Vec::new(),
             },
             frame: Frame::default(),
             temps: 0,
@@ -2334,7 +2333,8 @@ impl<'a> Builder<'a> {
             .filter(|(_, t)| self.owns(t))
             .map(|(f, _)| f.clone())
             .collect();
-        if !vyrn_frontend::declared::skippable(self.proto, &from, &taken) {
+        if !vyrn_frontend::declared::skippable(self.proto, &from, &taken, self.body.file.as_deref())
+        {
             return gap(
                 "a record with a declared release crossing into another record type",
                 line,
@@ -3860,8 +3860,11 @@ impl<'a> Builder<'a> {
                     return Ok(());
                 };
                 // An ordinary drop inside a `region` too: `free` refuses an
-                // arena block by its class word.
-                out.push(St::Drop(n, Site::Node(sid), *line, None));
+                // arena block by its class word. A drop of a type that
+                // declares its release runs that release, which walks no hole.
+                let ty = &self.body.names[n.index()].ty;
+                let whole = self.proto.declares_release(ty).is_some();
+                out.push(St::Drop(n, Site::Node(sid), *line, whole.then(Vec::new)));
             }
             // An unaudited build states neither the audit hook nor its operand;
             // `p + 8` alone costs four instructions per allocation.
@@ -4821,6 +4824,47 @@ impl<'a> Builder<'a> {
         lines: Option<(usize, usize)>,
         out: &mut Vec<St>,
     ) -> Result<(Val, bool), Gap> {
+        let (v, consuming) = self.scrutinee_val(e, construct, lines, out)?;
+        let foreign = match consuming {
+            true => (self.proto).released_elsewhere(&*self.ty_of(e)?, self.body.file.as_deref()),
+            false => None,
+        };
+        match foreign {
+            Some(t) => {
+                let text = match e {
+                    Expr::Consume { place, .. } => {
+                        vyrn_frontend::ast::place_path(place).map(|(_, p)| format!("consume {p}"))
+                    }
+                    _ => vyrn_frontend::ast::place_path(e).map(|(_, p)| p),
+                };
+                let text = text.unwrap_or_else(|| "match".to_string());
+                self.taken_apart(&text, &t, (e.line(), start_col(e)))
+            }
+            None => Ok((v, consuming)),
+        }
+    }
+
+    /// Refuses `text`, spelled from `at` (line, column), which takes apart a
+    /// value of `t`, a type another module declares the release of
+    /// ([`vyrn_frontend::declared::hole_walk`]).
+    fn taken_apart<T>(&self, text: &str, t: &Type, at: (usize, usize)) -> Result<T, Gap> {
+        let t = self.body.speech().ty(t).to_string();
+        let what = format!("`{text}`");
+        let d = crate::rules::refusal(at.0, rule!(TakenApart, what, t), Vec::new());
+        refused(match at.1 {
+            0 => d,
+            col => d.at(col, col + text.len() - 1),
+        })
+    }
+
+    /// [`Builder::scrutinee`]'s value, and whether the construct takes it.
+    fn scrutinee_val(
+        &mut self,
+        e: &'a Expr,
+        construct: NodeId,
+        lines: Option<(usize, usize)>,
+        out: &mut Vec<St>,
+    ) -> Result<(Val, bool), Gap> {
         if !matches!(e, Expr::Var { .. }) && is_place_read(e) {
             // A field or an element: the construct borrows it, and its
             // binders borrow what they name.
@@ -5085,6 +5129,7 @@ impl<'a> Builder<'a> {
                                 self.proto,
                                 sty,
                                 std::slice::from_ref(&at),
+                                self.body.file.as_deref(),
                             ) {
                                 Payload::Hole(format!(".{at}"))
                             } else {
@@ -5712,7 +5757,6 @@ impl<'a> Builder<'a> {
                 mistyped: Vec::new(),
                 ends: HashMap::new(),
                 consumes: HashMap::new(),
-                sealed: Vec::new(),
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);
@@ -5944,27 +5988,28 @@ impl<'a> Builder<'a> {
                 let fixes = self.uncopy(e, kw);
                 let key = (self.frame.stmt, n, path.clone());
                 self.body.consumes.entry(key).or_insert(fixes);
-                // A hole the walk cannot skip is not stated: a declared
-                // `release` cannot be told to leave a field alone, so it would
-                // free the field twice (`refusals/r22_drop_with_a_hole.vyrn`).
-                // It is sealed instead, and the kernel refuses its release.
-                let bty = self.body.names[n.index()].ty.clone();
-                let rel = path.trim_start_matches('.').to_string();
-                let skips = vyrn_frontend::declared::skippable(
-                    self.proto,
-                    &bty,
-                    std::slice::from_ref(&rel),
-                );
-                match (rel.is_empty(), skips) {
-                    (true, _) => {}
-                    (false, true) => {
+                // A release's receiver is taken apart by its own release, which
+                // releases no `self` afterwards, so it needs no hole.
+                let bty = &self.body.names[n.index()].ty;
+                let module = self.body.file.as_deref();
+                let walk = match self.body.released == Some(n) {
+                    true => Err(None),
+                    false => vyrn_frontend::declared::hole_walk(self.proto, bty, &path, module),
+                };
+                match walk {
+                    Err(Some(t)) => {
+                        let p =
+                            vyrn_frontend::ast::place_path(e).map_or_else(String::new, |(_, p)| p);
+                        return self.taken_apart(&format!("consume {p}"), &t, kw);
+                    }
+                    Ok(()) if path.len() > 1 => {
                         let hs = &mut self.body.names[n.index()].holes;
                         if !hs.contains(&path) {
                             hs.push(path);
                             hs.sort();
                         }
                     }
-                    (false, false) => self.body.sealed.push((n, path)),
+                    _ => {}
                 }
             }
         }
@@ -9819,11 +9864,12 @@ fn place_frames(
                 .iter()
                 .map(|h| h.trim_start_matches('.').to_string())
                 .collect();
-            // A declared release takes the whole value: it cannot
-            // be told a hole.
-            if !holes.is_empty() && matches!(kind, DropKind::Release(..)) {
-                continue;
-            }
+            // A declared release takes the whole value, so a value with a
+            // hole, which only its type's module takes apart, is walked.
+            let kind = match kind {
+                DropKind::Release(..) if !holes.is_empty() => DropKind::Deep(info.ty.clone()),
+                kind => kind,
+            };
             match m.kind {
                 // Rule N: one edge of a join still holds what another took.
                 // Keyed by name, so a loop variable qualifies.

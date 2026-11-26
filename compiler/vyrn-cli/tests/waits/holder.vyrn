@@ -1,4 +1,6 @@
-import { sleep, cancel, child } from "std/task"
+// A task cancelled under a plain await releases the handle it holds, and the
+// held task runs on.
+import { sleep, cancel } from "std/task"
 
 fn later(ms: Int64, s: consume String) -> String {
     await sleep(ms)
@@ -7,9 +9,9 @@ fn later(ms: Int64, s: consume String) -> String {
 }
 
 fn holder() -> Int64 {
-    let c = child(fork later(10, "the child printed"))
-    let p = fork later(10, "the plain task prints")
+    let p = fork later(10, "the held task runs on")
     await sleep(20)
+    print("never printed")
     return 0
 }
 

@@ -1,0 +1,41 @@
+// The module that declares a type's release takes a value of it apart: the
+// parts left are released one by one, and the declared release does not run.
+type Kid = { name: String, note: String }
+
+impl Owned for Kid {
+    fn release(consume self) {
+        print("never printed")
+        let s = consume self.name
+        drop s
+        let t = consume self.note
+        drop t
+    }
+}
+
+type Slot = enum { Full(String), Empty }
+
+impl Owned for Slot {
+    fn release(consume self) {
+        print("never printed")
+        match consume self {
+            Full(s) => {
+                drop s
+            }
+            Empty => {}
+        }
+    }
+}
+
+fn unkid(k: consume Kid) -> String {
+    return consume k.name
+}
+
+fn main() -> Int64 {
+    print(unkid(Kid { name: "a" + "b", note: "c" + "d" }))
+    let s = Full("e" + "f")
+    match consume s {
+        Full(x) => print(x),
+        Empty => {}
+    }
+    return 0
+}

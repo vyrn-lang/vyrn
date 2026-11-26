@@ -619,8 +619,7 @@ fn parseValue(p: modify JsonReader) -> Json {
 
 /// Reads and drops one value, refusing what `parseJson` refuses.
 export fn skipJsonValue(p: modify JsonReader) -> Unit {
-    let v = parseValue(p)
-    drop v
+    parseValue(p)
 }
 
 /// Reads an array, the cursor on `[`. A refused array holds what was read.
@@ -665,9 +664,6 @@ export fn parseJson(src: String) -> Result<Json, String> {
     let v = parseValue(p)
     finishJson(p)
     if jsonRefused(p) {
-        // `Json` declares its release, and only an explicit `drop` releases a
-        // partial tree on every engine.
-        drop v
         return Err(p.err.copy())
     }
     return Ok(v)

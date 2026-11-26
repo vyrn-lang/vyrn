@@ -58,31 +58,6 @@ impl Copy for Html {
     }
 }
 
-/// Declared because `Html` reaches itself through `El`, and the structural
-/// release walk has no bottom.
-impl Owned for Html {
-    fn release(consume self) {
-        match consume self {
-            Empty => {}
-            Text(s) => {
-                drop s
-            }
-            Raw(m) => {
-                match consume m {
-                    TrustedMarkup(s) => {
-                        drop s
-                    }
-                }
-            }
-            El(tag, attrs, kids) => {
-                drop tag
-                drop attrs
-                drop kids
-            }
-        }
-    }
-}
-
 /// Exported because `ks.copy()` cannot be written for this element type: a
 /// declared `Copy` answers for the whole value, not a part of one.
 export fn copyHtmlArray(ks: Array<Html>) -> Array<Html> {

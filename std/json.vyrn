@@ -36,31 +36,6 @@ impl Copy for Json {
     }
 }
 
-/// `Json` reaches itself, so the structural release has no bottom. This
-/// declaration is that bottom: the walk calls it, and every type above `Json`
-/// (`Array<Json>`, `JsonField`) keeps its structural release. A copy shares
-/// nothing, so releasing an original and its copy frees two trees.
-impl Owned for Json {
-    fn release(consume self) {
-        match consume self {
-            JNull => {}
-            JBool(b) => {}
-            JNum(s) => {
-                drop s
-            }
-            JStr(s) => {
-                drop s
-            }
-            JArr(xs) => {
-                drop xs
-            }
-            JObj(fs) => {
-                drop fs
-            }
-        }
-    }
-}
-
 /// A `Json` that shares nothing with `j`; same as `j.copy()`.
 export fn copyJson(j: Json) -> Json {
     return j.copy()

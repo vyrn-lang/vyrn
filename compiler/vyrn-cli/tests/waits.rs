@@ -3,7 +3,7 @@
 //! every value whichever wait the host cancels. Each prints the same bytes when
 //! the host replays what it delivered. The programs under
 //! `tests/waits/` witness `vyrn test`'s clock, a race the host's delivery order
-//! decides, a waiting export's result on every host, and released tasks and children on every
+//! decides, a waiting export's result on every host, and released and cancelled tasks on every
 //! host.
 
 mod common;
@@ -413,11 +413,11 @@ joined u
     }
 }
 
-/// A `Child`'s release cancels its task, where a plain handle's leaves it running: a cancelled
-/// `timeout`, whose branch is its child, a cancelled holder of a child and a plain handle, and
-/// a dropped child. Each frees every value on every host.
+/// Cancellation is explicit: a cancelled `timeout` cancels its branch in `std/task`'s code, and
+/// a task cancelled under a plain await releases its handle, whose task runs on. Each frees
+/// every value on every host.
 #[test]
-fn a_child_s_release_cancels_its_task_on_every_host() {
+fn a_cancelled_task_cancels_only_what_its_code_cancels_on_every_host() {
     for (name, want) in [
         (
             "timedout.vyrn",
@@ -428,19 +428,57 @@ the branch printed nothing
         (
             "holder.vyrn",
             "exit Some(0)
-the plain task prints
+the held task runs on
 main ends
-",
-        ),
-        (
-            "dropchild.vyrn",
-            "exit Some(0)
-dropped
 ",
         ),
     ] {
         assert_eq!(on_every_host(name), want, "{name}");
     }
+}
+
+/// A trap runs no more code in its task, and the task it held runs on: under `vyrn test`, a
+/// resident instance, the trap ends the holder alone. `vyrn run`, a native build and the shim
+/// end the program at any trap, so this shape has no other host.
+#[test]
+fn a_trap_in_a_holder_leaves_its_held_task_running() {
+    let out = vyrn()
+        .args(["test", "trapholder.vyrn"])
+        .env("VYRN_LEAK_CHECK", "1")
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn test");
+    assert!(
+        out.status.success() && norm(&out.stdout).contains("1 passed, 0 failed"),
+        "{}{}",
+        norm(&out.stdout),
+        norm(&out.stderr)
+    );
+}
+
+/// A fork of a call whose result crosses in its words (`Option<Int64>`, a record of two
+/// `Int64`), or in the parameter it returns, lands the result in the task's block on every host.
+#[test]
+fn a_fork_of_a_call_whose_result_crosses_in_words_runs_on_every_host() {
+    assert_eq!(
+        on_every_host("forkwords.vyrn"),
+        "exit Some(0)
+1 2 xy 3 4 8
+"
+    );
+}
+
+/// A task cancelled while it waits in `joinOr` runs on with its child's handle and cancels the
+/// child in its `Cancelled` arm. It frees every value on every host.
+#[test]
+fn a_cancel_aware_wait_answers_cancelled_on_every_host() {
+    assert_eq!(
+        on_every_host("aware.vyrn"),
+        "exit Some(0)
+the parent cancelled its child
+main ends
+"
+    );
 }
 
 const SHIM_RUN: &str = r#"import { readFile } from "node:fs/promises";

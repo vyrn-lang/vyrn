@@ -220,22 +220,21 @@ fn main() -> Int64 {
 /// A runtime module's declarations take a reserved spelling (`json$Json`)
 /// however it is linked, and a declared impl row is keyed by that one type key.
 /// In `loader.rs` a flattened impl method follows its type's rename, and
-/// `rewrite_module_refs` rewrites the impl head; if either stops, the row binds
-/// to a spelling nothing looks up.
+/// `rewrite_module_refs` rewrites the impl head; if either stops, `Json`'s
+/// declared `copy` binds to a spelling nothing looks up and the check fails.
 #[test]
 fn a_declared_impl_in_an_injected_module_is_reached_in_both_link_modes() {
     let dir = common::scratch("0096-keys");
-    // (file, source, the release the binding must be reclaimed by).
     let cases = [
         (
             "handonly.vyrn",
             "import { Json, emit } from \"std/json\"\n\
              fn main() -> Int64 {\n\
              let v: Json = JStr(\"a\" + \"b\")\n\
+             print(emit(v.copy()))\n\
              print(emit(v))\n\
              return 0\n\
              }\n",
-            "Owned$json$Json$release",
         ),
         (
             "both.vyrn",
@@ -243,34 +242,28 @@ fn a_declared_impl_in_an_injected_module_is_reached_in_both_link_modes() {
              type P = { n: Int64 }\n\
              fn main() -> Int64 {\n\
              let v: Json = JStr(\"a\" + \"b\")\n\
+             print(emit(v.copy()))\n\
              print(emit(v))\n\
              print(toJson(P { n: 5 }))\n\
              return 0\n\
              }\n",
-            "Owned$json$Json$release",
         ),
     ];
-    for (name, src, release) in cases {
+    for (name, src) in cases {
         let file = dir.join(name);
         std::fs::write(&file, src).unwrap();
-        // An unresolved flattened `release` fails the check; a release that
-        // frees the wrong thing traps.
-        let run = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+        // A copy or a release that frees the wrong thing traps under the audit.
+        let run = vyrn()
+            .env("VYRN_LEAK_CHECK", "1")
+            .arg("run")
+            .arg(&file)
+            .output()
+            .expect("vyrn run");
+        let stdout = String::from_utf8_lossy(&run.stdout);
         assert!(
-            run.status.success(),
-            "{name} did not run:\n{}{}",
-            String::from_utf8_lossy(&run.stdout),
+            run.status.success() && stdout.starts_with("\"ab\"\n\"ab\"\n"),
+            "{name} did not run:\n{stdout}{}",
             String::from_utf8_lossy(&run.stderr)
-        );
-        let engine = vyrn_genwasm::engine();
-        let rows =
-            vyrn_frontend::symbols::analyze_judged(src, None, Some(&*engine), &vyrn_lower::JUDGE);
-        let report: String = (rows.memory.iter())
-            .map(|m| format!("{} {}\n", m.name, m.text))
-            .collect();
-        assert!(
-            report.contains(&format!("calling `{release}`")),
-            "{name}: expected the declared release `{release}`:\n{report}"
         );
     }
 }

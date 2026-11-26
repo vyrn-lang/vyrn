@@ -1,0 +1,9 @@
+// Only the module that declares a type's release takes a value of it apart.
+import { Kid, kid } from "./apart/kid"
+
+fn main() -> Int64 {
+    let k = kid("a" + "b")
+    let s = consume k.name
+    print(s)
+    return 0
+}

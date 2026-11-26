@@ -31,6 +31,15 @@ type Race = enum { First(A), Second(B) }
 
 The task of a `race` that returned first, and its result.
 
+## Joined
+
+```vyrn
+type Joined = enum { Done(T), Cancelled(Task<T>) }
+```
+
+What `joinOr` answers: the task's result, or its handle when the caller was
+cancelled while it waited.
+
 ## join
 
 ```vyrn
@@ -39,6 +48,18 @@ fn join<T>(t: consume Task<T>) -> T
 
 Waits for `t` to end and returns its result. If `t` is cancelled, the
 caller is cancelled where it waits.
+
+## joinOr
+
+```vyrn
+fn joinOr<T>(t: consume Task<T>) -> Joined<T>
+```
+
+Waits for `t` as `join` does, but a cancellation of the caller while it
+waits here answers `Cancelled(t)`, and the caller runs on: it decides to
+cancel, keep or hand on `t`, and returns. Any other wait the caller reaches
+after that ends it there. If `t` is cancelled, the caller is cancelled
+where it waits.
 
 ## cancel
 
@@ -49,32 +70,6 @@ fn cancel<T>(t: consume Task<T>) -> Unit
 Ends `t` where it waits, releasing what it holds, or releases its result
 when it returned. Does not wait.
 
-## Child
-
-```vyrn
-type Child = enum { Held(Task<T>) }
-```
-
-A task's handle whose release cancels the task, where a plain handle's
-release leaves it running: the code that holds a `Child` decides that the
-task ends with it. `detach(c)` takes the plain handle back, for `join`.
-
-## child
-
-```vyrn
-fn child<T>(t: consume Task<T>) -> Child<T>
-```
-
-Holds `t` as a child: releasing the child cancels `t`.
-
-## detach
-
-```vyrn
-fn detach<T>(c: consume Child<T>) -> Task<T>
-```
-
-The plain handle `c` holds.
-
 ## both
 
 ```vyrn
@@ -82,7 +77,8 @@ fn both<A, B>(first: consume Task<A>, second: consume Task<B>) -> Both<A, B>
 ```
 
 Waits for both tasks: their results, in argument order. If one is
-cancelled, `both` is cancelled, and so is the other, a child of `both`.
+cancelled, `both` cancels the other and is cancelled. If the caller is
+cancelled while it waits here, `both` cancels both tasks.
 
 ## race
 
@@ -91,9 +87,10 @@ fn race<A, B>(first: consume Task<A>, second: consume Task<B>) -> Race<A, B>
 ```
 
 The first task to return, in argument order once both started, and its
-result: `await race(fork f(a), fork sleep(500))`. The other, a child of
-`race`, is cancelled where it waits, or released if it returned. If the
-first to end was cancelled, `race` is cancelled.
+result: `await race(fork f(a), fork sleep(500))`. The other is cancelled
+where it waits, or released if it returned. If the first to end was
+cancelled, `race` is cancelled. If the caller is cancelled while it waits
+here, `race` cancels both tasks.
 
 ## timeout
 
@@ -111,17 +108,17 @@ fn joinAll<T>(ts: consume Array<Task<T>>) -> Array<T>
 ```
 
 Waits for every task: the results, in index order. If one is cancelled,
-`joinAll` is cancelled, and so are the rest, its children.
+or the caller is cancelled while it waits here, `joinAll` cancels the rest
+and is cancelled.
 
 ## Group
 
 ```vyrn
-type Group = { tasks: Array<Child<T>>, ids: Array<Int64>, limit: Int64 }
+type Group = { tasks: Array<Task<T>>, ids: Array<Int64>, limit: Int64 }
 ```
 
 Tasks of one result type, at most `limit` of them running at once, joined
-or cancelled together. Each is a child of the group, so releasing the group
-cancels them; `ids` holds their run queue ids in the same order.
+or cancelled together; `ids` holds their run queue ids in the same order.
 
 ## group
 
@@ -139,7 +136,9 @@ fn room<T>(g: modify Group<T>) -> Unit
 ```
 
 Waits until fewer than the limit of `g`'s tasks run: call it before each
-`fork` the group will hold. If one was cancelled, `room` is cancelled.
+`fork` the group will hold. If one was cancelled, or the caller is
+cancelled while it waits here, `room` cancels the group's tasks and is
+cancelled.
 
 ## add
 

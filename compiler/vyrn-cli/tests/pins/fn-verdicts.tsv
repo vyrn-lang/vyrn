@@ -225,7 +225,6 @@ examples/binarytrees.vyrn	checkAll	yes	no, its effect set is alloc
 examples/binarytrees.vyrn	iterationsFor	yes	no, the loop is no counter loop
 examples/binarytrees.vyrn	run	yes	no, its effect set is alloc, write-output
 examples/binarytrees.vyrn	main	yes	no, its effect set is alloc, write-output, module-state
-examples/binarytrees.vyrn	Owned$Tree$release	yes	no, it is recursive
 examples/binder_shadows_state.vyrn	bump	yes	no, its effect set is module-state
 examples/binder_shadows_state.vyrn	peek	yes	no, its effect set is alloc, write-output, module-state
 examples/binder_shadows_state.vyrn	main	yes	no, its effect set is alloc, write-output, module-state
@@ -349,7 +348,6 @@ examples/container.vyrn	main	no, it keeps an index check	no, its effect set is a
 examples/container.vyrn	Iterate$Window$size	yes	no, `self` is Window, not an integer, Bool or a read array of one
 examples/container.vyrn	Owned$Pool$release	yes	no, its effect set is write-output
 examples/container.vyrn	Copy$Pool$copy	yes	no, its effect set is alloc, write-output
-examples/container.vyrn	Owned$Chain$release	yes	no, it is recursive
 examples/container.vyrn	Copy$Chain$copy	yes	no, its effect set is alloc
 examples/contractquery.vyrn	noSchema	yes	no, its effect set is alloc
 examples/contractquery.vyrn	noOrigin	yes	no, its effect set is alloc
@@ -960,7 +958,6 @@ examples/modifypaths.vyrn	Merging$Tally$absorb	yes	no, its effect set is alloc
 examples/modifyself.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/modifyself.vyrn	Counting$Tally$record	yes	no, its effect set is alloc
 examples/modifyself.vyrn	Counting$Tally$sum	yes	no, `self` is Tally, not an integer, Bool or a read array of one
-examples/modifyself.vyrn	Owned$Tally$release	yes	no, it is recursive
 examples/modifyself.vyrn	feed	yes	no, its effect set is alloc
 examples/modules.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/modules.vyrn	where$pPercent	yes	yes, emulated Int64
@@ -2525,7 +2522,6 @@ std/graphql.vyrn	gqlSpyResolve	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlExecTestSchema	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlEmptyRootSchema	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlNullResolve	yes	no, its effect set is alloc
-std/graphql.vyrn	Owned$GqlSel$release	yes	no, it is recursive
 std/hash.vyrn	fnv1a	yes	yes, emulated UInt64
 std/hash.vyrn	fnv1aStr	yes	no, its effect set is alloc
 std/hash.vyrn	sha1	yes	no, its effect set is alloc
@@ -2555,7 +2551,7 @@ std/hints.vyrn	reportText	no, it calls `earned`, which is not trap-free	no, its 
 std/html.vyrn	copyHtmlArray	yes	no, its effect set is alloc
 std/html.vyrn	el	yes	no, its effect set is alloc
 std/html.vyrn	text	yes	no, its effect set is alloc
-std/html.vyrn	empty	yes	no, the value of line 108 is Html, not an integer, Bool or a read array of one
+std/html.vyrn	empty	yes	no, the value of line 83 is Html, not an integer, Bool or a read array of one
 std/html.vyrn	cls	yes	no, its effect set is alloc
 std/html.vyrn	attr	yes	no, its effect set is alloc
 std/html.vyrn	on	yes	no, its effect set is alloc
@@ -2603,7 +2599,6 @@ std/html.vyrn	document	no, it calls `toHtmlString`, which is not trap-free	no, i
 std/html.vyrn	withAttr	yes	no, its effect set is alloc
 std/html.vyrn	pushed	yes	no, its effect set is alloc
 std/html.vyrn	Copy$Html$copy	yes	no, its effect set is alloc
-std/html.vyrn	Owned$Html$release	yes	no, it is recursive
 std/http.editor.vyrn	vyrnSymbolMapsHttp	yes	no, the result is String, not an integer, Bool or a read array of one
 std/http.vyrn	httpNoRun	yes	no, `req` is Request, not an integer, Bool or a read array of one
 std/http.vyrn	httpNoWhole	yes	no, `req` is Request, not an integer, Bool or a read array of one
@@ -2837,7 +2832,6 @@ std/json.vyrn	json$jsonEncoder	no, it keeps an index check	no, its effect set is
 std/json.vyrn	json$jsonEncoderBody	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/json.vyrn	json$jsonVariant	no, it calls `jsonEncoder`, which is not trap-free	no, its effect set is alloc, gen-only
 std/json.vyrn	Copy$json$Json$copy	yes	no, its effect set is alloc
-std/json.vyrn	Owned$json$Json$release	yes	no, it is recursive
 std/json5.vyrn	maxDepth	yes	yes, emulated Int64
 std/json5.vyrn	newP5	yes	no, its effect set is alloc
 std/json5.vyrn	cur	yes	no, `p` is P5, not an integer, Bool or a read array of one
@@ -3339,7 +3333,8 @@ std/syntax.vyrn	syntaxReport	yes	no, its effect set is gen-only
 std/syntaxreport.vyrn	syntaxSentence	no, it keeps a slice check	no, its effect set is alloc
 std/syntaxreport.vyrn	syntaxEntry	yes	no, the loop is no counter loop
 std/task.vyrn	task$sleep	yes	no, its effect set is waits
-std/task.vyrn	task$settle	no, it calls `watch`, which is not trap-free	no, its effect set is alloc, module-state, waits
+std/task.vyrn	task$settle	no, it calls `watch`, which is not trap-free	no, its effect set is alloc, module-state, trap, waits
+std/task.vyrn	task$stopAll	no, it calls `stop`, which is not trap-free	no, its effect set is alloc, module-state, trap
 std/task.vyrn	task$live	no, it calls `stateOf`, which is not trap-free	no, its effect set is module-state
 std/task.vyrn	task$anyCancelled	no, it calls `stateOf`, which is not trap-free	no, its effect set is module-state
 std/task.vyrn	task$taskAt	yes	no, its effect set is module-state
@@ -3355,6 +3350,7 @@ std/task.vyrn	task$forget	no, it keeps an index check	no, its effect set is modu
 std/task.vyrn	task$stop	no, it keeps an index check	no, its effect set is alloc, module-state, trap
 std/task.vyrn	task$waitFor	no, it calls `delivery`, which is not trap-free	no, its effect set is alloc, module-state
 std/task.vyrn	task$cancelled	yes	no, its effect set is alloc, module-state, waits
+std/task.vyrn	task$waitAware	yes	no, its effect set is alloc, module-state, waits
 std/task.vyrn	task$taskResult	no, it keeps an index check	no, its effect set is module-state
 std/task.vyrn	task$taskSettle	no, it keeps an index check	no, its effect set is alloc, module-state
 std/task.vyrn	task$taskFinish	no, it calls `taskEnd`, which is not trap-free	no, its effect set is alloc, module-state
@@ -3672,7 +3668,6 @@ std/von.vyrn	roundTrip	no, it calls `toVon`, which is not trap-free	no, its effe
 std/von.vyrn	converted	no, it calls `jsonToVon`, which is not trap-free	no, its effect set is alloc, trap
 std/von.vyrn	nested	yes	no, its effect set is alloc
 std/von.vyrn	Copy$Von$copy	yes	no, its effect set is alloc
-std/von.vyrn	Owned$Von$release	yes	no, it is recursive
 std/vyx-hints.vyrn	hintsKey	yes	no, the result is String, not an integer, Bool or a read array of one
 std/vyx-hints.vyrn	vyxHints	no, it calls `vhScan`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/vyx-hints.vyrn	vyxHintsConfigured	no, it calls `vhScan`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
@@ -3940,4 +3935,3 @@ std/vyx.vyrn	vyxError	no, it calls `vyxErrorOf`, which is not trap-free	no, its 
 std/vyx.vyrn	vyxErrorThemed	no, it calls `vyxErrorOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/vyx.vyrn	vyxScriptBodyOf	no, it calls `vyxOutlineOf`, which is not trap-free	no, its effect set is alloc
 std/vyx.vyrn	vyxTemplateBodyOf	no, it calls `vyxOutlineOf`, which is not trap-free	no, its effect set is alloc
-std/vyx.vyrn	Owned$VyxFlow$release	yes	no, it is recursive

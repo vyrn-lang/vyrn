@@ -1,0 +1,24 @@
+// A trap runs no more code in its task, and the handles it held detach: the
+// held task runs on.
+import { sleep } from "std/task"
+
+let mut ran: Bool = false
+
+fn later(ms: Int64) -> Int64 {
+    await sleep(ms)
+    ran = true
+    return ms
+}
+
+fn holder() -> Int64 {
+    let p = fork later(10)
+    await sleep(1)
+    panic("the holder trapped")
+    return 0
+}
+
+test "a trap in a holder leaves its held task running" {
+    let h = fork holder()
+    await sleep(30)
+    assert(ran)
+}

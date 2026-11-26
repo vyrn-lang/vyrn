@@ -56,40 +56,6 @@ impl Copy for Von {
     }
 }
 
-/// `Von` reaches itself, so the structural release has no bottom; this
-/// declaration is that bottom, and every type above `Von` keeps its structural
-/// release.
-impl Owned for Von {
-    fn release(consume self) {
-        match consume self {
-            VRecord(n, fs) => {
-                drop n
-                drop fs
-            }
-            VVariant(n, xs) => {
-                drop n
-                drop xs
-            }
-            VArray(xs) => {
-                drop xs
-            }
-            VMap(es) => {
-                drop es
-            }
-            VStr(s) => {
-                drop s
-            }
-            VInt(s) => {
-                drop s
-            }
-            VFloat(s) => {
-                drop s
-            }
-            VBool(b) => {}
-        }
-    }
-}
-
 /// `copy` over a list of values; `xs.copy()` is refused for this element type.
 export fn copyVonArray(xs: Array<Von>) -> Array<Von> {
     let mut out: Array<Von> = []

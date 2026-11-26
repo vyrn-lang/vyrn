@@ -1,3 +1,2 @@
-release_passes_a_record_self_to_a_function.vyrn:5:0: `r` (line 4) is released whole although a `consume` took `.s` out of it
 release_passes_a_record_self_to_a_function.vyrn:10:0: `self` may not be moved out of its `release`: a new owner would release it again
   fix: `match consume self` or `consume self.field` takes it apart
