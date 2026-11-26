@@ -235,6 +235,29 @@ export fn bsearch(xs: Array<Int64>, v: Int64) -> Int64 {
     assert_eq!((err.as_str(), rows.len()), ("", 3));
 }
 
+/// A caller assumes the declared result clause of a callee that takes a
+/// function value: the clause holds whatever value the call binds, because
+/// the callee checks it before each return.
+#[test]
+fn a_call_that_binds_a_function_value_assumes_the_result_clause() {
+    let src = "fn applyAll(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> where value.length == xs.length {
+    let mut out: Array<Int64> = []
+    for x in xs {
+        out.push(f(x))
+    }
+    return out
+}
+fn add7(x: Int64) -> Int64 {
+    return x + 7
+}
+fn third(xs: Array<Int64> where value.length >= 3) -> Int64 {
+    let b = applyAll(xs, add7)
+    return b[2]
+}
+";
+    assert_eq!(verdicts(src, "third"), ["proved array-index"]);
+}
+
 /// A kept check over a sum that may wrap names the sum, not the callee whose
 /// result is one addend, where that callee states a result clause.
 #[test]

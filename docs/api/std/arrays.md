@@ -5,7 +5,7 @@ Higher-order array helpers such as `map`, `filter` and `fold`, in Vyrn.
 ## map
 
 ```vyrn
-fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U>
+fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> where value.length == xs.length
 ```
 
 Applies `f` to every element, collecting the results into a new array.

@@ -5462,7 +5462,9 @@ impl<'a> Walk<'a> {
     /// call. A side the call does not hand a value is left out: an argument
     /// read from a place, or the result of a call no name binds.
     fn ensured(&self, st: &mut State, n: Option<Name>, rhs: &Rhs) {
-        let g = self.sums.call(rhs);
+        // A declared clause holds whatever function values the call binds:
+        // the callee checks it before each of its returns.
+        let g = runs(self.sums.instances, rhs);
         let Some((_, s)) = g.and_then(|g| self.sums.get(g)) else {
             return;
         };

@@ -1,7 +1,7 @@
 /// Higher-order array helpers such as `map`, `filter` and `fold`, in Vyrn.
 
 /// Applies `f` to every element, collecting the results into a new array.
-export fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> {
+export fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> where value.length == xs.length {
     let mut out: Array<U> = []
     for x in xs {
         out.push(f(x))
