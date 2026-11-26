@@ -916,6 +916,10 @@ fn the_generation_refusals_are_what_the_engine_says() {
              `moduleCode` cannot reflect `./r109_a_generator_that_reflects_its_importer`, \
              because `./r109_a_generator_that_reflects_its_importer` imports this generator",
         ),
+        (
+            "r113_an_island_literal_the_grammar_refuses.vyrn",
+            "a ledger line cannot hold `x` here",
+        ),
     ];
     for (file, says) in rows {
         let (ok, text) = refusal_in(dir().join("gen"), file, false);

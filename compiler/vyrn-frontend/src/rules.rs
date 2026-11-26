@@ -373,7 +373,11 @@ rules! {
         "`@{name}` writes `{other}`, which line {line} declares already";
     ValidatedBaseNotScalar { name }
         "`{name}` must have a scalar base (Int64, sized int, Float64, Bool, or String)";
-    PredicateCalls { kind, name } "{kind} predicate for `{name}` may not contain calls (v0.1)";
+    PredicateCalls { kind, name }
+        "{kind} predicate for `{name}` may call only a `-> Bool` function of \
+        its own module, passing its binds";
+    PredicateImpure { name, chain, reason }
+        "the predicate for `{name}` is not comptime-pure: it calls {chain}, which {reason}";
     PredicateNotBool { kind, name, pty } "{kind} predicate for `{name}` must be Bool, found {pty}";
     ExternParamType { func, param, ty }
         "extern fn `{func}` parameter `{param}` has type {ty}, which cannot cross \
@@ -596,6 +600,8 @@ rules! {
         "`{name}` names its target as a type argument: write `{name}<{was}>({suffix})`";
     SchemaOfUnion { t }
         "`schemaOf` describes one declaration, and `{t}` is a union of several: ask it of each member";
+    SchemaOfCall { name, t }
+        "`{name}` cannot state the rule of `{t}`: it calls a function, and no schema keyword does";
     ContractOfArity { got } "`contractOf` takes 1 argument (a contract name), got {got}";
     ContractOfUnknown { cn }
         "`contractOf` needs a declared contract name; \
@@ -1098,6 +1104,7 @@ rules! {
     GenImportArity { name, want, got } "generator `{name}` takes {want} argument(s), got {got}";
     GenImportNotCode { name, ret } "generator `{name}` returns `{ret}`; an imported generator returns `Code`";
     GenModuleReread { module, why } "cannot re-read generator module `{module}`: {why}";
+    IslandRow { sentence } "{sentence}";
     GenFailed { name, args, trap } "generator `{name}({args})` failed: {trap}";
     NamespaceBoundTwice { ns } "namespace `{ns}` is bound twice in this module";
     NamespaceCollides { ns }

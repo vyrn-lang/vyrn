@@ -41,9 +41,9 @@ use crate::{
 /// `scan`, and `trivia` and `token` serve the parser itself.
 const NOT_STARTS: &[&str] = &["scan", "trivia", "token"];
 
-/// Returns the Vyrn source of `g`'s parser, or where the grammar has no such parser
-/// and why.
-pub fn parser(g: &Grammar) -> Result<String, Refused> {
+/// Returns the Vyrn source of `g`'s parser and the island of each start rule, or
+/// where the grammar has no such parser and why. No island is part of the source.
+pub fn parser(g: &Grammar) -> Result<(String, Vec<Island>), Refused> {
     refuse_unset_flags(g)?;
     let starts = start_rules(g)?;
     let rules = reached(g, &starts);
@@ -69,7 +69,7 @@ pub fn parser(g: &Grammar) -> Result<String, Refused> {
     }
     refuse_wide_classes(g, &rules)?;
     let rows = rows(g);
-    let shapes = shapes(g, &rules, rows.keys())?;
+    let shapes = shapes(g, &rules, &starts, rows.keys())?;
     let mut w = Writer {
         g,
         free: free_labels(g, &rules),
@@ -90,10 +90,19 @@ pub fn parser(g: &Grammar) -> Result<String, Refused> {
     for &r in &rules {
         w.rule(r)?;
     }
-    for &r in &starts {
-        w.entry(r)?;
-    }
-    Ok(w.finish(&rules))
+    let islands = (starts.iter().map(|&r| w.entry(r))).collect::<Result<_, _>>()?;
+    Ok((w.finish(&rules), islands))
+}
+
+/// A start rule's island: the refinement type `<Start>Text` whose value the rule
+/// accepts, the names its declarations bind, and the module text that declares
+/// them beside [`parser`]'s, which a loader adds only for a module that names one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Island {
+    pub ty: String,
+    pub start: String,
+    pub names: Vec<String>,
+    pub decls: String,
 }
 
 /// Refuses a character class that names a character outside ASCII: the loader reads
@@ -749,8 +758,8 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// The exported function of start rule `r`.
-    fn entry(&mut self, r: RuleId) -> Result<(), Refused> {
+    /// The exported function of start rule `r`, and its island.
+    fn entry(&mut self, r: RuleId) -> Result<Island, Refused> {
         self.start_rule(r);
         let rule = self.g.body(r);
         let ty = self.ty(Ty::Rule(r));
@@ -802,7 +811,36 @@ impl Writer<'_> {
         self.line("return Err(consume p.errors)");
         self.close();
         self.o.push('\n');
-        Ok(())
+        let (name, island) = (type_name(&rule.name), island_type(&rule.name));
+        let decls = format!(
+            "
+/// Whether `parse{name}` accepts `text`.
+export fn is{name}(text: String) -> Bool {{
+    return match parse{name}(text) {{
+        Ok(tree) => true,
+        Err(errors) => false,
+    }}
+}}
+
+/// A text `parse{name}` accepts. A string literal of this type is read with the
+/// grammar when the program is checked.
+export type {island} = String where is{name}(value)
+
+/// The tree of `text`, which `parse{name}` accepts.
+export fn parsed{name}(text: {island}) -> {ty} {{
+    return match parse{name}(text) {{
+        Ok(tree) => tree,
+        Err(errors) => panic(\"a `{island}` that `parse{name}` refuses\"),
+    }}
+}}
+"
+        );
+        Ok(Island {
+            names: vec![island.clone(), format!("is{name}"), format!("parsed{name}")],
+            ty: island,
+            start: rule.name.to_string(),
+            decls,
+        })
     }
 
     /// The module around the rule functions: the types, then the rules, then the
@@ -1804,6 +1842,18 @@ impl Writer<'_> {
     }
 }
 
+/// The refinement type [`parser`] writes for start rule `rule`, whose value the
+/// rule accepts.
+pub(crate) fn island_type(rule: &str) -> String {
+    format!("{}Text", type_name(rule))
+}
+
+/// The name of the `gen fn` [`report`] writes for start rule `rule` that reports
+/// the refusals of a text: `report<Start>Text(path, text) -> Code`.
+pub fn island_report_fn(rule: &str) -> String {
+    format!("{}Text", report_fn(rule))
+}
+
 /// The name of the reporting `gen fn` of start rule `rule`.
 pub(crate) fn report_fn(rule: &str) -> String {
     format!("report{}", type_name(rule))
@@ -1844,8 +1894,14 @@ pub fn report(
             "/// The refusals `parse{name}` gives the text at `path`, each a report at its
 /// line and column.
 export gen fn {report}(path: String) -> Code {{
+    return {text_report}(path, readFile(path) ?? \"\")
+}}
+
+/// The refusals `parse{name}` gives `text`, each a report at its line and column
+/// in the file `path`.
+export gen fn {text_report}(path: String, text: String) -> Code {{
     let mut out = vyrn\"\"
-    match parsed.parse{name}(readFile(path) ?? \"\") {{
+    match parsed.parse{name}(text) {{
         Ok(tree) => {{}}
         Err(errors) => {{
             for e in errors {{
@@ -1860,6 +1916,7 @@ export gen fn {report}(path: String) -> Code {{
 ",
             name = type_name(rule),
             report = report_fn(rule),
+            text_report = island_report_fn(rule),
         );
     }
     o.push_str("/// A refusal's row as text, for `syntaxSentence`.\ngen fn rowParts(row: parsed.Row) -> SyntaxRow {\n    return match row {\n");
@@ -2266,14 +2323,16 @@ mod tests {
     #[test]
     fn a_cycle_declares_no_release() {
         let grammar = "expect ^E\nDoc = a:A\nA = '(' b:B? ')' / C\nB = '[' a:A ']'\nC = 'c'\n";
-        let written = parser(&load(grammar).expect("it loads")).expect("it lowers");
+        let written = parser(&load(grammar).expect("it loads"))
+            .expect("it lowers")
+            .0;
         assert!(!written.contains("impl Owned"), "{written}");
     }
 
     #[test]
     fn a_row_line_names_its_holes() {
         let g = crate::load("expect ^E\nrow Two(a, b)\nrow None\nDoc = 'x'\n").expect("loads");
-        let written = parser(&g).expect("writes");
+        let written = parser(&g).expect("writes").0;
         assert!(written.contains("    Two(String, String),\n"), "{written}");
         assert!(written.contains("    None,\n"), "{written}");
         for bad in ["row Two(a, a)", "row Two(a", "row Two(1)", "row 1"] {
@@ -2303,7 +2362,7 @@ mod tests {
     #[test]
     fn the_format_grammar_writes_a_parser() {
         let g = load(&text("../../std/syntax.syntax")).expect("syntax.syntax loads");
-        let written = parser(&g).expect("it lowers");
+        let written = parser(&g).expect("it lowers").0;
         assert!(
             written.contains("export fn parseFile(text: String)"),
             "{written}"

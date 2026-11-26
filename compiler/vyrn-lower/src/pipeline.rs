@@ -126,6 +126,7 @@ fn check(
                     cost: Vec::new(),
                     proofs: Vec::new(),
                     waits: Vec::new(),
+                    islands: Vec::new(),
                 };
                 return (judged, None);
             }
@@ -135,6 +136,10 @@ fn check(
     }
     let (mut diags, refused, binders, record) =
         vyrn_frontend::check_and_synthesize(program, engine, linker);
+    let islands = (record.iter().flat_map(|r| &r.islands))
+        .filter(|s| s.module.is_none())
+        .cloned()
+        .collect();
     // One type record for the readers below: the check's own, or a new one
     // where the check made none, with the function values the given bodies
     // store and pass. The synthesis is over, so no node moves under its keys.
@@ -185,6 +190,7 @@ fn check(
         cost: Vec::new(),
         proofs: Vec::new(),
         waits: Vec::new(),
+        islands,
     };
     (out, judged)
 }

@@ -1,0 +1,9 @@
+fn isShort(value: String) -> Bool {
+    return value.byteLength < 4
+}
+
+type Short = String where isShort("abc")
+
+fn main() -> Int64 {
+    return 0
+}

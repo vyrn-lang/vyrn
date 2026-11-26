@@ -1,0 +1,15 @@
+let limit: Int64 = 4
+
+fn under(value: String) -> Bool {
+    return value.byteLength < limit
+}
+
+fn isShort(value: String) -> Bool {
+    return under(value)
+}
+
+type Short = String where isShort(value)
+
+fn main() -> Int64 {
+    return 0
+}

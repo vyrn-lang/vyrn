@@ -1049,6 +1049,7 @@ fn check_accum_inner(
         shadows: &program.surface_shadows,
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
+        islands: &program.islands[..],
         orders: &program.orders,
         record_reads: recording && program.session.get().is_some(),
         record_uses: USES.with(|u| u.get()),
@@ -1640,6 +1641,9 @@ pub struct Recorded {
     /// with the entry's serial. A serial names one record of one body, so a
     /// reader keyed by it may reuse what it derived from that record.
     pub entries: Vec<(SourceBody, u64)>,
+    /// Each string literal that crosses into an island type, in the order
+    /// typed; a body typed twice repeats its sites.
+    pub islands: Vec<crate::gen::IslandSite>,
     /// Each statement whose refusal the checker states, the innermost that
     /// states it. The core builds it as a trap and binds its name `Err`, so
     /// the typed judgment judges the rest of the body.
@@ -1660,6 +1664,7 @@ impl Recorded {
         self.stored.extend(tail.stored);
         self.reads.extend(tail.reads);
         self.entries.extend(tail.entries);
+        self.islands.extend(tail.islands);
         self.trapped.extend(tail.trapped);
     }
 }
@@ -1731,6 +1736,8 @@ struct Cx<'a> {
     extern_fns: &'a std::collections::HashSet<String>,
     /// `gen fn`s, which cannot be function values.
     gen_fns: &'a std::collections::HashSet<String>,
+    /// [`Program::islands`].
+    islands: &'a [crate::gen::Island],
     /// `std/order`'s compiler-known declarations.
     orders: &'a crate::order::Names,
     /// Whether a recording check records read rows ([`Recorded::reads`]): yes
@@ -2426,10 +2433,30 @@ impl<'a> Checker<'a> {
         crate::types::coercible(from, to, self)
     }
 
+    /// Records a string literal that flows into an island type as a site the
+    /// island verdict reads ([`crate::gen::island_verdicts`]).
+    fn note_island(&self, expr: &Expr, to: &Type) {
+        let (Expr::Str(text, _), Type::Named(n)) = (expr, to) else {
+            return;
+        };
+        let island = self.islands.iter().find(|i| &i.ty == n);
+        if let (Some(island), Some(r)) = (island, self.acc.borrow_mut().record.as_mut()) {
+            let (line, col) = expr.start();
+            r.islands.push(crate::gen::IslandSite {
+                module: self.frame.borrow().here.clone(),
+                line,
+                col,
+                text: text.clone(),
+                island: island.clone(),
+            });
+        }
+    }
+
     /// Refuses a constant, or a record literal of constants, that fails the
     /// predicate of the named type it flows into. Other values keep the
-    /// runtime check.
+    /// runtime check; a string literal into an island type is noted.
     fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {
+        self.note_island(expr, to);
         let decl = match to {
             Type::Named(n) => match self.decl(n) {
                 Some(d) if d.predicate.is_some() => d,
@@ -2971,8 +2998,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks a type's `where` predicate: no call, and Bool in a scope holding
-    /// only `binds`. `kind` names it in a refusal ("cross-field" or
+    /// Checks a type's `where` predicate: Bool in a scope holding only
+    /// `binds`, and each call one of a `-> Bool` function of the declaring
+    /// module whose arguments are binds. `check_comptime_purity` holds the
+    /// callee pure. `kind` names it in a refusal ("cross-field" or
     /// "refinement").
     fn check_predicate(
         &self,
@@ -2984,7 +3013,18 @@ impl<'a> Checker<'a> {
             return Ok(());
         };
         let decl = DeclName(&t.name);
-        if consteval::contains_call(pred) {
+        let binds: Vec<(String, Type)> = binds.collect();
+        let is_bind =
+            |a: &Expr| matches!(a, Expr::Var { name, .. } if binds.iter().any(|(b, _)| b == name));
+        let allowed = |c: &Expr| match c {
+            Expr::Call { name, args, .. } => {
+                let f = self.resolve_fn(name).map(|d| &self.functions[d.index()]);
+                f.is_some_and(|f| f.module == t.module && f.ret == Type::Bool)
+                    && args.iter().all(is_bind)
+            }
+            _ => false,
+        };
+        if !consteval::calls(pred).is_some_and(|cs| cs.into_iter().all(allowed)) {
             return Err(cerr!(t.line, PredicateCalls, kind, name = decl));
         }
         let mut scope = Scope::closed();
@@ -5849,6 +5889,17 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, SchemaOfParam, name, t));
             }
         }
+        // No schema keyword states a call.
+        if let ("schemaOf" | "jsonSchema", [Type::Named(n)]) = (name, written) {
+            let calls = |p: &Expr| consteval::calls(p).is_some_and(|cs| !cs.is_empty());
+            if self
+                .decl(n)
+                .and_then(|d| d.predicate.as_ref())
+                .is_some_and(calls)
+            {
+                return Err(cerr!(line, SchemaOfCall, name, t = n));
+            }
+        }
         // A `Schema` describes one declaration, and a union is none of its own.
         if let ("schemaOf", [t]) = (name, written) {
             if crate::types::union_of(t, self).is_some() {
@@ -7363,34 +7414,49 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
     ty.is_scalar() || (allow_unit && *ty == Type::Unit)
 }
 
-/// Refuses a `gen fn` that reaches, through any call chain, an `extern`,
-/// module state, or an atom [`crate::effects::gen_refusal`] refuses, naming
-/// the effect and the chain. Every `gen fn` is checked, even one called only
-/// at run time, because any may be an import target.
+/// Refuses a `gen fn`, or a function a `where` predicate calls, that reaches,
+/// through any call chain, an `extern`, module state, or an atom
+/// [`crate::effects::gen_refusal`] refuses, naming the effect and the chain.
+/// Every `gen fn` is checked, even one called only at run time, because any
+/// may be an import target.
 fn check_comptime_purity<'a>(
     program: &'a Program,
     through: &'a HashSet<NodeId>,
     dispatched: impl Iterator<Item = &'a (String, String)>,
     out: &mut Vec<Diagnostic>,
 ) {
-    // A given gen fn's verdict is its module's own load's.
-    let gen_fns: Vec<&Function> = (program.functions.iter())
-        .filter(|f| f.is_gen && matches!(f.body, Body::Written(_)))
-        .collect();
-    if gen_fns.is_empty() {
-        return;
-    }
     let fn_map: HashMap<&str, &Function> = program
         .functions
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
+    let written = |f: &&Function| matches!(f.body, Body::Written(_));
+    // A given function's verdict is its module's own load's.
+    let gen_fns = (program.functions.iter().filter(|f| f.is_gen))
+        .filter(written)
+        .map(|g| (g, None));
+    let predicated = (program.type_decls.iter()).filter(|t| t.line != 0);
+    let fns = &fn_map;
+    let callees = predicated.flat_map(|t| {
+        let calls = t.predicate.as_ref().and_then(consteval::calls);
+        (calls.into_iter().flatten()).filter_map(move |c| match c {
+            // Another module's callee is refused by `check_predicate`.
+            Expr::Call { name, .. } => (fns.get(name.as_str()).copied())
+                .filter(|f| written(f) && f.module == t.module)
+                .map(|f| (f, Some(t))),
+            _ => None,
+        })
+    });
+    let roots: Vec<(&Function, Option<&TypeDecl>)> = gen_fns.chain(callees).collect();
+    if roots.is_empty() {
+        return;
+    }
     let cx = FenceCx::new(program, through, dispatched);
     // A function's own violation and call edges depend on its body alone, so
-    // they are computed once and shared by every generator's search.
+    // they are computed once and shared by every root's search.
     let mut facts: HashMap<String, Fenced> = HashMap::new();
 
-    for g in gen_fns {
+    for (g, pred) in roots {
         // Breadth-first, so the reported chain is the shortest.
         let mut queue: std::collections::VecDeque<Vec<&str>> =
             std::collections::VecDeque::from([vec![g.name.as_str()]]);
@@ -7409,15 +7475,26 @@ fn check_comptime_purity<'a>(
             }
             let Fenced { impure, calls } = &facts[cur];
             if let Some(reason) = impure.clone() {
-                let msg = if path.len() == 1 {
-                    cerr!(g.line, GenImpure, name = DeclName(&g.name), reason)
-                } else {
-                    let written = path.iter().map(|n| program.spellings.written(n));
-                    let chain = written.collect::<Vec<_>>().join(" -> ");
-                    let (name, cur) = (DeclName(&g.name), DeclName(cur));
-                    cerr!(g.line, GenImpureVia, name, cur, chain, reason)
+                let spelled = path.iter().map(|n| program.spellings.written(n));
+                let msg = match pred {
+                    Some(t) => {
+                        let chain = spelled.map(|n| format!("`{n}`")).collect::<Vec<_>>();
+                        let (name, chain) = (DeclName(&t.name), chain.join(" -> "));
+                        cerr!(t.line, PredicateImpure, name, chain, reason)
+                            .in_file(t.module.clone())
+                    }
+                    None if path.len() == 1 => {
+                        let msg = cerr!(g.line, GenImpure, name = DeclName(&g.name), reason);
+                        on_name(msg, g.col).in_file(g.module.clone())
+                    }
+                    None => {
+                        let chain = spelled.collect::<Vec<_>>().join(" -> ");
+                        let (name, cur) = (DeclName(&g.name), DeclName(cur));
+                        let msg = cerr!(g.line, GenImpureVia, name, cur, chain, reason);
+                        on_name(msg, g.col).in_file(g.module.clone())
+                    }
                 };
-                out.push(on_name(msg, g.col).in_file(g.module.clone()));
+                out.push(msg);
                 break;
             }
             for callee in calls.clone() {

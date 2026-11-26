@@ -582,6 +582,7 @@ fn build(
         lazy: None,
         seen: Default::default(),
         unclosed: Default::default(),
+        islands: Default::default(),
     };
     let mut bodies = Vec::new();
     let events = std::mem::take(&mut run.events);

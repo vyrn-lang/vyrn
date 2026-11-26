@@ -1,0 +1,17 @@
+fn isShort(value: String) -> Bool {
+    return value.byteLength < 4
+}
+
+type Short = String where isShort(value)
+
+fn ordered(lo: Int64, hi: Int64) -> Bool {
+    return lo <= hi
+}
+
+type Span = { lo: Int64, hi: Int64 } where ordered(lo, hi)
+
+fn main() -> Int64 {
+    let s: Short = "abc"
+    let span = Span { lo: 1, hi: 2 }
+    return s.byteLength + span.hi
+}

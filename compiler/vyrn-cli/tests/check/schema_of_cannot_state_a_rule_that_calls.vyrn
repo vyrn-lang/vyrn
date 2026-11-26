@@ -1,0 +1,14 @@
+fn isShort(value: String) -> Bool {
+    return value.byteLength < 4
+}
+
+type Short = String where isShort(value)
+
+gen fn shortSchema() -> Code {
+    let s = schemaOf<Short>()
+    return vyrn"fn h() -> Int64 { return 0 }"
+}
+
+fn main() -> Int64 {
+    return 0
+}

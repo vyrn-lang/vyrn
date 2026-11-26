@@ -1926,8 +1926,10 @@ fn handle_semantic_tokens_full(
     if let Some(runs) = language_runs(server, &p.text_document.uri) {
         return Some(SemanticTokensResult::Tokens(encode_runs(&runs, &text)));
     }
-    let toks = document_sem_tokens(server, &p.text_document.uri)?;
-    Some(SemanticTokensResult::Tokens(encode_tokens(toks, &text)))
+    let placed = document_placed(server, &p.text_document.uri, &text)?;
+    Some(SemanticTokensResult::Tokens(delta_encode(
+        placed.into_iter(),
+    )))
 }
 
 /// Semantic tokens for a line range: the whole document's, filtered.
@@ -1936,14 +1938,69 @@ fn handle_semantic_tokens_range(
     params: serde_json::Value,
 ) -> Option<SemanticTokensRangeResult> {
     let p: SemanticTokensRangeParams = serde_json::from_value(params).ok()?;
-    let mut toks = document_sem_tokens(server, &p.text_document.uri)?;
-    let start = (p.range.start.line + 1) as usize;
-    let end = (p.range.end.line + 1) as usize;
-    toks.retain(|t| t.line >= start && t.line <= end);
     let text = doc_text(server, &p.text_document.uri).unwrap_or_default();
-    Some(SemanticTokensRangeResult::Tokens(encode_tokens(
-        toks, &text,
+    let mut placed = document_placed(server, &p.text_document.uri, &text)?;
+    let (start, end) = (p.range.start.line, p.range.end.line);
+    placed.retain(|t| t.0 >= start && t.0 <= end);
+    Some(SemanticTokensRangeResult::Tokens(delta_encode(
+        placed.into_iter(),
     )))
+}
+
+/// The document's tokens placed at 0-based lines and UTF-16 columns, in
+/// order: the classified tokens, and in a `.vyrn` the runs of each island
+/// literal ([`island_runs`]).
+fn document_placed(server: &Server, uri: &Url, text: &str) -> Option<Vec<Placed>> {
+    let mut placed = placed_tokens(document_sem_tokens(server, uri)?, text);
+    if let (true, Some((analysis, _))) = (is_vyrn_uri(uri), lookup(server, uri)) {
+        placed.extend(placed_runs(&island_runs(server, uri, analysis, text), text));
+        placed.sort_by_key(|t| (t.0, t.1));
+    }
+    Some(placed)
+}
+
+/// The coloured runs of each island literal the analysis found in `text`, at
+/// source offsets: its decoded text read by its grammar from the island's
+/// start rule, mapped through [`vyrn_frontend::lexer::literal_maps`]. Each
+/// grammar loads once.
+fn island_runs(
+    server: &Server,
+    uri: &Url,
+    analysis: &Analysis,
+    text: &str,
+) -> Vec<vyrn_syntax::colour::Run> {
+    let mut out = Vec::new();
+    if analysis.islands.is_empty() {
+        return out;
+    }
+    let Some((_, resolver, _, _)) = load_context(&server.session, uri, &overlays_of(server)) else {
+        return out;
+    };
+    let maps = vyrn_frontend::lexer::literal_maps(text).unwrap_or_default();
+    let mut grammars: HashMap<&str, Option<vyrn_syntax::Grammar>> = HashMap::new();
+    for site in &analysis.islands {
+        let key = site.island.grammar.as_str();
+        let g = grammars
+            .entry(key)
+            .or_insert_with(|| vyrn_syntax::load(&resolver.read(key).ok()?).ok());
+        let Some(g) = g else { continue };
+        let map = maps
+            .iter()
+            .find(|m| (m.line, m.col) == (site.line, site.col));
+        let (Some(start), Some(map)) = (g.rule(&site.island.start), map) else {
+            continue;
+        };
+        out.extend(
+            vyrn_syntax::colour::runs(g, start, &site.text)
+                .into_iter()
+                .map(|r| vyrn_syntax::colour::Run {
+                    start: map.source(r.start),
+                    stop: map.source(r.stop),
+                    ..r
+                }),
+        );
+    }
+    out
 }
 
 /// The classified tokens for `uri`; an input maps them from its generated module.
@@ -2176,9 +2233,12 @@ fn init_shows_type(line: &str, end_col: usize, ty: &str) -> bool {
     word == "true" || word == "false" || word == head
 }
 
-/// Delta-encode tokens into the LSP wire form: sorted, then
-/// `[delta line, delta start, len, type, mods]` in 0-based UTF-16 units.
-fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>, text: &str) -> SemanticTokens {
+/// A token at a 0-based line and UTF-16 column: its line, column, length,
+/// legend index and modifier bits.
+type Placed = (u32, u32, u32, u32, u32);
+
+/// The classified tokens, sorted and placed in 0-based UTF-16 units.
+fn placed_tokens(mut toks: Vec<vyrn_frontend::SemToken>, text: &str) -> Vec<Placed> {
     toks.sort_by_key(|t| (t.line, t.col));
     let placed = toks.into_iter().map(|t| {
         let line = t.line.saturating_sub(1) as u32;
@@ -2194,11 +2254,16 @@ fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>, text: &str) -> Semantic
             sem_mods_bits(t.mods),
         )
     });
-    delta_encode(placed)
+    placed.collect()
 }
 
 /// The tokens of a grammar's runs over `text`: one per line a run covers.
 fn encode_runs(runs: &[vyrn_syntax::colour::Run], text: &str) -> SemanticTokens {
+    delta_encode(placed_runs(runs, text).into_iter())
+}
+
+/// [`encode_runs`]'s tokens, placed in the runs' order.
+fn placed_runs(runs: &[vyrn_syntax::colour::Run], text: &str) -> Vec<Placed> {
     let mut placed = Vec::new();
     let mut starts = vec![0];
     starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
@@ -2221,7 +2286,7 @@ fn encode_runs(runs: &[vyrn_syntax::colour::Run], text: &str) -> SemanticTokens 
             (from, line) = (end + 1, line + 1);
         }
     }
-    delta_encode(placed.into_iter())
+    placed
 }
 
 /// The LSP's relative encoding of tokens placed at an absolute 0-based line and
@@ -3886,7 +3951,7 @@ mod tests {
             kind: SemKind::Variable,
             mods: SemMods::default(),
         }];
-        let encoded = encode_tokens(toks, text);
+        let encoded = delta_encode(placed_tokens(toks, text).into_iter());
         assert_eq!(encoded.data.len(), 1);
         assert_eq!(encoded.data[0].delta_start, 8);
         assert_eq!(encoded.data[0].length, 5);

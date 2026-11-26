@@ -31,7 +31,7 @@ use std::rc::Rc;
 
 pub use gen::{bytes, lexer};
 pub use load::load;
-pub use parser::{parser, report};
+pub use parser::{island_report_fn, parser, report, Island};
 pub use recognizer::recognizer;
 pub use textmate::{language_configuration, textmate, Naming, Scope};
 

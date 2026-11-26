@@ -65,6 +65,7 @@ pub(crate) fn type_name(rule: &str) -> String {
 pub(crate) fn shapes<'a>(
     g: &Grammar,
     rules: &[RuleId],
+    starts: &[RuleId],
     rows: impl Iterator<Item = &'a Rc<str>>,
 ) -> Result<Vec<Shape>, Refused> {
     let mut out = vec![Shape::Lexical; g.rules.len()];
@@ -78,7 +79,7 @@ pub(crate) fn shapes<'a>(
         }
     }
     refuse_endless(g, &out, rules)?;
-    refuse_clashes(g, &out, rules, rows)?;
+    refuse_clashes(g, &out, rules, starts, rows)?;
     Ok(out)
 }
 
@@ -377,6 +378,7 @@ fn refuse_clashes<'a>(
     g: &Grammar,
     shapes: &[Shape],
     rules: &[RuleId],
+    starts: &[RuleId],
     rows: impl Iterator<Item = &'a Rc<str>>,
 ) -> Result<(), Refused> {
     let mut names: BTreeSet<String> = rows.map(|r| r.to_string()).collect();
@@ -403,6 +405,9 @@ fn refuse_clashes<'a>(
                 written.push(ty);
             }
             Shape::Same(_) | Shape::Lexical => {}
+        }
+        if starts.contains(&r) {
+            written.push(crate::parser::island_type(&rule.name));
         }
         for name in written {
             if !names.insert(name.clone()) {

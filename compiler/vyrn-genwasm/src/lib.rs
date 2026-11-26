@@ -25,7 +25,7 @@ use vyrn_frontend::gen::GenRead;
 #[cfg(feature = "host")]
 use vyrn_frontend::gen::{compiler_identity, GenEngine};
 use vyrn_frontend::gen::{
-    Author, GenError, GenInputs, GenOutput, Kind, Pos, Rope, Span, Spliced, Written,
+    Author, GenError, GenInputs, GenOutput, Island, Kind, Pos, Rope, Span, Spliced, Written,
 };
 use vyrn_frontend::loader::GEN_HOST;
 
@@ -287,7 +287,7 @@ fn syntax_parser(
         _ => Writes::Parser,
     };
     vyrn_frontend::gen::syntax_span(&inputs.module, path, bytes, writes)
-        .map(|span| Served::Parser(key, Box::new(span)))
+        .map(|(span, islands)| Served::Parser(key, Box::new(span), islands))
 }
 
 /// The argv a run of `fn_name` on `args` hands its module, or why no wrapper
@@ -1093,6 +1093,8 @@ pub struct Arena {
     result: Option<Arc<Rope>>,
     /// [`Written::grammars`].
     grammars: Vec<String>,
+    /// [`Written::islands`].
+    islands: Vec<Island>,
     /// What serves the run's reads in the page; `None` on the native host,
     /// whose own thread serves them.
     page: Option<PageHost>,
@@ -1222,7 +1224,12 @@ impl Arena {
     pub fn answer(&mut self, served: Served) -> Result<(i64, Vec<u8>), String> {
         match served {
             Served::Bytes(status, bytes) => Ok(((status as i64) << 32 | bytes.len() as i64, bytes)),
-            Served::Parser(key, span) => {
+            Served::Parser(key, span, islands) => {
+                let island = |i| Island {
+                    grammar: key.clone(),
+                    ..i
+                };
+                self.islands.extend(islands.into_iter().map(island));
                 self.grammars.push(key);
                 Ok((self.leaf(*span), Vec::new()))
             }
@@ -1263,8 +1270,10 @@ impl Arena {
     pub fn written(&mut self) -> Result<Written, String> {
         let code = self.result.take();
         let grammars = std::mem::take(&mut self.grammars);
+        let islands = std::mem::take(&mut self.islands);
         code.map(|code| Written {
             grammars,
+            islands,
             ..Written::code(&code)
         })
         .ok_or_else(|| "the generator handed over no result".into())
@@ -1423,8 +1432,9 @@ struct Caps {
 pub enum Served {
     Bytes(i32, Vec<u8>),
     Copy(String, Vec<u8>),
-    /// A grammar's parser or its report, and the grammar's key.
-    Parser(String, Box<Span>),
+    /// A grammar's parser or its report, the grammar's key, and the parser's
+    /// islands.
+    Parser(String, Box<Span>, Vec<Island>),
     /// Encoded on the guest thread, so one [`encode`] call serves all three
     /// structured builtins.
     Lit(Box<Expr>),

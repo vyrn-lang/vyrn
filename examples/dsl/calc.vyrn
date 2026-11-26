@@ -14,6 +14,13 @@ export fn total(text: String) -> Result<Int64, Int64> {
     }
 }
 
+/// The sum of the amounts a ledger the program writes pays. A literal ledger
+/// is read with the grammar when the program is checked, so a broken one is
+/// refused at its line and column.
+export fn paid(text: ledger.LedgerText) -> Int64 {
+    return sum(ledger.parsedLedger(text))
+}
+
 fn sum(l: ledger.Ledger) -> Int64 {
     let mut t = 0
     for line in l.lines {

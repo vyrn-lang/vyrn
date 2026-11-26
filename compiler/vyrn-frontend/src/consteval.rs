@@ -143,33 +143,35 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
 // The descent over a body is `ast::body_scope_descent!`'s.
 crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
 
-/// Records whether a site holds something not const-analyzable.
-struct Calls(bool);
+/// Collects a predicate's calls; `None` once it holds a lambda or a block
+/// match arm, which no predicate may.
+struct Calls<'a>(Option<Vec<&'a Expr>>);
 
-impl BodyVisit<'_> for Calls {
+impl<'a> BodyVisit<'a> for Calls<'a> {
     const SCOPED: bool = false;
 
-    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+    fn expr(&mut self, e: &'a Expr, _: &std::collections::HashSet<String>) -> bool {
+        let Some(calls) = &mut self.0 else {
+            return false;
+        };
         match e {
-            // `@at` is a pure, foldable builtin, allowed in a refinement predicate;
-            // only its arguments are scanned.
+            // `@at` is a pure, foldable builtin, allowed in a refinement predicate.
             Expr::Call { name, .. } if name == crate::project::AT => {}
-            // A lambda and a block match arm never appear in a predicate;
-            // both count as a call, so a hole refuses instead of folding.
-            Expr::Call { .. } | Expr::Lambda { .. } => self.0 = true,
+            Expr::Call { .. } => calls.push(e),
+            Expr::Lambda { .. } => self.0 = None,
             Expr::Match { arms, .. } if arms.iter().any(|a| a.body.as_expr().is_none()) => {
-                self.0 = true
+                self.0 = None
             }
             _ => {}
         }
-        !self.0
+        self.0.is_some()
     }
 }
 
-/// Returns whether `expr` contains a call; refinement predicates forbid calls
-/// to stay const-analyzable.
-pub fn contains_call(expr: &Expr) -> bool {
-    let mut v = Calls(false);
+/// Returns every call in `expr` other than `@at`, outermost first, or `None`
+/// if it holds a lambda or a block match arm.
+pub fn calls(expr: &Expr) -> Option<Vec<&Expr>> {
+    let mut v = Calls(Some(Vec::new()));
     body_expr(expr, &std::collections::HashSet::new(), &mut v);
     v.0
 }

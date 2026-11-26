@@ -1,0 +1,15 @@
+// A ledger of island literals: each line pays an account an amount.
+syntax Island
+
+expect ^Expected(found=found)
+
+trivia = [ \t\r\n]*
+token = name / number
+
+Ledger = lines:Line*
+Line = 'pay' account:Name amount:Amount
+Name = text:name
+Amount = text:number
+
+name = [a-z]+
+number = [0-9]+
