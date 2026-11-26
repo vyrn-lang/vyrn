@@ -148,24 +148,76 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
 /// [`scan`] with `quote` saying whether `src` is a code quote's text, where a NUL is
 /// a hole.
 fn scan_as<I: Item>(src: &str, quote: bool) -> Result<Scan<I>, Diagnostic> {
-    let items = Items {
-        src,
-        quote,
-        items: Vec::new(),
-        escapes: Vec::new(),
-        lines: LineCol::START,
-        start: 0,
-        end: 0,
-    };
-    let mut scanner = grammar::Scanner::new(src, items);
-    scanner.scan().map_err(|d| *d)?;
-    let mut items = scanner.hooks;
+    let mut items = scan_items::<I>(src, quote, None)?;
     let (end_line, end_col) = items.lines.of(src, src.len());
     Ok(Scan {
         items: items.items,
         end_line,
         end_col,
     })
+}
+
+/// The hooks after one scan of `src`; `maps` is `Some` to keep each plain
+/// string literal's [`LiteralMap`].
+fn scan_items<I: Item>(
+    src: &str,
+    quote: bool,
+    maps: Option<Vec<LiteralMap>>,
+) -> Result<Items<'_, I>, Diagnostic> {
+    let items = Items {
+        src,
+        quote,
+        items: Vec::new(),
+        escapes: Vec::new(),
+        maps,
+        lines: LineCol::START,
+        start: 0,
+        end: 0,
+    };
+    let mut scanner = grammar::Scanner::new(src, items);
+    scanner.scan().map_err(|d| *d)?;
+    Ok(scanner.hooks)
+}
+
+/// Where the decoded text of one string literal with no hole sits in its
+/// source: the literal's line and column, and the byte offsets at which
+/// decoded and source text realign after each escape and each CRLF.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiteralMap {
+    pub line: usize,
+    pub col: usize,
+    /// The source offset of the first byte after the opening quote.
+    body: usize,
+    /// `(decoded, source)` pairs in increasing order; empty where decoded and
+    /// source bytes agree one for one.
+    breaks: Vec<(usize, usize)>,
+}
+
+impl LiteralMap {
+    /// Returns the source byte offset of decoded byte `decoded`. A byte an
+    /// escape decodes to maps into the escape.
+    pub fn source(&self, decoded: usize) -> usize {
+        let at = self.breaks.partition_point(|&(d, _)| d <= decoded);
+        match at {
+            0 => self.body + decoded,
+            i => self.breaks[i - 1].1 + (decoded - self.breaks[i - 1].0),
+        }
+    }
+}
+
+/// Returns the [`LiteralMap`] of each string literal of `src` with no hole, in
+/// source order. Only an island's check and its colours call it; [`lex`]
+/// builds no map.
+pub fn literal_maps(src: &str) -> Result<Vec<LiteralMap>, Diagnostic> {
+    let items = scan_items::<Token>(src, false, Some(Vec::new()))?;
+    Ok(items.maps.unwrap_or_default())
+}
+
+/// Returns the 1-based line and character column of byte `offset` of `src`,
+/// a character boundary.
+pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
+    let mut lines = LineCol::START;
+    lines.of(src, offset)
 }
 
 /// The 1-based line and character column of a byte offset, counted on from
@@ -303,6 +355,8 @@ struct Items<'s, I> {
     /// The escapes of the string literal being scanned, each with its byte
     /// range from the backslash; the `string` hook empties it.
     escapes: Vec<(std::ops::Range<usize>, Escape)>,
+    /// Each plain string literal's map, kept only by [`literal_maps`].
+    maps: Option<Vec<LiteralMap>>,
     lines: LineCol,
     /// The start of the last item, kept or not, for a splice to grow it.
     start: usize,
@@ -473,10 +527,16 @@ impl<I: Item> grammar::Hooks for Items<'_, I> {
         let mut exprs: Vec<Hole> = Vec::new();
         let mut cur = String::new();
         let mut from = start + quotes;
+        let mut breaks = self.maps.as_ref().map(|_| Vec::new());
         for (range, value) in escapes.drain(..) {
-            push_text(&mut cur, &src[from..range.start]);
+            push_text(&mut cur, &src[from..range.start], from, breaks.as_mut());
             match value {
-                Escape::Char(c) => cur.push(c),
+                Escape::Char(c) => {
+                    cur.push(c);
+                    if let Some(b) = &mut breaks {
+                        b.push((cur.len(), range.end));
+                    }
+                }
                 Escape::Hole => {
                     parts.push(std::mem::take(&mut cur));
                     let inner = range.start + 2..range.end - 1;
@@ -491,7 +551,7 @@ impl<I: Item> grammar::Hooks for Items<'_, I> {
             from = range.end;
         }
         self.escapes = escapes;
-        push_text(&mut cur, &src[from..end - quotes]);
+        push_text(&mut cur, &src[from..end - quotes], from, breaks.as_mut());
         // A `vyrn"""` code quote, its tag the item before it on its line as the
         // parser reads it, drops its closing indentation. Only here are the raw
         // delimiters known: `vyrn"\n"` is no multi-line quote.
@@ -501,6 +561,16 @@ impl<I: Item> grammar::Hooks for Items<'_, I> {
         let tok = if exprs.is_empty() {
             if quote {
                 dedent(std::slice::from_mut(&mut cur));
+            }
+            if let (Some(maps), Some(breaks), false) = (&mut self.maps, breaks, quote) {
+                let (line, col) = at;
+                let body = start + quotes;
+                maps.push(LiteralMap {
+                    line,
+                    col,
+                    body,
+                    breaks,
+                });
             }
             Tok::Str(cur)
         } else {
@@ -520,15 +590,27 @@ impl<I: Item> grammar::Hooks for Items<'_, I> {
 
 /// Appends the raw text of a string literal with each CRLF as LF, so a
 /// multi-line string has the same bytes on every checkout. The raw text keeps
-/// the CR for the formatter.
-fn push_text(cur: &mut String, raw: &str) {
+/// the CR for the formatter. `at` is the raw text's source offset; `breaks`,
+/// where given, gains a [`LiteralMap`] pair after each CRLF.
+fn push_text(
+    cur: &mut String,
+    raw: &str,
+    mut at: usize,
+    mut breaks: Option<&mut Vec<(usize, usize)>>,
+) {
     let mut lines = raw.split("\r\n");
     if let Some(first) = lines.next() {
         cur.push_str(first);
+        at += first.len();
     }
     for line in lines {
         cur.push('\n');
+        at += 2;
+        if let Some(b) = breaks.as_deref_mut() {
+            b.push((cur.len(), at));
+        }
         cur.push_str(line);
+        at += line.len();
     }
 }
 
@@ -604,6 +686,50 @@ fn with_eof(scanned: Scan<Token>) -> Vec<Token> {
 
 #[cfg(test)]
 mod tests {
+    /// The source text each decoded byte of the one literal of `src` maps to.
+    fn mapped(src: &str) -> String {
+        let maps = literal_maps(src).unwrap();
+        let [m] = &maps[..] else {
+            panic!("one literal")
+        };
+        let Tok::Str(text) = &lex(src).unwrap()[0].tok else {
+            panic!("a string")
+        };
+        (0..text.len())
+            .map(|d| &src[m.source(d)..m.source(d) + 1])
+            .collect()
+    }
+
+    #[test]
+    fn a_literal_with_no_escape_maps_one_for_one() {
+        assert_eq!(mapped("\"pay rent\""), "pay rent");
+        assert!(literal_maps("\"ab\"").unwrap()[0].breaks.is_empty());
+    }
+
+    #[test]
+    fn a_literal_maps_past_an_escape() {
+        assert_eq!(mapped(r#""a\tb\\c""#), r"a\b\c");
+    }
+
+    #[test]
+    fn a_literal_maps_past_a_unicode_escape() {
+        let src = r#""x\u{e9}y""#;
+        let m = &literal_maps(src).unwrap()[0];
+        assert_eq!((m.source(0), m.source(3)), (1, 8));
+    }
+
+    #[test]
+    fn a_literal_maps_past_a_crlf() {
+        assert_eq!(mapped("\"a\r\nb\""), "a\rb");
+        let m = &literal_maps("\"a\r\nb\"").unwrap()[0];
+        assert_eq!(m.source(2), 4);
+    }
+
+    #[test]
+    fn a_literal_with_a_hole_has_no_map() {
+        assert!(literal_maps(r#""a\{x}b" "c""#).unwrap().len() == 1);
+    }
+
     use super::*;
 
     #[test]
