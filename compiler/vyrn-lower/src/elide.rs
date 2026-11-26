@@ -48,7 +48,7 @@ use vyrn_frontend::prim::Cmp;
 use crate::effects::StateUse;
 use crate::facts::{Cert, Fact, Lin, Node, Premise, Said, Sides, Src, State, Tags, Term, EXACT};
 use vyrn_frontend::core::check::{
-    scalar_rule, Atom, Check, Ensures, Guard, Operand, Side, Site, Verdict, Why,
+    scalar_rule, Atom, Check, Ensures, Guard, Invariant, Operand, Side, Site, Verdict, Why,
 };
 use vyrn_frontend::core::{
     rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, NameInfo, Op, Place, Rhs, St,
@@ -5071,7 +5071,9 @@ impl<'a> Walk<'a> {
                 j
             }
             St::Block { body, .. } => self.block(st, body),
-            St::Loop { body, .. } => self.looped(st, body),
+            St::Loop {
+                body, invariant, ..
+            } => self.looped(st, body, invariant.as_deref()),
             St::Switch { on, arms, .. } => {
                 let mut outs = vec![st];
                 for a in arms.iter_mut() {
@@ -6342,21 +6344,21 @@ impl<'a> Walk<'a> {
         out
     }
 
-    fn looped(&mut self, entry: State, body: &mut [St]) -> State {
+    fn looped(&mut self, entry: State, body: &mut [St], inv: Option<&Invariant>) -> State {
         let key = (body.as_ptr() as usize, entry);
         if !self.record {
             if let Some(exit) = self.memo.get(&key) {
                 return exit.clone();
             }
         }
-        let exit = self.settle(&key.1, body);
+        let exit = self.settle(&key.1, body, inv);
         if !self.record {
             self.memo.insert(key, exit.clone());
         }
         exit
     }
 
-    fn settle(&mut self, entry: &State, body: &mut [St]) -> State {
+    fn settle(&mut self, entry: &State, body: &mut [St], inv: Option<&Invariant>) -> State {
         let mut written = BTreeSet::new();
         writes(body, &mut written);
         let mut indexed = Vec::new();
@@ -6372,6 +6374,15 @@ impl<'a> Walk<'a> {
         }
         for l in self.halving(entry, body, &written) {
             head.assume(&l, self.src(Premise::Invariant));
+        }
+        // The declared invariant holds at every head: its proof rows before
+        // the loop and at each turn's end show it (`check::turns`).
+        if let Some(i) = inv {
+            let src = Src {
+                kind: Premise::Declared,
+                line: u32::try_from(i.line).unwrap_or(0),
+            };
+            i.atoms.iter().for_each(|a| self.holds(&mut head, a, src));
         }
         // Candidates: what entry knows about the written names, two fields
         // of a record it grows that entry defines equally long, the record

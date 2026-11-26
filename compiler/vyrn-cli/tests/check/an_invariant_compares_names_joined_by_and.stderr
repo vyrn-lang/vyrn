@@ -1,0 +1,1 @@
+an_invariant_compares_names_joined_by_and.vyrn:3:0: the invariant of the loop on line 3 may compare only names in scope, their `.length`, `.byteLength` or integer field, the `.length` of a field of one, and integer literals, of one integer type, or sums and literal multiples of them over `Int64`, joined by `&&`

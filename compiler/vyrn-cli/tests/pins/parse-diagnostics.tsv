@@ -323,6 +323,11 @@ compiler/vyrn-cli/tests/check/an_imported_type_name_is_not_a_value.vyrn	0	cbf29c
 compiler/vyrn-cli/tests/check/an_index_store_takes_the_key_type_a_lookup_takes.vyrn	0	cbf29ce484222325	20	17	8b1133f337c7bbe0
 compiler/vyrn-cli/tests/check/an_inline_refinement_in_an_enum_variant_is_a_diagnostic_not_a_panic.vyrn	1	6e235062bdc853a0	20	20	f7349759da5a9686
 compiler/vyrn-cli/tests/check/an_inline_refinement_on_a_merged_record_is_a_diagnostic_not_a_panic.vyrn	1	6e235062bdc853a0	20	20	14de1ed4b0093f51
+compiler/vyrn-cli/tests/check/an_invariant_a_turn_may_break_is_refused.vyrn	0	cbf29ce484222325	20	16	b80dfba4fad80398
+compiler/vyrn-cli/tests/check/an_invariant_compares_names_joined_by_and.vyrn	0	cbf29ce484222325	20	18	9706175ee886c4d6
+compiler/vyrn-cli/tests/check/an_invariant_names_no_binding_of_the_loop.vyrn	0	cbf29ce484222325	20	16	989b0591de8bdaf6
+compiler/vyrn-cli/tests/check/an_invariant_names_only_locals_in_scope.vyrn	0	cbf29ce484222325	20	14	86bb10319a96c72d
+compiler/vyrn-cli/tests/check/an_invariant_that_fails_where_the_loop_starts_is_refused.vyrn	0	cbf29ce484222325	20	17	82de57d9c47be927
 compiler/vyrn-cli/tests/check/an_optional_projection_answers_a_place_not_a_value.vyrn	0	cbf29ce484222325	20	16	ec6e2b22948560d8
 compiler/vyrn-cli/tests/check/an_optional_projection_must_take_read_self.vyrn	0	cbf29ce484222325	20	16	0cf1387765f7e2d3
 compiler/vyrn-cli/tests/check/an_optional_projection_needs_its_shape.vyrn	0	cbf29ce484222325	20	16	862baf9ca971ded5

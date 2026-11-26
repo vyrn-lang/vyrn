@@ -14,7 +14,9 @@
 //! the call reads after it ([`Guard::Clause`]). A function's result clause
 //! is a clause check before each `return`, and at the end of a body that
 //! falls off it ([`Body::ensures`]). A `let`'s clause is a clause check after
-//! each row that writes its binding ([`Body::promises`]).
+//! each row that writes its binding ([`Body::promises`]). A loop's invariant
+//! is a proof row before the loop and at each end of a turn, which no build
+//! runs ([`Raises::Invariant`]).
 //!
 //! One runtime check is one row. A store that puts a taken element back into
 //! the place it was taken from (`a[i].push(v)`: `take a[i]`, the call, the
@@ -26,7 +28,7 @@ use vyrn_frontend::ast::{BinOp, Capability, Function, Type, TypeDecl};
 use vyrn_frontend::prelude::Indexes;
 use vyrn_frontend::trap::Rule;
 
-use vyrn_frontend::core::check::{scalar_arg, Check, Guard, Raises, Site, Verdict, Why};
+use vyrn_frontend::core::check::{scalar_arg, Check, Guard, Invariant, Raises, Site, Verdict, Why};
 use vyrn_frontend::core::{Arg, Body, Callee, Name, Op, Place, Rhs, St, Val};
 
 /// What a build does with its check rows, from the environment variable
@@ -134,6 +136,16 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
                 list(body, tys, then, lines);
                 list(body, tys, els, lines);
             }
+            St::Loop {
+                body: b,
+                invariant: Some(inv),
+                ..
+            } => {
+                out.push(St::Check(proof(lines, inv, inv.line, true)));
+                list(body, tys, b, lines);
+                turns(b, inv, lines);
+                b.push(St::Check(proof(lines, inv, inv.end, false)));
+            }
             St::Loop { body: b, .. } | St::Block { body: b, .. } => list(body, tys, b, lines),
             St::Switch { arms, .. } => {
                 for a in arms {
@@ -178,6 +190,35 @@ fn promised(body: &Body, s: &St) -> Vec<Guard> {
             says: p.says.clone(),
         })
         .collect()
+}
+
+/// The proof row of the invariant `inv` on `line`, where the loop starts
+/// (`entry`) or where a turn ends.
+fn proof(lines: &mut BTreeMap<usize, u32>, inv: &Invariant, line: usize, entry: bool) -> Check {
+    let rule = Raises::Invariant {
+        line: inv.line,
+        entry,
+    };
+    let guard = Guard::Clause {
+        atoms: inv.atoms.clone(),
+        says: inv.says.clone(),
+    };
+    row(lines, line, rule, guard)
+}
+
+/// Inserts the proof row of `inv` before each `continue` of its loop in `ss`;
+/// a nested loop's `continue` ends that loop's turn.
+fn turns(ss: &mut Vec<St>, inv: &Invariant, lines: &mut BTreeMap<usize, u32>) {
+    let mut out = Vec::with_capacity(ss.len());
+    for mut s in std::mem::take(ss) {
+        match &mut s {
+            St::Continue { line, .. } => out.push(St::Check(proof(lines, inv, *line, false))),
+            St::Loop { .. } => {}
+            _ => s.lists_mut().for_each(|l| turns(l, inv, lines)),
+        }
+        out.push(s);
+    }
+    *ss = out;
 }
 
 /// A kept check row of `guard` on `line`, numbered after the line's others.

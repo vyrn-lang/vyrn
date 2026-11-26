@@ -7473,6 +7473,10 @@ impl<'p> Fn_<'_, 'p> {
         says: &str,
     ) -> Result<(), String> {
         let line = c.site.line;
+        // A proof row runs nowhere: a program that keeps one is refused.
+        if matches!(c.rule, Raises::Invariant { .. }) {
+            return Ok(());
+        }
         let Some(row) = self.row(m, b, c.clone()) else {
             return Ok(());
         };
@@ -7618,7 +7622,11 @@ impl<'p> Fn_<'_, 'p> {
                 // A kept `where` check traps inside its type's constructor
                 // ([`Fn_::core_rule_check`]), and a kept clause check prints
                 // its sentence ([`Fn_::clause_check`]).
-                Raises::Where | Raises::Clause | Raises::Result | Raises::Let => {
+                Raises::Where
+                | Raises::Clause
+                | Raises::Result
+                | Raises::Let
+                | Raises::Invariant { .. } => {
                     b.ins(&Instruction::Unreachable);
                 }
             },

@@ -3628,8 +3628,19 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => Ok(()),
-            Stmt::While { cond, body, .. } => {
+            Stmt::While {
+                cond,
+                invariant,
+                body,
+                line,
+                ..
+            } => {
                 self.expr(cond, scope, None, Some(ret))?;
+                if let Some(e) = invariant {
+                    let names = self.invariant_names(e, body, scope, *line)?;
+                    crate::core::check::Invariant::atoms(e, *line, &names, self)
+                        .map_err(|rule| cerr!(*line; rule))?;
+                }
                 self.block(body, ret, scope);
                 Ok(())
             }
@@ -7000,6 +7011,41 @@ impl<'a> Checker<'a> {
     fn shadows_here(&self, name: &str) -> bool {
         self.shadows
             .contains(&(self.frame.borrow().here.clone(), name.to_string()))
+    }
+
+    /// The locals in `scope` the invariant `e` of the `while` on `line` names,
+    /// with their types. A name the loop's `body` binds is refused: it names no
+    /// value at the head.
+    fn invariant_names(
+        &self,
+        e: &Expr,
+        body: &Block,
+        scope: &Scope,
+        line: usize,
+    ) -> Result<Vec<(String, Type)>, Diagnostic> {
+        let mut spelled = Vec::new();
+        crate::ast::each_expr_in(e, &mut |x| {
+            if let Expr::Var { name, .. } = x {
+                spelled.push(name.clone());
+            }
+            true
+        });
+        let mut bound = std::collections::HashSet::new();
+        crate::ast::each_binding(body, &mut |n| _ = bound.insert(n.to_string()));
+        let mut names: Vec<(String, Type)> = Vec::new();
+        for name in spelled {
+            let local = scope.iter().rev().find_map(|f| f.get(&name));
+            match local {
+                Some(b) if names.iter().all(|(n, _)| *n != name) => {
+                    names.push((name, b.ty.clone()));
+                }
+                None if bound.contains(&name) => {
+                    return Err(cerr!(line, InvariantBinds, line, name));
+                }
+                _ => {}
+            }
+        }
+        Ok(names)
     }
 
     /// The innermost frame's binding of `name`, else module state when the

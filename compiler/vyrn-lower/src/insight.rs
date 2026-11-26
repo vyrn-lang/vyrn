@@ -397,6 +397,7 @@ pub fn source(program: &Program, world: &World, body: &Body, src: Src) -> String
         Premise::Test(false) => format!("test on line {at}, false"),
         Premise::Passed => format!("a check that stays, line {at}"),
         Premise::Invariant => "invariant the loop head inferred".into(),
+        Premise::Declared => format!("invariant of the loop on line {at}"),
         Premise::Let(n) => format!("let {}, line {at}", code(n)),
         Premise::Type(n) => format!("the type of {}", code(n)),
         Premise::Builtin => format!("what the builtin states, line {at}"),

@@ -721,6 +721,22 @@ rules! {
         `read` parameter, the `.length`, `.byteLength` or integer field of one, the \
         `.length` of a field of one, and integer literals, of one integer type, or sums \
         and literal multiples of them over `Int64`, joined by `&&`";
+    InvariantForm { line }
+        "the invariant of the loop on line {line} may compare only names in scope, \
+        their `.length`, `.byteLength` or integer field, the `.length` of a field of \
+        one, and integer literals, of one integer type, or sums and literal multiples \
+        of them over `Int64`, joined by `&&`";
+    InvariantName { line, name }
+        "the invariant of the loop on line {line} names `{name}`, which is no local \
+        in scope";
+    InvariantBinds { line, name }
+        "the invariant of the loop on line {line} names `{name}`, which the loop binds";
+    InvariantEntry { line, inv, why }
+        "the invariant of the loop on line {line}, `{inv}`, does not hold where the \
+        loop starts: {why}";
+    InvariantTurn { line, inv, at, why }
+        "the invariant of the loop on line {line}, `{inv}`, may not hold after a turn \
+        that ends on line {at}: {why}";
     ResultClauseName { name, param }
         "the `where` clause on the result of `{name}` names `{param}`, which is no \
         parameter of `{name}`";

@@ -2081,6 +2081,7 @@ impl<'a> Build<'a> {
                     return Stmt::While {
                         id: Id::NEW,
                         cond: Expr::Bool(true, Id::NEW),
+                        invariant: None,
                         body: Block {
                             id: Id::NEW,
                             stmts: vec![if_let(pattern, scrutinee, body, Some(brk), line)],
@@ -2089,10 +2090,12 @@ impl<'a> Build<'a> {
                     };
                 }
                 let cond = self.expr();
+                let invariant = self.eat(&Tok::Where).then(|| self.expr());
                 let body = self.block();
                 Stmt::While {
                     id: Id::NEW,
                     cond,
+                    invariant,
                     body,
                     line,
                 }

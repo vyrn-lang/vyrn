@@ -324,6 +324,34 @@ fn a_clause_sum_that_leaves_int64_fails_its_check() {
     assert!(norm(&out.stderr).contains("validation failed for parameter `i` of `edge`"));
 }
 
+/// A loop invariant is a premise at every head: `i < j` with the guard
+/// `j < xs.length` proves `xs[i]`, which the loop alone keeps. The state
+/// before the loop and the end of each turn prove it, and nothing runs it.
+#[test]
+fn a_loop_invariant_proves_the_read_it_bounds() {
+    let src = |inv: &str| {
+        format!(
+            "fn lag(xs: Array<Int64>) -> Int64 {{
+    let mut s = 0
+    let mut i = 0
+    let mut j = 1
+    while j < xs.length{inv} {{
+        s = s + xs[i]
+        i = i + 1
+        j = j + 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    assert_eq!(verdicts(&src(""), "lag"), ["check array-index"]);
+    let held = ["proved invariant", "proved array-index", "proved invariant"];
+    assert_eq!(verdicts(&src(" where i < j"), "lag"), held);
+    let (err, rows) = oracle(&src(" where i < j"), "    print(lag(xs).toString())", "lag");
+    assert_eq!((err.as_str(), rows.len()), ("", 1));
+}
+
 /// A kept check over a sum that may wrap names the sum, not the callee whose
 /// result is one addend, where that callee states a result clause.
 #[test]

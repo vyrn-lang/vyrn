@@ -1,0 +1,11 @@
+fn bad(n: Int64) -> Int64 {
+    let mut i = 0
+    while i < n where t >= 0 {
+        let t = i
+        i = i + 1
+    }
+    return i
+}
+fn main() -> Int64 {
+    return 0
+}

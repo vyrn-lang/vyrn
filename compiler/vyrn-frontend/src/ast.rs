@@ -1879,9 +1879,11 @@ pub enum Stmt {
         line: usize,
         id: Id,
     },
-    /// `while cond { .. }`.
+    /// `while cond where invariant { .. }`: the invariant holds at the loop's
+    /// head ([`crate::core::check::Invariant`]).
     While {
         cond: Expr,
+        invariant: Option<Expr>,
         body: Block,
         line: usize,
         id: Id,

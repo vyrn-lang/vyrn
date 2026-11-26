@@ -809,6 +809,7 @@ impl Decoders {
                     },
                     Stmt::While {
                         id: Id::NEW,
+                        invariant: None,
                         cond: Expr::Binary {
                             id: Id::NEW,
                             op: vyrn_frontend::ast::BinOp::Lt,

@@ -263,6 +263,8 @@ pub enum Premise {
     Passed,
     /// An invariant the loop head inferred.
     Invariant,
+    /// The invariant the loop on the source's line declares.
+    Declared,
     /// The definition of this name.
     Let(Name),
     /// The range or the refinement rule of this name's type.

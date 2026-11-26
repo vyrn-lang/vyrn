@@ -34,7 +34,7 @@ use crate::fact_flow::Built;
 use crate::kernel::{MissingKind, Root};
 use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
-use vyrn_frontend::core::check::{Ensures, Promise, Verdict};
+use vyrn_frontend::core::check::{Ensures, Guard, Invariant, Promise, Raises, Verdict};
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, AtRead, Await, Body, BorrowKind, Callee, Cand, Copied,
     Ctor, Facts, Forked, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Said,
@@ -2464,6 +2464,35 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The invariant `e` of the `while` on `line` with body `body`, over the
+    /// names in scope at the loop's head; `None` where the checker refused it.
+    fn invariant(&self, e: &Expr, body: &Block, line: usize) -> Option<Box<Invariant>> {
+        let mut spelled = Vec::new();
+        vyrn_frontend::ast::each_expr_in(e, &mut |x| {
+            if let Expr::Var { name, .. } = x {
+                spelled.extend(self.lookup(name).map(|n| (name.clone(), n)));
+            }
+            true
+        });
+        let mut names: Vec<(String, Name)> = Vec::new();
+        for (s, n) in spelled {
+            if names.iter().all(|(m, _)| *m != s) {
+                names.push((s, n));
+            }
+        }
+        let typed: Vec<(String, Type)> = (names.iter())
+            .map(|(s, n)| (s.clone(), self.body.names[n.index()].ty.clone()))
+            .collect();
+        let atoms = Invariant::atoms(e, line, &typed, self.proto.types()).ok()?;
+        let at = |j: usize| names.get(j).map(|(_, n)| Val::Name(*n));
+        Some(Box::new(Invariant {
+            atoms: atoms.iter().map(|a| a.with(&at)).collect::<Option<_>>()?,
+            says: vyrn_frontend::core::check::spelled(e).into(),
+            line,
+            end: body.stmts.last().map_or(line, Stmt::line),
+        }))
+    }
+
     fn lookup(&self, name: &str) -> Option<Name> {
         self.frame
             .scope
@@ -3555,10 +3584,12 @@ impl<'a> Builder<'a> {
             }
             Stmt::While {
                 cond,
+                invariant,
                 body,
                 line,
                 id: _,
             } => {
+                let invariant = (invariant.as_ref()).and_then(|e| self.invariant(e, body, *line));
                 let mut l = Vec::new();
                 let c = self.condition(cond, "while", *line, &mut l)?;
                 // The condition's exit is a `break` keyed by the loop's node,
@@ -3579,7 +3610,11 @@ impl<'a> Builder<'a> {
                 self.frame.loop_marks.pop();
                 r?;
                 self.hoist_headers(&mut l, *line, out);
-                out.push(St::Loop { body: l, site: sid });
+                out.push(St::Loop {
+                    body: l,
+                    site: sid,
+                    invariant,
+                });
             }
             Stmt::ForIn {
                 var,
@@ -3834,7 +3869,11 @@ impl<'a> Builder<'a> {
                 self.frame.loop_marks.pop();
                 r?;
                 self.frame.scope.truncate(mark);
-                out.push(St::Loop { body: l, site: sid });
+                out.push(St::Loop {
+                    body: l,
+                    site: sid,
+                    invariant: None,
+                });
                 if streaming {
                     self.frame.stream_loops.pop();
                     // Pulled to its end or left by a `break`, the stream is
@@ -4099,6 +4138,7 @@ impl<'a> Builder<'a> {
         out.push(St::Loop {
             body: l,
             site: NodeId::NONE,
+            invariant: None,
         });
     }
 
@@ -8490,11 +8530,22 @@ fn typed(
     // their groups.
     let (mut groups, ended) = crate::typed::groups(top, &rules, &[]);
     // The facts come from the check rows, which only an emitter's body
-    // states, so a body with a group, or of a module the manifest proves,
-    // states its own copy and decides it by the demanded walk.
+    // states, so a body with a group or a loop invariant, or of a module the
+    // manifest proves, states its own copy and decides it by the demanded walk.
     let proved = program.proved.contains(file);
+    let invariant = (top.frames().into_iter()).any(|f| {
+        rows(&f.stmts).any(|(s, _)| {
+            matches!(
+                s,
+                St::Loop {
+                    invariant: Some(_),
+                    ..
+                }
+            )
+        })
+    });
     let mut unshown = Vec::new();
-    if ended || proved {
+    if ended || proved || invariant {
         let mut body = stated(program, own, top);
         let declared = declared(program, own, &body);
         let mut refuted = Vec::new();
@@ -8505,14 +8556,27 @@ fn typed(
             groups = crate::typed::groups(&body, &rules, &refuted).0;
         }
         let named = |g: FnId| Some(program.functions.get(g.index())?.name.as_str());
-        for f in body.frames().into_iter().filter(|_| proved) {
+        for f in body.frames() {
             for (s, _) in rows(&f.stmts) {
                 let St::Check(c) = s else { continue };
-                if c.verdict == Verdict::Proved {
+                let proof = matches!(c.rule, Raises::Invariant { .. });
+                if c.verdict == Verdict::Proved || !(proved || proof) {
                     continue;
                 }
                 let why = crate::insight::said(&c.why, f, &named);
-                let rule = rule!(ProvedKept, what = crate::insight::guarded(&c.guard), why);
+                let inv = || match &c.guard {
+                    Guard::Clause { says, .. } => says.to_string(),
+                    _ => String::new(),
+                };
+                let rule = match c.rule {
+                    Raises::Invariant { line, entry: true } => {
+                        rule!(InvariantEntry, line, inv = inv(), why)
+                    }
+                    Raises::Invariant { line, entry: false } => {
+                        rule!(InvariantTurn, line, inv = inv(), at = c.site.line, why)
+                    }
+                    _ => rule!(ProvedKept, what = crate::insight::guarded(&c.guard), why),
+                };
                 let d = Diagnostic::refusal(c.site.line, 0, "check", rule).in_file(file.clone());
                 let same =
                     |x: &Diagnostic| (&x.file, x.line, &x.message) == (&d.file, d.line, &d.message);

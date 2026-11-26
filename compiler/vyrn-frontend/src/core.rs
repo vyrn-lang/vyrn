@@ -730,6 +730,9 @@ pub enum St {
     Loop {
         body: Vec<St>,
         site: NodeId,
+        /// A `while`'s invariant; `vyrn_lower::check::state` states its proof
+        /// rows.
+        invariant: Option<Box<check::Invariant>>,
     },
     /// A source block: its own scope, and the site the plan keys its
     /// fall-through release rows by.

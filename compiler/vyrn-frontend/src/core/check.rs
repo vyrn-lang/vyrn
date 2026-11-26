@@ -75,6 +75,10 @@ pub enum Raises {
     /// The failure of a `let`'s `where` clause after a write of its binding
     /// ([`crate::trap::let_clause`]), which [`Guard::Clause`] carries.
     Let,
+    /// The invariant of the loop on `line` where the loop starts (`entry`) or
+    /// where a turn ends, which [`Guard::Clause`] carries with the invariant as
+    /// its `says`. No build runs it: a program that keeps one is refused.
+    Invariant { line: usize, entry: bool },
 }
 
 impl Raises {
@@ -86,6 +90,7 @@ impl Raises {
             Raises::Clause => "where-arg",
             Raises::Result => "where-result",
             Raises::Let => "where-let",
+            Raises::Invariant { .. } => "invariant",
         }
     }
 }
@@ -362,6 +367,83 @@ impl Promise {
     }
 }
 
+/// A `while` loop's invariant: comparisons that hold at the loop's head. The
+/// state before the loop proves them, and so does the end of each turn; the
+/// head assumes them. Nothing checks them at run time: a program whose proof
+/// fails is refused ([`Raises::Invariant`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Invariant {
+    /// The comparisons, over the body's names.
+    pub atoms: Vec<Atom>,
+    /// The invariant in source form.
+    pub says: Arc<str>,
+    /// The loop's line.
+    pub line: usize,
+    /// The line of the body's last statement, where a turn that falls off the
+    /// body ends.
+    pub end: usize,
+}
+
+impl Invariant {
+    /// The comparisons of the invariant `e` of the `while` on `line`, over
+    /// `Val::Name(Name(j))` for `names[j]`, the names in scope it reads and
+    /// their types ([`Atom::with`]). The error is the rule the checker
+    /// refuses the invariant with.
+    pub fn atoms(
+        e: &Expr,
+        line: usize,
+        names: &[(String, Type)],
+        decls: &dyn Decls,
+    ) -> Result<Vec<Atom>, crate::rules::Rule> {
+        let (mut atoms, mut facts) = (Vec::new(), Vec::new());
+        let of = Of::Loop { line, names };
+        conjuncts(of, e, decls, &mut atoms, &mut facts)?;
+        match facts.is_empty() {
+            true => Ok(atoms),
+            false => Err(of.form()),
+        }
+    }
+}
+
+/// `e` in source form, for the operators of a clause.
+pub fn spelled(e: &Expr) -> String {
+    let rank = |e: &Expr| match e {
+        Expr::Binary { op, .. } => match op {
+            BinOp::Or => 1,
+            BinOp::And => 2,
+            BinOp::Add | BinOp::Sub => 4,
+            BinOp::Mul | BinOp::Div | BinOp::Rem => 5,
+            _ => 3,
+        },
+        _ => 6,
+    };
+    match e {
+        Expr::Var { name, .. } => name.clone(),
+        Expr::Field { expr, field, .. } => format!("{}.{field}", spelled(expr)),
+        Expr::Int(n, _) => n.to_string(),
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } if rank(expr) == 6 => format!("-{}", spelled(expr)),
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } => format!("-({})", spelled(expr)),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let at = rank(e);
+            let wrap = |x: &Expr, tight: bool| match rank(x) < at || (tight && rank(x) == at) {
+                true => format!("({})", spelled(x)),
+                false => spelled(x),
+            };
+            let op = crate::parser::binop_text(*op);
+            format!("{} {op} {}", wrap(lhs, false), wrap(rhs, true))
+        }
+        _ => "..".into(),
+    }
+}
+
 /// What a result's fact clause guarantees of the result. The body
 /// establishes it at every return.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,7 +565,8 @@ impl Ensures {
 /// `Name(k)`; the result's of `f`, whose `value` is `Name(0)` and whose
 /// parameter `k` is `Name(k + 1)`; or the `let` of `name`'s, of type `ty`,
 /// in a body whose type parameters `bounds` bounds, whose `value` is
-/// `Name(0)`.
+/// `Name(0)`; or the invariant of the `while` on `line`, whose names are
+/// `Name(j)` for `names[j]`.
 #[derive(Clone, Copy)]
 enum Of<'f> {
     Param(&'f Function, usize),
@@ -492,6 +575,10 @@ enum Of<'f> {
         name: &'f str,
         ty: &'f Type,
         bounds: Option<&'f Bounds>,
+    },
+    Loop {
+        line: usize,
+        names: &'f [(String, Type)],
     },
 }
 
@@ -505,6 +592,7 @@ impl<'f> Of<'f> {
             Of::Param(f, k) => rule!(ClauseForm, param = f.params[k].name.as_str()),
             Of::Result(f) => rule!(ResultClauseForm, name = crate::rules::DeclName(&f.name)),
             Of::Let { name, .. } => rule!(LetClauseForm, name),
+            Of::Loop { line, .. } => rule!(InvariantForm, line),
         }
     }
 
@@ -514,6 +602,7 @@ impl<'f> Of<'f> {
             Of::Param(f, k) => &f.params[k].ty,
             Of::Result(f) => &f.ret,
             Of::Let { ty, .. } => ty,
+            Of::Loop { .. } => &Type::Unit,
         }
     }
 
@@ -522,6 +611,7 @@ impl<'f> Of<'f> {
         match self {
             Of::Param(f, _) | Of::Result(f) => Some(&f.type_bounds),
             Of::Let { bounds, .. } => bounds,
+            Of::Loop { .. } => None,
         }
     }
 }
@@ -617,7 +707,10 @@ fn side(
             BinOp::Mul => match (lit(lhs), lit(rhs)) {
                 (Some(k), _) => side(of, rhs, times(k)?, decls, out, tys),
                 (None, Some(k)) => side(of, lhs, times(k)?, decls, out, tys),
-                (None, None) => Err(rule!(ClauseProduct, a = spelled(lhs), b = spelled(rhs))),
+                (None, None) => {
+                    let (a, b) = (spelled(lhs), spelled(rhs));
+                    Err(rule!(ClauseProduct, a, b))
+                }
             },
             _ => Err(of.form()),
         },
@@ -632,17 +725,6 @@ fn side(
             out.push((factor, o));
             Ok(())
         }
-    }
-}
-
-/// A factor of a product in source form: a name, a part of one, a literal,
-/// or `a sum` for any other expression.
-fn spelled(e: &Expr) -> String {
-    match e {
-        Expr::Var { name, .. } => name.clone(),
-        Expr::Field { expr, field, .. } => format!("{}.{field}", spelled(expr)),
-        Expr::Int(n, _) => n.to_string(),
-        _ => "a sum".into(),
     }
 }
 
@@ -811,12 +893,19 @@ fn scalar_conjuncts(e: &Expr, ty: &Type, out: &mut Vec<Atom>) -> bool {
 /// The name `name` names in the clause `of`, as [`Of`] numbers it, and its
 /// declared type. `value` is the clause's own subject. A parameter clause
 /// may name an earlier `read` parameter, a result clause any `read`
-/// parameter, and a `let` clause nothing else.
+/// parameter, a `let` clause nothing else, and an invariant a name in scope.
 fn sibling<'f>(of: Of<'f>, name: &str) -> Result<(usize, &'f Type), crate::rules::Rule> {
     let (f, before, shift) = match of {
         Of::Param(_, k) if name == "value" => return Ok((k, of.subject())),
         Of::Result(_) | Of::Let { .. } if name == "value" => return Ok((0, of.subject())),
         Of::Let { name: binding, .. } => return Err(rule!(LetClauseName, binding, name)),
+        Of::Loop { line, names } => {
+            let at = names.iter().position(|(n, _)| n == name);
+            return match at {
+                Some(j) => Ok((j, &names[j].1)),
+                None => Err(rule!(InvariantName, line, name)),
+            };
+        }
         Of::Param(f, k) => (f, k, 0),
         Of::Result(f) => (f, f.params.len(), 1),
     };
