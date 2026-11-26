@@ -423,6 +423,8 @@ const COMMANDS: &[Cmd] = &[
         Flag("--contract", None, "which module contract governs the file, and every export's status against it"),
         Flag("--cost", None, "per line: what it allocates, copies and grows, and the checks it keeps"),
         Flag("--provenance", None, "per function returning an array: which parameter positions the result's positions read"),
+        Flag("--proofs", None, "per removed check: its goal and each premise with its source"),
+        Flag("--uses", Some("fn"), "with --proofs: every removed check of the program that rests on a clause of fn"),
         Flag("--capability", Some("capability"), "every import chain that pulls the capability into the artifact the file argument names"),
     ]),
     cmd("routes", Host::Report, Pos::File, routes_cmd, "the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source", &[
@@ -999,6 +1001,9 @@ fn why_cmd(call: &Call) -> Outcome {
     }
     if call.has("--cost") {
         return why_cost(flags, file);
+    }
+    if call.has("--proofs") {
+        return why_proofs(flags, file, call.value("--uses"));
     }
     if call.has("--provenance") {
         return why_provenance(flags, file);
@@ -1632,6 +1637,101 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
         };
         let name = program.spellings.written(&f.name);
         println!("  {name}: trap-free: {trap}; kernel: {kernel}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `vyrn why --proofs <file>`: per function of the file, each removed check
+/// with its goal and each premise with its source ([`insight::proof_lines`]).
+/// With `--uses fn`, every removed check of the program that rests on a clause
+/// of `fn` instead. Exit 0 whenever it could answer, 1 for an unknown `fn`.
+fn why_proofs(flags: GlobalFlags, file: &str, uses: Option<&str>) -> Outcome {
+    let (_, _, (program, world)) = why_checked(flags, file)?;
+    println!("{}", dos_to_slash(file));
+    if let Some(name) = uses {
+        return why_uses(&program, &world, file, name);
+    }
+    let (mut removed, mut inferred) = (0, 0);
+    let mut head = None;
+    for (id, body) in insight::root_frames(&program, &world) {
+        let proofs = body.id.map(|f| world.proofs(f)).unwrap_or_default();
+        if proofs.is_empty() {
+            continue;
+        }
+        if head != Some(id) {
+            println!("{}", fn_head(&program, id));
+            head = Some(id);
+        }
+        for line in insight::proof_lines(&program, &world, body, &proofs) {
+            println!("{line}");
+        }
+        let mut sites: Vec<_> = proofs.iter().map(|p| p.site).collect();
+        sites.dedup();
+        removed += sites.len();
+        inferred += sites
+            .iter()
+            .filter(|s| {
+                (proofs.iter().filter(|p| p.site == **s))
+                    .any(|p| p.tree.iter().any(|l| l.src.kind.inferred()))
+            })
+            .count();
+    }
+    println!("summary: {removed} checks removed, {inferred} resting on an inferred fact");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `vyrn why --proofs --uses fn`: each removed check of the program whose
+/// proof rests on `fn`'s parameter clauses or result clause, then under
+/// `inferred` each that rests on what the compiler inferred of `fn`.
+fn why_uses(
+    program: &vyrn_frontend::ast::Program,
+    world: &vyrn_lower::World,
+    root: &str,
+    name: &str,
+) -> Outcome {
+    let Some(target) = (program.functions.iter())
+        .find(|f| program.spellings.written(&f.name) == name)
+        .and_then(|f| world.fn_id(&f.name))
+    else {
+        eprintln!("error: `--uses` names `{name}`, and the program declares no function `{name}`");
+        return Ok(ExitCode::from(1));
+    };
+    let (mut stated, mut inferred) = (Vec::new(), Vec::new());
+    for i in 0..world.fn_rows().len() {
+        let id = vyrn_frontend::ast::FnId::nth(i);
+        let Some(body) = world.body_at(id) else {
+            continue;
+        };
+        let fname = program
+            .spellings
+            .written(&world.fn_rows()[i].name)
+            .to_string();
+        let file = dos_to_slash(body.file.as_deref().unwrap_or(root));
+        for p in world.proofs(id) {
+            use vyrn_lower::facts::Premise;
+            let rests = |l: &&vyrn_lower::elide::Line| match l.src.kind {
+                Premise::Clause(_) => id == target,
+                Premise::Ensures(f) | Premise::Summary(f) => f == Some(target),
+                _ => false,
+            };
+            let Some(l) = p.tree.iter().find(rests) else {
+                continue;
+            };
+            let goal = p.goal.as_deref().unwrap_or("no path reaches it");
+            let row = format!(
+                "{file}:{}  {fname}  {goal}  rests on {}",
+                p.site.line, l.fact
+            );
+            match l.src.kind.inferred() {
+                true => inferred.push(row),
+                false => stated.push(row),
+            }
+        }
+    }
+    stated.iter().for_each(|r| println!("{r}"));
+    if !inferred.is_empty() {
+        println!("inferred");
+        inferred.iter().for_each(|r| println!("{r}"));
     }
     Ok(ExitCode::SUCCESS)
 }

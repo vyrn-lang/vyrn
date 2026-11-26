@@ -369,6 +369,19 @@ compile, except `--contract`.
   callee's. A counter loop opens with `while k < c`, where `c` is a literal
   or a value the loop does not write, and each turn steps `k` by a positive
   literal, its only write. The report emits nothing for a GPU.
+- `vyrn why --proofs <file>`: per function of the file, each check the
+  compiler removes, in source order, with its goal and each premise the
+  proof read, indented under the facts it follows from. A premise names its
+  source: a parameter clause, a callee's result clause at its call, a test
+  and its side, a check that stays, an invariant the loop head inferred, a
+  `let`, a type's rule, a length axiom, or a step (a join, a sum, a raised
+  bound). A premise marked `inferred` is one only the emitting walk reads,
+  so a change to another body can bring the check back; the summary counts
+  the checks that rest on one. `--uses fn` lists instead every removed check
+  of the program whose proof rests on a clause of `fn`, the inferred ones
+  under `inferred`; a name the program does not declare exits 1. The report
+  walks each body once more with every fact tagged (`elide::proofs`); `vyrn
+  check` tags nothing.
 - `vyrn why --provenance <file>`: per function of the file that returns an
   array, which positions of its array parameters the result's positions read,
   such as ``identity+fresh(end) pointwise, from `path` ``. The class is

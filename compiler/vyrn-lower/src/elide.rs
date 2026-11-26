@@ -46,7 +46,7 @@ use vyrn_frontend::prelude::{self, ShapeMap};
 use vyrn_frontend::prim::Cmp;
 
 use crate::effects::StateUse;
-use crate::facts::{Fact, Lin, Sides, State, Term, EXACT};
+use crate::facts::{Cert, Fact, Lin, Node, Premise, Said, Sides, Src, State, Tags, Term, EXACT};
 use vyrn_frontend::core::check::{
     scalar_rule, Atom, Check, Ensures, Guard, Operand, Site, Verdict, Why,
 };
@@ -66,7 +66,7 @@ fn decide_in(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>)
     for l in &mut body.lambdas {
         decide_in(l, decls, sums);
     }
-    walk(body, decls, sums);
+    walk(body, decls, sums, None);
 }
 
 /// A group's rule check that fails wherever it runs: its site, the field the
@@ -88,10 +88,73 @@ pub fn demanded(
     decls: &HashMap<String, TypeDecl>,
     declared: &Summaries,
 ) -> Vec<Refuted> {
-    walk(body, decls, declared.into())
+    walk(body, decls, declared.into(), None)
 }
 
-fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> Vec<Refuted> {
+/// Decides the check rows of `body` as `decide` or `demanded` decided
+/// `decided`, from the same `sums`, with every fact tagged by its source
+/// ([`Tags`]), and answers the proof of each removed check: `vyrn why
+/// --proofs`. The one frame, without its lambdas, which are bodies of their
+/// own.
+///
+/// # Panics
+///
+/// Where the traced walk gives a check another verdict than `decided` holds:
+/// the tags changed a verdict.
+pub fn proofs(
+    body: &Body,
+    decided: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    sums: &Summaries,
+) -> Vec<Proof> {
+    let mut b = body.clone();
+    b.lambdas.clear();
+    let mut out = Vec::new();
+    walk(&mut b, decls, sums.into(), Some(&mut out));
+    let verdicts = |b: &Body| -> Vec<(Site, Verdict)> {
+        (rows(&b.stmts))
+            .filter_map(|(s, _)| match s {
+                St::Check(c) => Some((c.site, c.verdict)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        verdicts(&b),
+        verdicts(decided),
+        "the traced walk of `{}` decided another verdict",
+        body.name
+    );
+    out
+}
+
+/// The proof of one goal of a removed check ([`proofs`]): the check's site and
+/// guard, the goal in source form, and the premises as a tree.
+#[derive(Debug, Clone)]
+pub struct Proof {
+    pub site: Site,
+    pub guard: Guard,
+    /// `None` where no path reaches the check.
+    pub goal: Option<Arc<str>>,
+    pub tree: Vec<Line>,
+}
+
+/// One premise of a [`Proof`]: how deep it sits under the goal, what it
+/// states, and its source. `again` marks a node printed above.
+#[derive(Debug, Clone)]
+pub struct Line {
+    pub depth: u32,
+    pub fact: String,
+    pub src: Src,
+    pub again: bool,
+}
+
+fn walk(
+    body: &mut Body,
+    decls: &HashMap<String, TypeDecl>,
+    sums: View<'_>,
+    trace: Option<&mut Vec<Proof>>,
+) -> Vec<Refuted> {
     if !any_check(&body.stmts) {
         return Vec::new();
     }
@@ -102,9 +165,13 @@ fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> V
         .and_then(|f| sums.get(f))
         .map_or(&none, |(_, s)| &s.pre);
     let mut w = Walk::new(body, decls, sums, &stmts, None, false);
+    w.proofs = trace.as_ref().map(|_| Vec::new());
     let st = w.entry(pre);
     w.block(st, &mut stmts);
-    let refuted = w.refuted;
+    let refuted = std::mem::take(&mut w.refuted);
+    if let (Some(t), Some(p)) = (trace, w.proofs.take()) {
+        *t = p;
+    }
     body.stmts = stmts;
     refuted
 }
@@ -3406,6 +3473,10 @@ struct Walk<'a> {
     /// ([`extents`]): after that row the walk drops the name's conditions,
     /// which only a row naming it reads.
     ends: Vec<Option<u32>>,
+    /// The source line of the row being walked, which a fact's [`Src`] names.
+    line: u32,
+    /// In a traced walk ([`proofs`]): the proofs of the checks removed so far.
+    proofs: Option<Vec<Proof>>,
 }
 
 /// What the walk keeps about one name.
@@ -3666,6 +3737,8 @@ impl<'a> Walk<'a> {
             rows: None,
             wraps: BTreeSet::new(),
             ends: extents(stmts, body.names.len()),
+            line: 0,
+            proofs: None,
         };
         for (k, p) in ghosted {
             w.elem_cands
@@ -3965,6 +4038,9 @@ impl<'a> Walk<'a> {
     /// parameters' clauses.
     fn entry(&mut self, pre: &BTreeSet<Lin>) -> State {
         let mut st = State::default();
+        if self.proofs.is_some() {
+            st.tags = Tags::traced();
+        }
         let params = &self.body.params;
         for p in params {
             self.slot[p.index()].origin = Origin::Param(*p);
@@ -3990,7 +4066,7 @@ impl<'a> Walk<'a> {
                     let p = params[j.index() - 1];
                     st.elems.get_mut().entry(p).or_default().insert(l);
                 }
-                None => st.assume(&l),
+                None => st.assume(&l, self.src(Premise::Entry)),
             }
         }
         if self.rows.is_some() {
@@ -4001,17 +4077,106 @@ impl<'a> Walk<'a> {
             }
         }
         for a in &self.body.assumes {
-            self.holds(&mut st, a);
+            let src = self.src(Premise::Clause(clause_of(a)));
+            self.holds(&mut st, a, src);
         }
         st
     }
 
+    /// A source of kind `kind` at the row being walked.
+    fn src(&self, kind: Premise) -> Src {
+        Src {
+            kind,
+            line: self.line,
+        }
+    }
+
+    /// In a traced walk, records the proof of each goal of `c`, which `st`
+    /// proves.
+    fn trace(&mut self, st: &State, c: &Check, goals: &[Lin]) {
+        if self.proofs.is_none() {
+            return;
+        }
+        let nodes = st.tags.nodes();
+        let mut out = Vec::new();
+        for g in goals {
+            let Some(cert) = st.prover().ge0_deep(g) else {
+                continue;
+            };
+            let roots = st.uses(&cert, g);
+            let goal = match cert {
+                Cert::Dead => None,
+                _ => Some(self.goal(st, g, None).0),
+            };
+            out.push(Proof {
+                site: c.site,
+                guard: c.guard.clone(),
+                goal,
+                tree: self.tree(&nodes, &roots),
+            });
+        }
+        if goals.is_empty() {
+            let mut p = self.unreached(c, &nodes, &st.uses(&Cert::Dead, &Lin::k(0)));
+            if !st.dead {
+                p.goal = Some("nothing: the check holds as written".into());
+            }
+            out.push(p);
+        }
+        self.proofs.as_mut().expect("traced").extend(out);
+    }
+
+    /// The proof of a check no live path reaches, from the facts that killed
+    /// the state.
+    fn unreached(&self, c: &Check, nodes: &[Node], roots: &[u32]) -> Proof {
+        Proof {
+            site: c.site,
+            guard: c.guard.clone(),
+            goal: None,
+            tree: self.tree(nodes, roots),
+        }
+    }
+
+    /// The premises `roots` and what each follows from, depth first, a node
+    /// printed once and marked `again` after.
+    fn tree(&self, nodes: &[Node], roots: &[u32]) -> Vec<Line> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        // Each node's parents have smaller ids, so the stack empties.
+        let mut stack: Vec<(u32, u32)> = roots.iter().rev().map(|r| (*r, 0)).collect();
+        while let Some((id, depth)) = stack.pop() {
+            let Some(n) = nodes.get(id as usize) else {
+                continue;
+            };
+            let again = !seen.insert(id);
+            out.push(Line {
+                depth,
+                fact: self.said(&n.said),
+                src: n.src,
+                again,
+            });
+            if !again {
+                stack.extend(n.parents.iter().rev().map(|p| (*p, depth + 1)));
+            }
+        }
+        out
+    }
+
+    /// What a node states, in source form.
+    fn said(&self, s: &Said) -> String {
+        match s {
+            Said::Ge(l) => self.lin_text(l, None),
+            Said::Ne(l) => format!("{} != 0", self.sum_text(l)),
+            Said::Def(t, v) => format!("{} = {}", self.sum_text(&Lin::of(*t)), self.sum_text(v)),
+            Said::Dead => "no path reaches here".into(),
+        }
+    }
+
     /// Assumes the facts the comparison `a` states, those over terms.
-    fn holds(&self, st: &mut State, a: &Atom) {
+    fn holds(&self, st: &mut State, a: &Atom, src: Src) {
         for f in self.atom(a).into_iter().flatten() {
             match f {
-                Fact::Ge(l) => st.assume(&l),
-                Fact::Ne(l) => st.differ(&l),
+                Fact::Ge(l) => st.assume(&l, src),
+                Fact::Ne(l) => st.differ(&l, src),
             }
         }
     }
@@ -4161,7 +4326,8 @@ impl<'a> Walk<'a> {
             let ts: Vec<Lin> = (st.elems.get(&a).into_iter().flatten())
                 .filter_map(|t| filled(t, a, &e))
                 .collect();
-            ts.iter().for_each(|l| st.assume(l));
+            let src = self.src(Premise::Element(a));
+            ts.iter().for_each(|l| st.assume(l, src));
         }
         let base = match base {
             Place::Name(b) => self.fields.get(b).unwrap_or(base),
@@ -4172,7 +4338,7 @@ impl<'a> Walk<'a> {
         let e = Lin::of(Term::Val(n));
         for fact in self.element_facts_of(r, Some(f)) {
             if let Some(l) = self.element_lin(r, fact, &e, None) {
-                st.assume(&l);
+                st.assume(&l, self.src(Premise::Record(r)));
                 if self.obliging {
                     self.assumed.insert(fact.clone());
                 }
@@ -4352,7 +4518,7 @@ impl<'a> Walk<'a> {
     /// another row or body proved them of ([`invariants`]).
     fn restate(&mut self, st: &mut State, n: Name) {
         for (l, f) in self.facts_of(n) {
-            st.assume(&l);
+            st.assume(&l, self.src(Premise::Record(n)));
             if self.obliging {
                 self.assumed.insert(f.clone());
             }
@@ -4499,7 +4665,11 @@ impl<'a> Walk<'a> {
             if let Some((own, least)) = self.col(*r, &f.name).filter(|(o, l)| o != l) {
                 let t = Term::Col(*r, own);
                 st.forget(t);
-                st.assume_eq(&Lin::of(t), &Lin::of(Term::Col(*r, least)));
+                st.assume_eq(
+                    &Lin::of(t),
+                    &Lin::of(Term::Col(*r, least)),
+                    self.src(Premise::Type(*r)),
+                );
             }
         }
     }
@@ -4533,10 +4703,14 @@ impl<'a> Walk<'a> {
     fn wrapped(&self, st: &mut State, n: Name, rhs: &Rhs) {
         let Some(v) = some_part(rhs) else { return };
         if let Some(l) = self.lin(&Val::Name(v)).filter(|_| self.payload(n)) {
-            st.define(Term::Val(n), &l);
+            st.define(Term::Val(n), &l, self.src(Premise::Let(n)));
         }
         for i in self.payload_fields(n) {
-            st.define(Term::Field(n, i), &Lin::of(Term::Field(v, i)));
+            st.define(
+                Term::Field(n, i),
+                &Lin::of(Term::Field(v, i)),
+                self.src(Premise::Let(n)),
+            );
         }
     }
 
@@ -4550,10 +4724,18 @@ impl<'a> Walk<'a> {
             return;
         }
         if self.payload(*o) {
-            st.define(Term::Val(b), &Lin::of(Term::Val(*o)));
+            st.define(
+                Term::Val(b),
+                &Lin::of(Term::Val(*o)),
+                self.src(Premise::Let(b)),
+            );
         }
         for i in self.payload_fields(*o) {
-            st.define(Term::Field(b, i), &Lin::of(Term::Field(*o, i)));
+            st.define(
+                Term::Field(b, i),
+                &Lin::of(Term::Field(*o, i)),
+                self.src(Premise::Let(b)),
+            );
         }
     }
 
@@ -4589,14 +4771,24 @@ impl<'a> Walk<'a> {
                     (0, (1i64 << bits) - 1)
                 };
                 let v = Lin::of(Term::Val(n));
-                st.assume(&v.plus(-lo).expect("a narrow range fits"));
-                st.assume(&Lin::k(hi).sub(&v).expect("a narrow range fits"));
+                st.assume(
+                    &v.plus(-lo).expect("a narrow range fits"),
+                    self.src(Premise::Type(n)),
+                );
+                st.assume(
+                    &Lin::k(hi).sub(&v).expect("a narrow range fits"),
+                    self.src(Premise::Type(n)),
+                );
             }
-            Kind::Int(64, false) => st.assume(&Lin::of(Term::Val(n))),
+            Kind::Int(64, false) => st.assume(&Lin::of(Term::Val(n)), self.src(Premise::Type(n))),
             Kind::Seq => {
                 let ty = vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, self.decls);
                 if let Type::ArrayN(_, len) = ty {
-                    st.assume_eq(&Lin::of(Term::Len(n)), &Lin::k(len as i64));
+                    st.assume_eq(
+                        &Lin::of(Term::Len(n)),
+                        &Lin::k(len as i64),
+                        self.src(Premise::Type(n)),
+                    );
                 }
             }
             Kind::Other if !self.dirty.contains(&n) => self.restate(st, n),
@@ -4622,7 +4814,7 @@ impl<'a> Walk<'a> {
     /// checks the rule.
     fn premises(&self, st: &mut State, n: Name, t: &str) {
         for a in self.scalar(n, t).map(|(a, _)| a).unwrap_or_default() {
-            self.holds(st, &a);
+            self.holds(st, &a, self.src(Premise::Type(n)));
         }
     }
 
@@ -4685,7 +4877,13 @@ impl<'a> Walk<'a> {
 
     fn dead(&mut self, s: &mut St) {
         match s {
-            St::Check(c) if self.record => c.verdict = Verdict::Proved,
+            St::Check(c) if self.record => {
+                c.verdict = Verdict::Proved;
+                if self.proofs.is_some() {
+                    let p = self.unreached(c, &[], &[]);
+                    self.proofs.as_mut().expect("traced").push(p);
+                }
+            }
             St::If { then, els, .. } => {
                 then.iter_mut().for_each(|s| self.dead(s));
                 els.iter_mut().for_each(|s| self.dead(s));
@@ -4703,6 +4901,9 @@ impl<'a> Walk<'a> {
     }
 
     fn stmt(&mut self, mut st: State, s: &mut St) -> State {
+        if let Some(l) = row_line(self.body, s) {
+            self.line = l;
+        }
         match s {
             St::Let(n, rhs) => {
                 self.observe(&st, rhs);
@@ -4772,7 +4973,7 @@ impl<'a> Walk<'a> {
                             Val::Lit(_) => None,
                         };
                         if let Some(l) = stored {
-                            st.define(t, &Lin::of(l));
+                            st.define(t, &Lin::of(l), self.src(Premise::Store));
                         }
                         if let Place::Name(r) = &**r {
                             self.wrote_field(&st, *r, f);
@@ -4785,7 +4986,7 @@ impl<'a> Walk<'a> {
                             st.forget(t);
                             let v = self.lin(value).filter(|_| self.slot[n.index()].relevant);
                             if let Some(v) = v {
-                                st.define(t, &v);
+                                st.define(t, &v, self.src(Premise::Store));
                             }
                             self.wrote_field(&st, *n, f);
                         }
@@ -4831,8 +5032,12 @@ impl<'a> Walk<'a> {
                         // are read from a shared copy.
                         let conds = yes.conds.clone();
                         if let Some(s) = conds.get(c) {
-                            s.0.iter().for_each(|l| yes.add(l));
-                            s.1.iter().for_each(|l| no.add(l));
+                            let (t, f) = (
+                                self.src(Premise::Test(true)),
+                                self.src(Premise::Test(false)),
+                            );
+                            s.0.iter().for_each(|l| yes.add(l, t));
+                            s.1.iter().for_each(|l| no.add(l, f));
                         }
                         (yes, no)
                     }
@@ -4904,6 +5109,7 @@ impl<'a> Walk<'a> {
                     let failing = goals.iter().flatten().find(|g| !holds(g));
                     if goals.is_some() && failing.is_none() {
                         c.verdict = Verdict::Proved;
+                        self.trace(&st, c, goals.as_deref().unwrap_or_default());
                     } else {
                         c.why = self.why(&st, c, failing);
                     }
@@ -4936,16 +5142,17 @@ impl<'a> Walk<'a> {
                         | Guard::Rule(..)
                 ) {
                     for g in goals.into_iter().flatten() {
-                        st.assume(&g);
+                        st.assume(&g, self.src(Premise::Passed));
                     }
                 }
                 if let Guard::NonZero(d) = &c.guard {
                     if let Some(d) = self.lin(d) {
-                        st.differ(&d);
+                        st.differ(&d, self.src(Premise::Passed));
                     }
                 }
                 if let Guard::Clause { atoms, .. } = &c.guard {
-                    atoms.iter().for_each(|a| self.holds(&mut st, a));
+                    let src = self.src(Premise::Passed);
+                    atoms.iter().for_each(|a| self.holds(&mut st, a, src));
                 }
                 if let Guard::Scalar(n, t) = &c.guard {
                     self.premises(&mut st, *n, t);
@@ -5169,12 +5376,12 @@ impl<'a> Walk<'a> {
                 if f == "length" || f == "byteLength" =>
             {
                 if let Some(t) = self.length(b).or_else(|| self.inner(b)) {
-                    st.define(Term::Val(n), &Lin::of(t));
+                    st.define(Term::Val(n), &Lin::of(t), self.src(Premise::Let(n)));
                 }
             }
             Rhs::Read(Place::Field(r, f)) if matches!(self.kind(n), Kind::Int(..)) => {
                 if let Some(t) = self.field(r, f) {
-                    st.define(Term::Val(n), &Lin::of(t));
+                    st.define(Term::Val(n), &Lin::of(t), self.src(Premise::Let(n)));
                     self.span(st, n);
                 }
             }
@@ -5183,11 +5390,15 @@ impl<'a> Walk<'a> {
                 if matches!(self.kind(n), Kind::Seq) =>
             {
                 if let Some(t) = self.length(p) {
-                    st.define(Term::Len(n), &Lin::of(t));
+                    st.define(Term::Len(n), &Lin::of(t), self.src(Premise::Let(n)));
                 }
             }
             Rhs::Make(Ctor::Array, parts) => {
-                st.define(Term::Len(n), &Lin::k(parts.len() as i64));
+                st.define(
+                    Term::Len(n),
+                    &Lin::k(parts.len() as i64),
+                    self.src(Premise::Let(n)),
+                );
             }
             Rhs::Read(Place::Elem(base, _)) if self.kind(n).is_int() => {
                 self.element_read(st, n, base);
@@ -5200,10 +5411,10 @@ impl<'a> Walk<'a> {
                         Val::Lit(_) => None,
                     };
                     if let (Some(t), Some(len)) = (self.col_term(n, f), len) {
-                        st.define(t, &len);
+                        st.define(t, &len, self.src(Premise::Let(n)));
                     }
                     if let (Some(t), Some(x)) = (self.field(&Place::Name(n), f), self.lin(v)) {
-                        st.define(t, &x);
+                        st.define(t, &x, self.src(Premise::Let(n)));
                     }
                 }
             }
@@ -5211,25 +5422,28 @@ impl<'a> Walk<'a> {
                 if let Some((_, lo, hi)) = self.resized(rhs).filter(|_| lands_on_result(args)) {
                     let len = Lin::of(Term::Len(n));
                     if lo == hi {
-                        st.define(Term::Len(n), &lo);
+                        st.define(Term::Len(n), &lo, self.src(Premise::Let(n)));
                     } else {
                         len.sub(&lo)
                             .iter()
                             .chain(&hi.sub(&len))
-                            .for_each(|l| st.assume(l));
+                            .for_each(|l| st.assume(l, self.src(Premise::Builtin)));
                     }
                 }
             }
             Rhs::Call { .. } if some_part(rhs).is_some() => self.wrapped(st, n, rhs),
             Rhs::Prim(op, vs, _) => match self.prim(st, n, op, vs) {
-                Out::Def(r) => st.define(Term::Val(n), &r),
+                Out::Def(r) => st.define(Term::Val(n), &r, self.src(Premise::Let(n))),
                 _ if self.record && matches!(op, Op::Bin(BinOp::Add | BinOp::Sub)) => {
                     self.wraps.insert(n);
                 }
                 Out::Cond(t, f) => {
                     st.conds.insert(n, Sides::from((t, f)));
                 }
-                Out::Facts(fs) => fs.iter().for_each(|f| st.assume(f)),
+                Out::Facts(fs) => {
+                    let src = self.src(Premise::Let(n));
+                    fs.iter().for_each(|f| st.assume(f, src))
+                }
                 Out::Nothing => {}
             },
             _ => {}
@@ -5248,7 +5462,8 @@ impl<'a> Walk<'a> {
     /// call. A side the call does not hand a value is left out: an argument
     /// read from a place, or the result of a call no name binds.
     fn ensured(&self, st: &mut State, n: Option<Name>, rhs: &Rhs) {
-        let Some((_, s)) = self.sums.call(rhs).and_then(|g| self.sums.get(g)) else {
+        let g = self.sums.call(rhs);
+        let Some((_, s)) = g.and_then(|g| self.sums.get(g)) else {
             return;
         };
         let (Rhs::Call { args, .. }, Some(e)) = (rhs, &s.ensures) else {
@@ -5256,8 +5471,9 @@ impl<'a> Walk<'a> {
         };
         let result = n.map(Val::Name);
         let param = |k: usize| args.get(k)?.0.val().cloned();
+        let src = self.src(Premise::Ensures(g));
         for a in e.over(result.as_ref(), &param).flatten() {
-            self.holds(st, &a);
+            self.holds(st, &a, src);
         }
     }
 
@@ -5288,7 +5504,7 @@ impl<'a> Walk<'a> {
                 exact(&Lin::of(p)).then(|| self.arg(p, &args[k].0, Kind::Seq))?
             });
         if let Some(l) = len {
-            st.define(Term::Len(n), &l);
+            st.define(Term::Len(n), &l, self.src(Premise::Let(n)));
         }
     }
 
@@ -5296,9 +5512,11 @@ impl<'a> Walk<'a> {
     /// read after the call's effects. A fact naming an argument the call may
     /// write is left out, and so is one with a term no argument gives.
     fn called(&mut self, st: &mut State, n: Name, rhs: &Rhs) {
-        let Some((i, s)) = self.sums.call(rhs).and_then(|g| self.sums.get(g)) else {
+        let g = self.sums.call(rhs);
+        let Some((i, s)) = g.and_then(|g| self.sums.get(g)) else {
             return;
         };
+        let src = self.src(Premise::Summary(g));
         let Rhs::Call { args, .. } = rhs else { return };
         if (s.post.is_empty() && s.when.is_empty()) || args.len() != s.params.len() {
             return;
@@ -5384,9 +5602,9 @@ impl<'a> Walk<'a> {
             Some(f) => {
                 let c = Lin::k(-f.c);
                 st.kill(n);
-                st.define(r, &c);
+                st.define(r, &c, src);
             }
-            None => facts.iter().for_each(|l| st.assume(l)),
+            None => facts.iter().for_each(|l| st.assume(l, src)),
         }
     }
 
@@ -5568,7 +5786,7 @@ impl<'a> Walk<'a> {
         };
         let mut yes = st.clone();
         if let Some(v) = value.and_then(|v| self.lin(v)) {
-            yes.add(&Fact::Ge(v));
+            yes.add(&Fact::Ge(v), self.src(Premise::Test(true)));
         }
         let holds = |g: &Lin| yes.ge0(g).is_some_and(|cert| cert.verify(&yes, g));
         let kept = (cands.into_iter())
@@ -5597,7 +5815,8 @@ impl<'a> Walk<'a> {
             Val::Lit(Lit::Bool(false)) => Some(State::dead()),
             Val::Name(m) if self.body.names[m.index()].ty == Type::Bool => {
                 let mut yes = st.clone();
-                (st.conds.get(m).into_iter().flat_map(|c| &c.0)).for_each(|f| yes.add(f));
+                let src = self.src(Premise::Test(true));
+                (st.conds.get(m).into_iter().flat_map(|c| &c.0)).for_each(|f| yes.add(f, src));
                 Some(yes)
             }
             _ => None,
@@ -5608,10 +5827,18 @@ impl<'a> Walk<'a> {
     fn assign(&self, st: &mut State, n: Name, v: &Val) {
         match (v, self.kind(n)) {
             (Val::Lit(Lit::Str(s)), Kind::Seq) => {
-                st.define(Term::Len(n), &Lin::k(s.len() as i64));
+                st.define(
+                    Term::Len(n),
+                    &Lin::k(s.len() as i64),
+                    self.src(Premise::Let(n)),
+                );
             }
             (Val::Name(m), Kind::Seq) => {
-                st.define(Term::Len(n), &Lin::of(Term::Len(*m)));
+                st.define(
+                    Term::Len(n),
+                    &Lin::of(Term::Len(*m)),
+                    self.src(Premise::Let(n)),
+                );
             }
             (_, Kind::Int(..)) => {
                 // A copy of a name of the same width and sign holds its value,
@@ -5619,12 +5846,16 @@ impl<'a> Walk<'a> {
                 let copy = matches!(v, Val::Name(m) if self.kind(*m) == self.kind(n));
                 if let Some(l) = self.lin(v).and_then(|l| Some(st.norm(&l)?.into_owned())) {
                     if copy || self.in_range(n, &l, st) {
-                        st.define(Term::Val(n), &l);
+                        st.define(Term::Val(n), &l, self.src(Premise::Let(n)));
                     }
                 }
             }
             (Val::Name(m), Kind::Other) if self.payload(n) && self.payload(*m) => {
-                st.define(Term::Val(n), &Lin::of(Term::Val(*m)));
+                st.define(
+                    Term::Val(n),
+                    &Lin::of(Term::Val(*m)),
+                    self.src(Premise::Let(n)),
+                );
             }
             // A Bool copy carries the facts its source's truth gives, none
             // when it has none; a literal's other side is dead (`-1 >= 0`).
@@ -5828,7 +6059,8 @@ impl<'a> Walk<'a> {
                 continue;
             };
             let mut probe = State::default();
-            out.iter().flatten().for_each(|f| probe.add(f));
+            let src = self.src(Premise::Test(true));
+            out.iter().flatten().for_each(|f| probe.add(f, src));
             let at_least_zero = Lin::of(Term::Val(*m));
             if probe
                 .ge0(&at_least_zero)
@@ -6122,7 +6354,7 @@ impl<'a> Walk<'a> {
             }
         }
         for l in self.halving(entry, body, &written) {
-            head.assume(&l);
+            head.assume(&l, self.src(Premise::Invariant));
         }
         // Candidates: what entry knows about the written names, two fields
         // of a record it grows that entry defines equally long, the record
@@ -6240,7 +6472,8 @@ impl<'a> Walk<'a> {
         let record = std::mem::replace(&mut self.record, false);
         loop {
             let mut h = head.clone();
-            cands.iter().for_each(|c| h.assume(c));
+            let src = self.src(Premise::Invariant);
+            cands.iter().for_each(|c| h.assume(c, src));
             held(&mut h, &temps);
             let end = self.block(h, body);
             let l = self.loops.last_mut().expect("pushed above");
@@ -6264,7 +6497,8 @@ impl<'a> Walk<'a> {
             }
         }
         self.record = record;
-        cands.iter().for_each(|c| head.assume(c));
+        let src = self.src(Premise::Invariant);
+        cands.iter().for_each(|c| head.assume(c, src));
         held(&mut head, &temps);
         self.block(head, body);
         let mut l = self.loops.pop().expect("pushed above");
@@ -6308,7 +6542,8 @@ impl<'a> Walk<'a> {
                 })
                 .filter(|f| !f.is_const() && !held(f))
                 .collect();
-            bounded.iter().for_each(|f| exit.assume(f));
+            let src = self.src(Premise::Invariant);
+            bounded.iter().for_each(|f| exit.assume(f, src));
         }
         // A copy below the counter lies below the counter's own bound:
         // `i - at - 1 >= 0` and `n - i >= 0` give `n - at - 1 >= 0`.
@@ -6321,7 +6556,8 @@ impl<'a> Walk<'a> {
             let bounded: Vec<Lin> = (tops.filter(length))
                 .flat_map(|t| lows.iter().filter_map(|l| t.add(l)))
                 .collect();
-            bounded.iter().for_each(|f| exit.assume(f));
+            let src = self.src(Premise::Invariant);
+            bounded.iter().for_each(|f| exit.assume(f, src));
         }
         exit
     }
@@ -6692,6 +6928,36 @@ impl<'a> Walk<'a> {
             })
     }
 
+    /// The sum `l` in source form: `lo + 2 * q - 1`.
+    fn sum_text(&self, l: &Lin) -> String {
+        let mut out = String::new();
+        for (t, k) in &l.terms {
+            let atom = self.lin_text(&Lin::of(*t), None);
+            let atom = atom.strip_suffix(" >= 0").unwrap_or(&atom);
+            let sign = if out.is_empty() {
+                if *k < 0 {
+                    "-"
+                } else {
+                    ""
+                }
+            } else if *k < 0 {
+                " - "
+            } else {
+                " + "
+            };
+            match k.unsigned_abs() {
+                1 => out.push_str(&format!("{sign}{atom}")),
+                m => out.push_str(&format!("{sign}{m} * {atom}")),
+            }
+        }
+        match (out.is_empty(), l.c) {
+            (true, c) => c.to_string(),
+            (false, 0) => out,
+            (false, c) if c < 0 => format!("{out} - {}", c.unsigned_abs()),
+            (false, c) => format!("{out} + {c}"),
+        }
+    }
+
     /// `l >= 0` as a comparison with the smaller side first: `i < xs.length`,
     /// `n >= 1`. `value` stands for `param`.
     fn lin_text(&self, l: &Lin, param: Option<Name>) -> String {
@@ -6757,6 +7023,31 @@ impl<'a> Walk<'a> {
             (false, false, c) if c < 0 => format!("{} < {}", sum(&neg, -c - 1), sum(&pos, 0)),
             (false, false, c) => format!("{} <= {}", sum(&neg, 0), sum(&pos, c)),
         }
+    }
+}
+
+/// The source line of the row `s`, where it has one.
+fn row_line(body: &Body, s: &St) -> Option<u32> {
+    let l = match s {
+        St::Let(n, _) => body.names[n.index()].line,
+        St::Do { line, .. }
+        | St::Store { line, .. }
+        | St::Return { line, .. }
+        | St::Switch { line, .. }
+        | St::Break { line, .. }
+        | St::Continue { line, .. } => *line,
+        St::Check(c) => c.site.line,
+        _ => 0,
+    };
+    u32::try_from(l).ok().filter(|l| *l > 0)
+}
+
+/// The parameter a parameter clause's atom constrains: its left side, which
+/// the clause grammar spells `value`.
+fn clause_of(a: &Atom) -> Name {
+    match (&a.l.of, &a.r.of) {
+        (Val::Name(n), _) | (_, Val::Name(n)) => *n,
+        _ => Name(0),
     }
 }
 

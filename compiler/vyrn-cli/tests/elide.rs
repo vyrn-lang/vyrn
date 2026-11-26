@@ -252,7 +252,10 @@ fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo 
     let (_dir, file) = program(src, "    print(mid(xs, 0, 3).toString())");
     let why = vyrn().args(["why", "--cost"]).arg(&file).output().unwrap();
     let out = norm(&why.stdout);
-    assert!(out.contains("where clause check: the sum `lo + q` may wrap"), "{out}");
+    assert!(
+        out.contains("where clause check: the sum `lo + q` may wrap"),
+        "{out}"
+    );
 }
 
 /// A quotient by a literal of `d >= 1` is at most `d - 1` (`facts::divided`),
@@ -8021,6 +8024,51 @@ fn lemma_calls() -> Vec<String> {
         .filter(|c| ["ordered", "positive", "inRange", "down"].contains(c))
         .map(str::to_string)
         .collect()
+}
+
+/// `vyrn why --proofs` prints each removed check with each premise and its
+/// source: here a parameter clause, a callee's result clause at its call, a
+/// loop guard and an invariant the loop head inferred.
+#[test]
+fn why_proofs_names_the_source_of_each_premise() {
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bsearch.vyrn");
+    let why = vyrn()
+        .args(["why", "--proofs"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    let out = norm(&why.stdout);
+    let lines = [
+        "         d <= n                   parameter clause of `n`\n",
+        "         q < the value of line 10 result clause of `half`, at the call on line 10\n",
+        "         lo < hi                  test on line 17, true\n",
+        "         hi <= xs.length          invariant the loop head inferred\n",
+        "summary: 9 checks removed, 1 resting on an inferred fact\n",
+    ];
+    for line in lines {
+        assert!(out.contains(line), "{out}");
+    }
+}
+
+/// `--uses` lists the removed checks that rest on a function's clauses, and
+/// refuses a name the program does not declare.
+#[test]
+fn why_proofs_uses_lists_the_checks_a_clause_pays_for() {
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bsearch.vyrn");
+    let uses = |name: &str| {
+        let args = ["why", "--proofs", "--uses", name];
+        vyrn().args(args).arg(&file).output().unwrap()
+    };
+    let half = uses("half");
+    assert!(
+        norm(&half.stdout).contains("  mid  `lo + q < hi`  rests on q < the value of line 10\n")
+    );
+    let none = uses("nope");
+    assert_eq!(none.status.code(), Some(1));
+    assert_eq!(
+        norm(&none.stderr),
+        "error: `--uses` names `nope`, and the program declares no function `nope`\n"
+    );
 }
 
 /// A call for its effect into a pure, read-only, trap-free function that

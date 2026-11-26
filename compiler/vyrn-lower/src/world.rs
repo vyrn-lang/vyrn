@@ -521,13 +521,7 @@ impl World {
         Some(s.decided.get_or_init(|| {
             if self.proves(&s.body) {
                 let mut body = s.body.clone();
-                let declared = self.declared.get_or_init(|| {
-                    let mut clauses: Vec<_> = (self.bodies.iter())
-                        .filter_map(|(f, s)| Some((*f, s.as_ref()?.body.ensures.clone()?)))
-                        .collect();
-                    clauses.sort_by_key(|(f, _)| f.index());
-                    crate::elide::Summaries::declared(clauses)
-                });
+                let declared = self.declared();
                 let decls = self.ownership.proto.types();
                 body.each_frame_mut(&mut |f| _ = crate::elide::demanded(f, decls, declared));
                 return body;
@@ -539,6 +533,35 @@ impl World {
                 body
             })
         }))
+    }
+
+    /// The declared result clauses of every body, which a demanded walk reads
+    /// ([`crate::elide::Summaries::declared`]).
+    fn declared(&self) -> &crate::elide::Summaries {
+        self.declared.get_or_init(|| {
+            let mut clauses: Vec<_> = (self.bodies.iter())
+                .filter_map(|(f, s)| Some((*f, s.as_ref()?.body.ensures.clone()?)))
+                .collect();
+            clauses.sort_by_key(|(f, _)| f.index());
+            crate::elide::Summaries::declared(clauses)
+        })
+    }
+
+    /// The proofs of the checks [`World::body_at`] removes from row `id`'s
+    /// body, by a traced copy of the walk that decided it
+    /// ([`crate::elide::proofs`]). Empty where nothing decides checks.
+    pub fn proofs(&self, id: FnId) -> Vec<crate::elide::Proof> {
+        let (Some(Some(s)), Some(decided)) = (self.bodies.get(&id), self.body_at(id)) else {
+            return Vec::new();
+        };
+        if !crate::core::decides() {
+            return Vec::new();
+        }
+        let sums = match self.proves(&s.body) {
+            true => self.declared(),
+            false => self.summaries(),
+        };
+        crate::elide::proofs(&s.body, decided, self.ownership.proto.types(), sums)
     }
 
     /// The callee summaries every decided body reads, over every body
