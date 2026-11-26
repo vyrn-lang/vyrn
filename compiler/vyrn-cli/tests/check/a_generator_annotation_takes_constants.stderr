@@ -1,0 +1,1 @@
+a_generator_annotation_takes_constants.vyrn:7:1: `@describe(..)` takes compile-time constants: string, integer or boolean literals

@@ -1124,14 +1124,6 @@ fn table() -> Vec<Builtin> {
         b("toJson")
             .takes(&[1], |_, _, got| rule!(ToJsonArity, got))
             .sig(row("toJson", &[], &[("x", Read, Unit)], Str, &[])),
-        // The generator is a name, not a value, and `x` any type: both inert.
-        b("derive").sig(row(
-            "derive",
-            &[],
-            &[("g", Read, Unit), ("x", Read, Unit)],
-            Str,
-            &[],
-        )),
         // Both fold to literals, whose release is a no-op (`cap == 0`); the
         // rows exist so the declared reading names the type at every site.
         b("jsonSchema").sig(row("jsonSchema", &["T"], &[], Str, &[])),

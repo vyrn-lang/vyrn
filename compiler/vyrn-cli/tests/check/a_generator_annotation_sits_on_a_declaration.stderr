@@ -1,0 +1,1 @@
+a_generator_annotation_sits_on_a_declaration.vyrn:3:19: `@describe` runs a generator, so it sits on a `type` declaration, not on a field or a variant

@@ -735,6 +735,7 @@ mod tests {
                 type_params: vec![],
                 predicate: None,
                 members: Vec::new(),
+                annotations: Vec::new(),
                 line: 1,
             },
         );

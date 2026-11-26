@@ -1,0 +1,8 @@
+import { describe } from "./annotation_gens_lib"
+
+@describe("hidden")
+type Hidden = { a: Int64 }
+
+export fn shown() -> String {
+    return describeHidden(Hidden { a: 1 })
+}

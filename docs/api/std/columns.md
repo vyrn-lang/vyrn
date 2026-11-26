@@ -3,10 +3,11 @@
 A record type laid out as one array per field.
 
   import { columns } from "std/columns"
-  import { BodyColumns, bodyColumns, pushBody, bodyAt } from columns("./bodies")
 
-`columns` is a `gen fn` that reflects a module and writes, for each record
-type `T` it exports:
+  @columns
+  export type Body = { x: Float64, mass: Float64 }
+
+`@columns` on a record type `T` writes beside it, exported when `T` is:
 
 - `type TColumns`: one `Array<F>` per field `f: F` of `T`, under the same
   name, with a `where` rule that every column has the first one's length.
@@ -25,8 +26,7 @@ of records reads the whole row.
 ## columns
 
 ```vyrn
-fn columns(module: String) -> Code
+fn columns(t: TypeCode, iface: ModuleInterface) -> Code
 ```
 
-Emits a module exporting the column layout of every record type `module`
-exports.
+Writes the column layout of the record type it annotates.

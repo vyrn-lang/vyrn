@@ -8,15 +8,17 @@
 //! ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
 //! FnInfo   { name: String, params: Array<ParamInfo>, ret: String, retSchema: Schema, retUncodable: String, mutates: Bool, origin: Origin }
 //! ParamInfo{ name: String, spelling: String, schema: Schema, uncodable: String }
-//! TypeInfo { name: String, source: String, module: String, schema: Schema, origin: Origin, shape: Array<TypeNode> }
+//! TypeInfo { name: String, source: String, module: String, schema: Schema, origin: Origin, shape: Array<TypeNode>, annotations: Array<AnnotationInfo> }
 //! TypeNode { kind: String, name: String, spelling: String, args: Array<Int64>, members: Array<TypeMember>, predicate: String }
 //! Origin   { file: String, line: Int64, col: Int64, name: String }
+//! AnnotationInfo { name: String, module: String, member: String, fields: Array<AnnotationField>, origin: Origin }
 //! ```
 //! `ret` and `spelling` are type spellings; `TypeInfo.source` is the canonical
 //! `type` declaration text; `uncodable` and `retUncodable` are
 //! [`crate::codec`]'s verdict on crossing a JSON wire; `mutates` is the
 //! author's `mut fn` marker; `origin` is where the declaration is written;
-//! `shape` is the declaration's base as a tree (`push_node`). `moduleCode(path)`
+//! `shape` is the declaration's base as a tree (`push_node`); `annotations` are
+//! its annotations' constants (`annotation_lit`). `moduleCode(path)`
 //! returns the same literal inside a `ModuleCode`, with each type a generator
 //! writes, and each shape node, paired with itself as `Code` ([`Reflect::Code`]).
 //!
@@ -69,18 +71,24 @@ impl Origins {
 
     /// Returns the `Origin` literal for `name`, declared on `line` of `module`.
     fn lit(&self, module: &Option<String>, name: &str, line: usize) -> Expr {
-        let file = self
-            .files
-            .get(module)
-            .cloned()
-            .or_else(|| module.clone())
-            .unwrap_or_default();
         let col = self
             .cols
             .get(module)
             .and_then(|m| m.get(&(line, name.to_string())))
             .copied()
             .unwrap_or(0);
+        self.at(module, name, line, col)
+    }
+
+    /// Returns the `Origin` literal for `name`, written at `line` and `col` of
+    /// `module`.
+    fn at(&self, module: &Option<String>, name: &str, line: usize, col: usize) -> Expr {
+        let file = self
+            .files
+            .get(module)
+            .cloned()
+            .or_else(|| module.clone())
+            .unwrap_or_default();
         struct_lit(
             "Origin",
             vec![
@@ -162,7 +170,14 @@ pub fn module_lit(
     let type_info = |t: &TypeDecl| {
         let spec = specifiers.get(&t.module).map(|s| s.as_str()).unwrap_or("");
         let shape = shape_nodes(t, &types);
-        (type_info_lit(t, spec, &shape, &types, origins), shape)
+        let anns = (t.annotations.iter())
+            .map(|a| {
+                let name = program.spellings.decls.get(a.name());
+                let name = name.map_or(a.name(), |(written, _)| written);
+                annotation_lit(t, a, types.get(a.name()), name, specifiers, origins)
+            })
+            .collect();
+        (type_info_lit(t, spec, &shape, anns, &types, origins), shape)
     };
     let iface = |fns: Vec<Expr>, tys: Vec<Expr>| {
         struct_lit(
@@ -373,6 +388,7 @@ fn type_info_lit(
     t: &TypeDecl,
     module_spec: &str,
     shape: &[(Expr, String)],
+    annotations: Vec<Expr>,
     types: &HashMap<String, TypeDecl>,
     origins: &Origins,
 ) -> Expr {
@@ -388,8 +404,118 @@ fn type_info_lit(
                 "shape",
                 array_lit(shape.iter().map(|(n, _)| n.clone()).collect()),
             ),
+            ("annotations", array_lit(annotations)),
         ],
     )
+}
+
+/// Builds the `AnnotationInfo` literal for annotation `a` on `t`, which
+/// `name` spells: the specifier of the module declaring its record type
+/// `decl` or its `gen fn`, as `TypeInfo.module` spells one, and each field or
+/// argument that is a constant, an argument named by its parameter.
+fn annotation_lit(
+    t: &TypeDecl,
+    a: &Annotation,
+    decl: Option<&TypeDecl>,
+    name: &str,
+    specifiers: &HashMap<Option<String>, String>,
+    origins: &Origins,
+) -> Expr {
+    let home = match &a.generator {
+        Some(g) => Some(Some(g.module.clone())),
+        None => decl.map(|d| d.module.clone()),
+    };
+    let module = home.and_then(|m| specifiers.get(&m)).cloned();
+    let written: Vec<(&str, &Expr)> = match (&a.expr, &a.generator) {
+        (Expr::StructLit { fields, .. }, _) => {
+            fields.iter().map(|(f, e)| (f.as_str(), e)).collect()
+        }
+        (Expr::Call { args, form, .. }, Some(g)) => {
+            let args = &args[usize::from(*form == CallForm::Method)..];
+            g.params.iter().map(String::as_str).zip(args).collect()
+        }
+        _ => Vec::new(),
+    };
+    let fields = written.into_iter().filter_map(|(field, e)| {
+        let value = match crate::consteval::eval(e, &HashMap::new())? {
+            crate::consteval::ConstVal::Int(n) => Expr::call("IntVal", vec![Expr::int(n)], 0),
+            crate::consteval::ConstVal::Str(s) => Expr::call("StrVal", vec![Expr::str(s)], 0),
+            crate::consteval::ConstVal::Bool(b) => {
+                Expr::call("BoolVal", vec![Expr::Bool(b, Id::NEW)], 0)
+            }
+            crate::consteval::ConstVal::Float(_) => return None,
+        };
+        let pair = vec![("name", Expr::str(field)), ("value", value)];
+        Some(struct_lit("AnnotationField", pair))
+    });
+    struct_lit(
+        "AnnotationInfo",
+        vec![
+            ("name", Expr::str(name)),
+            ("module", Expr::str(module.unwrap_or_default())),
+            ("member", Expr::str(a.member.clone().unwrap_or_default())),
+            ("fields", array_lit(fields.collect())),
+            ("origin", origins.at(&t.module, name, a.line, a.col)),
+        ],
+    )
+}
+
+/// Builds what a generator annotation on `t` runs on: `t`'s `TypeCode`, and a
+/// `ModuleInterface` of no functions and the types `t`'s shape names,
+/// transitively, as `types` declares them, in the order the walk reaches
+/// them. A name `types` lacks is a `named` leaf with no `TypeInfo`.
+pub fn annotated_lit(
+    t: &TypeDecl,
+    types: &HashMap<String, TypeDecl>,
+    specifiers: &HashMap<Option<String>, String>,
+    origins: &Origins,
+) -> (Expr, Expr) {
+    let info = |d: &TypeDecl| {
+        let spec = specifiers.get(&d.module).map_or("", String::as_str);
+        let shape = shape_nodes(d, types);
+        let anns = (d.annotations.iter())
+            .map(|a| {
+                let decl = types.get(a.name());
+                let name = decl.map_or(a.name(), |d| d.name.as_str());
+                annotation_lit(d, a, decl, name, specifiers, origins)
+            })
+            .collect();
+        (type_info_lit(d, spec, &shape, anns, types, origins), shape)
+    };
+    let mut seen: HashSet<&str> = HashSet::from([t.name.as_str()]);
+    let mut work: Vec<String> = Vec::new();
+    crate::loader::type_heads(&t.base, &mut |n| work.push(n.clone()));
+    let mut closure = Vec::new();
+    while let Some(n) = work.pop() {
+        let Some((name, d)) = types.get_key_value(&n) else {
+            continue;
+        };
+        if !seen.insert(name) {
+            continue;
+        }
+        crate::loader::type_heads(&d.base, &mut |n| work.push(n.clone()));
+        if d.line != 0 && !is_synthetic(&d.name) {
+            closure.push(info(d).0);
+        }
+    }
+    let (own, shape) = info(t);
+    let nodes = shape.into_iter().map(|(n, spelling)| arg_node(n, spelling));
+    let code = struct_lit(
+        "TypeCode",
+        vec![
+            ("info", own),
+            ("decl", type_code(render_type_decl(t, types))),
+            ("nodes", array_lit(nodes.collect())),
+        ],
+    );
+    let iface = struct_lit(
+        "ModuleInterface",
+        vec![
+            ("functions", array_lit(Vec::new())),
+            ("types", array_lit(closure)),
+        ],
+    );
+    (code, iface)
 }
 
 /// Builds `TypeInfo.shape`: the declaration's base flattened into `TypeNode`s,

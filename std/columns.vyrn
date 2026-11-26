@@ -1,10 +1,11 @@
 /// A record type laid out as one array per field.
 ///
 ///   import { columns } from "std/columns"
-///   import { BodyColumns, bodyColumns, pushBody, bodyAt } from columns("./bodies")
 ///
-/// `columns` is a `gen fn` that reflects a module and writes, for each record
-/// type `T` it exports:
+///   @columns
+///   export type Body = { x: Float64, mass: Float64 }
+///
+/// `@columns` on a record type `T` writes beside it, exported when `T` is:
 ///
 /// - `type TColumns`: one `Array<F>` per field `f: F` of `T`, under the same
 ///   name, with a `where` rule that every column has the first one's length.
@@ -21,26 +22,14 @@
 /// of records reads the whole row.
 
 import { join } from "std/code"
-import { importBlock } from "std/imports"
 import { substring, toLower } from "std/strings"
 
-/// Emits a module exporting the column layout of every record type `module`
-/// exports.
-export gen fn columns(module: String) -> Code {
-    let m = moduleCode(module)
-    let mut out = importBlock(m.iface, "", []) + vyrn"
-"
-    let mut records = 0
-    for t in m.types {
-        if t.info.module == module && t.info.shape[0].kind == "record" {
-            out = out + columnsOf(t)
-            records = records + 1
-        }
+/// Writes the column layout of the record type it annotates.
+export gen fn columns(t: TypeCode, iface: ModuleInterface) -> Code {
+    if t.info.shape[0].kind != "record" {
+        panic("std/columns: `@columns` sits on `" + t.info.name + "`, which is no record type, so there is nothing to lay out.")
     }
-    if records == 0 {
-        panic("std/columns: `" + module + "` exports no record type, so there is nothing to lay out. Export a record type.")
-    }
-    return out
+    return columnsOf(t)
 }
 
 gen fn columnsOf(t: TypeCode) -> Code {
@@ -82,14 +71,14 @@ gen fn columnsOf(t: TypeCode) -> Code {
     let read = join(reads, vyrn", ")
     return vyrn"""
         \{layout}
-        export fn \{make}(capacity: Int64) -> \{cols} {
+        fn \{make}(capacity: Int64) -> \{cols} {
             \{fill}
             return \{cols} { \{built} }
         }
-        export fn \{push}(c: modify \{cols}, v: \{row}) {
+        fn \{push}(c: modify \{cols}, v: \{row}) {
             \{stores}
         }
-        export fn \{at}(c: \{cols}, i: Int64) -> \{row} {
+        fn \{at}(c: \{cols}, i: Int64) -> \{row} {
             return \{row} { \{read} }
         }
 
@@ -100,8 +89,8 @@ gen fn columnsOf(t: TypeCode) -> Code {
 /// one's length when there is more than one.
 gen fn columnsType(cols: Name, fields: Code, rule: Array<Code>) -> Code {
     if rule.length == 0 {
-        return vyrn"export type \{cols} = { \{fields} }"
+        return vyrn"type \{cols} = { \{fields} }"
     }
     let same = join(rule, vyrn" && ")
-    return vyrn"export type \{cols} = { \{fields} } where \{same}"
+    return vyrn"type \{cols} = { \{fields} } where \{same}"
 }

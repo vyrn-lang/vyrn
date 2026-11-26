@@ -1,5 +1,5 @@
 constructor	checker	shared	wasm	types	prelude	editor	all
-Type::Int	30	2	67	15	0	1	115
+Type::Int	31	2	67	15	0	1	116
 Type::IntN	8	2	10	21	4	1	46
 Type::Float	9	2	18	5	0	1	35
 Type::Float32	12	2	17	5	5	0	41
@@ -8,12 +8,12 @@ Type::I32x4	9	1	8	1	2	0	21
 Type::F64x2	5	1	8	1	1	0	16
 Type::Mask32x4	4	1	6	1	0	0	12
 Type::Mask64x2	4	1	7	1	0	0	13
-Type::Bool	20	1	31	7	0	1	60
-Type::Str	29	1	69	10	1	2	112
+Type::Bool	21	1	31	7	0	1	61
+Type::Str	26	1	69	14	1	2	113
 Type::Unit	18	1	19	10	1	0	49
-Type::Named	37	2	12	17	10	6	84
+Type::Named	35	2	12	21	10	6	86
 Type::Union	2	1	0	6	0	0	9
-Type::Record	9	1	5	21	1	4	41
+Type::Record	10	1	5	23	1	4	44
 Type::Omit	2	1	0	6	0	0	9
 Type::Pick	2	1	0	6	0	0	9
 Type::Merge	2	1	0	6	0	0	9
@@ -23,7 +23,7 @@ Type::Param	21	1	2	6	6	2	38
 Type::App	15	1	1	11	1	0	29
 Type::Order	4	1	0	2	0	0	7
 Type::Elem	2	1	0	3	1	0	7
-Type::Array	20	2	29	10	3	2	66
+Type::Array	20	2	29	11	3	2	67
 Type::ArrayN	9	5	14	9	1	1	39
 Type::SmallArray	13	2	20	6	2	1	44
 Type::ConstInt	2	1	0	1	0	0	4
@@ -31,8 +31,8 @@ Type::Map	15	1	20	9	8	2	55
 Type::Stream	13	1	9	4	2	0	29
 Type::Task	8	1	1	4	1	0	15
 Type::Logger	0	1	3	1	3	0	8
-Type::Fn	26	3	21	12	1	0	63
+Type::Fn	23	3	21	12	1	0	60
 Type::Lazy	5	1	2	9	0	0	17
 Type::Never	1	2	2	3	2	0	10
-Type::Err	82	1	0	3	0	0	86
-all	454	52	414	250	58	26	1254
+Type::Err	81	1	0	3	0	0	85
+all	448	52	414	261	58	26	1259

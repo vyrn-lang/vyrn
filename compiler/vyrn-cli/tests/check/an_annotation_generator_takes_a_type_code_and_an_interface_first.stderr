@@ -1,0 +1,1 @@
+an_annotation_generator_takes_a_type_code_and_an_interface_first.vyrn:3:1: `gen fn plain` annotates nothing: an annotation's generator takes a `TypeCode` and a `ModuleInterface` first

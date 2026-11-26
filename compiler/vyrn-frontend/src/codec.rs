@@ -363,6 +363,7 @@ mod tests {
             base,
             predicate: None,
             members: Vec::new(),
+            annotations: Vec::new(),
             line: 0,
         };
         let mut m = HashMap::new();
@@ -505,6 +506,7 @@ mod tests {
                 base: Type::option(Type::Int),
                 predicate: None,
                 members: Vec::new(),
+                annotations: Vec::new(),
                 line: 0,
             },
         );
@@ -539,6 +541,7 @@ mod tests {
                 }]),
                 predicate: None,
                 members: Vec::new(),
+                annotations: Vec::new(),
                 line: 0,
             },
         );

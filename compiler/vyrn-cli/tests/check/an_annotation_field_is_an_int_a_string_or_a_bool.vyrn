@@ -1,0 +1,4 @@
+import { Wide } from "./annotations_lib"
+
+@Wide { xs: [1] }
+export type T = { a: Int64 }

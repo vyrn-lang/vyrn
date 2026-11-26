@@ -1,0 +1,10 @@
+import { Opt } from "./annotations_lib"
+
+fn short() -> String {
+    return "p"
+}
+
+export type T = {
+    @Opt { short: short(), hidden: false, rank: 0 }
+    a: Int64,
+}

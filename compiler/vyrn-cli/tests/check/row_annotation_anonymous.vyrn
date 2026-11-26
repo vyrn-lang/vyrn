@@ -1,0 +1,3 @@
+import { Skip } from "./annotations_lib"
+
+export type T = { a: { @Skip b: Int64 } }

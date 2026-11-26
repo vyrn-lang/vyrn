@@ -106,10 +106,10 @@ pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
 }
 
 /// Type-checks `program` and synthesizes what its builtins need into it, with
-/// `engine` running each `derive` site's generator in a load through `linker`,
-/// the load that linked `program` ([`gen::derive`]). Its options name the
-/// generator runs that enclose the check. With no `linker`, a `derive` site
-/// fails.
+/// `engine` running the generator of each `toJson` and `fromJson` site in a load
+/// through `linker`, the load that linked `program` ([`gen::derive`]). Its
+/// options name the generator runs that enclose the check. With no `linker`,
+/// such a site fails.
 /// Returns the check's diagnostics, the refused set, the root's bindings
 /// ([`checker::check_accum_with_sites`]) and the record of every body,
 /// synthesized ones included, for the judgments to hold. The record is `None`
@@ -118,7 +118,7 @@ pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
 ///
 /// An ordinary load and a generator re-loaded as its own root both
 /// call it, so neither misses the synthesis. The synthesis sits here because
-/// only here has the checker just typed every `derive` site while no
+/// only here has the checker just typed every `toJson` site while no
 /// backend has built its function table from the program yet.
 pub fn check_and_synthesize(
     program: &mut ast::Program,
@@ -139,7 +139,7 @@ pub fn check_and_synthesize(
         checker::check_accum_with_sites(program);
     diags.splice(0..0, unordered);
     let mut record = Some(record);
-    // What a `derive` generator writes joins the program and is checked
+    // What a `toJson` or `fromJson` generator writes joins the program and is checked
     // against it, so the second check's answers stand. The `where`
     // constructors join with it: `fromJson`'s decoders call the predicates.
     if diags.is_empty() && !derived.is_empty() {
@@ -173,7 +173,7 @@ pub fn check_and_synthesize(
     let synth_span = prof::phase("synthesize");
     let from = program.functions.len();
     if diags.is_empty() {
-        // One constructor per `where` type, unless the `derive` join added it.
+        // One constructor per `where` type, unless the generated join added it.
         let have: std::collections::HashSet<&str> =
             program.functions.iter().map(|f| f.name.as_str()).collect();
         let fresh: Vec<_> = ctor::constructors(&program.type_decls)

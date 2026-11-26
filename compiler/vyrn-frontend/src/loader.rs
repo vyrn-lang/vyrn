@@ -75,9 +75,8 @@ pub fn set_gen_budgets_for_test(fuel: Option<u64>, max_output: Option<usize>) {
 }
 
 /// `resolver` with the root's text served at the root's key. A host holds the
-/// root as text (an editor buffer, the playground's page), and a `derive`
-/// generator the root declares loads the root again as its own root
-/// ([`crate::gen::derive`]).
+/// root as text (an editor buffer, the playground's page), and a generator's
+/// load may read the root again.
 pub struct WithRoot<'a> {
     key: String,
     source: &'a str,
@@ -634,9 +633,6 @@ pub struct Nest {
     /// How many loads enclose this one. A generator import's own load and a
     /// load its run makes are one deeper than the load that imports it.
     pub(crate) depth: u32,
-    /// The `derive` generators running, outermost first, each as its module
-    /// key and declared name ([`crate::gen::derive`]).
-    pub(crate) deriving: Vec<String>,
     /// The gen fn whose own load this is, as its module declares it. The link
     /// keeps only what it reaches ([`keep_reached`]). Only
     /// [`checked_generator`] sets it, and the loads a generator's run makes
@@ -1009,7 +1005,9 @@ fn foreign_kernel_impls(
                 continue;
             };
             let rule = match owner.get(&key) {
-                Some((home, _)) if *home == m.key || clashed.contains(key.as_str()) => continue,
+                Some((owner, _)) if owner.as_str() == home(m) || clashed.contains(key.as_str()) => {
+                    continue
+                }
                 Some((home, _)) => {
                     let home = spoken(&m.key, home, opts);
                     rule!(ImplAwayFromType, protocol, ty, home, key = DeclName(&key))
@@ -1057,6 +1055,10 @@ struct Module {
     /// Whether a stateful row of it could not be given for want of a fresh
     /// closed entry ([`Program::unclosed`]).
     unclosed: bool,
+    /// The module whose annotation wrote this one, whose names it shares: the
+    /// link registers its declarations under that key, and it holds a copy of
+    /// that module's imports. `None` for every other module.
+    joins: Option<String>,
 }
 
 /// The state one load walks: the modules entered, their loading state, the
@@ -1089,6 +1091,12 @@ struct Work {
     unlinked: BTreeMap<String, GenFns>,
 }
 
+/// The key the link registers `m`'s declarations under: the module its
+/// annotation output joins, or its own.
+fn home(m: &Module) -> &str {
+    m.joins.as_deref().unwrap_or(&m.key)
+}
+
 /// The prefix every declaration of an injected runtime module is renamed to.
 /// `$` is not an identifier character, so no source can spell these names: a
 /// desugar calling `json$emit` is never captured by a program's `fn emit`, and
@@ -1099,7 +1107,7 @@ pub const RT_PREFIX: &str = "json$";
 const RT_JSON_SPEC: &str = "std/json";
 
 /// The `std/json` generator that writes `toJson`'s encoders, under its reserved
-/// name. `toJson(x)` is `derive(jsonEncoders, x)`.
+/// name. `toJson(x)` calls what it wrote for `x`'s type ([`crate::gen::derive`]).
 pub const JSON_ENCODERS: &str = "json$jsonEncoders";
 
 /// The reserved prefix of `std/jsondec`'s declarations.
@@ -1535,9 +1543,6 @@ pub fn routed_callee<'e>(
             Some((crate::checker::gen_entry_contract_of(c), &[]))
         }
         ("toJson", _, [a]) => Some((crate::gen::derived_name(JSON_ENCODERS, &ty_of(a)?), args)),
-        ("derive", _, [Expr::Var { name: g, .. }, a]) => {
-            Some((crate::gen::derived_name(g, &ty_of(a)?), &args[1..]))
-        }
         ("fromJson", [t], [_]) => Some((crate::gen::derived_name(JSON_DECODERS, t), args)),
         _ => None,
     }
@@ -1938,6 +1943,7 @@ fn load_modules(
                 refs: Rc::default(),
                 cut: None,
                 unclosed: false,
+                joins: None,
             };
             module.refs = Rc::new(program_ref_names(&module.program));
             w.modules.push(module);
@@ -2139,6 +2145,8 @@ fn load_modules(
             .into_iter()
             .map(|t| t.expect("every import resolved"))
             .collect();
+        let held = (text.as_str(), &mut program, &import_targets[..]);
+        annotate(key, held, opts, resolver, engine, w, root_key, visit)?;
 
         w.stack.pop();
         w.states.insert(key.to_string(), true);
@@ -2157,6 +2165,7 @@ fn load_modules(
             refs: parsed.refs.clone(),
             cut: cut.then(|| parsed.clone()),
             unclosed: false,
+            joins: None,
         });
         Ok(())
     }
@@ -3254,9 +3263,11 @@ fn unlinked_import(
             .map(|i| by_name(i) + by_ns(i))
             .sum::<usize>()
     };
+    // An annotation's generator runs in its own load too ([`annotate`]).
     let on_a_generator_line = |n: &str| {
         (program.imports.iter())
             .any(|i| matches!(&i.source, ImportSource::Generator { name, .. } if name == n))
+            || (program.type_decls.iter().flat_map(|t| &t.annotations)).any(|a| a.name() == n)
     };
     let only_named = imp.names.iter().all(|n| {
         let name = n.original.as_str();
@@ -3443,7 +3454,7 @@ fn run_generator(
     let generated = run_resolved(
         importer,
         name,
-        &consts,
+        (&consts, &[]),
         gen_mod_key,
         Site { line, root_key },
         (true, false),
@@ -3453,6 +3464,272 @@ fn run_generator(
         shared,
     )?;
     Ok((gen_key, Some(generated)))
+}
+
+/// Runs each generator annotation of the module `key`, in source order, on its
+/// declaration as written, and visits what it writes as a module that joins
+/// `key` ([`Module::joins`]). An annotation whose name is no imported `gen fn`
+/// is data, which the checker judges. The module's imports are loaded, so
+/// each generator reads them whole and `key` as written.
+#[allow(clippy::too_many_arguments)]
+fn annotate(
+    key: &str,
+    (text, program, targets): (&str, &mut Program, &[String]),
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+    w: &mut Work,
+    root_key: &str,
+    visit: Visit,
+) -> Result<(), Vec<Diagnostic>> {
+    let mut runs = Vec::new();
+    for (ti, t) in program.type_decls.iter_mut().enumerate() {
+        for (ai, a) in t.annotations.iter_mut().enumerate() {
+            let at = |rule: Rule| {
+                let d = Diagnostic::refusal(a.line, a.col, "load", rule);
+                vec![in_module(d, key, root_key)]
+            };
+            let (ns, written, args) = match &a.expr {
+                Expr::Var { name, .. } => (None, name, &[][..]),
+                Expr::Call {
+                    name,
+                    args,
+                    form: CallForm::Plain,
+                    ..
+                } => (None, name, &args[..]),
+                Expr::Field { expr, field, .. } => match &**expr {
+                    Expr::Var { name: ns, .. } => (Some(ns), field, &[][..]),
+                    _ => continue,
+                },
+                Expr::Call {
+                    name,
+                    args,
+                    form: CallForm::Method,
+                    ..
+                } => match args.first() {
+                    Some(Expr::Var { name: ns, .. }) => (Some(ns), name, &args[1..]),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let imported = (program.imports.iter().zip(targets)).find_map(|(i, target)| {
+                let bound = match ns {
+                    Some(ns) => (i.namespace.as_ref() == Some(ns)).then(|| written.clone()),
+                    None => (i.names.iter())
+                        .find(|n| n.local() == written)
+                        .map(|n| n.original.clone()),
+                };
+                Some((target, bound?))
+            });
+            let Some((target, name)) = imported else {
+                continue;
+            };
+            let signature = match w.modules.iter().find(|m| m.key == *target) {
+                Some(m) => gen_signature(m, &name),
+                None => unlinked_signature(target, &name, root_key, opts, resolver),
+            };
+            let Some((params, ret)) = signature else {
+                continue;
+            };
+            if a.member.is_some() {
+                return Err(at(rule!(AnnotationGenOnMember, name)));
+            }
+            let named =
+                |p: Option<&Param>, ty: &str| p.is_some_and(|p| p.ty == Type::Named(ty.into()));
+            if !(named(params.first(), "TypeCode") && named(params.get(1), "ModuleInterface")) {
+                return Err(at(rule!(AnnotationGenSignature, name)));
+            }
+            if ret != Type::Named("Code".into()) {
+                return Err(at(rule!(GenImportNotCode, name, ret = ret.to_string())));
+            }
+            let empty = HashMap::new();
+            let consts: Option<Vec<_>> = args
+                .iter()
+                .map(|e| crate::consteval::eval(e, &empty))
+                .collect();
+            let Some(consts) = consts else {
+                return Err(at(rule!(AnnotationConstArgs, name)));
+            };
+            if consts.len() + 2 != params.len() {
+                let (want, got) = (params.len() - 2, consts.len());
+                return Err(at(rule!(GenImportArity, name, want, got)));
+            }
+            let params = params[2..].iter().map(|p| p.name.clone()).collect();
+            a.generator = Some(AnnotationGen {
+                module: target.clone(),
+                params,
+            });
+            runs.push((ti, ai, name, consts));
+        }
+    }
+    if runs.is_empty() {
+        return Ok(());
+    }
+    // `types` declares each name as this module wrote it, then as the first
+    // loaded module that declares it does. ponytail: a name two loaded
+    // modules declare reads the first; a resolver per import scope if one
+    // generator ever reads a second.
+    let mut types: HashMap<String, TypeDecl> = HashMap::new();
+    let all =
+        (program.type_decls.iter()).chain(w.modules.iter().flat_map(|m| &m.program.type_decls));
+    for t in all {
+        types.entry(t.name.clone()).or_insert_with(|| t.clone());
+    }
+    let std_root = opts.std_root.as_deref();
+    let mut specifiers: HashMap<Option<String>, String> = HashMap::new();
+    for t in types.values() {
+        if let Some(m) = t.module.as_ref().filter(|m| *m != key) {
+            let spec = || import_specifier(dir_of(key), m, std_root);
+            specifiers.entry(Some(m.clone())).or_insert_with(spec);
+        }
+    }
+    let own = (key != root_key).then(|| key.to_string());
+    let origins = crate::schema_reflect::Origins::new([(own, key, text)]);
+    let mut written: Vec<(String, usize)> =
+        (decls(program).map(|d| (d.name.to_string(), d.line))).collect();
+    for (ti, ai, name, consts) in runs {
+        let t = &program.type_decls[ti];
+        let a = &t.annotations[ai];
+        let g = a.generator.as_ref().expect("the pass above resolved it");
+        let (code, iface) = crate::schema_reflect::annotated_lit(t, &types, &specifiers, &origins);
+        let reflected = [code, iface];
+        let site = Site {
+            line: a.line,
+            root_key,
+        };
+        let shared = (&mut w.inputs, &mut w.checked);
+        let call = (consts.as_slice(), &reflected[..]);
+        let g = run_resolved(
+            key,
+            &name,
+            call,
+            &g.module,
+            site,
+            (true, false),
+            opts,
+            resolver,
+            engine,
+            shared,
+        )?;
+        let banner = format!(
+            "generated by @{name}({}) on {}{GEN_SEP}{key}",
+            args_repr(&consts),
+            t.name
+        );
+        let (exported, line, col) = (t.exported, a.line, a.col);
+        visit(
+            &banner,
+            Some(&g.written.source),
+            Some((&g, (line, col))),
+            opts,
+            resolver,
+            engine,
+            w,
+            root_key,
+        )?;
+        let refuse = |rule: Rule| {
+            let d = Diagnostic::refusal(line, col, "load", rule);
+            vec![in_module(d, key, root_key)]
+        };
+        let Some(out) = w.modules.iter_mut().find(|m| m.key == banner) else {
+            continue;
+        };
+        if decls(&out.program).any(|d| d.exported) {
+            return Err(refuse(rule!(AnnotationWroteExport, name)));
+        }
+        if out
+            .program
+            .type_decls
+            .iter()
+            .any(|t| !t.annotations.is_empty())
+        {
+            return Err(refuse(rule!(AnnotationWroteAnnotation, name)));
+        }
+        let mut wrote = Vec::new();
+        for d in decls(&out.program) {
+            if let Some((other, at_line)) = written.iter().find(|(n, _)| n == d.name) {
+                let other = other.clone();
+                return Err(refuse(rule!(
+                    AnnotationWroteTwice,
+                    name,
+                    other,
+                    line = at_line.to_string()
+                )));
+            }
+            wrote.push((d.name.to_string(), line));
+        }
+        written.extend(wrote);
+        for x in exported_mut(&mut out.program) {
+            *x = exported;
+        }
+        // The output reads this module's names as its own and the names this
+        // module imports, so it holds a copy of each import it does not make.
+        let binds: HashSet<String> = (out.program.imports.iter())
+            .flat_map(|i| {
+                i.names
+                    .iter()
+                    .map(|n| n.local().to_string())
+                    .chain(i.namespace.clone())
+            })
+            .collect();
+        for (imp, target) in program.imports.iter().zip(targets) {
+            let mut imp = imp.clone();
+            imp.names.retain(|n| !binds.contains(n.local()));
+            let ns_free = imp.namespace.as_ref().is_none_or(|ns| !binds.contains(ns));
+            if (imp.namespace.is_some() && ns_free) || !imp.names.is_empty() {
+                out.program.imports.push(imp);
+                out.import_targets.push(target.clone());
+            }
+        }
+        out.joins = Some(key.to_string());
+    }
+    Ok(())
+}
+
+/// [`load_modules`]'s walk, which enters one module and what it imports.
+type Visit = fn(
+    &str,
+    Option<&str>,
+    Option<(&Generated, (usize, usize))>,
+    &LoadOptions,
+    &dyn ModuleResolver,
+    Option<&crate::gen::GenEngine>,
+    &mut Work,
+    &str,
+) -> Result<(), Vec<Diagnostic>>;
+
+/// The `exported` flag of each declaration of `p` that has one.
+fn exported_mut(p: &mut Program) -> impl Iterator<Item = &mut bool> {
+    (p.functions.iter_mut().map(|f| &mut f.exported))
+        .chain(p.type_decls.iter_mut().map(|t| &mut t.exported))
+        .chain(p.protocols.iter_mut().map(|x| &mut x.exported))
+        .chain(p.contracts.iter_mut().map(|c| &mut c.exported))
+}
+
+/// The parameters and the result of the `gen fn` `name` that module `m`
+/// exports, its declaration parsed from its row where the parse left it out.
+fn gen_signature(m: &Module, name: &str) -> Option<(Vec<Param>, Type)> {
+    if let Some(f) = exported_gen(&m.program, name) {
+        return Some((f.params.clone(), f.ret.clone()));
+    }
+    let (b, ri) = gen_row(m, name)?;
+    let f = b.declarations(&[ri], &m.key, "").ok()?.pop()?;
+    Some((f.params, f.ret))
+}
+
+/// [`gen_signature`] of the std module `target` that [`unlinked_import`] left
+/// out of the load, read from its parse.
+fn unlinked_signature(
+    target: &str,
+    name: &str,
+    root_key: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Option<(Vec<Param>, Type)> {
+    let text = resolver.read(target).ok()?;
+    let found = module_parse(target, &text, &text_hash(&text), root_key, opts).ok()?;
+    let f = exported_gen(&found.program, name)?;
+    Some((f.params.clone(), f.ret.clone()))
 }
 
 /// The constants of a generator call as its banner spells them.
@@ -3550,7 +3827,7 @@ pub fn run_gen_fn(
     let generated = run_resolved(
         importer,
         name,
-        args,
+        (args, &[]),
         module,
         site,
         (cache, true),
@@ -3622,15 +3899,15 @@ struct Site<'a> {
     root_key: &'a str,
 }
 
-/// Runs `name` of the generator module `gen_mod_key` on `consts`, as a call
-/// written in `importer` ([`generation`]), with the sandbox's input roots its
-/// path arguments name. Returns the output text, or the diagnostics at the
-/// call. `(cache, memo)` is [`generation`]'s.
+/// Runs `name` of the generator module `gen_mod_key` on `consts` after the
+/// `reflected` values, as a call written in `importer` ([`generation`]), with
+/// the sandbox's input roots its path arguments name. Returns the output text,
+/// or the diagnostics at the call. `(cache, memo)` is [`generation`]'s.
 #[allow(clippy::too_many_arguments)]
 fn run_resolved(
     importer: &str,
     name: &str,
-    consts: &[crate::consteval::ConstVal],
+    (consts, reflected): (&[crate::consteval::ConstVal], &[Expr]),
     gen_mod_key: &str,
     site: Site<'_>,
     (cache, memo): (bool, bool),
@@ -3641,8 +3918,12 @@ fn run_resolved(
 ) -> Result<Generated, Vec<Diagnostic>> {
     let Site { line, root_key } = site;
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
-    let call = gen_call(importer, consts, root_key, opts);
+    let mut call = gen_call(importer, consts, root_key, opts);
     let arg_repr = call.arg_repr.clone();
+    if !reflected.is_empty() {
+        call.reflected = reflected;
+        call.arg_repr = format!("{arg_repr}\u{0}{reflected:?}");
+    }
     let inner = generator_opts(opts, importer).map_err(err)?;
     generation(
         &gen_mod_key,
@@ -3731,7 +4012,7 @@ fn gen_call<'a>(
     }
     GenCall {
         consts,
-        type_arg: None,
+        reflected: &[],
         arg_repr: args_repr(consts),
         importer_dir,
         project: project_dir(opts, root_key).to_string(),
@@ -3741,12 +4022,14 @@ fn gen_call<'a>(
 }
 
 /// What one generation runs on ([`generation`]): an import line's constants,
-/// or a `derive` site's `TypeArg`.
+/// a `toJson` or `fromJson` site's `TypeArg`, or an annotation's reflected declaration and
+/// constants.
 pub(crate) struct GenCall<'a> {
     pub(crate) consts: &'a [crate::consteval::ConstVal],
-    pub(crate) type_arg: Option<&'a Expr>,
-    /// The arguments as the cache key spells them: the constants, or the
-    /// `TypeArg` literal.
+    /// [`crate::gen::GenInputs::reflected`].
+    pub(crate) reflected: &'a [Expr],
+    /// The arguments as the cache key spells them: the constants, then the
+    /// reflected literals.
     pub(crate) arg_repr: String,
     /// The directory a relative read resolves against.
     pub(crate) importer_dir: String,
@@ -3769,8 +4052,8 @@ pub(crate) enum GenFault {
 
 /// Runs gen fn `name` of the module `gen_mod_key` on `call`, under `inner`
 /// ([`generator_opts`]): the cache, the load and check of the generator's
-/// program, and the run. An import line's generator and a `derive` generator
-/// share this path and its cache. The key names the compiler, the module, the
+/// program, and the run. An import line's generator, an annotation's and a
+/// `toJson` generator share this path and its cache. The key names the compiler, the module, the
 /// gen fn, the arguments and the input roots ([`generator_cache_key`]); the
 /// entry records every input the run read and the generator's sources, and a
 /// hit checks each one by its stamp or its hash. `(cache, memo)`: with `cache`
@@ -3842,7 +4125,7 @@ pub(crate) fn generation(
                     .with(|c| c.get())
                     .unwrap_or(GEN_MAX_OUTPUT),
                 sources_fingerprint: checked.fingerprint.clone(),
-                type_arg: call.type_arg.cloned(),
+                reflected: call.reflected.to_vec(),
                 checked: checked.checked,
             },
         );
@@ -4057,7 +4340,7 @@ pub(crate) fn generator_opts(opts: &LoadOptions, caller: &str) -> Result<LoadOpt
 
 /// Loads the generator module `gen_mod_key` as its own root, keeping what its
 /// gen fn `name` reaches, and checks it, under `inner` ([`generator_opts`]).
-/// An import line's generator and a `derive` generator both load here. A
+/// An import line's generator, an annotation's and a `toJson` generator load here. A
 /// program in `held` is reused: the calls of one load share `inner`, so each
 /// call of a gen fn checks the same program. With `memo`, a program checked
 /// before under the same context is reused while its sources are unchanged.
@@ -4090,8 +4373,8 @@ fn checked_generator(
         aliases.sort();
         let n = &inner.nest;
         format!(
-            "{gen_mod_key}\u{0}{serves}\u{0}{std_root:?}\u{0}{}\u{0}{:?}\u{0}{aliases:?}",
-            n.depth, n.deriving
+            "{gen_mod_key}\u{0}{serves}\u{0}{std_root:?}\u{0}{}\u{0}{aliases:?}",
+            n.depth
         )
     });
     if let Some(k) = &memo_key {
@@ -4134,16 +4417,15 @@ fn checked_generator(
     // closure's keys and content hashes (`gen_graph` holds the generator, its
     // imports and the runtime modules the load links), the gen fns the link
     // keeps, the std root the contract restamping resolves against, and the
-    // nest, because a `derive` in the check refuses a generator already
-    // deriving and runs its own loads one deeper. The engine adds the
+    // depth, because a `toJson` in the check runs its own loads one deeper.
+    // The engine adds the
     // compiler's identity (`vyrn_genwasm::artifact_key`).
     let fingerprint = describable.then(|| {
         let n = &inner.nest;
         let mut fp = format!(
-            "{gen_mod_key}\u{0}{serves}\u{0}{}\u{0}{}\u{0}{:?}\u{0}",
+            "{gen_mod_key}\u{0}{serves}\u{0}{}\u{0}{}\u{0}",
             std_root.unwrap_or(""),
-            n.depth,
-            n.deriving
+            n.depth
         );
         for (k, h) in &gen_sources {
             fp.push_str(k);
@@ -5590,6 +5872,9 @@ impl NsResolver<'_> {
                 let locals: HashSet<String> = std::iter::once("value".to_string()).collect();
                 body_expr_mut(pred, &locals, self);
             }
+            for a in &mut t.annotations {
+                body_expr_mut(&mut a.expr, &HashSet::new(), self);
+            }
         }
         for g in &mut p.globals {
             if let Some(ty) = &mut g.ty {
@@ -5942,7 +6227,7 @@ fn link(
             {
                 continue;
             }
-            register(d.name, &m.key, d.exported, &mut clashes);
+            register(d.name, home(m), d.exported, &mut clashes);
             if d.export_to.is_empty() {
                 continue;
             }
@@ -5963,7 +6248,7 @@ fn link(
                     variant_enum
                         .entry(v.name.clone())
                         .or_default()
-                        .push((t.name.clone(), m.key.clone()));
+                        .push((t.name.clone(), home(m).to_string()));
                 }
             }
         }
@@ -5972,7 +6257,7 @@ fn link(
                 method_protocol
                     .entry(sig.name.clone())
                     .or_default()
-                    .push((p.name.clone(), m.key.clone()));
+                    .push((p.name.clone(), home(m).to_string()));
             }
         }
     }
@@ -6096,7 +6381,7 @@ fn link(
         // their enum, protocol methods to their protocol.
         let own: HashSet<&str> = owner
             .iter()
-            .filter(|(_, (module, _))| module == &m.key)
+            .filter(|(_, (module, _))| module == home(m))
             .map(|(n, _)| n.as_str())
             .collect();
         // A name the call site wrote into a generated module is the importer's
@@ -6167,7 +6452,7 @@ fn link(
             if candidates.is_empty() {
                 // A plain reference to a top-level decl.
                 if let Some((def_module, _)) = owner.get(name) {
-                    if def_module != &m.key {
+                    if def_module != home(m) {
                         if the_importers(name, line, def_module) {
                             return;
                         }
@@ -6190,7 +6475,7 @@ fn link(
             // picks between same-named declarations by type.
             if candidates.iter().any(|(decl, def_module)| {
                 in_scope(decl)
-                    || def_module == &m.key
+                    || def_module == home(m)
                     || the_importers(name, line, def_module)
                     || imported_modules.contains(def_module.as_str())
             }) {
@@ -6238,6 +6523,9 @@ fn link(
             }
             for n in type_names(&t.base) {
                 check_name(&n, t.line, "type", &mut errors);
+            }
+            for a in &t.annotations {
+                check_name(a.name(), a.line, "annotation", &mut errors);
             }
         }
         for imp in &m.program.impls {
@@ -6429,7 +6717,6 @@ fn reach(
 /// They are taken before `link` renames, so a spelling reaches every function
 /// that declares it, and a namespace member `ns.f` is the field `f`: the
 /// link's walk ([`drop_unreached`]) drops every function left out here. A
-/// program that calls `derive` parses every cut body.
 ///
 /// Under a build ([`gives_unrun`]) gen fns and their bodies reach last,
 /// because a gen fn runs in no run: a function only they reach takes its
@@ -6533,7 +6820,6 @@ fn parse_reached(
     if opts.nest.gen.is_some() {
         names.extend(GEN_HOST.calls());
     }
-    let mut derive = names.contains(&"derive") || unrun.contains(&"derive");
     let mut work: Vec<(usize, usize)> = Vec::new();
     // Each row reached, by module and row, and the body it takes: parsed here,
     // given under [`std_given`], or given here to what only gen fns reach.
@@ -6550,11 +6836,11 @@ fn parse_reached(
     loop {
         while let Some((mi, ri)) = work.pop() {
             let (m, (b, r)) = (&modules[mi], row(mi, ri));
-            if gives && r.gen && !giving && !derive {
+            if gives && r.gen && !giving {
                 deferred.push((mi, ri));
                 continue;
             }
-            if r.stateful && (std_given(opts) || giving && !derive) {
+            if r.stateful && (std_given(opts) || giving) {
                 closed.resize_with(modules.len(), || None);
                 if closed[mi].is_none() {
                     closed[mi] = Some(read_closed(resolver, m, b, modules, read));
@@ -6564,14 +6850,13 @@ fn parse_reached(
                 .is_some_and(|c| c.contains(b.name(r)));
             let spelled = b.names_of(r).filter(|_| !r.stateful || listed);
             // The emitter calls a runtime module's functions by name.
-            let gift = (spelled.clone().filter(|_| giving && !derive))
+            let gift = (spelled.clone().filter(|_| giving))
                 .filter(|_| runtime_module(&m.key, opts).is_none());
             let kept = spelled.filter(|_| std_given(opts));
             if let Some(g) = gift.or(kept) {
                 let list = if giving { &mut given } else { &mut stored };
                 list.push((mi, ri, g));
                 let names: Vec<&str> = list[list.len() - 1].2.iter().collect();
-                derive |= names.contains(&"derive");
                 for n in names {
                     reach(n, &mut waiting, &mut work);
                 }
@@ -6585,18 +6870,10 @@ fn parse_reached(
             crate::project::walk_block(&mut body, &mut site_stamp(&site, &m.key));
             let mut names: Vec<&str> = Vec::new();
             crate::ast::spelled(&body, &mut names);
-            derive |= names.contains(&"derive");
             for n in names {
                 reach(n, &mut waiting, &mut work);
             }
             parsed.push((mi, ri, body));
-        }
-        // A `derive` generator writes calls after the check, to any function.
-        if derive && !(waiting.is_empty() && given.is_empty() && deferred.is_empty()) {
-            work.append(&mut deferred);
-            work.extend(given.drain(..).map(|(mi, ri, _)| (mi, ri)));
-            work.extend(waiting.drain().flat_map(|(_, at)| at));
-            continue;
         }
         if giving || (unrun.is_empty() && deferred.is_empty()) {
             break;
@@ -6701,9 +6978,6 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
 /// method call `x.f()` arrives as a call named `f`, and the linked namespace is
 /// flat, so a name reaches the one function it can mean.
 ///
-/// A program that calls `derive` drops nothing: its generator writes calls
-/// after the check, to any function of the program.
-///
 /// `generators` names each `gen fn` an import line calls ([`generator_calls`]).
 /// Its import is no root, so a `lazy` one is kept only where a kept body spells
 /// it.
@@ -6721,7 +6995,7 @@ fn drop_unreached(
     let calls: Vec<String> = (RUNTIME_CALLS.iter())
         .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
         .collect();
-    // A gen fn runs only in its own load, an import line's or a derive's
+    // A gen fn runs only in its own load, an import line's or a toJson's
     // (checked_generator), so neither the import nor a toJson or fromJson site
     // reaches it. Only a std one drops: std bodies are judged as their own load
     // roots, and a user module's functions are all roots.
@@ -6744,11 +7018,6 @@ fn drop_unreached(
         crate::ast::expr_spelled(p, &mut roots);
     }
     let keep = reached(program, roots);
-    if keep.contains("derive") {
-        drop(keep);
-        program.lazy = None;
-        return;
-    }
     let kept: Vec<bool> = (program.functions.iter())
         .map(|f| !is_lazy(&f.module) || keep.contains(f.name.as_str()))
         .collect();
@@ -7352,9 +7621,10 @@ fn rewrite_module_refs(
     }
     for t in &mut p.type_decls {
         rewrite_type(&mut t.base, map);
-        if let Some(pred) = &mut t.predicate {
-            // A refinement predicate has no locals of its own.
-            body_expr_mut(pred, &HashSet::new(), rn);
+        // A refinement predicate and an annotation have no locals of their own.
+        let anns = t.annotations.iter_mut().map(|a| &mut a.expr);
+        for e in t.predicate.iter_mut().chain(anns) {
+            body_expr_mut(e, &HashSet::new(), rn);
         }
     }
     for g in &mut p.globals {

@@ -1,7 +1,10 @@
 /// The record types `examples/columns.vyrn` and `examples/nbodycols.vyrn` lay
 /// out as columns with `std/columns`.
 
+import { columns } from "std/columns"
+
 /// One body of `nbody`.
+@columns
 export type Body = {
     x: Float64,
     y: Float64,
@@ -13,6 +16,7 @@ export type Body = {
 }
 
 /// A 64-byte row, so a walk over one field touches one byte in eight.
+@columns
 export type Particle = {
     x: Float64,
     y: Float64,

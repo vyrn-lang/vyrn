@@ -1,0 +1,1 @@
+an_annotation_writes_with_its_declarations_visibility.vyrn:1:10: `describeHidden` exists in `./annotation_private_lib` but is not exported: add `export` to its declaration

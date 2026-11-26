@@ -1,0 +1,8 @@
+import { Opt } from "./annotations_lib"
+import { describe } from "./annotation_gens_lib"
+
+@describe("t")
+export type T = {
+    @Opt { short: "p", hidden: false, rank: 0 }
+    a: Int64,
+}

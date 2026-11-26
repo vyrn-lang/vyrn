@@ -392,7 +392,7 @@ export fn chapters() -> Array<Chapter> {
                     "<code>flag</code> asks whether a token is present. <code>opt</code> reads <code>--name=value</code> and <code>--name value</code>, and answers <code>Option&lt;String&gt;</code>. <code>positionals</code> returns what is left, and <code>rest</code> returns what follows <code>--</code>.",
                 ], ["cliargs"]),
                 section("cli", "std/cli", [
-                    "<a href=\"/docs/std/cli.html\">std/cli</a> goes further. Declare a record whose fields are the options, and give each field a refinement type with its own documentation line. <code>cli(\"./module\")</code> reflects it into a parser and a help text, so no flag name is written twice.",
+                    "<a href=\"/docs/std/cli.html\">std/cli</a> goes further. Declare a record whose fields are the options, and give each field a refinement type with its own documentation line. <code>@cli</code> on the record writes a parser and a help text beside it, so no flag name is written twice.",
                     "A parse answers <code>Valid</code> or <code>Invalid</code> with the issues attached to their fields, so a program reports every problem at once instead of the first one.",
                 ], []),
             ],

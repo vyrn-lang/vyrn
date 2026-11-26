@@ -1,0 +1,4 @@
+import { notAType } from "./annotations_lib"
+
+@notAType
+export type T = { a: Int64 }

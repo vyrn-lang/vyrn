@@ -108,7 +108,7 @@ fn check_here(root: &str) -> String {
         vyrn_lower::load_warned(&src, root, &opts, &resolver, Some(&*engine)).0
     };
     for d in loaded.err().expect("the program is refused") {
-        let file = d.file.as_deref().unwrap_or(root);
+        let file = d.shown_file(root, None);
         out += &format!("{file}:{}:{}: {}\n", d.line, d.col, d.message);
         if let Some(note) = &d.note {
             out += &format!("  note: {note}\n");
@@ -132,7 +132,7 @@ fn a_check_in_one_process_prints_what_a_fresh_process_prints() {
             .replace('\\', "/")
     };
     let first = path("mut_a_field_store.vyrn");
-    let second = path("a_derive_entry_must_match_its_call.vyrn");
+    let second = path("a_generator_annotations_output_is_checked.vyrn");
     let fresh = |root: &str| {
         let out = vyrn()
             .arg("check")
@@ -178,7 +178,7 @@ fn root_of(path: &Path) -> String {
 
 /// Building one program leaves nothing behind for the next: two programs
 /// compiled in one process, then the first again, write the module a fresh
-/// `vyrn build --target wasm` writes for each. The first runs a `derive`
+/// `vyrn build --target wasm` writes for each. The first runs an annotation
 /// generator, the second a generator import.
 #[test]
 fn a_build_in_one_process_writes_what_a_fresh_process_writes() {
@@ -222,7 +222,7 @@ fn a_build_in_one_process_writes_what_a_fresh_process_writes() {
 #[test]
 fn an_editor_analysis_on_one_thread_gives_what_a_fresh_thread_gives() {
     let first = root_of(&check_dir().join("mut_a_field_store.vyrn"));
-    let second = root_of(&check_dir().join("a_derive_entry_must_match_its_call.vyrn"));
+    let second = root_of(&check_dir().join("a_generator_annotations_output_is_checked.vyrn"));
     let analyze = |root: &str, session: &std::sync::Arc<Session>| -> String {
         let src = std::fs::read_to_string(root).expect("read the program");
         let opts = cli_load(root);

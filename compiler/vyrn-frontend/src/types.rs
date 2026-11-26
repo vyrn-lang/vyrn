@@ -1613,6 +1613,37 @@ fn resolve_d<'a>(ty: &'a Type, types: &'a dyn Decls, depth: usize) -> Cow<'a, Ty
                 field("kids", Type::Array(Box::new(Type::Int))),
             ]))
         }
+        // One annotation of a reflected type (`TypeInfo.annotations`). `name` is
+        // its declaration as written and `module` the specifier of that
+        // declaration's module, as `TypeInfo.module` spells one. `member` is the
+        // field or variant it sits on, `""` for the declaration; `fields` are its
+        // constants by field or parameter name; `origin` is where its `@` is.
+        Type::Named(n) if n == "AnnotationInfo" && types.decl(n).is_none() => {
+            let field = |name: &str, ty: Type| Field {
+                name: name.to_string(),
+                ty,
+            };
+            let named = |n: &str| Type::Named(n.to_string());
+            Owned(Type::Record(vec![
+                field("name", Type::Str),
+                field("module", Type::Str),
+                field("member", Type::Str),
+                field("fields", Type::Array(Box::new(named("AnnotationField")))),
+                field("origin", named("Origin")),
+            ]))
+        }
+        Type::Named(n) if n == "AnnotationField" && types.decl(n).is_none() => {
+            Owned(Type::Record(vec![
+                Field {
+                    name: "name".to_string(),
+                    ty: Type::Str,
+                },
+                Field {
+                    name: "value".to_string(),
+                    ty: Type::Named("Value".to_string()),
+                },
+            ]))
+        }
         Type::Named(n) if n == "Token" && types.decl("Token").is_none() => {
             Owned(Type::Record(vec![
                 Field {

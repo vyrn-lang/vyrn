@@ -1,0 +1,1 @@
+row_annotation_anonymous.vyrn:3:24: an annotation on a field needs the outermost record of a `type` declaration; an anonymous record has no declaration to carry it

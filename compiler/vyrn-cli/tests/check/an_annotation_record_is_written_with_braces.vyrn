@@ -1,0 +1,4 @@
+import { Opt } from "./annotations_lib"
+
+@Opt("p")
+export type T = { a: Int64 }

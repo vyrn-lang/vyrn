@@ -605,9 +605,10 @@ pub struct GenInputs<'a> {
     /// can re-read. An engine that caches compiled generators keys on it instead
     /// of hashing the whole program.
     pub sources_fingerprint: Option<String>,
-    /// The `TypeArg` literal a derived-code generator's one parameter
-    /// receives; `None` for an import target.
-    pub type_arg: Option<Expr>,
+    /// The literals a gen fn's leading parameters receive, in order: a
+    /// `toJson` generator's `TypeArg`, or an annotation's `TypeCode` and
+    /// `ModuleInterface`. Empty for an import target.
+    pub reflected: Vec<Expr>,
     /// Whether the program passed its check. An unchecked program runs only
     /// from a compiled module the engine already holds for
     /// `sources_fingerprint`; otherwise the engine answers
@@ -953,38 +954,35 @@ pub fn generate(
     })
 }
 
-/// The name `derive(g, x)` calls: the entry generator `g` writes for the type
-/// of `x`, after [`derive`] prefixes every function `g` wrote.
+/// The name a `toJson` or `fromJson` site calls: the entry generator `g` writes
+/// for `ty`, after [`derive`] prefixes every function `g` wrote.
 pub fn derived_name(g: &str, ty: &crate::ast::Type) -> String {
     format!("derive${g}$t{}", crate::types::struct_key(ty))
 }
 
-/// What a derive generator wrote: its functions and type declarations, each
+/// What a `derive` generator wrote: its functions and type declarations, each
 /// renamed under `derive$g$`, which no source can spell.
 pub type Derived = (Vec<crate::ast::Function>, Vec<crate::ast::TypeDecl>);
 
-/// A `derive` site: generator `g` writes an entry for `ty`, and the call at
-/// `line` calls it as `entry`, a [`Type::Fn`](crate::ast::Type::Fn).
+/// A `toJson` or `fromJson` site: `std/json`'s or `std/jsondec`'s generator
+/// `g` writes an entry for `ty`.
 #[derive(Clone)]
 pub struct Site {
     pub g: String,
     pub ty: crate::ast::Type,
-    pub line: usize,
-    pub entry: crate::ast::Type,
 }
 
-/// Runs the generator of every `derive(g, x)` site on `engine`, over the types
-/// the checker gave `x`, and returns what they wrote.
+/// Runs the generator of every `toJson` and `fromJson` site on `engine`, over
+/// the types the checker gave them, and returns what they wrote.
 ///
 /// `sites` are in source order. Each generator runs once per
 /// program, over all of its types as one `TypeArg`: a run per type would write a
 /// shared subtype's function twice. It runs through `linker` as an import
 /// line's generator does ([`crate::loader::generation`]): its module loaded as
 /// its own root, and its output cached under the `TypeArg`. With no `linker`,
-/// every site fails. The output is not
-/// checked here, except each entry's signature against its site; the caller
-/// checks the program it joins. A generator's own program may call `derive` (a
-/// `std/ui` generator reaches `toJson`), but not reach itself.
+/// every site fails. The output is not checked here; the caller checks the
+/// program it joins. A generator's own program may call `toJson` (a `std/ui`
+/// generator reaches it).
 pub fn derive(
     program: &Program,
     sites: &[Site],
@@ -1012,7 +1010,7 @@ pub fn derive(
         let (arg, placed) = crate::schema_reflect::type_arg_lit(&roots, &types);
         if let Some(i) = placed.iter().position(Option::is_none) {
             return Err(unplaced(format!(
-                "`derive({g}, ..)` cannot reflect `{}`: it has no wire form or no source spelling",
+                "generator `{g}` cannot reflect `{}`: it has no wire form or no source spelling",
                 roots[i]
             )));
         }
@@ -1022,15 +1020,7 @@ pub fn derive(
             )));
         };
         let (key, name) = declared(program, g);
-        let identity = format!("{key}\u{0}{name}");
-        if opts.nest.deriving.contains(&identity) {
-            return Err(unplaced(format!(
-                "generator `{g}` reaches `derive({g}, ..)`"
-            )));
-        }
-        let mut inner =
-            crate::loader::generator_opts(opts, key).map_err(|r| unplaced(r.render()))?;
-        inner.nest.deriving.push(identity);
+        let inner = crate::loader::generator_opts(opts, key).map_err(|r| unplaced(r.render()))?;
         let root = program.spellings.root.as_str();
         let refused = |ds: Vec<Diagnostic>| -> String {
             ds.into_iter()
@@ -1046,8 +1036,8 @@ pub fn derive(
         // type misses and any other edit of the program hits.
         let call = crate::loader::GenCall {
             consts: &[],
-            type_arg: Some(&arg),
             arg_repr: format!("{arg:?}"),
+            reflected: std::slice::from_ref(&arg),
             importer_dir: String::new(),
             project: crate::loader::project_dir(opts, root).to_string(),
             allowed: Vec::new(),
@@ -1082,21 +1072,11 @@ pub fn derive(
         })?;
         let (fns, decls) = adopt(&written.written.source, g).map_err(unplaced)?;
         for s in sites.iter().filter(|s| s.g == g) {
-            let Some(f) = fns.iter().find(|f| f.name == derived_name(g, &s.ty)) else {
+            if !fns.iter().any(|f| f.name == derived_name(g, &s.ty)) {
                 return Err(unplaced(format!(
                     "generator `{g}` wrote no entry for `{}`: each root node's `name` must be a function",
                     s.ty
                 )));
-            };
-            let mut got = crate::ast::Type::Fn(
-                f.params.iter().map(|p| p.ty.clone()).collect(),
-                Box::new(f.ret.clone()),
-            );
-            // Generated code spells a named union as written.
-            crate::ctor::declared_unions(&mut got, &types);
-            if got != s.entry {
-                let rule = crate::rules::rule!(DeriveEntryMismatch, g, got, want = s.entry);
-                return Err(Diagnostic::refusal(s.line, 0, "check", rule));
             }
         }
         out.0.extend(fns);
@@ -1151,7 +1131,7 @@ fn adopt(src: &str, g: &str) -> Result<Derived, String> {
         }
     }
     // The banner a diagnostic in the written code names as its file.
-    let banner = format!("generated by derive({g}, ..)");
+    let banner = format!("generated by {g}");
     for f in &mut written.functions {
         f.name = map[&f.name].clone();
         f.module = Some(banner.clone());

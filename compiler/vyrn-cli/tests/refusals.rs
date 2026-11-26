@@ -912,8 +912,8 @@ fn the_generation_refusals_are_what_the_engine_says() {
         ),
         (
             "r109_a_generator_that_reflects_its_importer.vyrn",
-            "generator `cli(\"./r109_a_generator_that_reflects_its_importer\")` failed: \
-             `moduleInterface` cannot reflect `./r109_a_generator_that_reflects_its_importer`, \
+            "generator `http(\"./r109_a_generator_that_reflects_its_importer\")` failed: \
+             `moduleCode` cannot reflect `./r109_a_generator_that_reflects_its_importer`, \
              because `./r109_a_generator_that_reflects_its_importer` imports this generator",
         ),
     ];

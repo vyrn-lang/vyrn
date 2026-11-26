@@ -1,8 +1,6 @@
 // One field of many records, read row-wise and column-wise.
 
-import { Particle } from "./lib/bodies"
-import { columns } from "std/columns"
-import { ParticleColumns, particleColumns, pushParticle, particleAt } from columns("./lib/bodies")
+import { Particle, ParticleColumns, particleColumns, pushParticle, particleAt } from "./lib/bodies"
 import { parseInt64 } from "std/num"
 
 fn particle(i: Int64) -> Particle {

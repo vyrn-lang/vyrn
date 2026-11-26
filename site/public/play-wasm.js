@@ -138,13 +138,14 @@ function runGenerator(wasm, { module: bytes, argv, atoms }) {
     },
   };
   const next = () => {
-    if (cursor >= atoms.length) throw new Error("generator decoder read past the end of its TypeArg");
+    if (cursor >= atoms.length) throw new Error("generator decoder read past the end of its reflected values");
     return atoms[cursor++];
   };
   const gen = {
+    // The reflected values follow one another in the atoms, in the order the
+    // wrapper asks for them.
     reflect(kind) {
-      if (kind !== 3n) throw new Error("the playground serves a generator its TypeArg and nothing else");
-      cursor = 0;
+      if (kind !== 3n) throw new Error("the playground serves a generator its reflected values and nothing else");
     },
     nextInt: () => next(),
     nextStr() {

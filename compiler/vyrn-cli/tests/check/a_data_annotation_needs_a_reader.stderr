@@ -1,0 +1,1 @@
+a_data_annotation_needs_a_reader.vyrn:6:5: no generator reads `@Opt`: annotate the declaration with a generator of the module that declares `Opt`

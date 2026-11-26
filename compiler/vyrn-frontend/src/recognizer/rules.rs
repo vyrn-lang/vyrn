@@ -165,7 +165,8 @@ impl Recognizer<'_> {
                     && (me.eat_if(matches!(me.peek(), Tok::Str(_))) || (me.committed(p0) && me.expected("\"\\\"\"")?)))
                 || { me.back(p0); false }
             })
-            || me._contract_head()?;
+            || me._contract_head()?
+            || me.eat(&Tok::At);
         Ok(hit)
     }
 
@@ -189,7 +190,13 @@ impl Recognizer<'_> {
             let p0 = me.save();
             (({ loop { let p = me.cur; if !me.eat_if(matches!(me.peek(), Tok::Doc(_))) || me.cur == p { break; } } true })
                 && ((
-                matches!(me.peek(), Tok::Eof)
+                ({
+                    let p0 = me.save();
+                    (matches!(me.peek(), Tok::At)
+                        && (me._annotated()? || (me.committed(p0) && me.expected("At")?)))
+                    || { me.back(p0); false }
+                })
+                || matches!(me.peek(), Tok::Eof)
                 || me._export()?
                 || ({
                     let p0 = me.save();
@@ -204,6 +211,58 @@ impl Recognizer<'_> {
         if hit {
             me.closed(Hook::Item, open, start)?;
         }
+        Ok(hit)
+    }
+
+    fn _annotated(&mut self) -> R {
+        let me = self;
+        let hit = ({
+            let p0 = me.save();
+            ((me._annotation()? && ({ loop { let p = me.cur; if !me._annotation()? || me.cur == p { break; } } true }))
+                && ((
+                ({
+                    let p0 = me.save();
+                    (me.look(|me| Ok((
+                        me.eat(&Tok::Type)
+                        || ({
+                            let p0 = me.save();
+                            (me.eat(&Tok::Export)
+                                && ({ let _ = me._export_to()?; true })
+                                && (me.eat(&Tok::Type) || (me.committed(p0) && me.expected("Type")?)))
+                            || { me.back(p0); false }
+                        })
+                    )))
+                        && ((
+                        me._export()?
+                        || me._decl()?
+                    ) || (me.committed(p0) && me.expected("\"\"")?)))
+                    || { me.back(p0); false }
+                })
+                || me.refuse((me.here().0, me.here().1), |me| rule!(AnnotationTarget))?
+            ) || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(AnnotationTarget))?)))
+            || { me.back(p0); false }
+        });
+        Ok(hit)
+    }
+
+    fn _annotation(&mut self) -> R {
+        let me = self;
+        let hit = ({
+            let p0 = me.save();
+            (me.eat(&Tok::At)
+                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
+                && ({ let _ = ({
+                let p0 = me.save();
+                (me.eat(&Tok::Dot)
+                    && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?)))
+                || { me.back(p0); false }
+            }); true })
+                && ({ let _ = (
+                me._args()?
+                || me._struct_body()?
+            ); true }))
+            || { me.back(p0); false }
+        });
         Ok(hit)
     }
 
@@ -489,7 +548,8 @@ impl Recognizer<'_> {
         let me = self;
         let hit = ({
             let p0 = me.save();
-            (me._ident()?
+            (({ loop { let p = me.cur; if !me._annotation()? || me.cur == p { break; } } true })
+                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && ({ let _ = ({
                 let p0 = me.save();
                 (me.eat(&Tok::LParen)
@@ -1681,7 +1741,21 @@ impl Recognizer<'_> {
         let start = me.cur;
         let hit = ({
             let p0 = me.save();
-            (me._ident()?
+            (({ let _ = (
+                ({
+                    let p0 = me.save();
+                    (me.flags.named
+                        && ({ loop { let p = me.cur; if !me._annotation()? || me.cur == p { break; } } true }))
+                    || { me.back(p0); false }
+                })
+                || ({
+                    let p0 = me.save();
+                    (matches!(me.peek(), Tok::At)
+                        && (me.refuse((me.here().0, me.here().1), |me| rule!(AnnotationAnonymous))? || (me.committed(p0) && me.refuse((me.here().0, me.here().1), |me| rule!(AnnotationAnonymous))?)))
+                    || { me.back(p0); false }
+                })
+            ); true })
+                && (me._ident()? || (me.committed(p0) && me.refuse_past((me.here().0, me.here().1), |me| rule!(ExpectedIdent, found = me.found()))?))
                 && (me.eat(&Tok::Colon) || (me.committed(p0) && me.expected("Colon")?))
                 && ((
                 ({
@@ -2873,7 +2947,7 @@ impl Recognizer<'_> {
                     || me.splice()
                     || matches!(me.peek(), Tok::Eof)
                     || me._decl_start()?
-                ) || (me.committed(p0) && me.expected("\"contract\"")?)))
+                ) || (me.committed(p0) && me.expected("At")?)))
                 || { me.back(p0); false }
             });
         Ok(hit)
@@ -2886,7 +2960,7 @@ impl Recognizer<'_> {
             (!matches!(me.peek(), Tok::Let)
                 && (!(matches!(me.peek(), Tok::Fn) && matches!(me.ahead(1), Tok::LParen)) || (me.committed(p0) && me.expected("\"\"")?))
                 && (!(matches!(me.peek(), Tok::Ident(w) if w == "logging") && !matches!(me.ahead(1), Tok::LBrace)) || (me.committed(p0) && me.expected("\"\"")?))
-                && (me._item_start()? || (me.committed(p0) && me.expected("\"contract\"")?)))
+                && (me._item_start()? || (me.committed(p0) && me.expected("At")?)))
             || { me.back(p0); false }
         });
         Ok(hit)

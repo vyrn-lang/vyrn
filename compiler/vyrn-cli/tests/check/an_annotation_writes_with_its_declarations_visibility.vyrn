@@ -1,0 +1,5 @@
+import { describeHidden } from "./annotation_private_lib"
+
+fn main() -> Int64 {
+    return 0
+}

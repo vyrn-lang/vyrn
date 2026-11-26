@@ -344,6 +344,33 @@ rules! {
         "a union's members share one base, but `{a}` is over `{ab}` and `{b}` over `{bb}`";
     RecordWhere {} "a record type cannot have a `where` clause";
     NotRecord { name } "`{name}` does not resolve to a record";
+    AnnotationKind { name }
+        "`@{name}` names no record type and no `gen fn`: an annotation names an imported one";
+    AnnotationLocal { name }
+        "`@{name}` is declared here or by the language: an annotation names an imported record type";
+    AnnotationArgs { name } "`@{name}` is a record type: write its fields as `@{name} {{ .. }}`";
+    AnnotationFieldType { name, field, ty }
+        "`{name}` cannot be an annotation: its field `{field}` is `{ty}`, and an \
+        annotation's fields are `Int64`, `String` or `Bool`";
+    AnnotationNotConstant { name, field }
+        "field `{field}` of `@{name}` is no constant: an annotation holds literals";
+    AnnotationMember { name, member, decl }
+        "`@{name}` sits on `{member}`, which is no field or variant of `{decl}`";
+    AnnotationGenOnMember { name }
+        "`@{name}` runs a generator, so it sits on a `type` declaration, not on a field or a variant";
+    AnnotationGenSignature { name }
+        "`gen fn {name}` annotates nothing: an annotation's generator takes a `TypeCode` and a \
+        `ModuleInterface` first";
+    AnnotationConstArgs { name }
+        "`@{name}(..)` takes compile-time constants: string, integer or boolean literals";
+    AnnotationWroteExport { name }
+        "`@{name}` wrote an `export`: what an annotation writes takes its declaration's visibility";
+    AnnotationWroteAnnotation { name }
+        "`@{name}` wrote an annotation: generated code holds none, so a module generates in one round";
+    AnnotationUnread { name }
+        "no generator reads `@{name}`: annotate the declaration with a generator of the module that declares `{name}`";
+    AnnotationWroteTwice { name, other, line }
+        "`@{name}` writes `{other}`, which line {line} declares already";
     ValidatedBaseNotScalar { name }
         "`{name}` must have a scalar base (Int64, sized int, Float64, Bool, or String)";
     PredicateCalls { kind, name } "{kind} predicate for `{name}` may not contain calls (v0.1)";
@@ -576,11 +603,6 @@ rules! {
     ContractOfName {} "`contractOf` needs a contract name";
     ToJsonArity { got } "`toJson` takes 1 argument (a value), got {got}";
     ToJsonUncodable { off } "`toJson` cannot encode `{off}` (not a codable type)";
-    DeriveArity {} "`derive` takes a generator's name and a value: `derive(g, x)`";
-    DeriveUnknownGen { g } "`derive` needs a `gen fn {g}(t: TypeArg)` returning `Code`; `{g}` is not one";
-    DeriveUncodable { g, off } "`derive({g}, ..)` cannot reflect `{off}`: it has no wire form";
-    DeriveEntryMismatch { g, got, want }
-        "generator `{g}` wrote the entry `{got}`, and this call needs `{want}`";
     ValueType { t } "`value` boxes an Int64, Bool, or String, found {t}";
     ValueTypeNoShow { t, key }
         "`value` boxes an Int64, Bool, or String, found {t}: say how it renders \
@@ -1007,7 +1029,7 @@ rules! {
         "artifact `{artifact}` ({target}) cannot include `{module}`: {what}";
     FormatterInvariant {}
         "internal formatter error: output would change the parse (source left unchanged)";
-    DeriveWroteDerive {} "a `derive` generator wrote a `derive` call";
+    DeriveWroteDerive {} "a `toJson` or `fromJson` generator wrote a `toJson` or `fromJson` call";
     AudienceCannotImport { importer, from, imported, to }
         "`{importer}` is {from} and cannot import `{imported}`, which is {to}";
     AudienceRuntime { shown, fenced }
@@ -1054,6 +1076,10 @@ rules! {
         `extern fn`, `gen fn`, or `mut fn`";
     ExportToExtern {}
         "an `extern fn` takes no `export to`: the JS host imports it, not a module";
+    AnnotationTarget {} "an annotation sits on a `type` declaration, a field or a variant";
+    AnnotationAnonymous {}
+        "an annotation on a field needs the outermost record of a `type` declaration; \
+        an anonymous record has no declaration to carry it";
     LambdaNotHere { form, fix }
         "`{form} ...` is not a lambda here; a lambda takes its parameters before an arrow"
         fix "{fix}";

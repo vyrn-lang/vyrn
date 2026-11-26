@@ -4610,8 +4610,10 @@ fn main() -> Int64 {
     // A generator body passes an unproved index; the trap is at load.
     (
         r#"import { g } from "./b"
+@g
+type P = { x: Int64 }
 fn main() -> Int64 {
-    print(derive(g, 1).toString())
+    print(shown(1).toString())
     return 0
 }
 "#,
@@ -4620,7 +4622,7 @@ fn main() -> Int64 {
             r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
     return xs[i]
 }
-export gen fn g(t: TypeArg) -> Code {
+export gen fn g(t: TypeCode, iface: ModuleInterface) -> Code {
     let xs: Array<Int64> = [10, 20, 30]
     let mut s = 0
     let mut i = 0
@@ -4628,7 +4630,7 @@ export gen fn g(t: TypeArg) -> Code {
         s = s + w(xs, i)
         i = i + 1
     }
-    let k = t.roots.length + 2
+    let k = iface.types.length + 3
     let total = s + w(xs, k)
     return vyrn"fn shown(v: Int64) -> Int64 {\n    return \{total}\n}\n"
 }

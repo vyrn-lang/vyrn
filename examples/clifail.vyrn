@@ -1,7 +1,7 @@
 // The refusal half of `clidemo`.
 
-import { cli, wantsHelp } from "std/cli"
-import { parseServe, helpServe } from cli("./lib/serve")
+import { wantsHelp } from "std/cli"
+import { parseServe, helpServe } from "./lib/serve"
 
 logging { level: error, sink: stderr }
 

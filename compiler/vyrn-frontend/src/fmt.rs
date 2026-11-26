@@ -283,7 +283,7 @@ fn wants_space(
     if matches!(prev, Bang) {
         return false;
     }
-    if matches!(prev, Tilde) {
+    if matches!(prev, Tilde | At) {
         return false;
     }
     // Everything else gets one space.

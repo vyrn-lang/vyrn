@@ -168,7 +168,7 @@ mod tests {
             .chain(RT_FILES.iter().copied())
             .collect();
         let files = &files[..];
-        // The pipeline's load checks the linked program, and its derive sites
+        // The pipeline's load checks the linked program, and its toJson sites
         // run through the load that linked it.
         let program = vyrn_lower::load(
             root,
@@ -1639,91 +1639,128 @@ fn main() -> Int64 { return shape().byteLength }"#;
         assert!(e.contains("function `onEvent` is defined in"), "{e}");
     }
 
-    /// A `derive` generator that writes, for each root, a function returning
-    /// `word`'s byte length.
-    fn derive_gen(word: &str) -> String {
+    /// An annotation generator that writes `tag<Name>(v)`, returning `word`'s
+    /// byte length.
+    fn tag_gen(word: &str) -> String {
         format!(
-            "export gen fn tag(t: TypeArg) -> Code {{\n    let mut out = vyrn\"\"\n    \
-             let w = \"{word}\"\n    for r in t.roots {{\n        let n = t.nodes[r]\n        \
-             out = out + vyrn\"fn \\{{name(n.shape.name)}}(v: \\{{n.code}}) -> String {{ return \\{{w}} }}\\n\"\n    \
-             }}\n    return out\n}}\n"
+            "export gen fn tag(t: TypeCode, iface: ModuleInterface) -> Code {{\n    \
+             let mut out = vyrn\"\"\n    let w = \"{word}\"\n    let n = t.info.name\n    \
+             return out + vyrn\"fn \\{{name(\"tag\" + n)}}(v: \\{{name(n)}}) -> String {{ return \\{{w}} }}\\n\"\n}}\n"
         )
     }
 
-    const DERIVE_ROOT: &str = "import { tag } from \"./gen\"\ntype P = { x: Int64 }\n\
-                               fn main() -> Int64 {\n    return derive(tag, P { x: 1 }).byteLength\n}\n";
+    const TAG_ROOT: &str = "import { tag } from \"./gen\"\n@tag\ntype P = { x: Int64 }\n\
+                            fn main() -> Int64 {\n    return tagP(P { x: 1 }).byteLength\n}\n";
 
-    /// Loads through the pipeline, whose check runs each `derive`, and runs the
+    /// Loads through the pipeline, which runs each annotation, and runs the
     /// program; an error is every diagnostic, rendered.
-    fn derive_with(root: &str, r: &dyn ModuleResolver) -> Result<i64, String> {
+    fn tag_with(root: &str, r: &dyn ModuleResolver) -> Result<i64, String> {
         let program = vyrn_lower::load(root, "main.vyrn", &shared_opts(), r, Some(&*engine()))
             .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
         run_compiled(&program)
     }
 
-    /// A `derive` generator's output is cached as an import generator's is: a
+    /// An annotation generator's output is cached as an import generator's is: a
     /// warm load runs nothing and gives the cold load's output.
     #[test]
-    fn a_derive_hit_skips_the_run_and_gives_the_same_output() {
-        let r = CachingResolver::new(&[("gen.vyrn", &derive_gen("one"))]);
+    fn an_annotation_hit_skips_the_run_and_gives_the_same_output() {
+        let r = CachingResolver::new(&[("gen.vyrn", &tag_gen("one"))]);
         let before = gen_run_count();
-        assert_eq!(derive_with(DERIVE_ROOT, &r), Ok(3), "cold");
+        assert_eq!(tag_with(TAG_ROOT, &r), Ok(3), "cold");
         assert_eq!(gen_run_count(), before + 1, "cold: one run");
-        assert_eq!(derive_with(DERIVE_ROOT, &r), Ok(3), "warm");
+        assert_eq!(tag_with(TAG_ROOT, &r), Ok(3), "warm");
         assert_eq!(gen_run_count(), before + 1, "warm: a hit, no run");
     }
 
     /// A hit gives the cold load's diagnostics, byte for byte.
     #[test]
-    fn a_derive_hit_gives_the_same_diagnostics() {
-        let gen = derive_gen("one").replace("let w = \"one\"", "let w = 7");
+    fn an_annotation_hit_gives_the_same_diagnostics() {
+        let gen = tag_gen("one").replace("let w = \"one\"", "let w = 7");
         let r = CachingResolver::new(&[("gen.vyrn", &gen)]);
         let before = gen_run_count();
-        let cold = derive_with(DERIVE_ROOT, &r).expect_err("the written code is refused");
-        assert_eq!(derive_with(DERIVE_ROOT, &r), Err(cold));
+        let cold = tag_with(TAG_ROOT, &r).expect_err("the written code is refused");
+        assert_eq!(tag_with(TAG_ROOT, &r), Err(cold));
         assert_eq!(gen_run_count(), before + 1, "warm: a hit, no run");
     }
 
     /// A refused generator writes no entry, cold or warm.
     #[test]
-    fn a_refused_derive_generator_writes_no_entry() {
-        let gen = derive_gen("one").replace("let mut out = vyrn\"\"", "let mut out = 1");
+    fn a_refused_annotation_generator_writes_no_entry() {
+        let gen = tag_gen("one").replace("let mut out = vyrn\"\"", "let mut out = 1");
         let r = CachingResolver::new(&[("gen.vyrn", &gen)]);
-        let cold = derive_with(DERIVE_ROOT, &r).expect_err("the generator is refused");
+        let cold = tag_with(TAG_ROOT, &r).expect_err("the generator is refused");
         assert!(r.generations().is_empty(), "cold: no entry");
-        assert_eq!(derive_with(DERIVE_ROOT, &r), Err(cold));
+        assert_eq!(tag_with(TAG_ROOT, &r), Err(cold));
         assert!(r.generations().is_empty(), "warm: no entry");
     }
 
     /// The generator's source is an input of its entry: editing it misses.
     #[test]
-    fn editing_a_derive_generator_misses() {
-        let mut r = CachingResolver::new(&[("gen.vyrn", &derive_gen("one"))]);
+    fn editing_an_annotation_generator_misses() {
+        let mut r = CachingResolver::new(&[("gen.vyrn", &tag_gen("one"))]);
         let before = gen_run_count();
-        assert_eq!(derive_with(DERIVE_ROOT, &r), Ok(3));
-        r.files.insert("gen.vyrn".to_string(), derive_gen("three"));
-        assert_eq!(derive_with(DERIVE_ROOT, &r), Ok(5), "fresh output");
+        assert_eq!(tag_with(TAG_ROOT, &r), Ok(3));
+        r.files.insert("gen.vyrn".to_string(), tag_gen("three"));
+        assert_eq!(tag_with(TAG_ROOT, &r), Ok(5), "fresh output");
         assert_eq!(gen_run_count(), before + 2, "edited: a second run");
     }
 
-    /// The `TypeArg` is in the key: editing the derived type misses, and an
+    /// The `TypeCode` is in the key: editing the annotated type misses, and an
     /// edit that leaves every reflected type alone hits.
     #[test]
-    fn editing_only_the_derived_type_misses() {
-        let r = CachingResolver::new(&[("gen.vyrn", &derive_gen("one"))]);
+    fn editing_only_the_annotated_type_misses() {
+        let r = CachingResolver::new(&[("gen.vyrn", &tag_gen("one"))]);
         let before = gen_run_count();
-        assert_eq!(derive_with(DERIVE_ROOT, &r), Ok(3));
-        let other = DERIVE_ROOT.replace(
+        assert_eq!(tag_with(TAG_ROOT, &r), Ok(3));
+        let other = TAG_ROOT.replace(
             "fn main",
             "fn unused() -> Int64 {\n    return 0\n}\nfn main",
         );
-        assert_eq!(derive_with(&other, &r), Ok(3));
+        assert_eq!(tag_with(&other, &r), Ok(3));
         assert_eq!(gen_run_count(), before + 1, "another edit: a hit");
-        let typed = DERIVE_ROOT
+        let typed = TAG_ROOT
             .replace("{ x: Int64 }", "{ x: Int64, y: Int64 }")
             .replace("P { x: 1 }", "P { x: 1, y: 2 }");
-        assert_eq!(derive_with(&typed, &r), Ok(3));
+        assert_eq!(tag_with(&typed, &r), Ok(3));
         assert_eq!(gen_run_count(), before + 2, "the type edited: a second run");
+    }
+
+    /// What `toJson`'s generator writes is checked once: a `toJson` in it is
+    /// refused, because no second round runs. Only std writes that generator,
+    /// so the witness serves a `std/json` whose encoders call `toJson`.
+    #[test]
+    fn a_to_json_generator_that_writes_to_json_is_refused() {
+        let json = include_str!("../../../std/json.vyrn");
+        let at = json
+            .find("export gen fn jsonEncoders")
+            .expect("std/json writes the encoders");
+        let end = at
+            + json[at..]
+                .find("    return out\n}")
+                .expect("the encoders return `out`");
+        let wrote = format!(
+            "{}    return out + vyrn\"fn again() -> String {{ return toJson(1) }}\\n\"\n}}{}",
+            &json[..end],
+            &json[end + "    return out\n}".len()..]
+        );
+        let mut files: HashMap<String, String> = (RT_FILES.iter())
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        files.insert("std/json.vyrn".to_string(), wrote);
+        let root = "fn main() -> Int64 {\n    print(toJson(1))\n    return 0\n}\n";
+        let ds = vyrn_lower::load(
+            root,
+            "main.vyrn",
+            &shared_opts(),
+            &MapResolver(files),
+            Some(&*engine()),
+        )
+        .expect_err("the written `toJson` is refused");
+        let said: Vec<&str> = ds.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            said,
+            ["a `toJson` or `fromJson` generator wrote a `toJson` or `fromJson` call"]
+        );
     }
 
     #[test]

@@ -619,6 +619,9 @@ struct Build<'a> {
     /// record, drained into synthetic validated types named `Decl.field`. `None`
     /// outside a type declaration.
     field_preds: Option<Vec<(String, Expr)>>,
+    /// The annotations on a `type` declaration's fields and variants, in source
+    /// order, drained into its [`TypeDecl::annotations`].
+    member_anns: Vec<Annotation>,
     /// Extra statements from a one-statement desugar. `stmt` returns the first and
     /// stashes the rest here; `block` drains them right after.
     extra_stmts: Vec<Stmt>,
@@ -656,6 +659,7 @@ impl<'a> Build<'a> {
             answers,
             aliases: Default::default(),
             field_preds: None,
+            member_anns: Vec::new(),
             extra_stmts: Vec::new(),
         }
     }
@@ -669,6 +673,7 @@ impl<'a> Build<'a> {
             answers,
             aliases: Default::default(),
             field_preds: None,
+            member_anns: Vec::new(),
             extra_stmts: Vec::new(),
         }
     }
@@ -878,6 +883,7 @@ impl<'a> Build<'a> {
             _ => (0, 0),
         };
         let doc = self.take_docs();
+        let mut annotations = self.annotations();
         let exported = self.eat(&Tok::Export);
         let export_to = self.export_to();
         let is_gen = self.eat_word("gen");
@@ -894,6 +900,8 @@ impl<'a> Build<'a> {
             Tok::Import => program.imports.push(self.import_decl()),
             Tok::Type => {
                 let mut ds = self.type_decl();
+                annotations.append(&mut ds[0].annotations);
+                ds[0].annotations = annotations;
                 ds[0].doc = doc;
                 ds[0].exported = exported;
                 ds[0].export_to = export_to;
@@ -946,6 +954,55 @@ impl<'a> Build<'a> {
             // `~^TopLevelExpected` consumed the stray token and recorded nothing.
             _ => {}
         }
+    }
+
+    /// The annotations here, on no member yet: `@name` or `@ns.name`, then
+    /// `(args)` or `{ field: value }`.
+    fn annotations(&mut self) -> Vec<Annotation> {
+        let mut out = Vec::new();
+        while matches!(self.peek(), Tok::At) {
+            let (line, col) = (self.line(), self.col());
+            self.at += 1;
+            let first = self.ident();
+            let (ns, name) = match self.eat(&Tok::Dot) {
+                true => (Some(first), self.ident()),
+                false => (None, first),
+            };
+            let expr = match (self.peek(), ns) {
+                (Tok::LBrace, ns) => {
+                    let name = ns.map_or(name.clone(), |ns| format!("{ns}.{name}"));
+                    self.struct_lit(name, line)
+                }
+                (Tok::LParen, ns) => {
+                    self.at += 1;
+                    let mut args: Vec<Expr> = ns.iter().map(|ns| Expr::var(ns, line)).collect();
+                    let form = match args.is_empty() {
+                        true => CallForm::Plain,
+                        false => CallForm::Method,
+                    };
+                    self.exprs_to_paren(&mut args);
+                    Expr::Call {
+                        id: Id::NEW,
+                        name,
+                        args,
+                        form,
+                        mark: Mark::Plain,
+                        type_args: Vec::new(),
+                        line,
+                    }
+                }
+                (_, Some(ns)) => Expr::field(Expr::var(ns, line), name, line),
+                (_, None) => Expr::var(name, line),
+            };
+            out.push(Annotation {
+                member: None,
+                expr,
+                line,
+                col,
+                generator: None,
+            });
+        }
+        out
     }
 
     /// The paths of an `export to "a", "b"` clause; empty without one.
@@ -1395,6 +1452,7 @@ impl<'a> Build<'a> {
                     base: std::mem::replace(&mut field.ty, Type::Named(synthetic)),
                     predicate: Some(pred),
                     members: Vec::new(),
+                    annotations: Vec::new(),
                     line,
                 });
             }
@@ -1411,6 +1469,7 @@ impl<'a> Build<'a> {
                 base,
                 predicate: t.predicate,
                 members: Vec::new(),
+                annotations: std::mem::take(&mut self.member_anns),
                 line,
             },
         );
@@ -1454,7 +1513,12 @@ impl<'a> Build<'a> {
         self.eat(&Tok::LBrace);
         let mut variants = Vec::new();
         self.list_to(&Tok::RBrace, |b| {
+            let anns = b.annotations();
             let name = b.ident();
+            b.member_anns.extend(anns.into_iter().map(|a| Annotation {
+                member: Some(name.clone()),
+                ..a
+            }));
             let mut payload = Vec::new();
             if b.eat(&Tok::LParen) {
                 b.list_to(&Tok::RParen, |b| payload.push(b.type_()));
@@ -1475,7 +1539,12 @@ impl<'a> Build<'a> {
         let mut local: Vec<(String, Expr)> = Vec::new();
         let mut fields = Vec::new();
         self.list_to(&Tok::RBrace, |b| {
+            let anns = b.annotations();
             let name = b.ident();
+            b.member_anns.extend(anns.into_iter().map(|a| Annotation {
+                member: Some(name.clone()),
+                ..a
+            }));
             b.eat(&Tok::Colon);
             // `field: lazy T`. `lazy` is contextual: read only where a field's
             // type begins, a position no call occupies, so `std/ui`'s `lazy(..)` keeps its
@@ -2702,6 +2771,7 @@ impl<'a> Build<'a> {
             answers: self.answers,
             aliases: std::mem::take(&mut self.aliases),
             field_preds: None,
+            member_anns: Vec::new(),
             extra_stmts: Vec::new(),
         };
         let e = sub.expr();

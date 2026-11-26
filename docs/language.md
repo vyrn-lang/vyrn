@@ -54,6 +54,45 @@ A file holds these top-level forms, in any order:
 
 `export` before a `fn`, `type`, `protocol` or `contract` makes it visible to importers. Declaration order does not matter, except that a module-state initializer may read only earlier state.
 
+### Annotations
+
+An annotation is data a generator reads off a declaration. It is `@Name { field: value }` before a `type` declaration, a field of its outermost record or an enum variant, after the doc comment and before `export`. `@Name` alone is `@Name {}`.
+
+```vyrn
+import { Opt } from "./flags"
+
+/// Serve a directory over HTTP.
+export type Serve = {
+    @Opt { short: "p" }
+    port: Int64,
+    verbose: Bool,
+}
+```
+
+- `Name` is an imported record type whose fields are `Int64`, `String` or `Bool`, or `ns.Name` through a namespace import. Every field of the literal is a constant.
+- An annotation never changes the declaration it sits on, and no judgment of the program reads it.
+- Reflection carries it: `TypeInfo.annotations` lists each one as an `AnnotationInfo`, with its declaration's written name and the import specifier of that declaration's module, the member it sits on (`""` for the declaration), its fields as `Value`s and the `Origin` of its `@`.
+- An annotation on a function, a parameter, a protocol, an impl, a statement or a field of an anonymous record is refused.
+
+An annotation whose name is an imported `gen fn g(t: TypeCode, iface: ModuleInterface, ..)` is a generator. It sits on a `type` declaration, takes constants for the parameters after the second, and runs once while its module loads:
+
+```vyrn
+import { describe } from "./describe"
+
+@describe("pt")
+type Point = { x: Int64, y: Int64 }
+
+fn main() -> Int64 {
+    print(describePoint(Point { x: 1, y: 2 }))
+    return 0
+}
+```
+
+- `t` is the declaration as written, its annotations included, and `iface.types` holds every type its shape names, transitively, as the module and its imports declare them. A generator reads its own module as written and each imported module whole.
+- What it writes joins the declaration's module: that module's code and its importers see the names as the module's own, and the output sees the module's names and its imports. Everything it writes takes the declaration's visibility, so `@describe export type Point` exports `describePoint`.
+- The output writes no `export`, no annotation and no name its module or another annotation of it declares; each is refused at the annotation. So a module generates in one round, after its imports.
+- A generator reads data annotations through `t.info.annotations`, by name and module. A data annotation needs a reader: a generator annotation on the same declaration whose `gen fn` the data type's module declares. Without one it is refused, because nothing would read it.
+
 ## Bindings
 
 `let` binds a value once. `let mut` allows assignment. The type is inferred from the initializer, or written.
@@ -668,7 +707,6 @@ import { squareOf } from squares()
 - `vyrnModule(src)` and `vyrnType(src)` read text as a module or a type with the compiler's recognizer and answer its nodes as `Array<VyrnNode>`: a rule of `vyrn.syntax`, a byte range of `src` and the kids, as indices. A rule's node follows its kids, so the last node is the root. A declaration that does not parse has no node, a token no declaration starts with is an `Item` with no kids, a function's body is one unread `SkimBody`, and text that does not lex has no nodes. A generator copies text it cannot read, and the compile of what it wrote refuses it where the author wrote it. For an island, pass the slice and add its offset.
 - `codeRuns(src)` runs the compiler's classifier over text and answers its coloured runs as `CodeRun { start, stop, class }`: a byte range and a stylesheet class, in source order. Text in no run has no colour, and text that does not lex has no runs.
 - `syntaxParser(path)` reads a `.syntax` grammar, limited to the paths the generator's caller passed, and answers the parser it writes as `Code`. A grammar that does not load is a report at its line and column. `std/syntax`'s `syntax` is the generator import that calls it.
-- `derive(g, x)` runs generator `g` after the check, on the type the checker gave `x`, and calls the function it wrote for that type. `g` is a `gen fn g(t: TypeArg)` that returns `Code`; for each root node `r` of `t` it defines `fn <t.nodes[r].shape.name>(v: <t.nodes[r].code>) -> String`, and `vyrn check` refuses an entry of another signature at the call. Each node pairs a checked type's `shape`, a `TypeNode` with its wire form as `kind`, with the type as `code`, a `Code` value the call site wrote, so a generator can write only a type the checker resolved. `g` runs once per program, and its code is checked with the program.
 - A generator reports a diagnostic with `std/diag`'s `report`, which returns `Code`; every tool shows it at the file and line the generator read.
 
 ### Code quotes

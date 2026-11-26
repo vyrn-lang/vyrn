@@ -1,8 +1,6 @@
 // `nbody.vyrn` on `std/columns`.
 
-import { Body } from "./lib/bodies"
-import { columns } from "std/columns"
-import { BodyColumns, bodyColumns, pushBody } from columns("./lib/bodies")
+import { Body, BodyColumns, bodyColumns, pushBody } from "./lib/bodies"
 
 let steps = 1000
 

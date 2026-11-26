@@ -1,0 +1,4 @@
+import { describe, exports, annotates, clashes, plain, traps } from "./annotation_gens_lib"
+
+@annotates
+export type T = { a: Int64 }

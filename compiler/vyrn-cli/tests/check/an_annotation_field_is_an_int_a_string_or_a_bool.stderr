@@ -1,0 +1,1 @@
+an_annotation_field_is_an_int_a_string_or_a_bool.vyrn:3:1: `Wide` cannot be an annotation: its field `xs` is `Array<Int64>`, and an annotation's fields are `Int64`, `String` or `Bool`

@@ -1,8 +1,7 @@
 // The command line as a record type.
 
-import { cli, wantsHelp } from "std/cli"
-import { parseServe, helpServe } from cli("./lib/serve")
-import { Serve } from "./lib/serve"
+import { wantsHelp } from "std/cli"
+import { Serve, parseServe, helpServe } from "./lib/serve"
 
 fn report(s: Serve) -> Int64 {
     print("port=\{s.port}")
