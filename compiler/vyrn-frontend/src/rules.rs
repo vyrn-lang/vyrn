@@ -1188,10 +1188,6 @@ rules! {
     StoreUnderHole { s, h, here, path }
         "`{s}{h}` was moved here into `consume`\nline {here}: ... and `{s}{path}` is written \
         here, under the hole";
-    // A payload binder handed on out of a type that declares `release`.
-    SealedPayload { b, ty, m }
-        "`{b}` may not be handed to a `consume` parameter: `{ty}` declares `release`, which \
-        reads it; consume `{m}` or copy `{b}`";
     // A written `drop` of a name with a hole.
     DropWithHole { s, h, l }
         "`{s}` may not be dropped: `{s}{h}` was taken out of it on line {l}, and `drop` \

@@ -5157,21 +5157,15 @@ impl<'a> Builder<'a> {
                     // refuses a write to it meanwhile.
                     if layout || self.body.names[n.index()].borrow {
                         // The walk skips a payload hole on its live tag, and
-                        // only a declared `release` cannot skip one
-                        // ([`vyrn_frontend::declared::skippable`]).
+                        // only a release another module declares cannot skip
+                        // one ([`vyrn_frontend::declared::hole_walk`]).
                         let at = format!("{variant}.{i}");
-                        self.body.names[n.index()].payload = Some(
-                            if vyrn_frontend::declared::skippable(
-                                self.proto,
-                                sty,
-                                std::slice::from_ref(&at),
-                                self.body.file.as_deref(),
-                            ) {
-                                Payload::Hole(format!(".{at}"))
-                            } else {
-                                Payload::Sealed(sty.to_string())
-                            },
-                        );
+                        let module = self.body.file.as_deref();
+                        let walk = vyrn_frontend::declared::hole_walk(self.proto, sty, &at, module);
+                        self.body.names[n.index()].payload = Some(match walk {
+                            Ok(()) => Payload::Hole(format!(".{at}")),
+                            Err(t) => Payload::Sealed(t.as_ref().unwrap_or(sty).to_string()),
+                        });
                         out.push(St::Let(n, Rhs::Read(Place::Name(m))));
                     }
                 }

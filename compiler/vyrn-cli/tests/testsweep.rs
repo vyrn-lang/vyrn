@@ -220,10 +220,10 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
         "row 17's other half, a borrow an arm yields",
     ),
     // A rule the checker never had: a declared `release` reads every payload.
-    // `refusals.rs`'s `a_payload_of_a_type_that_declares_release_is_not_handed_on`
+    // `refusals.rs`'s `a_payload_of_a_type_that_declares_release_is_handed_on_only_at_home`
     // pins it.
     (
-        "may not be handed to a `consume` parameter: ",
+        " on takes apart a `",
         "m7-hole, a declared release reads every payload",
     ),
     // A rule the checker never had: a call that consumes a value may not also

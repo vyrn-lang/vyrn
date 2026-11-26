@@ -2181,8 +2181,8 @@ fn a_payload_of_a_type_that_declares_release_is_handed_on_only_at_home() {
                Text(s) => One { node: n, k: 0 },\n  }\n}\n\
                fn main() -> Int64 {\n  let a = f(Elem(\"a\", [1, 2, 3]))\n  \
                let b = f(Text(\"b\"))\n  print(a.k + b.k)\n  return 0\n}\n";
-    let want = "`kids` may not be handed to a `consume` parameter: `Node` declares \
-                `release`, which reads it; consume `n` or copy `kids`";
+    let want = "handing `kids` on takes apart a `Node`, and another module declares the \
+                release of `Node`";
     let dir = common::scratch("sealed-payload");
     let mut bad: Vec<String> = Vec::new();
     std::fs::write(dir.join("m.vyrn"), src).expect("write the program");
