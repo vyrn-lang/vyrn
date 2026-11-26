@@ -6,8 +6,7 @@
 /// `cli` is a `gen fn` that reflects a module of type declarations and returns a
 /// module exporting, for every exported record type, `parse<Name>(argv) ->
 /// Validation<Name>` and `help<Name>() -> String`. The compiler knows nothing
-/// about command lines. The mapping is a rule over the declaration, never an
-/// attribute:
+/// about command lines. The mapping is a rule over the declaration:
 ///
 /// | field type | surface | missing |
 /// |---|---|---|
@@ -19,6 +18,8 @@
 /// - The long name is the field name in kebab-case: `dryRun` is `--dry-run`.
 /// - The short name is the first byte of the field name, taken in declaration
 ///   order and skipped on collision. `-h` is reserved for `--help`.
+///   `@Opt { short: "H" }` on a field names its short letter instead, before
+///   any first byte is taken, and `@Opt { short: "" }` gives it none.
 /// - An unknown option is an `Issue`: unlike `std/args`, a spec exists.
 /// - A value is validated by construction: `--port 99999` reaches
 ///   `Port?(99999)`, and its `None` becomes an `Issue` worded from that type's
@@ -47,6 +48,9 @@ export to "./cli" type CliOpt = {
     field: String,
     takesValue: Bool,
 }
+
+/// The annotation that names a field's short letter, without its `-`.
+export type Opt = { short: String }
 
 /// One option seen in argv: the field it fills, and the text it carried (`""`
 /// for a flag).
@@ -335,16 +339,46 @@ fn cliWant(named: String, base: String, bounds: String) -> String {
     return "text, " + bounds
 }
 
-/// Every option of one command record, decided in declaration order.
+/// The short letter an `@Opt` on field `field` of `t` names, or `None`.
+gen fn cliOptShort(t: TypeInfo, field: String) -> Option<String> {
+    for a in t.annotations {
+        if a.member == field && a.name == "Opt" && a.module == "std/cli" {
+            for f in a.fields {
+                if let StrVal(s) = f.value {
+                    return Some(s.copy())
+                }
+            }
+        }
+    }
+    return None
+}
+
+/// Every option of one command record, decided in declaration order. A short
+/// letter an `@Opt` names is taken before any field's first byte.
 gen fn cliPlansOf(t: TypeInfo, iface: ModuleInterface) -> Array<CliPlan> {
     let mut out: Array<CliPlan> = []
     let mut used: Array<String> = ["h"]
+    for f in t.shape[0].members {
+        if let Some(s) = cliOptShort(t, f.name) {
+            if includes(used, s) {
+                panic(
+                    "std/cli: field `" + f.name + "` of `" + t.name + "` names the short letter `" + s + "`, which `-h` or another field already takes.",
+                )
+            }
+            used.push(s.copy())
+        }
+    }
     let mut frees = 0
     for f in t.shape[0].members {
         let node = t.shape[f.args[0]]
         let optional = node.kind == "option"
         let inner = if optional { t.shape[node.args[0]] } else { node }
         if node.spelling == "Array<String>" {
+            if let Some(_) = cliOptShort(t, f.name) {
+                panic(
+                    "std/cli: field `" + f.name + "` of `" + t.name + "` takes the positional arguments, which have no short letter. Remove its `@Opt`.",
+                )
+            }
             frees = frees + 1
             if frees > 1 {
                 panic(
@@ -393,14 +427,17 @@ gen fn cliPlansOf(t: TypeInfo, iface: ModuleInterface) -> Array<CliPlan> {
                     }
                 }
             }
-            let letter = cliInitial(f.name)
-            let short = if includes(used, letter) {
-                ""
+            let mut short = ""
+            if let Some(s) = cliOptShort(t, f.name) {
+                if s != "" {
+                    short = "-" + s
+                }
             } else {
-                "-" + letter
-            }
-            if short != "" {
-                used.push(letter.copy())
+                let letter = cliInitial(f.name)
+                if !includes(used, letter) {
+                    short = "-" + letter
+                    used.push(letter.copy())
+                }
             }
             out.push(
                 CliPlan {

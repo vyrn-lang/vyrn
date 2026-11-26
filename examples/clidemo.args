@@ -2,7 +2,8 @@
 8080
 --root
 /srv/www
---host=example.com
+-H
+example.com
 -v
 a.txt
 b.txt

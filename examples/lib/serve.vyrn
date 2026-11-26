@@ -1,3 +1,5 @@
+import { Opt } from "std/cli"
+
 /// The TCP port to listen on.
 export type Port = Int64 where value >= 1 && value <= 65535
 
@@ -8,6 +10,7 @@ export type Root = String where value.byteLength > 0
 export type Serve = {
     port: Port,
     root: Root,
+    @Opt { short: "H" }
     host: Option<String>,
     verbose: Bool,
     files: Array<String>,

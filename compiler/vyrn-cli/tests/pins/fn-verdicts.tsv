@@ -2334,6 +2334,7 @@ std/cli.vyrn	cliBaseOf	yes	no, its effect set is alloc
 std/cli.vyrn	cliBytes	yes	no, its effect set is alloc
 std/cli.vyrn	cliBoundsText	yes	no, its effect set is alloc
 std/cli.vyrn	cliWant	yes	no, its effect set is alloc
+std/cli.vyrn	cliOptShort	yes	no, its effect set is alloc
 std/cli.vyrn	cliPlansOf	no, it keeps an index check	no, its effect set is alloc, trap
 std/cli.vyrn	cliDeclaresHelp	yes	no, `plans` is Array<CliPlan>, not an integer, Bool or a read array of one
 std/cli.vyrn	cliHelpLeft	yes	no, its effect set is alloc

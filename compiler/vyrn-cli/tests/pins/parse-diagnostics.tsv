@@ -1274,7 +1274,7 @@ examples/lib/metrics.vyrn	0	cbf29ce484222325	20	15	dfba772953fef4c4
 examples/lib/remover.vyrn	0	cbf29ce484222325	20	13	b4081b24e85fd242
 examples/lib/renamed_helper_a.vyrn	0	cbf29ce484222325	20	18	95cacd27242f7a1b
 examples/lib/renamed_helper_b.vyrn	0	cbf29ce484222325	20	18	2f8397aac0b7bfd0
-examples/lib/serve.vyrn	0	cbf29ce484222325	20	15	96cd158c115b4b35
+examples/lib/serve.vyrn	0	cbf29ce484222325	20	15	f88b9e8df1cc36e3
 examples/lib/shapes.vyrn	0	cbf29ce484222325	20	19	2e2f39807e6857a6
 examples/linkedlist.vyrn	0	cbf29ce484222325	20	19	c869099220e59a0f
 examples/listdir.vyrn	0	cbf29ce484222325	20	19	0e9edb03d683fa22
@@ -1507,7 +1507,7 @@ site/markup.vyrn	0	cbf29ce484222325	20	17	dec25373dda5c291
 std/args.vyrn	0	cbf29ce484222325	20	18	f4b938afd0b09fc0
 std/arrays.vyrn	0	cbf29ce484222325	20	17	183b2ba22dbba025
 std/bench.vyrn	0	cbf29ce484222325	20	15	2825b3d36aaa04dc
-std/cli.vyrn	0	cbf29ce484222325	20	17	26c8e4e681a4debb
+std/cli.vyrn	0	cbf29ce484222325	20	17	cf92e3950dff3fe6
 std/code.vyrn	0	cbf29ce484222325	20	17	3b7294d64896b46c
 std/codecs.vyrn	0	cbf29ce484222325	20	19	9fce1e43dd7c273d
 std/columns.vyrn	0	cbf29ce484222325	20	15	b5ffb940812c70c7

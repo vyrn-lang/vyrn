@@ -8,8 +8,7 @@ The command line is a record type, and `cli` writes its parser and help.
 `cli` is a `gen fn` that reflects a module of type declarations and returns a
 module exporting, for every exported record type, `parse<Name>(argv) ->
 Validation<Name>` and `help<Name>() -> String`. The compiler knows nothing
-about command lines. The mapping is a rule over the declaration, never an
-attribute:
+about command lines. The mapping is a rule over the declaration:
 
 | field type | surface | missing |
 |---|---|---|
@@ -21,6 +20,8 @@ attribute:
 - The long name is the field name in kebab-case: `dryRun` is `--dry-run`.
 - The short name is the first byte of the field name, taken in declaration
   order and skipped on collision. `-h` is reserved for `--help`.
+  `@Opt { short: "H" }` on a field names its short letter instead, before
+  any first byte is taken, and `@Opt { short: "" }` gives it none.
 - An unknown option is an `Issue`: unlike `std/args`, a spec exists.
 - A value is validated by construction: `--port 99999` reaches
   `Port?(99999)`, and its `None` becomes an `Issue` worded from that type's
@@ -35,6 +36,14 @@ A field is `Bool`, `Int64`, `String`, a refinement type over `Int64` or
 Anything else fails the generation with a sentence naming the field.
 
 Inspect the synthesized module with:  vyrn emit-gen <file>
+
+## Opt
+
+```vyrn
+type Opt = { short: String }
+```
+
+The annotation that names a field's short letter, without its `-`.
 
 ## CliHit
 
