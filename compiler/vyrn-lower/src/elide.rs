@@ -6940,9 +6940,13 @@ impl<'a> Walk<'a> {
     /// would test it: `` `xs` non-empty ``, `` `i < xs.length` ``. A goal over a
     /// temporary reads `the value of line N` and is no code. With `param`, also
     /// the goal as that parameter's `where` clause, where [`Walk::states`]
-    /// allows one.
+    /// allows one. A goal the state reduces to a constant reads as written:
+    /// `0 >= 1` names no fact the reader can act on.
     fn goal(&self, st: &State, g: &Lin, param: Option<Name>) -> (Arc<str>, Option<Arc<str>>) {
-        let l = &st.norm(g).unwrap_or(Cow::Borrowed(g));
+        let l = &st
+            .norm(g)
+            .filter(|l| !l.terms.is_empty())
+            .unwrap_or(Cow::Borrowed(g));
         let temp = (l.terms.iter()).any(|(t, _)| {
             t.name()
                 .is_some_and(|n| self.body.names[n.index()].source.starts_with('@'))
