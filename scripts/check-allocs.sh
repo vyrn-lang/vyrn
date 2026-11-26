@@ -92,8 +92,9 @@ for verb, root in roots:
     failed |= over
     moved = [f"  {p}: only in {'head' if p in b else 'base'}, {a.get(p, b.get(p))}" if p not in a or p not in b
              else f"  {p}: {a[p]} -> {b[p]}" for p in sorted(a.keys() | b.keys()) if abs(a.get(p, 0) - b.get(p, 0)) > NOISE]
-    # An example that did not move prints nothing; the two big roots always print.
-    if moved or root.startswith("site/"):
+    # An example that neither moved a phase nor failed prints nothing; the two big roots
+    # always print, and a failed root prints its total even when no phase moved by NOISE.
+    if moved or over or root.startswith("site/"):
         print("\n".join([f"{name}: base {ta}, head {tb}, {pct:+.3f}%{' FAIL' if over else ''}"] + moved))
 compared = len(roots) - len(skipped)
 print(f"compared {compared} roots, skipped {len(skipped)} that a binary rejects: {', '.join(skipped)}")
