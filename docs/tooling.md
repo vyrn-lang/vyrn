@@ -361,7 +361,7 @@ compile, except `--contract`.
   is empty; it is trap-free; it is in no cycle of the call graph; every
   parameter, local and result is an integer or `Bool`, or a `read` array of
   one, so `Float32` and `Float64` are named reasons; every loop is a counter
-  loop; and every callee is a kernel. Its `yes` names the form the kernel
+  loop; and every callee is a kernel, a call the emitter erases aside. Its `yes` names the form the kernel
   needs on a GPU and the first type that needs it: `native` for 32-bit
   integers and `Bool`, `packed` for 8- and 16-bit integers held in `u32`
   words, and `emulated` for 64-bit integers held as two `u32` words, as in

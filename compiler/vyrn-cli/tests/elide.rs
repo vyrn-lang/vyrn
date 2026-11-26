@@ -8114,6 +8114,34 @@ fn why_proofs_uses_lists_the_checks_a_clause_pays_for() {
     );
 }
 
+/// A call the emitter erases is no call of the kernel rule: `mid` calls the
+/// theorem `below` twice, the emitter removes both, and `mid` is a kernel.
+#[test]
+fn an_erased_call_does_not_block_the_kernel_verdict() {
+    let src = "fn below(a: Int64, b: Int64 where value > a, n: Int64 where value >= b) -> Unit where a < n {
+    return
+}
+fn half(d: Int64 where value >= 1) -> Int64 where value >= 0 && value < d {
+    return d / 2
+}
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64
+    where value >= lo && value < hi && value < xs.length
+{
+    below(lo, hi, xs.length)
+    let q = half(hi - lo)
+    below(q, hi - lo, xs.length)
+    return lo + q
+}
+";
+    let (_dir, file) = program(src, "    print(mid(xs, 0, 3).toString())");
+    let why = vyrn().args(["why", "--cost"]).arg(&file).output().unwrap();
+    let out = norm(&why.stdout);
+    assert!(
+        out.contains("  mid: trap-free: yes; kernel: yes, emulated Int64\n"),
+        "{out}"
+    );
+}
+
 /// A call for its effect into a pure, read-only, trap-free function that
 /// calls no function in a cycle emits nothing, and the run prints the same.
 #[test]
