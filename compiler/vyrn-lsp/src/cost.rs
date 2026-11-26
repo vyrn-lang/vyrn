@@ -331,12 +331,13 @@ fn line_end(src: &str, line: usize) -> Position {
     }
 }
 
-/// The hints for lines `from..=to` (1-based), at the end of each line that allocates, copies,
-/// grows a container, enters an allocating function, keeps a check, proves one or erases a
-/// call; a line with none of them has no hint. In the compact style a line's hint shows its
-/// rows' glyphs, and its hover every row's, then [`WHY_COST`]. A line with a proof glyph
-/// carries the document's `uri` and its line as `data`, for [`resolve`]. The full style shows
-/// only costs, in words.
+/// The hints for lines `from..=to` (1-based) that allocate, copy, grow a container, enter an
+/// allocating function, keep a check, prove one or erase a call; a line with none of them has
+/// no hint. In the compact style a hint stands at each [`Anchor`], after the expression its
+/// facts are about, and shows the glyphs anchored there with their hovers, then [`WHY_COST`]:
+/// an editor hovers a hint as its own element, so each expression's glyphs have their own
+/// hover. A hint with a proof glyph carries the document's `uri` and its line as `data`, for
+/// [`resolve`]. The full style shows only costs, in words, at the end of each line.
 pub fn hints(
     analysis: &Analysis,
     uri: &str,
@@ -345,8 +346,8 @@ pub fn hints(
     from: usize,
     to: usize,
 ) -> Vec<InlayHint> {
-    let hint = |line: usize, label: String, tip: String, data| InlayHint {
-        position: line_end(src, line),
+    let hint = |position: Position, label: String, tip: String, data| InlayHint {
+        position,
         label: InlayHintLabel::String(label),
         kind: None,
         text_edits: None,
@@ -357,15 +358,19 @@ pub fn hints(
     };
     if crate::compact_hints() {
         let rows = rows(analysis, uri, path, src, from, to);
-        return (rows.chunk_by(|a, b| a.line == b.line))
-            .map(|line| {
-                let at = line[0].line;
-                let glyphs: Vec<&str> = line.iter().map(|r| r.glyph.as_str()).collect();
-                let hovers: Vec<&str> = line.iter().map(|r| r.hover.as_str()).collect();
-                let data = (line.iter().any(|r| r.proof))
-                    .then(|| serde_json::json!({ "uri": uri, "line": at }));
+        let mut anchors: Vec<(&Anchor, &Row)> = (rows.iter())
+            .flat_map(|r| r.anchors.iter().map(move |a| (a, r)))
+            .collect();
+        anchors.sort_by_key(|(a, _)| (a.at.line, a.at.character));
+        return (anchors.chunk_by(|x, y| x.0.at == y.0.at))
+            .map(|here| {
+                let at = here[0].0.at;
+                let glyphs: Vec<&str> = here.iter().map(|(a, _)| a.glyph.as_str()).collect();
+                let hovers: Vec<&str> = here.iter().map(|(a, _)| a.hover.as_str()).collect();
+                let data = (here.iter().any(|(_, r)| r.proof))
+                    .then(|| serde_json::json!({ "uri": uri, "line": at.line as usize + 1 }));
                 let tip = format!("{}\n\n{WHY_COST}", hovers.join("\n\n"));
-                hint(at, glyphs.join(" "), tip, data)
+                hint(at, glyphs.join(""), tip, data)
             })
             .collect();
     }
@@ -386,7 +391,12 @@ pub fn hints(
             let labels: Vec<String> = line_rows.iter().map(|r| label(f, r, fresh)).collect();
             let tips: Vec<String> = line_rows.iter().map(|r| tooltip(f, r, fresh)).collect();
             let at = line_rows[0].line;
-            out.push(hint(at, labels.join(", "), tips.join("\n\n"), None));
+            out.push(hint(
+                line_end(src, at),
+                labels.join(", "),
+                tips.join("\n\n"),
+                None,
+            ));
         }
     }
     out
