@@ -2692,11 +2692,12 @@ std/random.vyrn	seededRng	yes	no, the value of line 27 is Rng, not an integer, B
 std/random.vyrn	nextInt	yes	no, `rng` is Rng, not an integer, Bool or a read array of one
 std/random.vyrn	nextInRange	no, it keeps a division check	no, it is not trap-free
 std/random.vyrn	int64Min	yes	yes, emulated UInt64
-std/regex.vyrn	noBytes	yes	no, the value of line 68 is ByteSet, not an integer, Bool or a read array of one
+std/regex.vyrn	noBytes	yes	no, the value of line 69 is ByteSet, not an integer, Bool or a read array of one
 std/regex.vyrn	addByte	yes	no, `s` is ByteSet, not an integer, Bool or a read array of one
 std/regex.vyrn	hasByte	yes	no, `s` is ByteSet, not an integer, Bool or a read array of one
 std/regex.vyrn	regexSay	yes	no, its effect set is alloc
 std/regex.vyrn	refuse	yes	no, its effect set is alloc
+std/regex.vyrn	refused	yes	no, `bd` is Builder, not an integer, Bool or a read array of one
 std/regex.vyrn	emit	yes	no, its effect set is alloc
 std/regex.vyrn	patch	no, it keeps an index check	no, it is not trap-free
 std/regex.vyrn	joinHoles	yes	no, its effect set is alloc
@@ -2705,8 +2706,20 @@ std/regex.vyrn	addRange	yes	no, `k` is ByteSet, not an integer, Bool or a read a
 std/regex.vyrn	escapeBytes	yes	no, `k` is ByteSet, not an integer, Bool or a read array of one
 std/regex.vyrn	classBytes	no, it keeps an index check	no, its effect set is alloc
 std/regex.vyrn	fragSet	no, it keeps an index check	no, its effect set is alloc, module-state
-std/regex.vyrn	fragRepeat	no, it calls `patch`, which is not trap-free	no, its effect set is alloc, module-state
-std/regex.vyrn	fragBytes	no, it keeps an index check	no, its effect set is alloc, module-state
+std/regex.vyrn	fragByte	no, it calls `fragSet`, which is not trap-free	no, its effect set is alloc, module-state
+std/regex.vyrn	fragEmpty	yes	no, its effect set is alloc, module-state
+std/regex.vyrn	fragOp	no, it calls `patch`, which is not trap-free	no, its effect set is alloc, module-state
+std/regex.vyrn	fragTerm	no, it keeps an index check	no, its effect set is alloc, module-state
+std/regex.vyrn	digitsEnd	no, it keeps an index check	no, it is not trap-free
+std/regex.vyrn	countValue	no, it keeps an index check	no, it is not trap-free
+std/regex.vyrn	boundsOf	no, it keeps an index check	no, it is not trap-free
+std/regex.vyrn	copiesOf	yes	no, `n` is Bounds, not an integer, Bool or a read array of one
+std/regex.vyrn	pieceSize	no, it calls `boundsOf`, which is not trap-free	no, it is not trap-free
+std/regex.vyrn	altSize	no, it keeps an index check	no, it is not trap-free
+std/regex.vyrn	termSize	no, it calls `altSize`, which is not trap-free	no, it is not trap-free
+std/regex.vyrn	fragCopy	no, it calls `fragTerm`, which is not trap-free	no, its effect set is alloc, module-state
+std/regex.vyrn	fragRepeat	no, it calls `fragTerm`, which is not trap-free	no, its effect set is alloc, module-state
+std/regex.vyrn	fragCount	no, it calls `patch`, which is not trap-free	no, its effect set is alloc, module-state
 std/regex.vyrn	fragPiece	no, it keeps an index check	no, its effect set is alloc, module-state
 std/regex.vyrn	fragBranch	no, it calls `fragPiece`, which is not trap-free	no, its effect set is alloc, module-state
 std/regex.vyrn	fragAlt	no, it keeps an index check	no, its effect set is alloc, module-state

@@ -697,10 +697,13 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<Said> {
                 rhs,
                 ..
             } => Some(match &**rhs {
-                Expr::Str(pat, _) => {
-                    let err = vyrn_frontend::regex::compile(pat).err()?;
-                    rule!(InvalidRegex, pat, err = err.to_string()).render()
-                }
+                // The island check states a row of the grammar.
+                Expr::Str(pat, _) => match vyrn_frontend::regex::compile(pat).err()? {
+                    vyrn_frontend::regex::Refusal::Builder(err) => {
+                        rule!(InvalidRegex, pat, err).render()
+                    }
+                    vyrn_frontend::regex::Refusal::Grammar(_) => return None,
+                },
                 _ => rule!(MatchNeedsPattern).render(),
             }),
             // A literal operand takes a sized sibling's type

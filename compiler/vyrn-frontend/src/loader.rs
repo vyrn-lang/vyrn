@@ -6636,7 +6636,7 @@ fn link(
             .find(|(_, (w, k))| w == ty && k == key);
         renamed.map_or(ty.to_string(), |(l, _)| l.clone())
     };
-    let islands: Vec<Island> = (modules.iter())
+    let mut islands: Vec<Island> = (modules.iter())
         .flat_map(|m| {
             m.generated
                 .iter()
@@ -6683,6 +6683,7 @@ fn link(
     }
     let mut program = merged.expect("root module was loaded");
     program.type_decls.extend(extra_types);
+    islands.extend(opts.std_root.as_deref().map(crate::gen::regex_island));
     program.islands = islands.into();
     // Which modules can see a declaration of a surface builtin. The
     // checker cannot compute it, because `imports` are consumed here.

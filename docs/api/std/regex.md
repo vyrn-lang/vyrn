@@ -9,11 +9,12 @@ and counts.
 The language is `std/regex.syntax`, the one `=~` reads, and a pattern means what
 it means there: `.` is any character but `\n` and `\r`, `\d`, `\w` and `\s` are
 shorthands, `\n`, `\t`, `\r`, `\f` and `\v` are control characters, and any
-other escape is the character after it. A Thompson NFA with no backtracking, so
-the time is linear in the pattern size times the input for every pattern. A
-search runs it as a lazy DFA: one table read per byte. Refuses what the grammar
-accepts and this builder does not compile: anchors, counted repetition and an
-empty class. It has no backreferences or lookaround: `\1` is the byte `1`.
+other escape is the character after it. `{m,n}` repeats a term `m` to `n` times,
+each count at most 255. `^` and `$` are the bytes they spell, and the empty
+pattern matches the empty string. A Thompson NFA with no backtracking, so the
+time is linear in the pattern size times the input for every pattern. A search
+runs it as a lazy DFA: one table read per byte. It has no backreferences or
+lookaround: `\1` is the byte `1`.
 
 Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
 backtracking engine answers `a`.

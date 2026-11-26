@@ -67,6 +67,14 @@ const STD: &[(&str, &str)] = &[
     ),
     ("std/random.vyrn", include_str!("../../../std/random.vyrn")),
     ("std/regex.vyrn", include_str!("../../../std/regex.vyrn")),
+    (
+        "std/regex.syntax",
+        include_str!("../../../std/regex.syntax"),
+    ),
+    (
+        "std/regex.errors/en.json",
+        include_str!("../../../std/regex.errors/en.json"),
+    ),
     ("std/rpc.vyrn", include_str!("../../../std/rpc.vyrn")),
     (
         "std/runtime.vyrn",
@@ -82,6 +90,11 @@ const STD: &[(&str, &str)] = &[
     (
         "std/strings.vyrn",
         include_str!("../../../std/strings.vyrn"),
+    ),
+    ("std/syntax.vyrn", include_str!("../../../std/syntax.vyrn")),
+    (
+        "std/syntaxreport.vyrn",
+        include_str!("../../../std/syntaxreport.vyrn"),
     ),
     (
         "std/strpred.vyrn",

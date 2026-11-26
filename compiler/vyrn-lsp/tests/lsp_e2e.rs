@@ -7102,6 +7102,37 @@ fn main() -> Int64 {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The pattern of `=~` is an island of `std/regex.syntax`, so the editor colours
+/// it with that grammar.
+#[test]
+fn a_match_pattern_is_coloured_by_the_regex_grammar() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_regex_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "fn main() -> Int64 {
+    return if \"ab\" =~ \"[a-z]{2}\" { 1 } else { 0 }
+}
+";
+    let path = dir.join("main.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", src);
+    let diags = read_diags_for(&mut client, "main.vyrn");
+    let none = diags.pointer("/params/diagnostics");
+    assert_eq!(none, Some(&serde_json::json!([])), "{diags}");
+    let toks = semantic_tokens_full(&mut client, &uri);
+    let inside: Vec<_> = (toks.iter())
+        .filter(|t| t.line == 1 && t.ch >= 23 && t.ch < 32)
+        .map(|t| (t.ch, t.len, t.ty.clone()))
+        .collect();
+    // The grammar names one part of this pattern: the `-` of a range.
+    assert_eq!(inside, vec![(25, 1, "operator".to_string())], "{toks:?}");
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Every `vyrn.json` under a workspace folder is a module root: with the folder
 /// one level above `dsl/`, the server asks for `dsl/*.calc` at initialize, so a
 /// `.calc` file opened first is coloured and refused. A client whose

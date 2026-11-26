@@ -83,6 +83,8 @@ struct Build<'a> {
     counts: Vec<u32>,
     /// Nodes copied by counted repetition so far.
     expanded: usize,
+    /// Whether the scan stopped at a row of the grammar.
+    in_grammar: bool,
 }
 
 impl Build<'_> {
@@ -115,12 +117,14 @@ impl Build<'_> {
 
 impl Hooks for Build<'_> {
     fn refuse(&mut self, _at: usize, rule: Rule) -> String {
+        self.in_grammar = true;
         match rule {
             Rule::ClassBackslash {} => "dangling `\\` in character class",
             Rule::ClassUnclosed {} => "unterminated character class `[`",
             Rule::CountForm {} => "malformed counted repetition (expected `}` or `,`)",
             Rule::CountNumber {} => "counted repetition needs a number (`{m}`, `{m,}`, `{m,n}`)",
             Rule::CountUnclosed {} => "unclosed counted repetition `{`",
+            Rule::EmptyClass {} => "empty character class `[]`",
             Rule::GroupUnclosed {} => "unclosed group `(`",
             Rule::NoCountTerm {} => "nothing to repeat before counted repetition `{..}`",
             Rule::NoTerm {} | Rule::NonGreedy { .. } => "nothing to repeat before quantifier",
@@ -297,8 +301,24 @@ fn concat(mut parts: Vec<Re>) -> Re {
     }
 }
 
+/// Why a pattern does not compile: a row of `std/regex.syntax`, which the
+/// island check of a `=~` literal states in the grammar's sentence, or a limit
+/// of this builder, which only the builder states.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    Grammar(String),
+    Builder(String),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Refusal::Grammar(s) | Refusal::Builder(s)) = self;
+        f.write_str(s)
+    }
+}
+
 /// Parses `pattern` by `std/regex.syntax` into its tree.
-fn parse(pattern: &str) -> Result<Re, String> {
+fn parse(pattern: &str) -> Result<Re, Refusal> {
     let build = Build {
         b: pattern.as_bytes(),
         terms: Vec::new(),
@@ -307,9 +327,15 @@ fn parse(pattern: &str) -> Result<Re, String> {
         hi: None,
         counts: Vec::new(),
         expanded: 0,
+        in_grammar: false,
     };
     let mut scanner = grammar::Scanner::new(pattern, build);
-    scanner._regex_pattern()?;
+    if let Err(why) = scanner._regex_pattern() {
+        return Err(match scanner.hooks.in_grammar {
+            true => Refusal::Grammar(why),
+            false => Refusal::Builder(why),
+        });
+    }
     // The pattern is one alternation, which leaves one term.
     Ok(scanner.hooks.terms.pop().map_or(Re::Empty, |t| t.1))
 }
@@ -1032,9 +1058,9 @@ impl Dfa {
 /// rebuilding one table measured 96% of checker time. A clone is a ~1 MB
 /// memcpy against a ~25 ms rebuild. A thread that asks while another builds
 /// the pattern waits for that build.
-pub fn compile(pattern: &str) -> Result<Dfa, String> {
+pub fn compile(pattern: &str) -> Result<Dfa, Refusal> {
     use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-    type Slot = Arc<OnceLock<Result<Dfa, String>>>;
+    type Slot = Arc<OnceLock<Result<Dfa, Refusal>>>;
     // ponytail: unbounded, but keyed by patterns in the compiled source. Add an
     // LRU if a long-lived process compiles unbounded distinct patterns.
     static MEMO: Mutex<std::collections::BTreeMap<String, Slot>> =
@@ -1054,7 +1080,7 @@ pub fn compile(pattern: &str) -> Result<Dfa, String> {
 /// so a pathological pattern is a compile error, not a hang.
 const DFA_STATE_BUDGET: usize = 8_192;
 
-fn compile_uncached(pattern: &str) -> Result<Dfa, String> {
+fn compile_uncached(pattern: &str) -> Result<Dfa, Refusal> {
     let re = parse(pattern)?;
     let nfa = Nfa::build(&re);
 
@@ -1083,9 +1109,9 @@ fn compile_uncached(pattern: &str) -> Result<Dfa, String> {
     let mut processed = 0usize;
     while processed < sets.len() {
         if processed >= DFA_STATE_BUDGET {
-            return Err(format!(
+            return Err(Refusal::Builder(format!(
                 "pattern compiles past the maximum ({DFA_STATE_BUDGET} DFA states)"
-            ));
+            )));
         }
         // Take, not clone: the slot is never read again, and `index` keeps a copy.
         let cur = std::mem::take(&mut sets[processed]);
@@ -1253,6 +1279,8 @@ mod tests {
         assert!(compile("a}").is_err()); // unmatched brace (literal is \})
         assert!(compile("[z-a]").is_err()); // reversed class range
         assert!(compile("a{3,2}").is_err()); // max < min
+        assert!(compile("[]").is_err()); // empty class
+        assert!(compile("[^]").is_err()); // empty negated class
         assert!(compile("a{999}").is_err()); // over the 255 cap
         assert!(compile("a{2,").is_err()); // unclosed counted repetition
     }
@@ -1263,7 +1291,7 @@ mod tests {
         assert!(compile("[0-9a-f]{40}").is_ok());
         assert!(compile("([0-9a-f]{2}){10}").is_ok());
         // Nesting multiplies the counts: a compile error, not a hang.
-        let e = compile("(a{200}){200}").unwrap_err();
+        let e = compile("(a{200}){200}").unwrap_err().to_string();
         assert!(e.contains("past the maximum"), "message: {e}");
         // Just inside the budget still compiles.
         assert!(compile("(a{200}){40}").is_ok());
@@ -1276,7 +1304,7 @@ mod tests {
         assert!(compile(&ok).is_ok());
         // Thousands of parens: a compile error, not a stack overflow.
         let deep = format!("{}{}", "(".repeat(1000), ")".repeat(1000));
-        let e = compile(&deep).unwrap_err();
+        let e = compile(&deep).unwrap_err().to_string();
         assert!(e.contains("deep"), "message: {e}");
     }
 
@@ -1285,8 +1313,10 @@ mod tests {
         assert!(compile(&"(a)".repeat(250)).is_ok());
         let past = format!("{}{}", "(".repeat(250), ")".repeat(250));
         assert_eq!(
-            compile(&past).err().as_deref(),
-            Some("pattern nests more than 250 levels deep")
+            compile(&past).err(),
+            Some(Refusal::Grammar(
+                "pattern nests more than 250 levels deep".to_string()
+            ))
         );
     }
 
@@ -1294,7 +1324,7 @@ mod tests {
     fn exponential_subset_construction_hits_the_state_budget() {
         // About 70 NFA states, but the DFA needs 2^21 states: the state ceiling makes
         // it a compile error.
-        let e = compile("(a|b)*a(a|b){20}").unwrap_err();
+        let e = compile("(a|b)*a(a|b){20}").unwrap_err().to_string();
         assert!(e.contains("DFA states"), "message: {e}");
         // Real-world sized DFAs still compile.
         assert!(compile("[0-9a-f]{40}").is_ok());
