@@ -1072,7 +1072,7 @@ impl Rhs {
 
     /// Returns what this row makes when it binds `bound`, an owned name, or
     /// `None` when it makes no block: the row binds nothing owned, it moves
-    /// or reads a value, or it is an empty array literal.
+    /// or reads a value, it is a proven crossing, or it is an empty array literal.
     ///
     /// The effect judgment's `alloc` and the cost report's allocating rows
     /// both read it.
@@ -1084,6 +1084,11 @@ impl Rhs {
             Rhs::Prim(op, ..) => Some(Made::Prim(op)),
             Rhs::Make(Ctor::Array, parts) if parts.is_empty() => None,
             Rhs::Make(ctor, _) => Some(Made::Make(ctor)),
+            // A proven crossing takes its operand's block as it is.
+            Rhs::Call {
+                kind: Callee::Proven,
+                ..
+            } => None,
             Rhs::Call { callee, .. } => Some(Made::Call(callee)),
             Rhs::Val(_) | Rhs::Read(_) | Rhs::Take(_) => None,
         }
