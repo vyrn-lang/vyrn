@@ -15,7 +15,7 @@ use vyrn_frontend::core::Span;
 use vyrn_frontend::{Analysis, CostItem, CostLine, FnCost};
 use vyrn_lower::lastrun::{self, Found, Sites};
 
-use crate::{char_col_to_utf16, line_of_text};
+use crate::{char_col_to_utf16, line_of_text, utf16_to_char_col};
 
 /// The verb of a check row `why --cost` keeps. A run counts no blocks for it.
 const KEPT: &str = "check kept";
@@ -168,9 +168,40 @@ fn link(text: &str, uri: &str, r: &Range) -> String {
     )
 }
 
+/// How many characters of source a hover quotes for a place before it cuts.
+const QUOTE_CHARS: usize = 40;
+
+/// The source range `r` of `src` covers, as a Markdown code span: its first line, cut to
+/// [`QUOTE_CHARS`] characters with `...` after a cut. The fence is one backtick longer than the
+/// longest run inside, so a template's backticks stay text.
+fn quote(src: &str, r: &Range) -> String {
+    let line = line_of_text(src, r.start.line as usize);
+    let from = utf16_to_char_col(line, r.start.character);
+    let to = match r.end.line == r.start.line {
+        true => utf16_to_char_col(line, r.end.character),
+        false => line.chars().count(),
+    };
+    let whole: Vec<char> = line
+        .chars()
+        .skip(from)
+        .take(to.saturating_sub(from))
+        .collect();
+    let mut text: String = whole.iter().take(QUOTE_CHARS).collect();
+    if whole.len() > QUOTE_CHARS || r.end.line != r.start.line {
+        text += "...";
+    }
+    let run = (text.split(|c| c != '`').map(str::len).max()).unwrap_or(0);
+    let fence = "`".repeat(run + 1);
+    let pad = match text.starts_with('`') || text.ends_with('`') {
+        true => " ",
+        false => "",
+    };
+    format!("{fence}{pad}{text}{pad}{fence}")
+}
+
 /// One row as a compact glyph: its glyph and count, and a hover with a bold title, one line per
-/// noun linked to its first span with a numbered link to each further one, the loops around it
-/// and a fix where one is plain. A verb [`GLYPHS`] lacks shows its words.
+/// noun with each place it happens quoted from the source and linked to it, the loops around
+/// it and a fix where one is plain. A verb [`GLYPHS`] lacks shows its words.
 fn compact(row: &CostLine, uri: &str, src: &str) -> Row {
     let item_ranges: Vec<Vec<Range>> = (row.items.iter())
         .map(|i| i.spans.iter().filter_map(|s| range(src, s)).collect())
@@ -181,16 +212,29 @@ fn compact(row: &CostLine, uri: &str, src: &str) -> Row {
         let (glyph, hover) = (row.label.clone(), row.text.clone());
         return line_row(row.line, glyph, row.count, spans, hover, proof, src);
     };
-    // The item worded for `n` sites, linked to `ranges`: the first on its text, a numbered
-    // link to each further one.
-    let linked = |item: &CostItem, ranges: &[Range], n: usize| match ranges.split_first() {
-        Some((first, rest)) => {
-            let more = (rest.iter().enumerate())
-                .map(|(k, r)| format!(" {}", link(&(k + 2).to_string(), uri, r)));
-            let text = link(&item.text(n), uri, first);
-            format!("\n- {text}{}", more.collect::<String>())
+    // The item worded for `n` sites, then each place it happens, quoted from the source and
+    // linked to it. Sites on one range are one place; where several places hold sites, each
+    // is its own line, with how many sites stand there when more than one does.
+    let linked = |item: &CostItem, ranges: &[Range], n: usize| {
+        let mut places: Vec<(Range, usize)> = Vec::new();
+        for r in ranges {
+            match places.iter_mut().find(|p| p.0 == *r) {
+                Some(p) => p.1 += 1,
+                None => places.push((*r, 1)),
+            }
         }
-        None => format!("\n- {}", item.text(n)),
+        let at = |r: &Range| link(&quote(src, r), uri, r);
+        match places.as_slice() {
+            [] => format!("\n- {}", item.text(n)),
+            [(r, _)] => format!("\n- {} at {}", item.text(n), at(r)),
+            many => {
+                let lines = many.iter().map(|(r, k)| match k {
+                    1 => format!("\n  - {}", at(r)),
+                    k => format!("\n  - {} ({k} times)", at(r)),
+                });
+                format!("\n- {}{}", item.text(n), lines.collect::<String>())
+            }
+        }
     };
     let items: Vec<String> = (row.items.iter().zip(&item_ranges))
         .map(|(item, ranges)| linked(item, ranges, item.spans.len()))

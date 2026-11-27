@@ -6568,7 +6568,7 @@ fn each_costly_expression_has_its_own_hint_and_hover() {
     let grow = &line[3].2;
     assert!(
         grow.starts_with(&format!(
-            "**\u{2197} may grow 1**\n\n- [`push(..)`]({uri}#L73,"
+            "**\u{2197} may grow 1**\n\n- `push(..)` at [`w.push(alphabet[(key / d) % 4])`]({uri}#L73,"
         )),
         "{grow}"
     );
@@ -6578,7 +6578,7 @@ fn each_costly_expression_has_its_own_hint_and_hover() {
     );
     let kept = &line[2].2;
     assert!(
-        kept.starts_with("**? check kept 1**\n\n- [index check: "),
+        kept.starts_with("**? check kept 1**\n\n- index check: "),
         "{kept}"
     );
     assert!(
