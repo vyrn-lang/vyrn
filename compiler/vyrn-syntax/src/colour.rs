@@ -5,8 +5,9 @@
 //! it, and a syntactic start rule skips the trivia before its first token. A rule whose name [`scope_of`] knows colours what it matched, and
 //! an inner one outranks an outer one. Outside those, a word literal is a keyword
 //! and a punctuation literal that is no bracket or separator is an operator. A
-//! refusal, or a form only a syntactic rule holds, ends the reading: the text after
-//! it has no colour. [`naming`] is what the TextMate grammar of a `.syntax` file
+//! refusal, or a form only a syntactic rule holds, ends a rule where it stands: the
+//! rules around it keep their marks, and the nearest repetition, or the start rule,
+//! reads on one character past it. [`naming`] is what the TextMate grammar of a `.syntax` file
 //! needs beyond `syntax.syntax`, because a regex matches without the context that
 //! places a head, a reference, a label or a capture.
 
@@ -45,7 +46,14 @@ pub fn runs(g: &Grammar, start: RuleId, src: &str) -> Vec<Run> {
         true => r.trivia(0),
         false => 0,
     };
-    let _ = r.rule(start, at);
+    let mut at = at;
+    // Each restart moves at least one character, so the loop ends.
+    while let Step::End(p) = r.rule(start, at) {
+        match next_char(src, p.max(at)) {
+            Some(next) => at = next,
+            None => break,
+        }
+    }
     let mut by_byte: Vec<Option<Scope>> = vec![None; src.len()];
     // A rule's mark follows the marks of the rules it holds, so the stable sort by
     // start, longest first, paints the outer one first. A literal's mark yields to
@@ -93,13 +101,19 @@ pub fn naming() -> Naming {
     }
 }
 
+/// The byte after the character at `at`, or `None` at the end of `src`.
+fn next_char(src: &str, at: usize) -> Option<usize> {
+    src.get(at..)?.chars().next().map(|c| at + c.len_utf8())
+}
+
 /// What one reading step did.
 enum Step {
     /// Matched up to this byte.
     To(usize),
     Miss,
-    /// A refusal or a form this reader has no meaning for: reading ends.
-    End,
+    /// A refusal or a form this reader has no meaning for, at this byte: the rules
+    /// it stands in end there.
+    End(usize),
 }
 
 struct Mark {
@@ -125,7 +139,9 @@ impl Reader<'_> {
         let outer = std::mem::replace(&mut self.syntactic, rule.syntactic);
         let step = self.read(&rule.body, at);
         self.syntactic = outer;
-        if let (Step::To(stop), Some(scope)) = (&step, scope_of(self.g.name(), &rule.name)) {
+        if let (Step::To(stop) | Step::End(stop), Some(scope)) =
+            (&step, scope_of(self.g.name(), &rule.name))
+        {
             self.mark(at, *stop, scope, true);
         }
         match step {
@@ -144,7 +160,7 @@ impl Reader<'_> {
         self.syntactic = outer;
         match step {
             Step::To(stop) => stop,
-            Step::Miss | Step::End => at,
+            Step::Miss | Step::End(_) => at,
         }
     }
 
@@ -241,23 +257,27 @@ impl Reader<'_> {
                 let step = self.read(x, at);
                 self.marks.truncate(kept);
                 match (step, matches!(e, E::And(_))) {
-                    (Step::End, _) => Step::End,
+                    (Step::End(p), _) => Step::End(p),
                     (Step::To(_), true) | (Step::Miss, false) => Step::To(at),
                     _ => Step::Miss,
                 }
             }
             E::Try(x) | E::Field(_, x) | E::Guard(_, x) => self.read(x, at),
-            _ => Step::End,
+            _ => Step::End(at),
         }
     }
 
-    /// Reads `x` while it matches and moves.
+    /// Reads `x` while it matches and moves. Past a refusal it reads on one character
+    /// after it, so each round moves and the loop ends.
     fn repeat(&mut self, x: &E, mut at: usize) -> Step {
         loop {
             match self.read(x, at) {
                 Step::To(p) if p > at => at = p,
                 Step::To(_) | Step::Miss => return Step::To(at),
-                Step::End => return Step::End,
+                Step::End(p) => match next_char(self.src, p.max(at)) {
+                    Some(next) => at = next,
+                    None => return Step::To(self.src.len()),
+                },
             }
         }
     }
@@ -330,9 +350,25 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_ends_the_colours() {
+    fn the_colours_go_on_past_a_refusal() {
+        let g = crate::load(include_str!("../../../std/regex.syntax")).expect("regex.syntax loads");
+        let src = "a**[b]|c";
+        let got = runs(&g, g.rule("RegexPattern").expect("a start rule"), src);
+        let found: Vec<_> = got
+            .iter()
+            .map(|r| (&src[r.start..r.stop], r.scope))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("*", Scope::Quantifier),
+                ("[b]", Scope::CharClass),
+                ("|", Scope::Alternation),
+            ]
+        );
         let (g, file) = format();
-        let got = runs(&g, file, "a = 'x'\nb = ( 'y\n");
-        assert_eq!(got.last().map(|r| r.stop), Some(7), "{got:?}");
+        let got = runs(&g, file, "a = ( 'y\nb = 'x'\n");
+        let last = got.last().map(|r| (r.start, r.stop, r.scope));
+        assert_eq!(last, Some((13, 16, Scope::String)), "{got:?}");
     }
 }
