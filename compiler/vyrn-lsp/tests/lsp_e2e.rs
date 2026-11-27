@@ -7098,6 +7098,45 @@ fn a_match_pattern_is_coloured_by_the_regex_grammar() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The pattern of a refinement type is typed at each boundary of the type, and its
+/// literal is one island site, so each of its tokens is sent once.
+#[test]
+fn a_where_pattern_is_one_island_site() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_site_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "type Code = String where value =~ \"[a-z]{2}\"
+
+fn main() -> Int64 {
+    let c: Code = \"ab\"
+    return 0
+}
+";
+    let path = dir.join("main.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", src);
+    let diags = read_diags_for(&mut client, "main.vyrn");
+    let none = diags.pointer("/params/diagnostics");
+    assert_eq!(none, Some(&serde_json::json!([])), "{diags}");
+    let toks = semantic_tokens_full(&mut client, &uri);
+    let line: Vec<_> = (toks.iter())
+        .filter(|t| t.line == 0 && t.ch >= 35)
+        .map(|t| (t.ch, t.len, t.ty.as_str()))
+        .collect();
+    let want = [
+        (35, 5, "regexp"),
+        (40, 1, "regexpQuantifier"),
+        (41, 1, "number"),
+        (42, 1, "regexpQuantifier"),
+    ];
+    assert_eq!(line, want, "{toks:?}");
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A pattern of a refinement type is coloured past a refusal: the reading goes on
 /// where the refused form ends, so the `\.` after the refused `(?!` is an escape.
 #[test]
