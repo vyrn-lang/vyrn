@@ -1,0 +1,11 @@
+// std/arrays and std/stream both export `map`. No module here sees both flat,
+// so the program links: a name two linked modules export is refused only in a
+// module that imports both.
+import { doubled } from "./a_module_that_doubles_an_array.vyrn"
+import { doubledAll } from "./a_module_that_doubles_a_stream.vyrn"
+
+fn main() -> Int64 {
+    let xs = doubled([1, 2, 3])
+    print(xs[2])
+    return 0
+}

@@ -5565,6 +5565,70 @@ fn resolve_aliases(
         }
     }
 
+    // Shared exports: two modules may export one name while no module sees
+    // both flat (its own and bare imports). Every home but the first, sorted,
+    // is renamed apart; a module that sees two is `link`'s DeclaredByBothLinked.
+    // An extern keeps its spelling, because a rename severs the host ABI.
+    let home_of: HashMap<&str, &str> = modules.iter().map(|m| (m.key.as_str(), home(m))).collect();
+    let renamed: HashSet<(&str, &str)> = (foreign_renames.keys())
+        .map(|(k, n)| (k.as_str(), n.as_str()))
+        .collect();
+    let mut rows: Vec<(&str, &str, &str)> = Vec::new();
+    for m in modules.iter().filter(|m| m.injected.is_none()) {
+        for d in decls(&m.program) {
+            if d.exported
+                && !d.injected
+                && !d.is_extern
+                && !d.name.contains('$')
+                && !renamed.contains(&(m.key.as_str(), d.name))
+            {
+                rows.push((d.name, home(m), &m.key));
+            }
+        }
+    }
+    drop(renamed);
+    rows.sort_by_key(|&(name, h, _)| (name, h));
+    let mut exporters: BTreeMap<&str, BTreeMap<&str, Vec<&str>>> = BTreeMap::new();
+    for group in rows.chunk_by(|a, b| a.0 == b.0) {
+        if group.iter().any(|r| r.1 != group[0].1) {
+            let homes = exporters.entry(group[0].0).or_default();
+            for &(_, h, key) in group {
+                homes.entry(h).or_default().push(key);
+            }
+        }
+    }
+    for m in modules.iter() {
+        if exporters.is_empty() {
+            break;
+        }
+        let mut seen: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+        for d in decls(&m.program).filter(|d| exporters.contains_key(d.name)) {
+            seen.entry(d.name).or_default().insert(home(m));
+        }
+        for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
+            let flat = imp.names.iter().filter(|n| n.alias.is_none());
+            for n in flat.filter(|n| exporters.contains_key(n.original.as_str())) {
+                let at = home_of
+                    .get(target.as_str())
+                    .copied()
+                    .unwrap_or(target.as_str());
+                seen.entry(&n.original).or_default().insert(at);
+            }
+            if let ImportSource::Generator { name, .. } = &imp.source {
+                exporters.remove(name.as_str());
+            }
+        }
+        exporters.retain(|name, homes| {
+            let seen = seen.get(name).into_iter().flatten();
+            seen.filter(|h| homes.contains_key(*h)).count() < 2
+        });
+    }
+    for (name, homes) in &exporters {
+        for key in homes.values().skip(1).flatten() {
+            rename_apart(&mut foreign_renames, key, name);
+        }
+    }
+
     // Pass 2: per-module reference-rewrite maps (alias or local -> resolved decl).
     let mut rewrites: HashMap<String, HashMap<String, String>> = HashMap::new();
     for m in modules.iter() {

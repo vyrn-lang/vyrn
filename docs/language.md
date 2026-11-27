@@ -649,7 +649,7 @@ import type { User, Port } from "./user.schema.json"
 - `import { a as b }` binds `a` under the local name `b`. `import * as ns` reaches the exports as `ns.name`.
 - Importing a name the module does not export is refused. An import cycle is refused.
 - `export to "./editor", "std/ui" fn f()` names the only modules that may import `f`. Each path resolves as an import written in the exporting module would; one that does not resolve is refused. Any other import of `f`, a namespace use of it, or a generator call of it is refused with a sentence naming the permitted importers. An import a generator writes is judged as whoever wrote its `import` keyword: the module that holds the quote for quote text, and the input file for text `codeAt` copied. The declaration is still an export everywhere else: in `moduleInterface`, a contract and the module's own uses. `vyrn doc` leaves it off the module's page, and editor completion offers it only where it may be imported. `to` is a word only after `export`, before a path; an `extern fn` takes none.
-- Every module links into one program. An exported name is program-wide, so two flat imports of the same name from two modules are refused, even under an alias. Import one of them as a namespace instead. A private name stays private to its module.
+- Every module links into one program. Two modules may export one name; a module that imports both flat, even under an alias, is refused. Import one of them as a namespace instead. A private name stays private to its module.
 - An `impl` applies program-wide, wherever it is written.
 - `main` and `logging` are root-module only. Module state exists in every module and is private to it; `export let` is refused, so export accessor functions.
 
@@ -890,7 +890,7 @@ Each line is a program the compiler refuses, and the reason.
 - A waiting call without `await`, and `await` before a call that does not wait: the mark shows where other code may run.
 - A module-state initializer that waits: state is set before `main` runs.
 - A module-state initializer that calls a function of its own module or reads later state.
-- Two modules' exports of one name imported flat: a top-level name is program-wide.
+- Two modules' exports of one name imported flat into one module.
 - An enum variant name declared twice.
 - A function or type name declared twice. Every body is still checked, under each declaration, so one run prints every error.
 - An `impl` of a protocol for a scalar refinement type.

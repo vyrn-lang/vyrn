@@ -1,10 +1,9 @@
 //! Which `std/` modules export the same top-level name, as a reviewed list.
 //!
-//! A top-level name is program-wide, so two std modules exporting it cannot
-//! both be imported flatly; a program must reach one through a namespace
-//! import. A reviewed collision stays with its reason; a new one fails here. A
-//! std name colliding with a user's name is out of scope: the loader reports
-//! it at the point of use.
+//! A module cannot import two std modules' exports of one name flat; it
+//! reaches one through a namespace import. A reviewed collision stays with its
+//! reason; a new one fails here. A std name colliding with a user's name is out
+//! of scope: the loader reports it at the point of use.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -93,9 +92,9 @@ fn no_two_std_modules_export_the_same_name() {
 
     assert!(
         fresh.is_empty(),
-        "a NEW top-level name is exported by two std modules, so no program can \
-         import both flatly:\n  {}\nRename one, or add it to REVIEWED with the \
-         reason sharing the name is right. A name here is program-wide.",
+        "a NEW top-level name is exported by two std modules, so no module can \
+         import both flat:\n  {}\nRename one, or add it to REVIEWED with the \
+         reason sharing the name is right.",
         fresh.join("\n  ")
     );
 

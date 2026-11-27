@@ -159,6 +159,8 @@ compiler/vyrn-cli/tests/check/a_module_declaring_a_len_function.vyrn	0	cbf29ce48
 compiler/vyrn-cli/tests/check/a_module_exporting_a_type_a_root_also_names.vyrn	0	cbf29ce484222325	20	18	4f9064466832d70a
 compiler/vyrn-cli/tests/check/a_module_exporting_an_enum_and_a_record.vyrn	0	cbf29ce484222325	20	18	78904e5329556ca9
 compiler/vyrn-cli/tests/check/a_module_state_initializer_cannot_wait.vyrn	0	cbf29ce484222325	20	17	b364954eaba7c2c5
+compiler/vyrn-cli/tests/check/a_module_that_doubles_a_stream.vyrn	0	cbf29ce484222325	20	19	13de1d9fdea152dc
+compiler/vyrn-cli/tests/check/a_module_that_doubles_an_array.vyrn	0	cbf29ce484222325	20	19	2d8f3f424a1085d6
 compiler/vyrn-cli/tests/check/a_module_that_only_exports_a_contract_is_a_library.vyrn	0	cbf29ce484222325	20	19	a11f467f003da61d
 compiler/vyrn-cli/tests/check/a_module_that_refuses_its_own_global.vyrn	0	cbf29ce484222325	20	19	ef6734ee4ba1c1db
 compiler/vyrn-cli/tests/check/a_module_with_a_function_and_a_type_a_root_also_names.vyrn	0	cbf29ce484222325	20	18	92c9fe98534402da
@@ -808,6 +810,7 @@ compiler/vyrn-cli/tests/check/then_joins_orders_of_one_type.vyrn	0	cbf29ce484222
 compiler/vyrn-cli/tests/check/top_level_let_requires_initializer.vyrn	1	866121b1826eb2fa	20	20	ddf3b3c4dad3c50b
 compiler/vyrn-cli/tests/check/two_modules_cannot_implement_one_protocol_for_one_type.vyrn	0	cbf29ce484222325	20	17	4b5ca4b7c3921f86
 compiler/vyrn-cli/tests/check/two_modules_cannot_share_an_extern_of_two_signatures.vyrn	0	cbf29ce484222325	20	20	9b00c719bdd378fb
+compiler/vyrn-cli/tests/check/two_modules_may_each_import_a_map_of_their_own.vyrn	0	cbf29ce484222325	20	19	6e0257fd813e3770
 compiler/vyrn-cli/tests/check/two_types_of_one_spelling_read_with_their_modules.vyrn	0	cbf29ce484222325	20	18	2d327d3a45c1c63d
 compiler/vyrn-cli/tests/check/union_members_over_different_bases_are_refused.vyrn	0	cbf29ce484222325	20	19	f4875b8f36314afc
 compiler/vyrn-cli/tests/check/validated_decays_to_base_and_reverse_is_auto_checked_1.vyrn	0	cbf29ce484222325	20	15	ed503617ce01c37c

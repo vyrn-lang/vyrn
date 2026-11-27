@@ -812,6 +812,23 @@ pub fn linked_module_lit(
     // A recording resolver adds every file the link reads to the cache inputs.
     let rec = crate::loader::RecordingResolver::new(resolver);
     let program = crate::loader::load(source, resolved, opts, &rec, engine)?;
+    // Two modules may each export a type of one written name; a reflection
+    // spells a type by that name, so two in its closure have no spelling apart.
+    let mut by_written: HashMap<&str, &Option<String>> = HashMap::new();
+    let reflected = crate::schema_reflect::reflected_types(&program);
+    for t in reflected.into_iter().filter(|t| !t.name.contains('$')) {
+        let spelled = program.spellings.decls.get(&t.name);
+        let written = spelled.map_or(t.name.as_str(), |(w, _)| w.as_str());
+        match by_written.insert(written, &t.module) {
+            Some(first) if first != &t.module => {
+                let key = |m: &Option<String>| m.clone().unwrap_or_else(|| resolved.to_string());
+                let (first, second) = (key(first), key(&t.module));
+                let rule = crate::rules::rule!(DeclaredByBoth, name = written, first, second);
+                return Err(vec![Diagnostic::refusal(t.line, 0, "load", rule)]);
+            }
+            _ => {}
+        }
+    }
     // The link's reads, kept as text for the origin index: the AST has no name
     // columns, so the lexer supplies them (see `Origins`).
     let mut origin_src: Vec<(Option<String>, String, String)> =

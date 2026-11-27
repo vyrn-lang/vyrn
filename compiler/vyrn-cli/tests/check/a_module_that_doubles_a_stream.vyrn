@@ -1,0 +1,10 @@
+// Imports `map` from std/stream; a sibling module imports std/arrays's `map`.
+import { map } from "std/stream"
+
+fn twice(x: Int64) -> Int64 {
+    return x * 2
+}
+
+export fn doubledAll(s: consume Stream<Int64>) -> Stream<Int64> {
+    return map(s, twice)
+}
