@@ -715,117 +715,198 @@ fn char_re(c: u32) -> Re {
     concat(utf8(c).iter().map(byte).collect())
 }
 
-struct NfaState {
-    eps: Vec<usize>,
-    edge: Option<(ByteClass, usize)>,
+/// A term of the derivative construction: an index into [`Terms`]. Equal terms
+/// are one index, so a DFA state is a term.
+type T = u32;
+
+/// The empty language and the empty string, the first two terms.
+const EMPTY: T = 0;
+const EPS: T = 1;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Node {
+    Empty,
+    Eps,
+    Class(ByteClass),
+    /// A concatenation leans right: the left term is never a `Cat`, and neither
+    /// side is `Empty` or `Eps`.
+    Cat(T, T),
+    /// Two or more terms, ascending, none an `Alt` or `Empty`.
+    Alt(Vec<T>),
+    /// The body is not `Empty`, `Eps` or a `Star`.
+    Star(T),
 }
 
-struct Nfa {
-    states: Vec<NfaState>,
-    start: usize,
-    accept: usize,
+/// The terms built so far, each one's nullability, and the derivatives taken.
+/// The constructors keep the forms [`Node`] states, and those similarity rules make
+/// the derivatives of a term finite (Brzozowski 1964).
+struct Terms {
+    nodes: Vec<Node>,
+    ids: std::collections::HashMap<Node, T>,
+    /// Whether term `t` matches the empty string, at `t`.
+    nullable: Vec<bool>,
+    /// The derivative of a term by a byte that stands for its run.
+    derived: std::collections::HashMap<(T, u8), T>,
 }
 
-impl Nfa {
-    fn add(states: &mut Vec<NfaState>) -> usize {
-        states.push(NfaState {
-            eps: Vec::new(),
-            edge: None,
-        });
-        states.len() - 1
+impl Terms {
+    fn new() -> Terms {
+        let mut terms = Terms {
+            nodes: Vec::new(),
+            ids: Default::default(),
+            nullable: Vec::new(),
+            derived: Default::default(),
+        };
+        terms.node(Node::Empty);
+        terms.node(Node::Eps);
+        terms
     }
 
-    fn build(re: &Re) -> Nfa {
-        let mut states: Vec<NfaState> = Vec::new();
-        let (start, accept) = Nfa::frag(&mut states, re);
-        Nfa {
-            states,
-            start,
-            accept,
+    fn node(&mut self, n: Node) -> T {
+        if let Some(&t) = self.ids.get(&n) {
+            return t;
+        }
+        let nullable = match &n {
+            Node::Empty | Node::Class(_) => false,
+            Node::Eps | Node::Star(_) => true,
+            Node::Cat(l, r) => self.nullable[*l as usize] && self.nullable[*r as usize],
+            Node::Alt(ts) => ts.iter().any(|&t| self.nullable[t as usize]),
+        };
+        let t = self.nodes.len() as T;
+        self.nodes.push(n.clone());
+        self.nullable.push(nullable);
+        self.ids.insert(n, t);
+        t
+    }
+
+    fn cat(&mut self, a: T, b: T) -> T {
+        if a == EMPTY || b == EMPTY {
+            return EMPTY;
+        }
+        let mut spine = Vec::new();
+        let mut x = a;
+        while let Node::Cat(l, r) = self.nodes[x as usize] {
+            spine.push(l);
+            x = r;
+        }
+        spine.push(x);
+        spine.into_iter().rev().fold(b, |out, t| match (t, out) {
+            (EPS, _) => out,
+            (_, EPS) => t,
+            _ => self.node(Node::Cat(t, out)),
+        })
+    }
+
+    fn alt(&mut self, ts: Vec<T>) -> T {
+        let mut all = Vec::new();
+        for t in ts {
+            match &self.nodes[t as usize] {
+                Node::Alt(inner) => all.extend_from_slice(inner),
+                Node::Empty => {}
+                _ => all.push(t),
+            }
+        }
+        all.sort_unstable();
+        all.dedup();
+        match all.len() {
+            0 => EMPTY,
+            1 => all[0],
+            _ => self.node(Node::Alt(all)),
         }
     }
 
-    /// Builds a Thompson fragment for `re` and returns its `(in, out)` states.
-    fn frag(states: &mut Vec<NfaState>, re: &Re) -> (usize, usize) {
+    fn star(&mut self, a: T) -> T {
+        match self.nodes[a as usize] {
+            Node::Empty | Node::Eps => EPS,
+            Node::Star(_) => a,
+            _ => self.node(Node::Star(a)),
+        }
+    }
+
+    /// The term of `re`.
+    fn of(&mut self, re: &Re) -> T {
         match re {
-            Re::Empty => {
-                let a = Nfa::add(states);
-                let b = Nfa::add(states);
-                states[a].eps.push(b);
-                (a, b)
+            Re::Empty => EPS,
+            Re::Class(c) => self.node(Node::Class(*c)),
+            Re::Concat(ps) => ps.iter().rev().fold(EPS, |out, p| {
+                let t = self.of(p);
+                self.cat(t, out)
+            }),
+            Re::Alt(bs) => {
+                let ts = bs.iter().map(|b| self.of(b)).collect();
+                self.alt(ts)
             }
-            Re::Class(class) => {
-                let a = Nfa::add(states);
-                let b = Nfa::add(states);
-                states[a].edge = Some((*class, b));
-                (a, b)
+            Re::Star(r) => {
+                let t = self.of(r);
+                self.star(t)
             }
-            Re::Concat(parts) => {
-                let a = Nfa::add(states);
-                let mut cur = a;
-                for p in parts {
-                    let (fin, fout) = Nfa::frag(states, p);
-                    states[cur].eps.push(fin);
-                    cur = fout;
-                }
-                (a, cur)
+            Re::Plus(r) => {
+                let t = self.of(r);
+                let s = self.star(t);
+                self.cat(t, s)
             }
-            Re::Alt(branches) => {
-                let s = Nfa::add(states);
-                let e = Nfa::add(states);
-                for br in branches {
-                    let (fin, fout) = Nfa::frag(states, br);
-                    states[s].eps.push(fin);
-                    states[fout].eps.push(e);
-                }
-                (s, e)
-            }
-            Re::Star(inner) => {
-                let (fin, fout) = Nfa::frag(states, inner);
-                let s = Nfa::add(states);
-                let ex = Nfa::add(states);
-                states[s].eps.push(fin);
-                states[s].eps.push(ex);
-                states[fout].eps.push(s);
-                (s, ex)
-            }
-            Re::Plus(inner) => {
-                let (fin, fout) = Nfa::frag(states, inner);
-                let ex = Nfa::add(states);
-                states[fout].eps.push(fin);
-                states[fout].eps.push(ex);
-                (fin, ex)
-            }
-            Re::Opt(inner) => {
-                let (fin, fout) = Nfa::frag(states, inner);
-                let s = Nfa::add(states);
-                let ex = Nfa::add(states);
-                states[s].eps.push(fin);
-                states[s].eps.push(ex);
-                states[fout].eps.push(ex);
-                (s, ex)
+            Re::Opt(r) => {
+                let t = self.of(r);
+                self.alt(vec![t, EPS])
             }
         }
     }
 
-    fn eps_closure(&self, seed: &[usize]) -> Vec<usize> {
-        let mut seen = vec![false; self.states.len()];
-        let mut stack: Vec<usize> = seed.to_vec();
-        let mut out = Vec::new();
-        while let Some(s) = stack.pop() {
-            if seen[s] {
-                continue;
-            }
-            seen[s] = true;
-            out.push(s);
-            for &n in &self.states[s].eps {
-                if !seen[n] {
-                    stack.push(n);
-                }
-            }
+    /// The term of the strings `s` such that the byte `b` then `s` is in `t`.
+    fn derive(&mut self, t: T, b: u8) -> T {
+        if let Some(&d) = self.derived.get(&(t, b)) {
+            return d;
         }
-        out.sort_unstable();
-        out
+        let d = match self.nodes[t as usize].clone() {
+            Node::Empty | Node::Eps => EMPTY,
+            Node::Class(c) => match c.contains(b) {
+                true => EPS,
+                false => EMPTY,
+            },
+            Node::Alt(ts) => {
+                let ds = ts.iter().map(|&t| self.derive(t, b)).collect();
+                self.alt(ds)
+            }
+            Node::Star(r) => {
+                let dr = self.derive(r, b);
+                self.cat(dr, t)
+            }
+            // Down the spine while the left term can match the empty string: the
+            // recursion goes only into a left term, so its depth is the nesting.
+            Node::Cat(..) => {
+                let mut parts = Vec::new();
+                let mut x = t;
+                loop {
+                    match self.nodes[x as usize] {
+                        Node::Cat(l, r) => {
+                            let dl = self.derive(l, b);
+                            parts.push(self.cat(dl, r));
+                            if !self.nullable[l as usize] {
+                                break;
+                            }
+                            x = r;
+                        }
+                        _ => {
+                            parts.push(self.derive(x, b));
+                            break;
+                        }
+                    }
+                }
+                self.alt(parts)
+            }
+        };
+        self.derived.insert((t, b), d);
+        d
+    }
+}
+
+/// Each byte class of `re`, so a byte's run is the bytes no class tells apart.
+fn classes<'a>(re: &'a Re, out: &mut Vec<&'a ByteClass>) {
+    match re {
+        Re::Empty => {}
+        Re::Class(c) => out.push(c),
+        Re::Concat(ps) | Re::Alt(ps) => ps.iter().for_each(|p| classes(p, out)),
+        Re::Star(r) | Re::Plus(r) | Re::Opt(r) => classes(r, out),
     }
 }
 
@@ -1204,8 +1285,7 @@ pub enum ConcatPiece<'a> {
 }
 
 /// An epsilon-NFA with several labelled edges per state, for concatenating
-/// literal runs and hole DFAs. The `Re`-based [`Nfa`] cannot express an
-/// arbitrary hole DFA.
+/// literal runs and hole DFAs: a term cannot state an arbitrary hole DFA.
 struct GenNfa {
     states: Vec<GenState>,
 }
@@ -1405,92 +1485,57 @@ pub fn compile(pattern: &str) -> Result<Dfa, Refusal> {
     slot.get_or_init(|| compile_uncached(pattern)).clone()
 }
 
-/// Ceiling on interned DFA states. `EXPANSION_BUDGET` bounds the NFA, but
-/// determinisation can still explode (`(a|b)*a(a|b){20}` needs 2^21 states),
-/// so a pathological pattern is a compile error, not a hang.
+/// Ceiling on DFA states. `EXPANSION_BUDGET` bounds the pattern, but its
+/// derivatives can still explode (`(a|b)*a(a|b){20}` needs 2^21 states), so a
+/// pathological pattern is a compile error, not a hang.
 const DFA_STATE_BUDGET: usize = 8_192;
 
+/// The DFA of `pattern` by derivatives: a state is a term, and the state a run of
+/// bytes leads to is the term's derivative by the run's first byte.
 fn compile_uncached(pattern: &str) -> Result<Dfa, Refusal> {
     let re = parse(pattern)?;
-    let nfa = Nfa::build(&re);
-
-    use std::collections::HashMap;
-    let mut index: HashMap<Vec<usize>, u32> = HashMap::new();
-    let mut sets: Vec<Vec<usize>> = Vec::new();
+    let mut all = Vec::new();
+    classes(&re, &mut all);
+    // `firsts` holds the first byte of each run of bytes every class holds alike.
+    let firsts: Vec<u8> = std::iter::once(0)
+        .chain((1..=255u8).filter(|&b| all.iter().any(|c| c.contains(b) != c.contains(b - 1))))
+        .collect();
+    let mut terms = Terms::new();
+    let start = terms.of(&re);
+    let mut number = std::collections::HashMap::from([(start, 0u32)]);
+    let mut states = vec![start];
     let mut table: Vec<u32> = Vec::new();
-    let mut accepting: Vec<bool> = Vec::new();
-
-    let intern = |set: Vec<usize>,
-                  index: &mut HashMap<Vec<usize>, u32>,
-                  sets: &mut Vec<Vec<usize>>|
-     -> u32 {
-        if let Some(&i) = index.get(&set) {
-            return i;
-        }
-        let i = sets.len() as u32;
-        index.insert(set.clone(), i);
-        sets.push(set);
-        i
-    };
-
-    let start_set = nfa.eps_closure(&[nfa.start]);
-    let start = intern(start_set, &mut index, &mut sets);
-
-    // Two bytes that every edge's class holds alike take one step from every set:
-    // `class_of[b]` numbers that run of bytes, and `firsts[k]` is run `k`'s first byte.
-    let mut class_of = [0u8; 256];
-    let mut firsts: Vec<u8> = vec![0];
-    for b in 1..=255u8 {
-        let cut = (nfa.states.iter())
-            .filter_map(|s| s.edge.as_ref())
-            .any(|(class, _)| class.contains(b) != class.contains(b - 1));
-        if cut {
-            firsts.push(b);
-        }
-        class_of[usize::from(b)] = (firsts.len() - 1) as u8;
-    }
-
-    let mut processed = 0usize;
-    while processed < sets.len() {
-        if processed >= DFA_STATE_BUDGET {
+    let mut accepting = Vec::new();
+    let mut k = 0;
+    while k < states.len() {
+        if k >= DFA_STATE_BUDGET {
             return Err(Refusal::Builder(format!(
                 "pattern compiles past the maximum ({DFA_STATE_BUDGET} DFA states)"
             )));
         }
-        // Take, not clone: the slot is never read again, and `index` keeps a copy.
-        let cur = std::mem::take(&mut sets[processed]);
-        let dfa_state = processed as u32;
-        if table.len() < (dfa_state as usize + 1) * 256 {
-            table.resize((dfa_state as usize + 1) * 256, 0);
+        let t = states[k];
+        accepting.push(terms.nullable[t as usize]);
+        let mut run = 0;
+        for b in 0..=255u8 {
+            if firsts.get(run + 1) == Some(&b) {
+                run += 1;
+            }
+            let next = match firsts[run] == b {
+                true => {
+                    let d = terms.derive(t, b);
+                    *number.entry(d).or_insert_with(|| {
+                        states.push(d);
+                        states.len() as u32 - 1
+                    })
+                }
+                false => table[table.len() - 1],
+            };
+            table.push(next);
         }
-        if accepting.len() < dfa_state as usize + 1 {
-            accepting.resize(dfa_state as usize + 1, false);
-        }
-        accepting[dfa_state as usize] = cur.contains(&nfa.accept);
-        // A class's first byte steps first, so states are interned in byte order,
-        // as a walk of all 256 bytes interns them.
-        let row = dfa_state as usize * 256;
-        for &first in &firsts {
-            let moved: Vec<usize> = (cur.iter())
-                .filter_map(|&s| nfa.states[s].edge.as_ref())
-                .filter(|(class, _)| class.contains(first))
-                .map(|&(_, to)| to)
-                .collect();
-            let closure = nfa.eps_closure(&moved); // the empty set is the dead state
-            table[row + first as usize] = intern(closure, &mut index, &mut sets);
-        }
-        for byte in 0..256 {
-            table[row + byte] = table[row + firsts[usize::from(class_of[byte])] as usize];
-        }
-        processed += 1;
+        k += 1;
     }
-    // States interned last still need rows. The loop recorded acceptance for
-    // every interned set.
-    table.resize(sets.len() * 256, 0);
-    accepting.resize(sets.len(), false);
-
     let dfa = Dfa {
-        start,
+        start: 0,
         accepting,
         table,
     };
