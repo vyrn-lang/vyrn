@@ -3158,3 +3158,13 @@ fn a_statement_after_a_refused_one_is_judged() {
          main.vyrn:4:5: cannot assign to `x` (declared without `mut`)\n"
     );
 }
+
+#[test]
+fn a_parse_refusal_spells_the_token_it_found() {
+    let src = "fn main() {\n    let = 1\n    f(1 \"a\\{x + 1}b\\n\")\n}\n";
+    assert_eq!(
+        refused_src("parse-found", src),
+        "main.vyrn:2:9: expected identifier, found `=`\n\
+         main.vyrn:3:9: expected RParen, found `\"a\\{x + 1}b\\n\"`\n"
+    );
+}

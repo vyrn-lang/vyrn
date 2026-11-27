@@ -96,6 +96,31 @@ pub fn token_name_and_text(tok: &Tok) -> (String, String) {
     }
 }
 
+/// Returns how `tok` reads in a refusal: its spelling, a literal written back as
+/// source with its escapes.
+pub fn spelling(tok: &Tok) -> String {
+    match tok {
+        Tok::Str(s) => crate::gen::escape_string_literal(s),
+        Tok::TemplateStr { parts, exprs } => {
+            let mut out = String::from("\"");
+            for (i, part) in parts.iter().enumerate() {
+                let quoted = crate::gen::escape_string_literal(part);
+                out.push_str(&quoted[1..quoted.len() - 1]);
+                if let Some(hole) = exprs.get(i) {
+                    out.push_str("\\{");
+                    out.push_str(&hole.src);
+                    out.push('}');
+                }
+            }
+            out.push('"');
+            out
+        }
+        Tok::Byte(b) => format!("'{}'", char::from(*b).escape_default()),
+        Tok::Doc(s) => format!("/// {s}"),
+        t => token_name_and_text(t).1,
+    }
+}
+
 /// One lexical item, a token or a comment, with the span of its raw source
 /// text and the lines it spans. [`lex`] drops the comments and keeps the
 /// payloads. The formatter keeps the comments and prints the raw text
