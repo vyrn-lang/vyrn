@@ -282,11 +282,11 @@ An excerpt from `examples/nbody.vyrn`:
 
 ```
 fn fixed9(v: Float64) -> String
-   53           allocates `String`: rendering a value as text
-   55  loop 1   copies `String`: copied into the template
-       loop 1   allocates `String`: joining Strings
+   26           allocates `String`: rendering a value as text
+   28  loop 1   allocates `String`: joining Strings
+   30           allocates `String`: rendering a value as text, `String`: joining Strings
 fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
-  129           index check: it needs `bodies` non-empty, and `bodies` is a parameter, so the function cannot know what its callers pass; only a `read` parameter takes a `where` clause that could state it
+   95           index check: it needs `bodies` non-empty, and `bodies` is a parameter, so the function cannot know what its callers pass; only a `read` parameter takes a `where` clause that could state it
 ```
 
 A kept check names what it guards (index, slice, division, shift, `where`

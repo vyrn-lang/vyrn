@@ -101,9 +101,9 @@ enum Piece<'a> {
     Hole(&'a Expr),
 }
 
-/// Flattens a desugared interpolation chain (`@concat` and `@str` over
-/// `Expr::Str` leaves, from `parser::template`) left to right into literal
-/// parts and holes. `None` when `expr` is not such a chain. A result with no
+/// Flattens a desugared interpolation (`@concat` and `@str` over `Expr::Str`
+/// leaves, from `parser::template`) left to right into literal parts and
+/// holes. `None` when `expr` is not one. A result with no
 /// hole is a plain literal, which ordinary coercion handles.
 fn flatten_template(expr: &Expr) -> Option<Vec<Piece<'_>>> {
     fn walk<'a>(e: &'a Expr, out: &mut Vec<Piece<'a>>) -> Option<()> {
@@ -116,10 +116,8 @@ fn flatten_template(expr: &Expr) -> Option<Vec<Piece<'_>>> {
                 out.push(Piece::Hole(&args[0]));
                 Some(())
             }
-            Expr::Call { name, args, .. } if name == "@concat" && args.len() == 2 => {
-                walk(&args[0], out)?;
-                walk(&args[1], out)?;
-                Some(())
+            Expr::Call { name, args, .. } if name == "@concat" => {
+                args.iter().try_for_each(|a| walk(a, out))
             }
             _ => None,
         }

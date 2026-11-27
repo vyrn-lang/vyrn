@@ -4966,7 +4966,7 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// Stack-neutral. The window covers the whole call, so a `String` the callee makes on the
     /// way is the arena's too; none of these callees runs user code, so it cannot escape.
-    /// The call sites are `rt.concat`, [`Fn_::str_dup`] and `rt.int_str`. They must stay equal
+    /// The call sites are `rt.concat`, [`Fn_::str_join`], [`Fn_::str_dup`] and `rt.int_str`. They must stay equal
     /// to `Gen::str_alloc`'s, or the two backends own a block differently.
     fn arena_route(&mut self, b: &mut Frame, on: bool) {
         if !self.regions.is_empty() {
@@ -5475,6 +5475,68 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Const(0));
         b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on strings"), line))?);
         Ok(Type::Bool)
+    }
+
+    /// An interpolation's pieces, each a `String`, joined into one fresh `String` in the
+    /// `region`'s arena. Two go to `strConcat` ([`Fn_::str_bin`]). More are copied inline after
+    /// one `strNew` of their summed lengths, so an interpolation allocates once; each piece's
+    /// address waits in a frame slot, one word each.
+    ///
+    /// Each piece is read before the frame base is pushed, because the stack may already carry
+    /// the first ([`first_read`]).
+    fn str_join(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        pieces: &[(Val, Capability)],
+        line: usize,
+    ) -> Result<Type, String> {
+        if let [(l, _), (r, _)] = pieces {
+            self.core_val(m, b, l, &Type::Str, line)?;
+            self.core_val(m, b, r, &Type::Str, line)?;
+            return self.str_bin(b, BinOp::Add, line);
+        }
+        let at = b.alloc(4 * pieces.len() as u32, 4);
+        let words = (0u32..pieces.len() as u32).map(|k| word_at(at + 4 * k));
+        let [p, n, d, to] = [3, 4, 5, 6].map(|i| self.scratch(b, ValType::I32, i));
+        let base = b.base();
+        for ((v, _), w) in pieces.iter().zip(words.clone()) {
+            self.core_val(m, b, v, &Type::Str, line)?;
+            b.ins(&Instruction::LocalSet(p))
+                .ins(&Instruction::LocalGet(base))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::I32Store(w));
+        }
+        b.ins(&Instruction::I32Const(0));
+        for w in words.clone() {
+            b.ins(&Instruction::LocalGet(base))
+                .ins(&Instruction::I32Load(w));
+            str_len(b);
+            b.ins(&Instruction::I32Add);
+        }
+        b.ins(&Instruction::LocalTee(n))
+            .ins(&Instruction::LocalGet(n));
+        self.arena_route(b, true);
+        b.ins(&Instruction::Call(self.cx.rt.str_new));
+        self.arena_route(b, false);
+        b.ins(&Instruction::LocalTee(d))
+            .ins(&Instruction::LocalSet(to));
+        for w in words {
+            b.ins(&Instruction::LocalGet(to))
+                .ins(&Instruction::LocalGet(base))
+                .ins(&Instruction::I32Load(w))
+                .ins(&Instruction::LocalTee(p))
+                .ins(&Instruction::LocalGet(p));
+            str_len(b);
+            b.ins(&Instruction::LocalTee(n))
+                .ins(&MEMORY_COPY)
+                .ins(&Instruction::LocalGet(to))
+                .ins(&Instruction::LocalGet(n))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(to));
+        }
+        b.ins(&Instruction::LocalGet(d));
+        Ok(Type::Str)
     }
 
     /// `s =~ pat` with `s` on the stack; leaves a `Bool`.
@@ -12758,6 +12820,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 Some(Spec::Asserts) => Ok(Type::Unit),
                 Some(Spec::HostWait(ret)) => Ok(ret.clone()),
                 Some(Spec::Resumes) => Ok(INT32),
+                Some(Spec::Joins) => Ok(Type::Str),
                 Some(Spec::Tasks) => at
                     .clone()
                     .ok_or_else(|| gap("a task's block the checker did not type", line)),
@@ -13274,6 +13337,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             Some(Spec::Pulls) => return unsupported("a pull apart from its loop head", line),
             Some(Spec::HostWait(_)) => return self.host_wait(m, b, callee, args, line),
             Some(Spec::Tasks) => return self.task_op(m, b, callee, args, hint, line),
+            Some(Spec::Joins) => return self.str_join(m, b, args, line),
             // The step of a task the run queue resumes: a call of the root dispatcher.
             Some(Spec::Resumes) => {
                 for (v, _) in args {
@@ -16411,6 +16475,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 | Spec::Effect(_)
                 | Spec::HostWait(_)
                 | Spec::Resumes
+                | Spec::Joins
                 | Spec::Tasks
                 | Spec::Logs
                 | Spec::Traps

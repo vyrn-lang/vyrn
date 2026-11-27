@@ -2806,9 +2806,10 @@ impl<'a> Build<'a> {
         e
     }
 
-    /// Desugars an untagged interpolated string `"a\{e}b"` into a
-    /// `@concat`/`@str` chain. `parts.len() == exprs.len() + 1`.
-    /// Each `@str` spans its hole, `\{` to `}`, and each `@concat` the whole literal, which
+    /// Desugars an untagged interpolated string `"a\{e}b"` into one `@concat`
+    /// of its pieces in written order, each hole an `@str`; a lone piece is
+    /// that piece. `parts.len() == exprs.len() + 1`.
+    /// Each `@str` spans its hole, `\{` to `}`, and the `@concat` the whole literal, which
     /// the parser just consumed.
     fn template(&mut self, mut parts: Vec<String>, exprs: &[Hole], line: usize) -> Expr {
         let (start, end) = (self.last_start(), self.last_end());
@@ -2829,17 +2830,15 @@ impl<'a> Build<'a> {
                 pieces.push(Expr::str(std::mem::take(&mut parts[k + 1])));
             }
         }
-        // There is at least one hole, so `pieces` is non-empty; a lone piece is
-        // already a `String`.
-        let mut iter = pieces.into_iter();
-        let first = iter.next();
-        let mut acc = first.unwrap_or_else(|| unreachable!("a template has a hole"));
-        for p in iter {
-            acc = Expr::call("@concat", vec![acc, p], line);
-            acc.starts(start);
-            acc.ends(end);
-        }
-        acc
+        // A lone piece is already a `String`.
+        let pieces = match <[Expr; 1]>::try_from(pieces) {
+            Ok([lone]) => return lone,
+            Err(pieces) => pieces,
+        };
+        let mut join = Expr::call("@concat", pieces, line);
+        join.starts(start);
+        join.ends(end);
+        join
     }
 
     /// Desugars a tagged template `tag"a\{e}b"` into

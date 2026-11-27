@@ -19,23 +19,19 @@ fn pack(frag: String) -> Int64
    84           allocates `Array<UInt8>`
 fn fixed3(x: Float64) -> String
    93           allocates `String`: rendering a value as text
-   95  loop 1   copies `String`: copied into the template
-       loop 1   allocates `String`: joining Strings
-   97           copies `String`: copied into the template
-                allocates `String`: rendering a value as text, `String` x2: joining Strings
+   95  loop 1   allocates `String`: joining Strings
+   97           allocates `String`: rendering a value as text, `String`: joining Strings
 fn ranked(m: Map<Int64, Int64>) -> Array<Entry>
   102           allocates `Array<Int64>`
   107  loop 1   `push(..)` may allocate when it outgrows its capacity
 fn report(seq: Array<UInt8>, k: Int64) -> Unit
-  116  loop 1   copies `String` x2: copied into the template
-       loop 1   allocates `String` x2: joining Strings
+  116  loop 1   allocates `String`: joining Strings
 fn syntheticSequence(n: Int64) -> Array<UInt8>
   130           allocates `Array<UInt8>`
   136  loop 1   `push(..)` may allocate when it outgrows its capacity
 fn main() -> Int64
-  157  loop 1   copies `String`: copied into the template
-       loop 1   allocates `String`: rendering a value as text, `String` x2: joining Strings
-summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 1 (1 in loops), checks proved 20 (15 in loops)
+  157  loop 1   allocates `String`: rendering a value as text, `String`: joining Strings
+summary: allocating rows 17 (7 in loops), growing rows 6 (5 in loops), copies 0 (0 in loops), checks kept 1 (1 in loops), checks proved 20 (15 in loops)
   namedFragments: trap-free: yes; kernel: no, its effect set is alloc
   code: trap-free: yes; kernel: yes, emulated Int64
   modulusOf: trap-free: yes; kernel: yes, emulated Int64

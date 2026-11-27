@@ -10,11 +10,11 @@
 76 allocates Result<String, String>
 84 allocates Array<UInt8>
 93 allocates String
-95 copies String, allocates String
-97 copies String, allocates String x3
+95 allocates String
+97 allocates String x2
 102 allocates Array<Int64>
 107 push may allocate
-116 copies String x2, allocates String x2
+116 allocates String
 130 allocates Array<UInt8>
 136 push may allocate
-157 copies String, allocates String x3
+157 allocates String x2
