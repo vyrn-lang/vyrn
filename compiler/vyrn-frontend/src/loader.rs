@@ -1206,7 +1206,7 @@ pub const GEN_HOST: GenHost = GenHost {
     args: "args",
     at: "@at",
     print: "print",
-    parse: "parse",
+    parse: "runtime$parseV",
     push: "@push",
 };
 
@@ -7229,8 +7229,10 @@ fn parse_reached(
     }
     names.append(&mut tested);
     names.extend(RUNTIME_CALLS.iter().map(|(n, ..)| *n));
+    // A call the engine adds names a runtime function by its reserved
+    // spelling, which the link gives it after this walk.
     if opts.nest.gen.is_some() {
-        names.extend(GEN_HOST.calls());
+        names.extend(GEN_HOST.calls().map(unprefixed));
     }
     let mut work: Vec<(usize, usize)> = Vec::new();
     // Each row reached, by module and row, and the body it takes: parsed here,

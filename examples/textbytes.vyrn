@@ -1,6 +1,6 @@
 // `std/text`: UTF-8 decoding and line and column.
 
-import { chars, colAtV, decodeUtf8, lineAtV, showCps } from "std/text"
+import { chars, colAt, decodeUtf8, lineAt, showCps } from "std/text"
 
 fn cps(s: String) -> String {
     return showCps(chars(s))
@@ -19,8 +19,7 @@ fn verdict(b: Array<UInt8>) -> String {
 }
 
 fn lc(b: Array<UInt8>, off: Int64) -> String {
-    return lineAtV(b, off).toString() + ":" + colAtV(b, off).toString() + " | " +
-    lineAt(b, off).toString() + ":" + colAt(b, off).toString()
+    return lineAt(b, off).toString() + ":" + colAt(b, off).toString()
 }
 
 fn main() -> Int64 {
@@ -88,13 +87,13 @@ test "the two validators agree on every malformed shape" {
     assertEq(verdict(['h', '\x00', 'i']), "accept 104,0,105 | reject: bytes contain a NUL byte")
 }
 
-test "line and column match the builtins, and the column is in bytes" {
+test "line and column are 1-based, and the column is in bytes" {
     let b = bytes("ab\ncd\n\nx")
-    assertEq(lc(b, 0), "1:1 | 1:1")
-    assertEq(lc(b, 3), "2:1 | 2:1")
-    assertEq(lc(b, 7), "4:1 | 4:1")
-    assertEq(lc(b, 99), "4:2 | 4:2")
-    assertEq(lc(bytes("abcd"), 3), "1:4 | 1:4")
-    assertEq(lc(bytes("ab\r\ncd"), 4), "2:1 | 2:1")
-    assertEq(lc(bytes("éx"), 2), "1:3 | 1:3")
+    assertEq(lc(b, 0), "1:1")
+    assertEq(lc(b, 3), "2:1")
+    assertEq(lc(b, 7), "4:1")
+    assertEq(lc(b, 99), "4:2")
+    assertEq(lc(bytes("abcd"), 3), "1:4")
+    assertEq(lc(bytes("ab\r\ncd"), 4), "2:1")
+    assertEq(lc(bytes("éx"), 2), "1:3")
 }

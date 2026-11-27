@@ -392,9 +392,9 @@ fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
     );
 }
 
-/// Reaches `std/json` by injection (`toJson`), `std/text` both injected
-/// (`charCount`) and imported (`chars`), and `std/codecs` and `std/strpred` by
-/// plain import. The user declares names those modules hold privately or
+/// Reaches `std/json` by injection (`toJson`), `std/text` both injected and
+/// imported (`chars`), `std/strings` as the home of `String` (`charCount`), and
+/// `std/codecs` and `std/strpred` by plain import. The user declares names those modules hold privately or
 /// export; injection keeps them apart with the `$` prefix, a plain import with
 /// name-privacy renaming.
 #[test]
@@ -445,7 +445,7 @@ fn main() -> Int64 {
     print(showCps(7))
     print(byteLengthV("anything"))
     // And all four runtime modules answering in the same program — `std/text`
-    // both hand-imported (`chars`) and injected (`charCount`).
+    // both hand-imported (`chars`) and injected.
     print(toJson(Point { x: 1, y: 2 }))
     print(hexEncode("Hi"))
     print(chars("é").length)

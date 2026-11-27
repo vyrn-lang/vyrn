@@ -37,6 +37,8 @@ import * as vx from syntax("std/vyx.syntax")
 import { join } from "std/code"
 import { contains, endsWith, slice, startsWith } from "std/strpred"
 import { substring, toLower, trim } from "std/strings"
+import { parse } from "std/int64"
+import { lineAt } from "std/text"
 
 /// The config key this library reads. A function, not a `let`: module state
 /// is not comptime-pure.

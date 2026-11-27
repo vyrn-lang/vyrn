@@ -22,7 +22,7 @@ fn main() -> Int64 {
     showOpt("dup", opt(a, "--dup"))
 
     let count = match opt(a, "--count") {
-        Some(s) => match parse(s) {
+        Some(s) => match Int64.parse(s) {
             Some(n) => n,
             None => 0,
         },

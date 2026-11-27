@@ -140,7 +140,7 @@ const GEN: &str = r#"export gen fn consts(dir: String) -> Code {
         Ok(t) => t,
         Err(e) => "",
     }
-    return match parse(s) {
+    return match Int64.parse(s) {
         Some(v) => vyrn"export fn n() -> Int64 { return \{v} }\n" + extra,
         None => vyrn"export fn n() -> Int64 { return \{s} }\n" + extra,
     }

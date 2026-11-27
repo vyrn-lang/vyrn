@@ -8,14 +8,14 @@ fn nextLine() -> String {
 }
 
 fn numericValue(line: String) -> Int64 {
-    return match parse(line) {
+    return match Int64.parse(line) {
         Some(n) => n,
         None => 0,
     }
 }
 
 fn isWord(line: String) -> Bool {
-    return match parse(line) {
+    return match Int64.parse(line) {
         Some(n) => false,
         None => true,
     }

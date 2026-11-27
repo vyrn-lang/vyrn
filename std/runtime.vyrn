@@ -97,8 +97,10 @@ export fn intStr(v: Int64, signed: Bool) -> String {
     }
 }
 
-/// `parse_i64`: `parse`. An optional `-`, then digits, all consumed; anything
-/// else is `None`. `acc * 10 + d` wraps, so `"9223372036854775808"` is
+/// `parse_i64`: the generator host's read of an `Int64` argument
+/// (`loader::GEN_HOST`), which links no `std/int64`. It states the rule
+/// `std/int64`'s `parse` states. An optional `-`, then digits, all consumed;
+/// anything else is `None`. `acc * 10 + d` wraps, so `"9223372036854775808"` is
 /// `Int64.min` on every engine (`examples/numbytes.vyrn`). Unlike `strI64`, it
 /// reads no `+` and does not stop early.
 export fn parseV(s: String) -> Option<Int64> {

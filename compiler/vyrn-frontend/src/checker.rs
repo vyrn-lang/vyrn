@@ -320,7 +320,6 @@ pub const RESERVED: &[&str] = &[
     "Ok",
     "Err",
     "match",
-    "parse",
     "logger",
     "bytes",
     "float32Bits",
@@ -341,8 +340,6 @@ pub const RESERVED: &[&str] = &[
     "listDir",
     "listDirKinds",
     "appPath",
-    "lineAt",
-    "colAt",
     "moduleInterface",
     "moduleCode",
     // The log levels (`info`, ...) are not reserved: the sugar carries `@info`

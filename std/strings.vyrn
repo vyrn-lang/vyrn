@@ -379,6 +379,32 @@ export fn editDistance(a: String, b: String) -> Int64 {
     return prev[m]
 }
 
+/// The number of Unicode scalar values in `s`: a byte scan that counts every byte
+/// that is not a continuation (`0b10xxxxxx`), with no allocation. O(n).
+export fn charCount(s: String) -> Int64 {
+    let n = s.byteLength
+    let mut count = 0
+    let mut i = 0
+    while i < n {
+        if (Int64(s[i]) & 192) != 128 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+test "a scalar count is not a byte count, except on ASCII" {
+    assertEq(charCount("").toString() + "/" + "".byteLength.toString(), "0/0")
+    assertEq(charCount("hello").toString() + "/" + "hello".byteLength.toString(), "5/5")
+    assertEq(charCount("h\u{e9}llo").toString() + "/" + "h\u{e9}llo".byteLength.toString(), "5/6")
+    assertEq(charCount("\u{2615}").toString() + "/" + "\u{2615}".byteLength.toString(), "1/3")
+    assertEq(charCount("\u{1f600}").toString() + "/" + "\u{1f600}".byteLength.toString(), "1/4")
+    // All four widths in one string, to catch a scan that mishandles the
+    // transition between sequences: 4 scalars, 1 + 2 + 3 + 4 = 10 bytes.
+    assertEq(charCount("a\u{e9}\u{20ac}\u{1f600}").toString() + "/" + "a\u{e9}\u{20ac}\u{1f600}".byteLength.toString(), "4/10")
+}
+
 test "toHex writes sixteen zero-padded nibbles, low byte last" {
     // An ETag is one of these, so a drift here is a cache key that stops
     // matching itself.

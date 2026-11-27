@@ -25,7 +25,7 @@ fn halved(n: Int64) -> Float64 {
 }
 
 fn p(s: String) -> String {
-    return match parse(s) {
+    return match Int64.parse(s) {
         Some(n) => n.toString(),
         None => "None",
     }

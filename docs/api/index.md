@@ -23,6 +23,7 @@
 - [std/i18n](std/i18n.md) — Typed translations as a generator library.
 - [std/icons](std/icons.md) — Inline SVG icons generated from a pinned Iconify collection, one function
 - [std/imports](std/imports.md) — The import block of a generated module.
+- [std/int64](std/int64.md) — The functions of `Int64`, its home: `Int64.parse(s)` calls them with no
 - [std/json](std/json.md) — The JSON value tree and its canonical writer.
 - [std/json5](std/json5.md) — A JSON5 reader that builds the `Json` tree of `std/json`.
 - [std/jsondec](std/jsondec.md) — The untyped half of `fromJson`, and the generator of the

@@ -10,7 +10,7 @@ The compiler emits WebAssembly, and everything that module needs at run time is 
 - `std/runtime` stands on `std/mem` and holds the allocator, the arena, strings, arrays, the map, integer formatting, UTF-8 checks, the regular-expression runner, and every I/O builtin. The compiler links it into every program.
 - Only `std/runtime` may import `std/mem`, and no user module may import either. The loader refuses the import.
 
-A builtin routes to a runtime function with the same name plus `V`: `readFile` calls `readFileV`, because the builtin's own name is reserved. Other builtins route to ordinary std modules. `x.charCount()`, `lineAt` and `colAt` run `std/text`. A float rendered by `print` or `toString()` runs `std/num`'s `f64Str`. `toJson` links `std/json`, and `fromJson` links `std/jsondec`. So one Vyrn source serves every engine, and the engines agree byte for byte.
+A builtin routes to a runtime function with the same name plus `V`: `readFile` calls `readFileV`, because the builtin's own name is reserved. Other builtins route to ordinary std modules. A float rendered by `print` or `toString()` runs `std/num`'s `f64Str`. `toJson` links `std/json`, and `fromJson` links `std/jsondec`. So one Vyrn source serves every engine, and the engines agree byte for byte.
 
 Inside the runtime a `String` is an `Int32` address of NUL-terminated bytes with a length header. No module outside the runtime holds an address. A `panic` in the runtime prints its trap line with no source site.
 
@@ -70,9 +70,9 @@ The compiler injects these declarations into every program, so a file names them
 
 | Module | Provides |
 |---|---|
-| `std/strings` | `split`, `lines`, `splitWhitespace`, `joinWith`, `substring`, `indexOf`, `lastIndexOf`, `trim`, `trimStart`, `trimEnd`, `toLower`, `toUpper`, `replace`, `repeat`, `padStart`, `padEnd`, `toHex`, `editDistance`, `fromBytesOr`. Offsets are bytes; case and whitespace helpers are ASCII-only and pass other bytes through. |
+| `std/strings` | `split`, `lines`, `splitWhitespace`, `joinWith`, `substring`, `indexOf`, `lastIndexOf`, `trim`, `trimStart`, `trimEnd`, `toLower`, `toUpper`, `replace`, `repeat`, `padStart`, `padEnd`, `toHex`, `editDistance`, `fromBytesOr`, `charCount`. It is the home of `String`, so `s.trim()` needs no import. Offsets are bytes; case and whitespace helpers are ASCII-only and pass other bytes through. |
 | `std/strpred` | `startsWith`, `endsWith`, `contains`, and `slice(s, start, end) -> Result<String, SliceError>`, which refuses a cut inside a UTF-8 character. `findPlain` and `findSkipping` are the substring searches the others use. |
-| `std/text` | `decodeUtf8`, `chars`, `utf8Width`, and the functions behind `charCount`, `lineAt` and `colAt`. It is the one statement of what UTF-8 admits. |
+| `std/text` | `decodeUtf8`, `chars`, `utf8Width`, and `lineAt` and `colAt`, the 1-based line and column of a byte offset in an `Array<UInt8>`. It is the one statement of what UTF-8 admits. |
 | `std/regex` | `compile(pattern) -> Result<Regex, String>`, `find`, `countMatches`, `replaceAll`, and `captures`, whose groups `capture` reads by number and `named` by name. Its language is `std/regex.syntax`, which `=~` reads too, so a pattern means one thing in both. A Thompson NFA that a search runs as a lazy DFA: linear time, leftmost-first matches, lazy repeats, counted repetition, code point classes with POSIX names and set operations, named and non-capturing groups, the flags `i`, `m` and `s`; no anchors (`^` and `$` are refused), backreferences or lookaround; a refusal says its sentence from `std/regex.errors`. `=~` is the separate whole-string match compiled at build time. |
 | `std/codecs` | Hex, base64 and percent encoding: `hexEncode`, `hexDecode`, `base64Encode`, `base64EncodeBytes`, `base64Decode`, `urlEncode`, `urlDecode`. A decoder answers `None` for bytes that cannot be a `String`. |
 | `std/scan` | A comment- and string-aware cursor over foreign text (CSS, ICU messages, templates, SDL) for generators. Offsets are bytes; `line` and `col` stay in step. |
@@ -82,6 +82,7 @@ The compiler injects these declarations into every program, so a file names them
 | Module | Provides |
 |---|---|
 | `std/math` | `min`, `max`, `abs`, `clamp` on `Int64`; `pi`, `trunc`, `floor`, `ceil`, `round`, `sin`, `cos`, `tan`, `atan2`, `exp`, `log` and `pow` on `Float64`. `abs` of `Int64` min saturates. The rounding functions are exact; `exp`, `log`, `pow` and `tan` are within 1 ulp, and `atan2` within 2. The square root is the builtin `x.sqrt()`. |
+| `std/int64` | `parse(s) -> Option<Int64>`: an optional `-`, then decimal digits, all consumed. It is the home of `Int64`, so `Int64.parse(s)` needs no import. |
 | `std/num` | `parseInt64`, `parseUInt64`, `parseFloat64`, `parseFloat32` (each an `Option`), each with a `Range` form that reads a byte range in place, and `f64Str`. Parsing is correctly rounded, with no `strtod` underneath. |
 | `std/time` | `now() -> Instant` (UTC milliseconds), `monotonic()`, the calendar breakdown (`civil`, `year` to `second`) and `format`, `formatIso`. UTC only. `now` and `monotonic` are host effects, so a generator cannot call them. |
 | `std/random` | `Rng`, `seededRng`, `nextInt`, `nextInRange`: SplitMix64 as a value, so a seeded run reproduces everywhere. `randomSeed()` is the one host effect. Not for secrets. |
@@ -94,7 +95,7 @@ The compiler injects these declarations into every program, so a file names them
 
 | Module | Provides |
 |---|---|
-| `std/arrays` | `map`, `filter`, `fold`, `any`, `all`, `includes`, `sortWith` (a comparator), `sortBy` (an `Int64` key). |
+| `std/arrays` | `map`, `filter`, `fold`, `any`, `all`, `includes`, `sortWith` (a comparator), `sortBy` (an `Int64` key). It is the home of `Array`, so `xs.map(f)` needs no import. |
 | `std/order` | Orders as types: `Asc<T, field..>`, `Desc<O>`, `Then<A, B>`, the `Order` bound and `Elem<O>`, the type an order compares. `before<O>(a, b)` compares under one. `sort`, `insertSorted`, `mergeSorted` and `dedupSorted` establish `sorted<O>` or `strict<O>` facts the flow proves, and `lowerBound` requires one. Each is an insertion or push-and-pop body, quadratic or linear, not in place. |
 | `std/columns` | `@columns`, a generator annotation: the record type `T` it sits on gets `TColumns`, one array per field under a `where` rule of equal lengths, with `tColumns(capacity)`, `pushT(c, v)` (an in-place push onto every column) and `tAt(c, i)`. `c.f[i]` reads and writes one field in place, and a loop bounded by `c.f.length` indexes every column with no check. |
 | `std/slots` | `Slots<T>` and `Handle<T>`: a generational slab. `insert`, `remove` (which hands the element back), `get`, `alive`, `count`, `capacity`, `handles`. `s[h]` and `s[h] = v` index it, `for x in s` visits the live elements, and `s.tryAt(h)` reads in place. A stale or foreign handle is dead, never plausible. |

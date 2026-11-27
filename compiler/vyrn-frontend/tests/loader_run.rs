@@ -39,6 +39,7 @@ const RT_FILES: &[(&str, &str)] = &[
         include_str!("../../../std/runtime.vyrn"),
     ),
     ("std/mem.vyrn", include_str!("../../../std/mem.vyrn")),
+    ("std/int64.vyrn", include_str!("../../../std/int64.vyrn")),
 ];
 
 #[cfg(test)]
@@ -1974,7 +1975,7 @@ fn main() -> Int64 { return shape().byteLength }"#;
         // different file; the key folds in resolved inputs, so they never share an entry.
         let gen = "export gen fn consts(dir: String) -> Code { \
                        return match readFile(dir + \"/n.txt\") { \
-                           Ok(s) => vyrn\"export fn val() -> Int64 { return \\{parse(s) ?? 0} }\", \
+                           Ok(s) => vyrn\"export fn val() -> Int64 { return \\{Int64.parse(s) ?? 0} }\", \
                            Err(e) => vyrn\"\" } }";
         let a = "import { consts } from \"../gen\" \
                  import * as g from consts(\"./data\") \
@@ -2044,7 +2045,7 @@ fn main() -> Int64 { return shape().byteLength }"#;
         // Same importer, same arg: a re-load hits the cache, so the generation runs once.
         let gen = "export gen fn consts(dir: String) -> Code { \
                        return match readFile(dir + \"/n.txt\") { \
-                           Ok(s) => vyrn\"export fn val() -> Int64 { return \\{parse(s) ?? 0} }\", \
+                           Ok(s) => vyrn\"export fn val() -> Int64 { return \\{Int64.parse(s) ?? 0} }\", \
                            Err(e) => vyrn\"\" } }";
         let client = "import { consts } from \"../gen\" \
                       import { val } from consts(\"./data\") \

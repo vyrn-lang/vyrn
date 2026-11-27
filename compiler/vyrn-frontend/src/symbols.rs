@@ -1259,7 +1259,7 @@ pub fn prelude_document(
 }
 
 /// The file under `std_root` and the 1-based line of the function a route such as
-/// `runtime$parseV` names: the runtime module ([`crate::loader::RT_MODULES`]) whose
+/// `runtime$readLineV` names: the runtime module ([`crate::loader::RT_MODULES`]) whose
 /// prefix it carries, and the function its rest names.
 fn route_site(
     route: &str,
