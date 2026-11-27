@@ -831,7 +831,15 @@ const EMPTY: T = 0;
 const EPS: T = 1;
 const SIGMA: T = 3;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+/// A list of terms, interned: `len` terms of [`Terms::lists`] from `at`, so two
+/// equal lists are one.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct List {
+    at: u32,
+    len: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Node {
     Empty,
     Eps,
@@ -840,11 +848,11 @@ enum Node {
     /// side is `Empty` or `Eps`.
     Cat(T, T),
     /// Two or more terms, ascending, none an `Alt` or `Empty`.
-    Alt(Vec<T>),
+    Alt(List),
     /// The body is not `Empty`, `Eps` or a `Star`.
     Star(T),
     /// Two or more terms, ascending, none an `And`, `Empty` or `SIGMA`.
-    And(Vec<T>),
+    And(List),
     /// The spans `M` of the body does not match. The body is no `Not`.
     Not(T),
     /// The empty span where the rest of the text is in the body's language: a
@@ -861,6 +869,12 @@ enum Node {
 struct Terms {
     nodes: Vec<Node>,
     ids: std::collections::HashMap<Node, T>,
+    /// The members of every list, and each list by its members.
+    lists: Vec<T>,
+    list_ids: std::collections::HashMap<Vec<T>, List>,
+    /// Emptied buffers to build a list in, so a derivative that finds its list
+    /// interned allocates nothing.
+    spare: Vec<Vec<T>>,
     /// Whether term `t` holds no `And`, `Not`, `Guard` or `Behind`, so whether it
     /// matches the empty span depends on nothing around it.
     plain: Vec<bool>,
@@ -882,6 +896,9 @@ impl Terms {
         let mut terms = Terms {
             nodes: Vec::new(),
             ids: Default::default(),
+            lists: Vec::new(),
+            list_ids: Default::default(),
+            spare: Vec::new(),
             plain: Vec::new(),
             nullable: Vec::new(),
             bodies: Vec::new(),
@@ -902,80 +919,158 @@ impl Terms {
             return t;
         }
         let (p, z) = (&self.plain, &self.nullable);
-        let (plain, nullable) = match &n {
+        let (plain, nullable) = match n {
             Node::Empty | Node::Class(_) => (true, false),
             Node::Eps => (true, true),
-            Node::Star(r) => (p[*r as usize], true),
+            Node::Star(r) => (p[r as usize], true),
             Node::Cat(l, r) => (
-                p[*l as usize] && p[*r as usize],
-                z[*l as usize] && z[*r as usize],
+                p[l as usize] && p[r as usize],
+                z[l as usize] && z[r as usize],
             ),
-            Node::Alt(ts) => (
-                ts.iter().all(|&t| p[t as usize]),
-                ts.iter().any(|&t| z[t as usize]),
+            Node::Alt(l) => (
+                self.items(l).iter().all(|&t| p[t as usize]),
+                self.items(l).iter().any(|&t| z[t as usize]),
             ),
             Node::And(_) | Node::Not(_) | Node::Guard(_) | Node::Behind(..) => (false, false),
         };
         let t = self.nodes.len() as T;
-        self.nodes.push(n.clone());
+        self.nodes.push(n);
         self.plain.push(plain);
         self.nullable.push(nullable);
         self.ids.insert(n, t);
         t
     }
 
+    /// The members of `l`.
+    fn items(&self, l: List) -> &[T] {
+        &self.lists[l.at as usize..(l.at + l.len) as usize]
+    }
+
+    /// Member `i` of the `Alt` or `And` term `t`.
+    fn item(&self, t: T, i: u32) -> T {
+        match self.nodes[t as usize] {
+            Node::Alt(l) | Node::And(l) => self.lists[(l.at + i) as usize],
+            _ => unreachable!("only a list term has members"),
+        }
+    }
+
+    /// An empty buffer, taken from the spares.
+    fn buffer(&mut self) -> Vec<T> {
+        self.spare.pop().unwrap_or_default()
+    }
+
+    fn give(&mut self, mut buffer: Vec<T>) {
+        buffer.clear();
+        self.spare.push(buffer);
+    }
+
+    /// The list of the members of `ts`, which are ascending and two or more.
+    fn list(&mut self, ts: &[T]) -> List {
+        if let Some(&l) = self.list_ids.get(ts) {
+            return l;
+        }
+        let l = List {
+            at: self.lists.len() as u32,
+            len: ts.len() as u32,
+        };
+        self.lists.extend_from_slice(ts);
+        self.list_ids.insert(ts.to_vec(), l);
+        l
+    }
+
     fn cat(&mut self, a: T, b: T) -> T {
         if a == EMPTY || b == EMPTY {
             return EMPTY;
         }
-        let mut spine = Vec::new();
+        let Node::Cat(..) = self.nodes[a as usize] else {
+            return match (a, b) {
+                (EPS, _) => b,
+                (_, EPS) => a,
+                _ => self.node(Node::Cat(a, b)),
+            };
+        };
+        let mut spine = self.buffer();
         let mut x = a;
         while let Node::Cat(l, r) = self.nodes[x as usize] {
             spine.push(l);
             x = r;
         }
         spine.push(x);
-        spine.into_iter().rev().fold(b, |out, t| match (t, out) {
-            (EPS, _) => out,
-            (_, EPS) => t,
-            _ => self.node(Node::Cat(t, out)),
-        })
+        let mut out = b;
+        for &t in spine.iter().rev() {
+            out = match (t, out) {
+                (EPS, _) => out,
+                (_, EPS) => t,
+                _ => self.node(Node::Cat(t, out)),
+            };
+        }
+        self.give(spine);
+        out
     }
 
+    /// The `Alt` of the terms `ts`, a buffer it gives back.
     fn alt(&mut self, ts: Vec<T>) -> T {
-        let mut all = Vec::new();
-        for t in ts {
-            match &self.nodes[t as usize] {
-                Node::Alt(inner) => all.extend_from_slice(inner),
+        let mut all = self.buffer();
+        for &t in &ts {
+            match self.nodes[t as usize] {
+                Node::Alt(l) => all.extend_from_slice(self.items(l)),
                 Node::Empty => {}
                 _ => all.push(t),
             }
         }
+        self.give(ts);
         all.sort_unstable();
         all.dedup();
-        match all.len() {
+        let t = match all.len() {
             0 => EMPTY,
             1 => all[0],
-            _ => self.node(Node::Alt(all)),
-        }
+            _ => {
+                let l = self.list(&all);
+                self.node(Node::Alt(l))
+            }
+        };
+        self.give(all);
+        t
     }
 
+    /// The `And` of the terms `ts`, a buffer it gives back.
     fn and(&mut self, ts: Vec<T>) -> T {
-        let mut all = Vec::new();
-        for t in ts {
-            match &self.nodes[t as usize] {
-                Node::And(inner) => all.extend_from_slice(inner),
-                Node::Empty => return EMPTY,
+        let mut all = self.buffer();
+        let mut empty = false;
+        for &t in &ts {
+            match self.nodes[t as usize] {
+                Node::And(l) => all.extend_from_slice(self.items(l)),
+                Node::Empty => empty = true,
                 _ if t == SIGMA => {}
                 _ => all.push(t),
             }
         }
+        self.give(ts);
         all.sort_unstable();
         all.dedup();
-        match all.len() {
-            0 => SIGMA,
-            1 => all[0],
-            _ => self.node(Node::And(all)),
+        let t = match (empty, all.len()) {
+            (true, _) => EMPTY,
+            (_, 0) => SIGMA,
+            (_, 1) => all[0],
+            _ => {
+                let l = self.list(&all);
+                self.node(Node::And(l))
+            }
+        };
+        self.give(all);
+        t
+    }
+
+    /// The `And` of `a` and `b`, with no buffer when either is `SIGMA` or `EMPTY`.
+    fn and2(&mut self, a: T, b: T) -> T {
+        match (a, b) {
+            (EMPTY, _) | (_, EMPTY) => EMPTY,
+            (SIGMA, x) | (x, SIGMA) => x,
+            _ => {
+                let mut ts = self.buffer();
+                ts.extend([a, b]);
+                self.and(ts)
+            }
         }
     }
 
@@ -1095,8 +1190,8 @@ impl Terms {
                 }
                 self.ends(x, cx)
             }
-            Node::Alt(ts) => ts.iter().any(|&t| self.ends(t, cx)),
-            Node::And(ts) => ts.iter().all(|&t| self.ends(t, cx)),
+            Node::Alt(l) => self.items(*l).iter().any(|&t| self.ends(t, cx)),
+            Node::And(l) => self.items(*l).iter().all(|&t| self.ends(t, cx)),
             Node::Not(x) => !self.ends(*x, cx),
             Node::Guard(g) => self.ends(*g, cx),
             Node::Behind(k, holds) => {
@@ -1118,25 +1213,35 @@ impl Terms {
         if let Some(&c) = self.conditions.get(&(t, cx)) {
             return c;
         }
-        let c = match self.nodes[t as usize].clone() {
+        let c = match self.nodes[t as usize] {
             Node::Empty | Node::Class(_) => EMPTY,
             Node::Eps | Node::Star(_) => SIGMA,
             Node::Cat(..) => {
-                let mut parts = Vec::new();
+                let mut parts = self.buffer();
                 let mut x = t;
                 while let Node::Cat(l, r) = self.nodes[x as usize] {
-                    parts.push(self.condition(l, cx));
+                    let c = self.condition(l, cx);
+                    parts.push(c);
                     x = r;
                 }
-                parts.push(self.condition(x, cx));
+                let c = self.condition(x, cx);
+                parts.push(c);
                 self.and(parts)
             }
-            Node::Alt(ts) => {
-                let cs = ts.iter().map(|&t| self.condition(t, cx)).collect();
+            Node::Alt(l) => {
+                let mut cs = self.buffer();
+                for i in 0..l.len {
+                    let c = self.condition(self.item(t, i), cx);
+                    cs.push(c);
+                }
                 self.alt(cs)
             }
-            Node::And(ts) => {
-                let cs = ts.iter().map(|&t| self.condition(t, cx)).collect();
+            Node::And(l) => {
+                let mut cs = self.buffer();
+                for i in 0..l.len {
+                    let c = self.condition(self.item(t, i), cx);
+                    cs.push(c);
+                }
                 self.and(cs)
             }
             Node::Not(x) => {
@@ -1164,18 +1269,26 @@ impl Terms {
         if let Some(&d) = self.derived.get(&(t, b, cx)) {
             return d;
         }
-        let d = match self.nodes[t as usize].clone() {
+        let d = match self.nodes[t as usize] {
             Node::Empty | Node::Eps | Node::Guard(_) | Node::Behind(..) => EMPTY,
             Node::Class(c) => match c.contains(b) {
                 true => EPS,
                 false => EMPTY,
             },
-            Node::Alt(ts) => {
-                let ds = ts.iter().map(|&t| self.derive(t, b, cx)).collect();
+            Node::Alt(l) => {
+                let mut ds = self.buffer();
+                for i in 0..l.len {
+                    let d = self.derive(self.item(t, i), b, cx);
+                    ds.push(d);
+                }
                 self.alt(ds)
             }
-            Node::And(ts) => {
-                let ds = ts.iter().map(|&t| self.derive(t, b, cx)).collect();
+            Node::And(l) => {
+                let mut ds = self.buffer();
+                for i in 0..l.len {
+                    let d = self.derive(self.item(t, i), b, cx);
+                    ds.push(d);
+                }
                 self.and(ds)
             }
             Node::Not(x) => {
@@ -1190,7 +1303,7 @@ impl Terms {
             // before it put on the rest as they match the empty span. The recursion
             // goes only into a left term, so its depth is the nesting.
             Node::Cat(..) => {
-                let mut parts = Vec::new();
+                let mut parts = self.buffer();
                 let mut held = SIGMA;
                 let mut x = t;
                 loop {
@@ -1204,7 +1317,7 @@ impl Terms {
                     let g = self.guard(dh);
                     parts.push(self.cat(g, rest));
                     let c = self.condition(l, cx);
-                    held = self.and(vec![held, c]);
+                    held = self.and2(held, c);
                     if held == EMPTY || r == EPS {
                         break;
                     }
