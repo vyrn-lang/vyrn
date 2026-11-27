@@ -3183,3 +3183,20 @@ fn an_impl_of_what_the_language_defines_is_refused() {
          main.vyrn:9:1: `impl Iterate for Array<Int64>` is refused: the language already defines `Iterate` for `Array<Int64>`\n"
     );
 }
+
+/// Without a std root no island reads the pattern of `=~`, so the core states the
+/// grammar's row.
+#[test]
+fn a_pattern_the_grammar_refuses_is_refused_without_a_std_root() {
+    let src = "fn main() -> Int64 {\n    if \"abc\" =~ \"a(b\" {\n        print(\"y\")\n    }\n    return 0\n}\n";
+    let opts = vyrn_frontend::loader::LoadOptions::default();
+    let resolver = vyrn_frontend::loader::DiskResolver;
+    let said: Vec<String> = match vyrn_lower::load(src, "main.vyrn", &opts, &resolver, None) {
+        Ok(_) => Vec::new(),
+        Err(ds) => ds.iter().map(|d| d.render()).collect(),
+    };
+    assert_eq!(
+        said,
+        ["line 2: invalid regex `a(b`: a group with no closing `)`"]
+    );
+}

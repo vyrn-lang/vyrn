@@ -662,12 +662,20 @@ fn build_from<'a>(
     seeded(program, own, proto, fns, names, source, &seed)
 }
 
+/// Whether the program reads the pattern of `=~` as an island, which needs the
+/// std root's `regex.syntax`.
+fn islanded(program: &Program) -> bool {
+    let regex = vyrn_frontend::gen::REGEX_ISLAND;
+    program.islands.iter().any(|i| i.ty == regex)
+}
+
 /// The refusals the typed judgment states over the checker's answers at the
 /// expressions of `facts`: a literal that does not fit, a shift by a constant out of
 /// range, and at a node the checker typed `Err` whose operands it typed, the
 /// rule the node breaks (an operator, a field, a construction, a variant, a
 /// record literal, or a call's arity, type arguments and arguments).
-fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<Said> {
+/// `islanded` says whether the island check reads the pattern of `=~`.
+fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech, islanded: bool) -> Vec<Said> {
     let decls = own.proto.types();
     let recorded = |e: &Expr| facts.types.get(&e.id()).filter(|t| **t != Type::Err);
     let resolved = |e: &Expr| recorded(e).map(|t| vyrn_frontend::types::resolve(t, decls));
@@ -697,12 +705,14 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<Said> {
                 rhs,
                 ..
             } => Some(match &**rhs {
-                // The island check states a row of the grammar.
+                // The island check states a row of the grammar, when the std root
+                // holds the grammar.
                 Expr::Str(pat, _) => match vyrn_frontend::regex::compile(pat).err()? {
-                    vyrn_frontend::regex::Refusal::Builder(err) => {
+                    vyrn_frontend::regex::Refusal::Grammar(_) if islanded => return None,
+                    vyrn_frontend::regex::Refusal::Builder(err)
+                    | vyrn_frontend::regex::Refusal::Grammar(err) => {
                         rule!(InvalidRegex, pat, err).render()
                     }
-                    vyrn_frontend::regex::Refusal::Grammar(_) => return None,
                 },
                 _ => rule!(MatchNeedsPattern).render(),
             }),
@@ -1574,7 +1584,7 @@ impl<'a> Builder<'a> {
         let none = HashMap::new();
         let (refused, mistyped) = (
             unbound(facts, own, &program.impls, bounds.unwrap_or(&none), &sp),
-            judged(facts, own, &sp),
+            judged(facts, own, &sp, islanded(program)),
         );
         Builder {
             program,
