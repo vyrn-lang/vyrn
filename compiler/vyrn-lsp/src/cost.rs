@@ -217,14 +217,18 @@ fn compact(row: &CostLine, uri: &str, src: &str) -> Row {
     }
     let anchors = (ends.into_iter())
         .map(|at| {
-            let here = (row.items.iter().zip(&item_ranges)).filter_map(|(item, ranges)| {
-                let here: Vec<Range> = ranges.iter().filter(|r| r.end == at).copied().collect();
-                (!here.is_empty()).then(|| linked(item, &here, here.len()))
-            });
+            let here: Vec<(String, usize)> = (row.items.iter().zip(&item_ranges))
+                .filter_map(|(item, ranges)| {
+                    let here: Vec<Range> = ranges.iter().filter(|r| r.end == at).copied().collect();
+                    (!here.is_empty()).then(|| (linked(item, &here, here.len()), here.len()))
+                })
+                .collect();
+            let count: usize = here.iter().map(|(_, n)| n).sum();
+            let lines: String = here.into_iter().map(|(l, _)| l).collect();
             Anchor {
                 at,
                 glyph: glyph.to_string(),
-                hover: format!("**{glyph} {title}**\n{}{tail}", here.collect::<String>()),
+                hover: format!("**{glyph} {title} {count}**\n{lines}{tail}"),
             }
         })
         .collect();

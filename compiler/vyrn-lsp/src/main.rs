@@ -1069,7 +1069,14 @@ fn cost_hover(server: &Server, uri: &Url, text: &str, pos: Position) -> Option<(
                 .map(move |r| (row, *r))
         })
         .min_by_key(|(_, r)| width(r))
-        .map(|(row, r)| (format!("{}\n\n{}", row.hover, cost::WHY_COST), r))
+        .map(|(row, r)| {
+            // The facts that end with this expression, as its glyph words them, not the row's
+            // other sites on the line.
+            let hover = (row.anchors.iter())
+                .find(|a| a.at == r.end)
+                .map_or(&row.hover, |a| &a.hover);
+            (format!("{hover}\n\n{}", cost::WHY_COST), r)
+        })
 }
 
 fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoDefinitionResponse> {
