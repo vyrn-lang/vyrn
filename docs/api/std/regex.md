@@ -24,6 +24,9 @@ size times the input for every pattern. A search runs it as two lazy DFAs, one
 forward to a match's end and one back to its start: one table read per byte. It
 has no backreferences or lookaround.
 
+`captures` gives a match's groups, numbered from 1 in the order of their `(`;
+`(?:..)` and `(?i:..)` do not count. `capture` and `named` read one.
+
 Leftmost-first, as Perl, PCRE and RE2 match: of the matches that start
 leftmost, the one the pattern prefers, so an earlier alternative wins, a greedy
 repeat takes as much as it can and a lazy one as little. `a|ab` against `ab`
@@ -38,7 +41,7 @@ match starts and ends on a character boundary.
 ## Regex
 
 ```vyrn
-type Regex = { fwd: Program, rev: Program }
+type Regex = { fwd: Program, rev: Program, names: Array<String> }
 ```
 
 A compiled pattern: `fwd` is the pattern after a loop over any byte, so a forward
@@ -87,4 +90,38 @@ fn replaceAll(re: Regex, hay: String, with: String) -> String
 ```
 
 `hay` with every non-overlapping match replaced by `with`, taken literally:
-there are no captures, so no `$1`.
+`$1` is two characters, not a group.
+
+## Captures
+
+```vyrn
+type Captures = { whole: Match, spans: Array<Int64> }
+```
+
+A match and the span of each group of its pattern that took part in it.
+
+## captures
+
+```vyrn
+fn captures(re: Regex, hay: String, from: Int64) -> Option<Captures>
+```
+
+The first match at or after `from` and its groups, or `None`. The groups cost a
+Thompson simulation over the match alone.
+
+## capture
+
+```vyrn
+fn capture(c: Captures, k: Int64) -> Option<Match>
+```
+
+Group `k` of `c`: the whole match for 0, or `None` for a group that took no part
+or that the pattern does not have.
+
+## named
+
+```vyrn
+fn named(re: Regex, c: Captures, name: String) -> Option<Match>
+```
+
+The group of `c` that `re` names `name`, or `None`.

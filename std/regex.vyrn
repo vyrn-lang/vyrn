@@ -22,6 +22,9 @@
 /// forward to a match's end and one back to its start: one table read per byte. It
 /// has no backreferences or lookaround.
 ///
+/// `captures` gives a match's groups, numbered from 1 in the order of their `(`;
+/// `(?:..)` and `(?i:..)` do not count. `capture` and `named` read one.
+///
 /// Leftmost-first, as Perl, PCRE and RE2 match: of the matches that start
 /// leftmost, the one the pattern prefers, so an earlier alternative wins, a greedy
 /// repeat takes as much as it can and a lazy one as little. `a|ab` against `ab`
@@ -52,6 +55,10 @@ let opSplit = 1
 /// `op[i]` accepts.
 let opMatch = 2
 
+/// `op[i]` notes the offset in slot `a[i]` of a thread's group spans, and goes on
+/// to `b[i]`. Every other walk passes it as an empty edge.
+let opSave = 3
+
 /// A set of bytes: byte `c` is in it when bit `c % 64` of word `c / 64` is set.
 ///
 /// Four words and not an array, so a membership test reads no array and has no
@@ -62,7 +69,12 @@ type ByteSet = { w0: UInt64, w1: UInt64, w2: UInt64, w3: UInt64 }
 /// A compiled pattern: `fwd` is the pattern after a loop over any byte, so a forward
 /// pass finds where the leftmost match ends, and `rev`, its reverse, reads that match
 /// back to its start.
-export type Regex = { fwd: Program, rev: Program }
+export type Regex = {
+    fwd: Program,
+    rev: Program,
+    // The name of group `k` at `k - 1`, or "" for a group with none.
+    names: Array<String>,
+}
 
 type Program = {
     op: Array<Int64>,
@@ -123,10 +135,11 @@ type Builder = {
     // and `$`, which `AnchorPending` refuses.
     fold: Bool,
     dotAll: Bool,
-    // Each named group's name, and the offset of its `(` in `nameAt`: a count walks
-    // a group once per copy, and a name names one group.
+    // The offset of each capturing group's `(`, by number from 1, and its name or
+    // "" in `names`: a count walks a group once per copy, and a name names one
+    // group.
+    groupAt: Array<Int64>,
     names: Array<String>,
-    nameAt: Array<Int64>,
 }
 
 /// The terms counted repetition may copy in one pattern. Nested counts multiply,
@@ -733,25 +746,41 @@ fn fragGroup(bd: modify Builder, pattern: String, g: rx.RegexSubpattern) -> Frag
     let dotAll = bd.dotAll
     let open = g.open.text
     let named = open.byteLength > 2 && (open[2] == 'P' || open[2] == '<' || open[2] == '\'')
-    if named {
-        let from = if open[2] == 'P' { 4 } else { 3 }
-        let name = substring(open, from, open.byteLength - 1)
-        let mut i = 0
-        while i < bd.names.length {
-            if bd.names[i] == name && bd.nameAt[i] != g.start {
-                refuse(bd, NameTwice)
-            }
-            i = i + 1
-        }
-        bd.names.push(name)
-        bd.nameAt.push(g.start)
-    } else if open.byteLength > 2 {
+    if !named && open.byteLength > 2 {
         setFlags(bd, open, 2, open.byteLength - 1)
+        let f = fragAlt(bd, pattern, g.alt)
+        bd.fold = fold
+        bd.dotAll = dotAll
+        return f
     }
+    let name = if named { substring(open, if open[2] == 'P' { 4 } else { 3 }, open.byteLength - 1) } else { "" }
+    let k = groupNumber(bd, g.start, name)
+    let first = emit(bd, opSave, 2 * k - 2, 0, noBytes())
     let f = fragAlt(bd, pattern, g.alt)
+    let last = emit(bd, opSave, 2 * k - 1, 0, noBytes())
+    patch(bd, [first * 2 + 1], f.start)
+    patch(bd, f.holes, last)
     bd.fold = fold
     bd.dotAll = dotAll
-    return f
+    return Frag { start: first, holes: [last * 2 + 1] }
+}
+
+/// The number of the capturing group whose `(` is at `at`, from 1, numbered on its
+/// first walk. A name names one group.
+fn groupNumber(bd: modify Builder, at: Int64, name: String) -> Int64 {
+    let mut i = 0
+    while i < bd.groupAt.length {
+        if bd.groupAt[i] == at {
+            return i + 1
+        }
+        if name != "" && bd.names[i] == name {
+            refuse(bd, NameTwice)
+        }
+        i = i + 1
+    }
+    bd.groupAt.push(at)
+    bd.names.push(name.copy())
+    return bd.groupAt.length
 }
 
 /// One class test, as a fragment.
@@ -1121,7 +1150,7 @@ export fn compile(pattern: String) -> Result<Regex, String> {
 }
 
 fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
-    let mut bd = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, names: [], nameAt: [] }
+    let mut bd = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, groupAt: [], names: [] }
     let f = fragAlt(bd, pattern, tree)
     if let Some(row) = bd.err {
         return Err(regexSay(row))
@@ -1144,7 +1173,7 @@ fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
         classCount: classCount,
         classOf: classOf,
     }
-    return Ok(Regex { fwd: fwd, rev: rev })
+    return Ok(Regex { fwd: fwd, rev: rev, names: consume bd.names })
 }
 
 fn allBytes() -> ByteSet {
@@ -1200,7 +1229,7 @@ fn reverse(p: Builder, first: Int64, m: Int64, classOf: consume Array<UInt8>, cl
         size = size + tests + if links == 0 { 1 } else { links }
         r = r + 1
     }
-    let mut out = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, names: [], nameAt: [] }
+    let mut out = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, groupAt: [], names: [] }
     emit(out, opClass, 0 - 1, 0, noBytes())
     emit(out, opMatch, 0, 0, noBytes())
     let mut s = 0
@@ -1284,9 +1313,11 @@ fn addThread(re: Program, list: modify Array<Int64>, sc: modify Scan, pc: Int64)
         }
         sc.mark[p] = sc.gen
         if re.op[p] == opSplit {
-            // `b` first so `a` pops first: that makes `*` greedy.
+            // `b` first so `a` pops first: `a` is the operand a search prefers.
             stack.push(re.b[p])
             stack.push(re.a[p])
+        } else if re.op[p] == opSave {
+            stack.push(re.b[p])
         } else {
             list.push(p)
         }
@@ -1552,7 +1583,7 @@ export fn countMatches(re: Regex, hay: String) -> Int64 {
 }
 
 /// `hay` with every non-overlapping match replaced by `with`, taken literally:
-/// there are no captures, so no `$1`.
+/// `$1` is two characters, not a group.
 export fn replaceAll(re: Regex, hay: String, with: String) -> String {
     let raw = bytes(hay)
     let mut se = newSearch(re, dfaCap)
@@ -1565,6 +1596,145 @@ export fn replaceAll(re: Regex, hay: String, with: String) -> String {
         i = if m.end > m.at { m.end } else { m.at + 1 }
     }
     return out + substring(hay, kept, raw.length)
+}
+
+/// A match and the span of each group of its pattern that took part in it.
+export type Captures = {
+    whole: Match,
+    // The offsets group `k` starts and ends at, at `2 * k - 2` and `2 * k - 1`, or
+    // -1 for a group that took no part. A group in a repeat spans its last turn.
+    spans: Array<Int64>,
+}
+
+/// The first match at or after `from` and its groups, or `None`. The groups cost a
+/// Thompson simulation over the match alone.
+export fn captures(re: Regex, hay: String, from: Int64) -> Option<Captures> {
+    let raw = bytes(hay)
+    let mut se = newSearch(re, dfaCap)
+    if let Some(m) = nextMatch(re, raw, from, se) {
+        return Some(Captures { whole: m, spans: spansOf(re, raw, m) })
+    }
+    return None
+}
+
+/// Group `k` of `c`: the whole match for 0, or `None` for a group that took no part
+/// or that the pattern does not have.
+export fn capture(c: Captures, k: Int64) -> Option<Match> {
+    if k == 0 {
+        return Some(c.whole)
+    }
+    if k < 1 || 2 * k > c.spans.length {
+        return None
+    }
+    let at = c.spans[2 * k - 2]
+    let end = c.spans[2 * k - 1]
+    if at < 0 || end < 0 {
+        return None
+    }
+    return Some(Match { at: at, end: end })
+}
+
+/// The group of `c` that `re` names `name`, or `None`.
+export fn named(re: Regex, c: Captures, name: String) -> Option<Match> {
+    let mut k = 0
+    while k < re.names.length {
+        if name != "" && re.names[k] == name {
+            return capture(c, k + 1)
+        }
+        k = k + 1
+    }
+    return None
+}
+
+/// The pattern's own start: operand `a` of the split of the loop `build` puts first.
+fn patternStart(re: Regex) -> Int64 {
+    let p = re.fwd
+    return if p.start >= 0 && p.start < p.a.length { p.a[p.start] } else { 0 - 1 }
+}
+
+/// The group spans of the match `m` of `re`: a Thompson simulation from its start
+/// to its end whose threads carry their spans, in the order a search prefers them.
+/// A thread that matches drops every thread after it.
+fn spansOf(re: Regex, hay: Array<UInt8>, m: Match) -> Array<Int64> {
+    let p = re.fwd
+    let mut none: Array<Int64> = []
+    while none.length < 2 * re.names.length {
+        none.push(0 - 1)
+    }
+    let mut mark: Array<Int64> = []
+    while mark.length < p.op.length {
+        mark.push(0)
+    }
+    let mut gen = 1
+    let mut pcs: Array<Int64> = []
+    let mut spans: Array<Array<Int64>> = []
+    addSpans(p, pcs, spans, mark, gen, patternStart(re), none, m.at)
+    let mut best = joinHoles(none, [])
+    let mut i = m.at
+    while pcs.length > 0 {
+        let mut k = 0
+        while k < pcs.length && p.op[pcs[k]] != opMatch {
+            k = k + 1
+        }
+        if k < pcs.length {
+            best = joinHoles(spans[k], [])
+            while pcs.length > k {
+                pcs.pop()
+                spans.pop()
+            }
+        }
+        if i >= m.end || i >= hay.length {
+            return best
+        }
+        gen = gen + 1
+        let mut nextPcs: Array<Int64> = []
+        let mut nextSpans: Array<Array<Int64>> = []
+        let mut j = 0
+        while j < pcs.length {
+            let t = follow(p, pcs[j], Int64(hay[i]))
+            if t >= 0 {
+                addSpans(p, nextPcs, nextSpans, mark, gen, t, spans[j], i + 1)
+            }
+            j = j + 1
+        }
+        pcs = nextPcs
+        spans = nextSpans
+        i = i + 1
+    }
+    return best
+}
+
+/// Adds `pc` at offset `i` and everything reachable from it without consuming, each
+/// class or match pc with the spans `held` and the saves on its way.
+fn addSpans(p: Program, pcs: modify Array<Int64>, spans: modify Array<Array<Int64>>, mark: modify Array<Int64>, gen: Int64, pc: Int64, held: Array<Int64>, i: Int64) {
+    let mut todo: Array<Int64> = [pc]
+    let mut with: Array<Array<Int64>> = [joinHoles(held, [])]
+    while todo.length > 0 && with.length > 0 {
+        let q = todo[todo.length - 1]
+        let mut sp = joinHoles(with[with.length - 1], [])
+        todo.pop()
+        with.pop()
+        if q < 0 || q >= p.op.length || q >= mark.length || mark[q] == gen {
+            continue
+        }
+        mark[q] = gen
+        if p.op[q] == opSplit {
+            todo.push(p.b[q])
+            with.push(joinHoles(sp, []))
+            todo.push(p.a[q])
+            with.push(sp)
+        } else if p.op[q] == opSave {
+            let slot = p.a[q]
+            if slot >= 0 && slot < sp.length {
+                sp[slot] = i
+            }
+            todo.push(p.b[q])
+            with.push(sp)
+        } else {
+            pcs.push(q)
+            spans.push(sp)
+        }
+    }
 }
 
 test "a literal is found, counted and replaced" {
@@ -1909,6 +2079,62 @@ test "what it refuses, it refuses by name" {
     }
 }
 
+/// `o` as `at..end`, or `none`.
+fn spanText(o: Option<Match>) -> String {
+    return match o {
+        Some(m) => "\{m.at}..\{m.end}",
+        None => "none",
+    }
+}
+
+test "captures give each group's span, by number or by name" {
+    let re = match compile("(?<key>[a-z]+)=(\\d+)(?:;(x))?") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    match captures(re, " ab=12 ", 0) {
+        Some(c) => {
+            assertEq(spanText(capture(c, 0)), "1..6")
+            assertEq(spanText(capture(c, 1)), "1..3")
+            assertEq(spanText(named(re, c, "key")), "1..3")
+            assertEq(spanText(capture(c, 2)), "4..6")
+            assertEq(spanText(capture(c, 3)), "none")
+            assertEq(spanText(capture(c, 4)), "none")
+            assertEq(spanText(named(re, c, "value")), "none")
+        }
+        None => panic("no match"),
+    }
+    match captures(re, "k=1;x", 0) {
+        Some(c) => assertEq(spanText(capture(c, 3)), "4..5"),
+        None => panic("no match"),
+    }
+}
+
+test "a group in a repeat spans its last turn" {
+    let re = match compile("(a|b)+(c){2}") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    match captures(re, "abcc", 0) {
+        Some(c) => {
+            assertEq(spanText(capture(c, 1)), "1..2")
+            assertEq(spanText(capture(c, 2)), "3..4")
+        }
+        None => panic("no match"),
+    }
+    let lazy = match compile("(a+?)(a*)") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    match captures(lazy, "aaa", 0) {
+        Some(c) => {
+            assertEq(spanText(capture(c, 1)), "0..1")
+            assertEq(spanText(capture(c, 2)), "1..3")
+        }
+        None => panic("no match"),
+    }
+}
+
 /// A draw below `n` from the generator state `seed`, which it advances.
 fn draw(seed: modify Int64, n: Int64) -> Int64 {
     seed = (seed * 1103515245 + 12345) % 2147483648
@@ -1971,6 +2197,9 @@ fn backtrackAt(p: Program, pc: Int64, hay: Array<UInt8>, at: Int64) -> Int64 {
             ats.push(i)
             pcs.push(p.a[q])
             ats.push(i)
+        } else if p.op[q] == opSave {
+            pcs.push(p.b[q])
+            ats.push(i)
         } else if i < hay.length && hasByte(p.cls[q], Int64(hay[i])) {
             pcs.push(p.b[q])
             ats.push(i + 1)
@@ -1995,8 +2224,7 @@ test "the two lazy DFAs find the match a backtracking search finds from each off
             hay = hay + pieces[draw(seed, pieces.length)]
         }
         let raw = bytes(hay)
-        // The pattern's own start: operand `a` of the loop's split.
-        let first = re.fwd.a[re.fwd.start]
+        let first = patternStart(re)
         let mut ends: Array<Int64> = []
         let mut i = 0
         while i <= raw.length {
