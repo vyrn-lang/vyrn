@@ -103,7 +103,7 @@ Fix: `reserve` the capacity before the loop.
 73 ⇒
 **⇒ check proved**
 
-- [division check proved x3](URI#L73,26-L73,33) [2](URI#L73,26-L73,33) [3](URI#L73,25-L73,38)
+- [division check proved x2](URI#L73,26-L73,33) [2](URI#L73,26-L73,33)
 
 In a loop.
 
@@ -112,7 +112,7 @@ In a loop.
 73 ⇒
 **⇒ check proved**
 
-- [division check proved x3](URI#L73,26-L73,33) [2](URI#L73,26-L73,33) [3](URI#L73,25-L73,38)
+- [division check proved](URI#L73,25-L73,38)
 
 In a loop.
 
@@ -212,7 +212,7 @@ In a loop.
 97 ⊞
 **⊞ allocates**
 
-- [`String` x3](URI#L97,13-L97,21) [2](URI#L97,12-L97,30) [3](URI#L97,12-L97,30)
+- [`String`](URI#L97,13-L97,21)
 
 [vyrn why --cost](command:vyrn.whyCost)
 
@@ -226,7 +226,7 @@ In a loop.
 97 ⊞
 **⊞ allocates**
 
-- [`String` x3](URI#L97,13-L97,21) [2](URI#L97,12-L97,30) [3](URI#L97,12-L97,30)
+- [`String` x2](URI#L97,12-L97,30) [2](URI#L97,12-L97,30)
 
 [vyrn why --cost](command:vyrn.whyCost)
 
@@ -269,7 +269,7 @@ In a loop.
 116 ⧉
 **⧉ copies**
 
-- [`String` x2: interpolating a `String` copies it](URI#L116,16-L116,35) [2](URI#L116,36-L116,88)
+- [`String`: interpolating a `String` copies it](URI#L116,16-L116,35)
 
 In a loop.
 
@@ -278,7 +278,7 @@ In a loop.
 116 ⧉
 **⧉ copies**
 
-- [`String` x2: interpolating a `String` copies it](URI#L116,16-L116,35) [2](URI#L116,36-L116,88)
+- [`String`: interpolating a `String` copies it](URI#L116,36-L116,88)
 
 In a loop.
 
@@ -350,7 +350,7 @@ In a loop.
 157 ⊞
 **⊞ allocates**
 
-- [`String` x3](URI#L157,16-L157,37) [2](URI#L157,15-L157,47) [3](URI#L157,15-L157,47)
+- [`String`](URI#L157,16-L157,37)
 
 In a loop.
 
@@ -368,7 +368,7 @@ In a loop.
 157 ⊞
 **⊞ allocates**
 
-- [`String` x3](URI#L157,16-L157,37) [2](URI#L157,15-L157,47) [3](URI#L157,15-L157,47)
+- [`String` x2](URI#L157,15-L157,47) [2](URI#L157,15-L157,47)
 
 In a loop.
 

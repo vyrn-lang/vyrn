@@ -12,7 +12,7 @@ use lsp_types::{
     InlayHint, InlayHintLabel, InlayHintTooltip, MarkupContent, MarkupKind, Position, Range,
 };
 use vyrn_frontend::core::Span;
-use vyrn_frontend::{Analysis, CostLine, FnCost};
+use vyrn_frontend::{Analysis, CostItem, CostLine, FnCost};
 use vyrn_lower::lastrun::{self, Found, Sites};
 
 use crate::{char_col_to_utf16, line_of_text};
@@ -173,7 +173,7 @@ fn link(text: &str, uri: &str, r: &Range) -> String {
 /// and a fix where one is plain. A verb [`GLYPHS`] lacks shows its words.
 fn compact(row: &CostLine, uri: &str, src: &str) -> Row {
     let item_ranges: Vec<Vec<Range>> = (row.items.iter())
-        .map(|(_, spans)| spans.iter().filter_map(|s| range(src, s)).collect())
+        .map(|i| i.spans.iter().filter_map(|s| range(src, s)).collect())
         .collect();
     let spans: Vec<Range> = item_ranges.iter().flatten().copied().collect();
     let proof = PROOFS.contains(&row.verb);
@@ -181,15 +181,19 @@ fn compact(row: &CostLine, uri: &str, src: &str) -> Row {
         let (glyph, hover) = (row.label.clone(), row.text.clone());
         return line_row(row.line, glyph, row.count, spans, hover, proof, src);
     };
+    // The item worded for `n` sites, linked to `ranges`: the first on its text, a numbered
+    // link to each further one.
+    let linked = |item: &CostItem, ranges: &[Range], n: usize| match ranges.split_first() {
+        Some((first, rest)) => {
+            let more = (rest.iter().enumerate())
+                .map(|(k, r)| format!(" {}", link(&(k + 2).to_string(), uri, r)));
+            let text = link(&item.text(n), uri, first);
+            format!("\n- {text}{}", more.collect::<String>())
+        }
+        None => format!("\n- {}", item.text(n)),
+    };
     let items: Vec<String> = (row.items.iter().zip(&item_ranges))
-        .map(|((item, _), ranges)| match ranges.split_first() {
-            Some((first, rest)) => {
-                let more = (rest.iter().enumerate())
-                    .map(|(k, r)| format!(" {}", link(&(k + 2).to_string(), uri, r)));
-                format!("\n- {}{}", link(item, uri, first), more.collect::<String>())
-            }
-            None => format!("\n- {item}"),
-        })
+        .map(|(item, ranges)| linked(item, ranges, item.spans.len()))
         .collect();
     let mut tail = match row.depth {
         0 => String::new(),
@@ -213,9 +217,10 @@ fn compact(row: &CostLine, uri: &str, src: &str) -> Row {
     }
     let anchors = (ends.into_iter())
         .map(|at| {
-            let here = (items.iter().zip(&item_ranges))
-                .filter(|(_, ranges)| ranges.iter().any(|r| r.end == at))
-                .map(|(item, _)| item.as_str());
+            let here = (row.items.iter().zip(&item_ranges)).filter_map(|(item, ranges)| {
+                let here: Vec<Range> = ranges.iter().filter(|r| r.end == at).copied().collect();
+                (!here.is_empty()).then(|| linked(item, &here, here.len()))
+            });
             Anchor {
                 at,
                 glyph: glyph.to_string(),

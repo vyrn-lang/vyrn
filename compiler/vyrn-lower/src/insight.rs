@@ -15,7 +15,7 @@ use vyrn_frontend::core::{
     rows, Body, BorrowKind, Callee, Copied, Ctor, Lit, Made, Name, NameInfo, Op, Rhs, Span, St, Val,
 };
 
-use vyrn_frontend::symbols::{CostLine, FnCost};
+use vyrn_frontend::symbols::{CostItem, CostLine, FnCost};
 
 use crate::elide::Proof;
 use crate::facts::{Premise, Src};
@@ -507,6 +507,14 @@ impl CostRow {
     /// Each noun of the row with its count and reason, code in backticks: `` `String` x2 ``,
     /// `` `push(..)` ``, `index check: the reason`.
     pub fn items(&self, verb: Verb) -> Vec<String> {
+        (self.cost_items(verb).iter())
+            .map(|i| i.text(i.spans.len()))
+            .collect()
+    }
+
+    /// Each noun of the row in the verb's words, its reason after the verb's separator, and
+    /// its spans, so an editor can word an item for some of its sites.
+    pub fn cost_items(&self, verb: Verb) -> Vec<CostItem> {
         let (say, sep): (fn(&str) -> String, &str) = match verb {
             Verb::Copies => (|n| format!("`{n}`"), ": "),
             Verb::Allocates => (|n| format!("`{n}`"), ""),
@@ -518,10 +526,14 @@ impl CostRow {
             Verb::Proves => (|n| format!("{n} check proved"), ""),
             Verb::Erases => (|n| format!("`{n}(..)` erased"), ""),
         };
-        (self.nouns(say).into_iter().zip(&self.whats))
-            .map(|(noun, (_, why, _))| match why.is_empty() {
-                true => noun,
-                false => format!("{noun}{sep}{why}"),
+        (self.whats.iter())
+            .map(|(noun, why, at)| CostItem {
+                noun: say(noun),
+                reason: match why.is_empty() {
+                    true => String::new(),
+                    false => format!("{sep}{why}"),
+                },
+                spans: at.clone(),
             })
             .collect()
     }
@@ -625,9 +637,7 @@ pub fn fn_costs(program: &Program, world: &World) -> Vec<FnCost> {
                 depth: row.depth,
                 label: row.label(verb),
                 text: row.text(verb),
-                items: (row.items(verb).into_iter())
-                    .zip(row.whats.iter().map(|w| w.2.clone()))
-                    .collect(),
+                items: row.cost_items(verb),
                 count: row.count(),
             })
             .collect()
