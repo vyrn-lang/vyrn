@@ -1489,11 +1489,76 @@ fn compile_uncached(pattern: &str) -> Result<Dfa, Refusal> {
     table.resize(sets.len() * 256, 0);
     accepting.resize(sets.len(), false);
 
-    Ok(Dfa {
+    let dfa = Dfa {
         start,
         accepting,
         table,
-    })
+    };
+    Ok(minimal(&dfa, &firsts))
+}
+
+/// The minimal DFA of `dfa`'s language, its states numbered breadth-first from the
+/// start in byte order. A minimal DFA is unique up to numbering, so the table depends
+/// on the language alone. `firsts` holds the first byte of each run of bytes that
+/// every state steps alike, ascending.
+///
+/// ponytail: Moore's refinement, O(rounds x states x runs) with at most one round per
+/// state; Hopcroft's O(runs x states x log states) if a pattern ever needs it.
+fn minimal(dfa: &Dfa, firsts: &[u8]) -> Dfa {
+    use std::collections::HashMap;
+    let n = dfa.num_states();
+    let step = |s: usize, b: u8| dfa.table[s * 256 + usize::from(b)] as usize;
+    // Each round splits a block or ends: the count of blocks rises to at most `n`.
+    let mut block: Vec<u32> = dfa.accepting.iter().map(|&a| u32::from(a)).collect();
+    let mut count = 0;
+    loop {
+        let mut ids: HashMap<Vec<u32>, u32> = HashMap::new();
+        let next: Vec<u32> = (0..n)
+            .map(|s| {
+                let key: Vec<u32> = std::iter::once(block[s])
+                    .chain(firsts.iter().map(|&b| block[step(s, b)]))
+                    .collect();
+                let id = ids.len() as u32;
+                *ids.entry(key).or_insert(id)
+            })
+            .collect();
+        block = next;
+        if ids.len() == count {
+            break;
+        }
+        count = ids.len();
+    }
+    // `rep[k]` is a state of block `k`; `order` lists the blocks as the walk meets them.
+    let mut rep = vec![usize::MAX; count];
+    for s in (0..n).rev() {
+        rep[block[s] as usize] = s;
+    }
+    let mut number = vec![u32::MAX; count];
+    let mut order = vec![block[dfa.start as usize]];
+    number[order[0] as usize] = 0;
+    let mut table = Vec::new();
+    let mut k = 0;
+    while k < order.len() {
+        let s = rep[order[k] as usize];
+        for b in 0..=255u8 {
+            let t = block[step(s, b)] as usize;
+            if number[t] == u32::MAX {
+                number[t] = order.len() as u32;
+                order.push(t as u32);
+            }
+            table.push(number[t]);
+        }
+        k += 1;
+    }
+    let accepting = order
+        .iter()
+        .map(|&k| dfa.accepting[rep[k as usize]])
+        .collect();
+    Dfa {
+        start: 0,
+        accepting,
+        table,
+    }
 }
 
 #[cfg(test)]
@@ -1874,6 +1939,17 @@ mod tests {
         // Real-world sized DFAs still compile.
         assert!(compile("[0-9a-f]{40}").is_ok());
         assert!(compile("nav\\.(home|about|settings)\\.label").is_ok());
+    }
+
+    #[test]
+    fn a_dfa_is_minimal_and_its_table_depends_on_the_language_alone() {
+        let (a, b) = (dfa("(a|b)*a|(a|b)*b"), dfa("[ab]+"));
+        assert_eq!(
+            (a.start, &a.accepting, &a.table),
+            (b.start, &b.accepting, &b.table)
+        );
+        // The start, then the dead state byte 0 reaches, then the accepting loop.
+        assert_eq!(dfa("(aa*|a)+").accepting, [false, false, true]);
     }
 
     #[test]
