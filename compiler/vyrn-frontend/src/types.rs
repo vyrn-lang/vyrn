@@ -1233,6 +1233,11 @@ pub fn written_params(ty: &Type) -> Option<Type> {
 /// ([`crate::ast::Key`]).
 pub trait Decls {
     fn decl(&self, name: &str) -> Option<&TypeDecl>;
+
+    /// Notes that [`assignable`] or [`interchangeable`] took a record of type
+    /// `from` where a record of type `to` is expected, by width or by an equal
+    /// field set. The checker records each pair ([`record_node`]).
+    fn coerced(&self, _from: &Type, _to: &Type) {}
 }
 
 impl Decls for HashMap<String, TypeDecl> {
@@ -1244,6 +1249,25 @@ impl Decls for HashMap<String, TypeDecl> {
 impl<T: Decls + ?Sized> Decls for &T {
     fn decl(&self, name: &str) -> Option<&TypeDecl> {
         (**self).decl(name)
+    }
+
+    fn coerced(&self, from: &Type, to: &Type) {
+        (**self).coerced(from, to)
+    }
+}
+
+/// The node record type `ty` is in the coercion graph [`Decls::coerced`]
+/// feeds: a declaration by its name, an anonymous record by its field names,
+/// sorted. `None` for a type that names no record.
+pub fn record_node(ty: &Type) -> Option<Cow<'_, str>> {
+    match ty {
+        Type::Named(n) | Type::App(n, _) => Some(Cow::Borrowed(n)),
+        Type::Record(fs) => {
+            let mut names: Vec<&str> = fs.iter().map(|f| f.name.as_str()).collect();
+            names.sort_unstable();
+            Some(Cow::Owned(format!("{{{}}}", names.join(","))))
+        }
+        _ => None,
     }
 }
 
@@ -1553,13 +1577,17 @@ fn assignable_d(from: &Type, to: &Type, width: bool, depth: usize, types: &dyn D
     // Width subtyping: every field `to` needs, with an assignable type, and
     // no other field below the top.
     if let (Type::Record(ff), Type::Record(tf)) = (&resolve(from, types), &resolve(to, types)) {
-        return (width || ff.len() == tf.len())
+        let fits = (width || ff.len() == tf.len())
             && tf.iter().all(|need| {
                 ff.iter().any(|have| {
                     have.name == need.name
                         && assignable_d(&have.ty, &need.ty, false, depth + 1, types)
                 })
             });
+        if fits {
+            types.coerced(from, to);
+        }
+        return fits;
     }
     false
 }
