@@ -1,0 +1,13 @@
+type Pair = String where value =~ "ab|cd"
+type Word = String where value =~ "^(?!-)[a-z-]+(?<!-)$"
+
+fn word(p: Pair) -> Word {
+    return p
+}
+
+fn main() -> Int64 {
+    let p: Pair = "ab"
+    let w: Word = "x-\{p}"
+    let bad: Word = "\{p}-"
+    return 0
+}

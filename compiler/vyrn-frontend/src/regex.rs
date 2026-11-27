@@ -1270,6 +1270,11 @@ impl Dfa {
         seen
     }
 
+    /// Returns whether the language is empty: no accepting state is reachable.
+    pub fn is_empty(&self) -> bool {
+        !self.can_reach_accept()[self.start as usize]
+    }
+
     /// Marks the states that can reach an accepting state.
     fn can_reach_accept(&self) -> Vec<bool> {
         let n = self.num_states();

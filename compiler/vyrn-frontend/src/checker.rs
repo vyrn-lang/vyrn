@@ -2922,7 +2922,12 @@ impl<'a> Checker<'a> {
             t,
             "refinement",
             std::iter::once(("value".to_string(), t.base.clone())),
-        )
+        )?;
+        if crate::finite::matches_nothing(t) {
+            let name = DeclName(&t.name);
+            return Err(cerr!(t.line, EmptyRefinement, name));
+        }
+        Ok(())
     }
 
     /// Checks annotation `a` on `t`: it sits on a member `t` declares, and it

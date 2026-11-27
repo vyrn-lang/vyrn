@@ -1,0 +1,1 @@
+an_interpolation_into_a_lookaround_type_has_a_witness.vyrn:11:0: "ab-" (a possible value of this interpolation) does not satisfy `Word` (predicate `where value =~ "^(?!-)[a-z-]+(?<!-)$"` is false)
