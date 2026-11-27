@@ -5750,6 +5750,14 @@ impl<'a> Checker<'a> {
             };
             return Ok(Type::Array(Box::new(elem)));
         }
+        // An interpolation's join (`parser::template`): every piece is a
+        // `String`, at any count.
+        if name == "@concat" {
+            for a in args {
+                self.expr(a, scope, Some(&Type::Str), fn_ret)?;
+            }
+            return Ok(Type::Str);
+        }
         // `x.copy()`: a deep copy the caller owns, by `impl Copy` where the type
         // declares one and structurally otherwise. A scalar is accepted, so one
         // generic `x.copy()` serves every instance.

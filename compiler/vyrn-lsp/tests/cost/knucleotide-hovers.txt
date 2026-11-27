@@ -191,15 +191,6 @@ In a loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-95 ⧉
-**⧉ copies 1**
-
-- `String`: copied into the template
-
-In a loop.
-
-[vyrn why --cost](command:vyrn.whyCost)
-
 95 ⊞
 **⊞ allocates 1**
 
@@ -216,17 +207,10 @@ In a loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-97 ⧉
-**⧉ copies 1**
+97 ⊞
+**⊞ allocates 1**
 
-- `String`: copied into the template
-
-[vyrn why --cost](command:vyrn.whyCost)
-
-97 ⊞²
-**⊞ allocates 2**
-
-- 2× `String`: joining Strings
+- `String`: joining Strings
 
 [vyrn why --cost](command:vyrn.whyCost)
 
@@ -266,28 +250,10 @@ In a loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-116 ⧉
-**⧉ copies 1**
+116 ⊞
+**⊞ allocates 1**
 
-- `String`: copied into the template
-
-In a loop.
-
-[vyrn why --cost](command:vyrn.whyCost)
-
-116 ⧉
-**⧉ copies 1**
-
-- `String`: copied into the template
-
-In a loop.
-
-[vyrn why --cost](command:vyrn.whyCost)
-
-116 ⊞²
-**⊞ allocates 2**
-
-- 2× `String`: joining Strings
+- `String`: joining Strings
 
 In a loop.
 
@@ -356,19 +322,10 @@ In a loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-157 ⧉
-**⧉ copies 1**
+157 ⊞
+**⊞ allocates 1**
 
-- `String`: copied into the template
-
-In a loop.
-
-[vyrn why --cost](command:vyrn.whyCost)
-
-157 ⊞²
-**⊞ allocates 2**
-
-- 2× `String`: joining Strings
+- `String`: joining Strings
 
 In a loop.
 

@@ -1103,8 +1103,9 @@ fn table() -> Vec<Builtin> {
         b("@strAppend")
             .spec(Spec::Rebuilds)
             .resizes(ShapeMap::Extends),
-        // String `a + b` and interpolation: copies both and allocates.
-        b("@concat").fresh().sig(row(
+        // String `a + b` keys its operands' releases at this row, and an
+        // interpolation each of its pieces at `a`.
+        b("@concat").fresh().spec(Spec::Joins).sig(row(
             "@concat",
             &[],
             &[("a", Read, Str), ("b", Read, Str)],
@@ -1502,6 +1503,9 @@ pub enum Spec {
     /// `taskId`, `taskTake`, `taskFree` and `taskLeave`: the block of a task
     /// `fork` started.
     Tasks,
+    /// An interpolation's join: two or more operands at `String`, read and
+    /// copied in order into one fresh `String`, allocated once.
+    Joins,
 }
 
 /// Returns the seeded row for the name a call site carries.

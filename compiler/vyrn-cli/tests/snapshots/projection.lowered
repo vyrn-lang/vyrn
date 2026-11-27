@@ -28,139 +28,107 @@ fn main()
     proved array-index w!.data[@t3]  (line 42 #0)
     let @borrow = read w!.data[@t3]
     let @t4! = builtin @str(read @borrow)
-    let @t5! = prim add(lit "window: ", @t4!)
+    let @t5 = read w!.start
+    let @t6 = prim add(@t5, lit 1)
+    proved array-index w!.data[@t6]  (line 42 #1)
+    let @borrow = read w!.data[@t6]
+    let @t7! = builtin @str(read @borrow)
+    let @t8 = read w!.start
+    let @t9 = prim add(@t8, lit 3)
+    proved array-index w!.data[@t9]  (line 42 #2)
+    let @borrow = read w!.data[@t9]
+    let @t10! = builtin @str(read @borrow)
+    let @t11! = builtin @concat(read lit "window: ", read @t4!, read lit " ", read @t7!, read lit " ", read @t10!)
     drop @t4!
-    let @t6! = prim add(@t5!, lit " ")
-    drop @t5!
-    let @t7 = read w!.start
-    let @t8 = prim add(@t7, lit 1)
-    proved array-index w!.data[@t8]  (line 42 #1)
-    let @borrow = read w!.data[@t8]
-    let @t9! = builtin @str(read @borrow)
-    let @t10! = prim add(@t6!, @t9!)
-    drop @t6!
-    drop @t9!
-    let @t11! = prim add(@t10!, lit " ")
+    drop @t7!
     drop @t10!
-    let @t12 = read w!.start
-    let @t13 = prim add(@t12, lit 3)
-    proved array-index w!.data[@t13]  (line 42 #2)
-    let @borrow = read w!.data[@t13]
-    let @t14! = builtin @str(read @borrow)
-    let @t15! = prim add(@t11!, @t14!)
+    do builtin print(read @t11!)
     drop @t11!
-    drop @t14!
-    do builtin print(read @t15!)
-    drop @t15!
-    let @t16! = fn build(read lit 9)
-    let s! = make Strided {data, stride}(@t16!, lit 3)
-    let @t17 = read s!.stride
-    let @b32_22.k = prim mul(lit 0, @t17)
+    let @t12! = fn build(read lit 9)
+    let s! = make Strided {data, stride}(@t12!, lit 3)
+    let @t13 = read s!.stride
+    let @b32_22.k = prim mul(lit 0, @t13)
     proved array-index s!.data[@b32_22.k]  (line 45 #0)
     let @borrow = read s!.data[@b32_22.k]
-    let @t18! = builtin @str(read @borrow)
-    let @t19! = prim add(lit "strided: ", @t18!)
-    drop @t18!
-    let @t20! = prim add(@t19!, lit " ")
-    drop @t19!
-    let @t21 = read s!.stride
-    let @b32_31.k = prim mul(lit 1, @t21)
+    let @t14! = builtin @str(read @borrow)
+    let @t15 = read s!.stride
+    let @b32_31.k = prim mul(lit 1, @t15)
     proved array-index s!.data[@b32_31.k]  (line 45 #1)
     let @borrow = read s!.data[@b32_31.k]
-    let @t22! = builtin @str(read @borrow)
-    let @t23! = prim add(@t20!, @t22!)
-    drop @t20!
-    drop @t22!
-    let @t24! = prim add(@t23!, lit " ")
-    drop @t23!
-    let @t25 = read s!.stride
-    let @b32_40.k = prim mul(lit 2, @t25)
+    let @t16! = builtin @str(read @borrow)
+    let @t17 = read s!.stride
+    let @b32_40.k = prim mul(lit 2, @t17)
     proved array-index s!.data[@b32_40.k]  (line 45 #2)
     let @borrow = read s!.data[@b32_40.k]
-    let @t26! = builtin @str(read @borrow)
-    let @t27! = prim add(@t24!, @t26!)
-    drop @t24!
-    drop @t26!
-    do builtin print(read @t27!)
-    drop @t27!
-    let @t28! = fn build(read lit 3)
-    let c! = make Clamped {data}(@t28!)
+    let @t18! = builtin @str(read @borrow)
+    let @t19! = builtin @concat(read lit "strided: ", read @t14!, read lit " ", read @t16!, read lit " ", read @t18!)
+    drop @t14!
+    drop @t16!
+    drop @t18!
+    do builtin print(read @t19!)
+    drop @t19!
+    let @t20! = fn build(read lit 3)
+    let c! = make Clamped {data}(@t20!)
     let @p32_49.i = lit 0
     let @b32_49.n = read c!.data.length
-    let @t30 = prim lt(@p32_49.i, @b32_49.n)
-    if @t30
-      @t29 = @p32_49.i  (Nothing)
+    let @t22 = prim lt(@p32_49.i, @b32_49.n)
+    if @t22
+      @t21 = @p32_49.i  (Nothing)
     else
-      let @t31 = prim sub(@b32_49.n, lit 1)
-      @t29 = @t31  (Nothing)
-    let @b32_49.j = @t29
+      let @t23 = prim sub(@b32_49.n, lit 1)
+      @t21 = @t23  (Nothing)
+    let @b32_49.j = @t21
     proved array-index c!.data[@b32_49.j]  (line 48 #0)
     let @borrow = read c!.data[@b32_49.j]
-    let @t32! = builtin @str(read @borrow)
-    let @t33! = prim add(lit "clamped: ", @t32!)
-    drop @t32!
-    let @t34! = prim add(@t33!, lit " ")
-    drop @t33!
+    let @t24! = builtin @str(read @borrow)
     let @p32_68.i = lit 2
     let @b32_68.n = read c!.data.length
-    let @t36 = prim lt(@p32_68.i, @b32_68.n)
-    if @t36
-      @t35 = @p32_68.i  (Nothing)
+    let @t26 = prim lt(@p32_68.i, @b32_68.n)
+    if @t26
+      @t25 = @p32_68.i  (Nothing)
     else
-      let @t37 = prim sub(@b32_68.n, lit 1)
-      @t35 = @t37  (Nothing)
-    let @b32_68.j = @t35
+      let @t27 = prim sub(@b32_68.n, lit 1)
+      @t25 = @t27  (Nothing)
+    let @b32_68.j = @t25
     proved array-index c!.data[@b32_68.j]  (line 48 #1)
     let @borrow = read c!.data[@b32_68.j]
-    let @t38! = builtin @str(read @borrow)
-    let @t39! = prim add(@t34!, @t38!)
-    drop @t34!
-    drop @t38!
-    let @t40! = prim add(@t39!, lit " ")
-    drop @t39!
+    let @t28! = builtin @str(read @borrow)
     let @p32_87.i = lit 9
     let @b32_87.n = read c!.data.length
-    let @t42 = prim lt(@p32_87.i, @b32_87.n)
-    if @t42
-      @t41 = @p32_87.i  (Nothing)
+    let @t30 = prim lt(@p32_87.i, @b32_87.n)
+    if @t30
+      @t29 = @p32_87.i  (Nothing)
     else
-      let @t43 = prim sub(@b32_87.n, lit 1)
-      @t41 = @t43  (Nothing)
-    let @b32_87.j = @t41
+      let @t31 = prim sub(@b32_87.n, lit 1)
+      @t29 = @t31  (Nothing)
+    let @b32_87.j = @t29
     proved array-index c!.data[@b32_87.j]  (line 48 #2)
     let @borrow = read c!.data[@b32_87.j]
-    let @t44! = builtin @str(read @borrow)
-    let @t45! = prim add(@t40!, @t44!)
-    drop @t40!
-    drop @t44!
-    do builtin print(read @t45!)
-    drop @t45!
+    let @t32! = builtin @str(read @borrow)
+    let @t33! = builtin @concat(read lit "clamped: ", read @t24!, read lit " ", read @t28!, read lit " ", read @t32!)
+    drop @t24!
+    drop @t28!
+    drop @t32!
+    do builtin print(read @t33!)
+    drop @t33!
     let a! = fn build(read lit 4)
     proved array-index a![lit 1]  (line 51 #0)
     a![lit 1] = lit 99  (Nothing)
     proved array-index a![lit 0]  (line 52 #0)
     let @borrow = read a![lit 0]
-    let @t46! = builtin @str(read @borrow)
-    let @t47! = prim add(lit "array: ", @t46!)
-    drop @t46!
-    let @t48! = prim add(@t47!, lit " ")
-    drop @t47!
+    let @t34! = builtin @str(read @borrow)
     proved array-index a![lit 1]  (line 52 #1)
     let @borrow = read a![lit 1]
-    let @t49! = builtin @str(read @borrow)
-    let @t50! = prim add(@t48!, @t49!)
-    drop @t48!
-    drop @t49!
-    let @t51! = prim add(@t50!, lit " ")
-    drop @t50!
+    let @t35! = builtin @str(read @borrow)
     proved array-index a![lit 3]  (line 52 #2)
     let @borrow = read a![lit 3]
-    let @t52! = builtin @str(read @borrow)
-    let @t53! = prim add(@t51!, @t52!)
-    drop @t51!
-    drop @t52!
-    do builtin print(read @t53!)
-    drop @t53!
+    let @t36! = builtin @str(read @borrow)
+    let @t37! = builtin @concat(read lit "array: ", read @t34!, read lit " ", read @t35!, read lit " ", read @t36!)
+    drop @t34!
+    drop @t35!
+    drop @t36!
+    do builtin print(read @t37!)
+    drop @t37!
     drop a! minus []
     drop c! minus []
     drop s! minus []

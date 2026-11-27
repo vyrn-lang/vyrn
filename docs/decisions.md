@@ -66,6 +66,7 @@ pull request.
 - `'c'` is one ASCII byte of type `UInt8`. There is no `Char` type, and `'ab'` is an error.
 - A NUL byte is refused in a `String`, and UTF-8 validity is checked when bytes become a `String`.
 - Interpolation is `\{expr}` inside an ordinary string, so `{` and `}` stay literal for LaTeX, SQL and JSON.
+- An interpolation with two or more pieces allocates its result once (decided on 2026-11-27): one `@concat` row reads every piece, sums the lengths and copies each piece in. A `String` hole is read, not copied; any other hole still renders into a String of its own.
 - A tagged template `tag"..."` calls `tag(parts, values)`. The parts are compile-time literals and `Value` is the closed enum `enum { IntVal, StrVal, BoolVal }`, so a value can never become structure.
 - A user type in a template hole renders through its `impl Show` and is boxed as `StrVal`. `Value` stays closed, because without existentials there is nowhere to put a wider element.
 

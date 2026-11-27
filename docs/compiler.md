@@ -103,7 +103,7 @@ declaration reads differently. The builder performs the pure syntax desugars:
 `??` into a `match` over `Pattern::Success` and `Pattern::Failure`, a refutable
 `let` into a `match` with `Pattern::Other`, `if let` and `while let` into a
 statement `match` with `Pattern::Other` (`Expr::as_if_let`), interpolation into
-a `@concat` chain. Source cannot spell these patterns or `@` names.
+one `@concat` of its pieces. Source cannot spell these patterns or `@` names.
 
 `loader::load_with_origins` builds one `ast::Program` from a root file. All
 I/O goes through a `ModuleResolver`, so the editor serves unsaved buffers and

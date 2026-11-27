@@ -3999,6 +3999,44 @@ impl<'a> Builder<'a> {
             && *vyrn_frontend::types::resolved(&info.ty, self.proto.types()) == Type::Str;
     }
 
+    /// An interpolation `e`: one `@concat` row ([`Spec::Joins`]) that reads
+    /// its pieces in written order. A hole that renders a `String` is that
+    /// String, read and not copied. Every piece keys its release at
+    /// `(@concat, 0)`, as the left operand of a String `+` does.
+    fn join(&mut self, e: &'a Expr, pieces: &'a [Expr], out: &mut Vec<St>) -> Result<Rhs, Gap> {
+        self.frame.drain += 1;
+        let mut args = Vec::with_capacity(pieces.len());
+        for p in pieces {
+            let p = match p {
+                Expr::Call { name, args, .. } if name == "@str" => match args.as_slice() {
+                    [s] if self.ty_of(s).is_ok_and(|t| {
+                        *vyrn_frontend::types::resolved(&t, self.proto.types()) == Type::Str
+                    }) =>
+                    {
+                        s
+                    }
+                    _ => p,
+                },
+                _ => p,
+            };
+            args.push((
+                Arg::Val(self.read_arg(p, out, "@concat", 0)?),
+                Capability::Read,
+            ));
+        }
+        self.frame.drain -= 1;
+        Ok(Rhs::Call {
+            callee: "@concat".into(),
+            args,
+            write_back: false,
+            kind: Callee::Builtin,
+            ret: self.produced(e),
+            solved: Vec::new(),
+            targets: Vec::new(),
+            awaits: None,
+        })
+    }
+
     /// `s = s + a + b` on an accumulator: one `@strAppend` row that reads `s`
     /// and each part in written order; the store after it puts the result
     /// back into `s`. The parts' temporaries stay queued until the caller has
@@ -6515,6 +6553,7 @@ impl<'a> Builder<'a> {
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit(Lit::Opaque(Opaque::Trapped))))
             }
+            Expr::Call { name, args, .. } if name == "@concat" => self.join(e, args, out),
             // `xs[i]` of a heapless element, a String's byte and a map entry
             // are reads, not calls.
             Expr::Call {
@@ -7526,15 +7565,6 @@ impl<'a> Builder<'a> {
             vs.as_slice(),
         ) {
             return Ok(Rhs::Prim(Op::Conv(to), vec![v.clone()], ret));
-        }
-        // `@concat(a, b)` is the String `+` the interpolation spine spells as
-        // a call, so the row is the operator's, over the same arguments.
-        if let ("@concat", [(Arg::Val(a), _), (Arg::Val(b), _)]) = (name, vs.as_slice()) {
-            return Ok(Rhs::Prim(
-                Op::Bin(BinOp::Add),
-                vec![a.clone(), b.clone()],
-                ret,
-            ));
         }
         // A method is a call after dispatch, and so is `x.copy()` of a type
         // with `impl Copy`.
