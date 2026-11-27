@@ -224,11 +224,10 @@ fn compact(row: &CostLine, src: &str) -> Row {
     }
 }
 
-/// The facts of one line that one expression holds, drawn as one hint after it, or at the
-/// line's end for facts no expression spells. `range` is that expression's.
+/// The facts of one line whose expressions end at one position, drawn as one hint there, or at
+/// the line's end for facts no expression spells.
 pub struct Group {
     pub at: Position,
-    pub range: Option<Range>,
     /// Each verb's glyph with the count of its facts here in superscript.
     pub label: String,
     /// Per verb a bold title with its count and a line per noun, then the loops around them
@@ -237,28 +236,22 @@ pub struct Group {
     pub proof: bool,
 }
 
-/// The groups of `rows`, line by line. Each fact joins the outermost fact expression of its
-/// line that holds it, so a template with its holes, or a call with its arguments, is one
-/// hint; facts no expression spells, and rows with no facts, join the line's end.
+/// The groups of `rows`, line by line: one after each expression a fact is about, where the
+/// facts whose expressions end there share it, and one at the line's end for facts no
+/// expression spells and rows with no facts.
 pub fn groups(rows: &[Row], src: &str) -> Vec<Group> {
     let key = |p: Position| (p.line, p.character);
-    let holds = |o: &Range, r: &Range| key(o.start) <= key(r.start) && key(r.end) <= key(o.end);
     let mut out = Vec::new();
     for line in rows.chunk_by(|a, b| a.line == b.line) {
-        let all: Vec<Range> = line.iter().flat_map(|r| r.spans.iter().copied()).collect();
-        let mut outer: Vec<Range> = (all.iter())
-            .filter(|r| !all.iter().any(|o| o != *r && holds(o, r)))
-            .copied()
+        let mut ends: Vec<Position> = line
+            .iter()
+            .flat_map(|r| r.spans.iter().map(|s| s.end))
             .collect();
-        outer.sort_by_key(|r| (key(r.start), key(r.end)));
-        outer.dedup();
-        let places = outer.into_iter().map(Some).chain([None]);
+        ends.sort_by_key(|p| key(*p));
+        ends.dedup();
+        let places = ends.into_iter().map(Some).chain([None]);
         for place in places {
-            let here = |r: &Option<Range>| match (r, place) {
-                (Some(r), Some(p)) => holds(&p, r),
-                (None, None) => true,
-                _ => false,
-            };
+            let here = |r: &Option<Range>| r.map(|r| r.end) == place;
             let (mut label, mut parts, mut proof) = (String::new(), Vec::new(), false);
             let (mut depth, mut fixes) = (0, Vec::new());
             for row in line {
@@ -292,8 +285,7 @@ pub fn groups(rows: &[Row], src: &str) -> Vec<Group> {
                 continue;
             }
             out.push(Group {
-                at: place.map_or_else(|| line_end(src, line[0].line), |p| p.end),
-                range: place,
+                at: place.unwrap_or_else(|| line_end(src, line[0].line)),
                 label,
                 hover: format!("{}{}", parts.join("\n\n"), tail(depth, &fixes)),
                 proof,

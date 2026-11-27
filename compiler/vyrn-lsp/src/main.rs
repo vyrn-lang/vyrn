@@ -1033,8 +1033,9 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     })
 }
 
-/// The cost group whose expression holds `pos` in the Vyrn document `uri` ([`cost::groups`]):
-/// its hover, the same as its hint's, and that expression's range. `None` without cost hints.
+/// The cost hover of the innermost fact expression that holds `pos` in the Vyrn document
+/// `uri`: the hover of the hint after it ([`cost::groups`]), and that expression's range.
+/// `None` without cost hints.
 fn cost_hover(server: &Server, uri: &Url, text: &str, pos: Position) -> Option<(String, Range)> {
     if !is_vyrn_uri(uri) || !cost_hints() {
         return None;
@@ -1044,12 +1045,18 @@ fn cost_hover(server: &Server, uri: &Url, text: &str, pos: Position) -> Option<(
     let path = uri_path(uri);
     let rows = cost::rows(analysis, path.as_deref(), text, line, line);
     let key = |p: Position| (p.line, p.character);
-    (cost::groups(&rows, text).into_iter()).find_map(|g| {
-        let r = g
-            .range
-            .filter(|r| key(r.start) <= key(pos) && key(pos) < key(r.end))?;
-        Some((format!("{}\n\n{}", g.hover, cost::WHY_COST), r))
-    })
+    // A span inside another starts no earlier and ends no later, so it is the shorter.
+    let width = |r: &Range| {
+        (
+            r.end.line - r.start.line,
+            r.end.character.abs_diff(r.start.character),
+        )
+    };
+    let r = (rows.iter().flat_map(|row| row.spans.iter().copied()))
+        .filter(|r| key(r.start) <= key(pos) && key(pos) < key(r.end))
+        .min_by_key(width)?;
+    let g = (cost::groups(&rows, text).into_iter()).find(|g| g.at == r.end)?;
+    Some((format!("{}\n\n{}", g.hover, cost::WHY_COST), r))
 }
 
 fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoDefinitionResponse> {

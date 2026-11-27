@@ -578,17 +578,17 @@ blocks of the last run. The proof glyph's hover is resolved on demand
 proofs traced (`vyrn_lower::JUDGE_PROOFS`) and adds the proofs of the line as
 `vyrn why --proofs` prints them. Measured on 2026-11-26, the CLI's `why
 --proofs` takes 297 ms on `site/export.vyrn` against 173 ms for `check`, so a
-hover costs about one analysis and an edit nothing. Each fact joins the
-outermost costly expression of its line that holds it (`cost::groups`), so a
-template with its holes, or a call with its arguments, is one hint after that
-expression; facts no expression spells stand at the line's end. The hint's
+hover costs about one analysis and an edit nothing. A hint stands after
+each expression a fact is about, shared by the facts whose expressions end
+there (`cost::groups`); facts no expression spells stand at the line's end. The hint's
 label holds each verb's glyph with its count there. Its hover holds per verb a
 bold title with the count and one line per noun and reason, with the count
 where it is more than one (`3x String: joining Strings`), then the loops around
 them and the fixes once (`reserve` before a loop that grows), and one link that
 runs `vyrn why --cost` on the file. A hover inside a costly expression adds,
-after the name's own hover, the same hover as the expression's hint, and its
-range is that expression, so the client highlights it. In the `full` style a row is a few plain words, such as `copies String, allocates String x3`
+after the name's own hover, the hover of the hint after the innermost costly
+expression that holds the position, and its range is that expression, so the
+client highlights it. In the `full` style a row is a few plain words, such as `copies String, allocates String x3`
 or `index checked`, and the tooltip holds each row of `vyrn why --cost` in
 Markdown, with the full reason and the loops around it.
 

@@ -14,14 +14,19 @@ In a loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-38 ⊞↘
-**⊞ allocates 1**
-
-- `Array<UInt8>`
-
+38 ↘
 **↘ enters an allocating function 1**
 
 - `toUpper(..)` from std/strings
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+38 ⊞
+**⊞ allocates 1**
+
+- `Array<UInt8>`
 
 In a loop.
 
@@ -95,18 +100,37 @@ Fix: `reserve` the capacity before the loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-73 ↗?⇒³
-**↗ may grow 1**
+73 ⇒²
+**⇒ check proved 2**
 
-- `push(..)`
+- 2× division check proved
 
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+73 ⇒
+**⇒ check proved 1**
+
+- division check proved
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+73 ?
 **? check kept 1**
 
 - index check: it needs the value of line 73 >= 0, and that value is the result of `modulusOf(..)` at line 71, whose signature does not state it
 
-**⇒ check proved 3**
+In a loop.
 
-- 3× division check proved
+[vyrn why --cost](command:vyrn.whyCost)
+
+73 ↗
+**↗ may grow 1**
+
+- `push(..)`
 
 In a loop.
 
@@ -153,22 +177,30 @@ In a loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-93 ⊞⇒
-**⊞ allocates 1**
-
-- `String`: rendering a value as text
-
+93 ⇒
 **⇒ check proved 1**
 
 - division check proved
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-95 ⧉⊞
+93 ⊞
+**⊞ allocates 1**
+
+- `String`: rendering a value as text
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+95 ⧉
 **⧉ copies 1**
 
 - `String`: copied into the template
 
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+95 ⊞
 **⊞ allocates 1**
 
 - `String`: joining Strings
@@ -177,14 +209,23 @@ In a loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-97 ⧉⊞³
+97 ⊞
+**⊞ allocates 1**
+
+- `String`: rendering a value as text
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+97 ⧉
 **⧉ copies 1**
 
 - `String`: copied into the template
 
-**⊞ allocates 3**
+[vyrn why --cost](command:vyrn.whyCost)
 
-- `String`: rendering a value as text
+97 ⊞²
+**⊞ allocates 2**
+
 - 2× `String`: joining Strings
 
 [vyrn why --cost](command:vyrn.whyCost)
@@ -225,11 +266,25 @@ In a loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-116 ⧉²⊞²
-**⧉ copies 2**
+116 ⧉
+**⧉ copies 1**
 
-- 2× `String`: copied into the template
+- `String`: copied into the template
 
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+116 ⧉
+**⧉ copies 1**
+
+- `String`: copied into the template
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+116 ⊞²
 **⊞ allocates 2**
 
 - 2× `String`: joining Strings
@@ -254,15 +309,28 @@ In a loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-136 ↗⇒³
+136 ⇒²
+**⇒ check proved 2**
+
+- 2× division check proved
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+136 ⇒
+**⇒ check proved 1**
+
+- index check proved
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+136 ↗
 **↗ may grow 1**
 
 - `push(..)`
-
-**⇒ check proved 3**
-
-- 2× division check proved
-- index check proved
 
 In a loop.
 
@@ -279,14 +347,27 @@ In a loop.
 
 [vyrn why --cost](command:vyrn.whyCost)
 
-157 ⧉⊞³
+157 ⊞
+**⊞ allocates 1**
+
+- `String`: rendering a value as text
+
+In a loop.
+
+[vyrn why --cost](command:vyrn.whyCost)
+
+157 ⧉
 **⧉ copies 1**
 
 - `String`: copied into the template
 
-**⊞ allocates 3**
+In a loop.
 
-- `String`: rendering a value as text
+[vyrn why --cost](command:vyrn.whyCost)
+
+157 ⊞²
+**⊞ allocates 2**
+
 - 2× `String`: joining Strings
 
 In a loop.
