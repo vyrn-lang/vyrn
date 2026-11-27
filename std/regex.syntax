@@ -19,24 +19,24 @@ row NameTwice
 
 RegexPattern = RegexAlt (eof / ^StrayParen)
 
-nest RegexAlt = branches:RegexBranch ('|' branches:RegexBranch)*
+nest RegexAlt = branches:RegexBranch (regexAlternation branches:RegexBranch)*
 RegexBranch = (!('|' / ')' / eof) pieces:RegexPiece)*
-RegexPiece = atom:RegexAtom (op:regexOp / count:RegexCount)?
-RegexCount = '{' (regexInt / ^CountNumber)
-             ('}' / ',' ('}' / (regexInt / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
+RegexPiece = atom:RegexAtom (op:regexQuantifier / count:RegexQuantifierCount)?
+RegexQuantifierCount = '{' (regexNumber / ^CountNumber)
+                       ('}' / ',' ('}' / (regexNumber / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
 
 // The order states the language: a literal is what no other alternative takes.
-RegexAtom = RegexFlags / RegexComment / RegexGroup / RegexClass / RegexEscape / RegexDot
+RegexAtom = RegexFlags / RegexComment / RegexSubpattern / RegexClass / RegexEscape / RegexClassDot
             / &('*' / '+' / '?') ^NoTerm / &'{' ^NoCountTerm / &'}' ^StrayBrace
             / '^' ^AnchorPending(a='^') / '$' ^AnchorPending(a='$') / RegexLiteral
 // `(?i)` sets flags for the rest of its group, `(?i:..)` for its own; `(?#..)` is a
 // comment. Each matches the empty string.
-RegexFlags = regexFlags
+RegexFlags = regexGroupFlags
 RegexComment = regexComment
-RegexGroup = open:regexGroupOpen alt:RegexAlt (')' / ^GroupUnclosed)
+RegexSubpattern = open:regexGroupOpen alt:RegexAlt (regexGroupEnd / ^GroupUnclosed)
 RegexEscape = '\\' (regexQuote / regexShorthand / regexAnchor / regexSense / regexForeign
                     / ^PatternBackslash)
-RegexDot = '.'
+RegexClassDot = '.'
 RegexLiteral = regexChar
 
 // A class is a union of items, and `&&` (in both), `--` (in the left, not the right)
@@ -48,12 +48,12 @@ nest RegexClass = '[' negate:regexNegate? (&']' ^EmptyClass)?
                   (ops:regexSetOp (sets:RegexSet / &eof ^ClassUnclosed / ^SetOperand))*
                   (']' / ^ClassUnclosed)
 RegexSet = (!(']' / eof / '&&' / '--' / '~~') items:RegexItem)+
-RegexItem = RegexPosix / RegexClass / RegexMember
-RegexPosix = '[:' negate:regexPosixNegate? (name:regexPosixName (':]' / ^PosixName) / ^PosixName) regexNoRange?
+RegexItem = RegexClassPosix / RegexClass / RegexMember
+RegexClassPosix = '[:' negate:regexPosixNegate? (name:regexPosixName (':]' / ^PosixName) / ^PosixName) regexNoRange?
 RegexMember = lo:RegexBound range:RegexRange?
 RegexRange = regexDash (regexRangeEnd / hi:RegexBound / ^ClassUnclosed)
-RegexBound = RegexItemEscape / RegexSingle
-RegexItemEscape = '\\' (regexItemShorthand / regexItemAnchor / regexSense / regexForeign / ^ClassBackslash)
+RegexBound = RegexEscapeInClass / RegexSingle
+RegexEscapeInClass = '\\' (regexItemShorthand / regexItemAnchor / regexSense / regexForeign / ^ClassBackslash)
 RegexSingle = regexChar
 
 regexChar = .
@@ -62,12 +62,14 @@ regexPosixNegate = '^'
 regexSetOp = '&&' / '--' / '~~'
 regexPosixName = 'alnum' / 'alpha' / 'blank' / 'cntrl' / 'digit' / 'graph' / 'lower' / 'print'
                  / 'punct' / 'space' / 'upper' / 'xdigit'
-regexInt = [0-9]+
-regexFlags = '(?' [ims]* ('-' [ims]+)? ')'
+regexNumber = [0-9]+
+regexGroupFlags = '(?' [ims]* ('-' [ims]+)? ')'
 regexComment = '(?#' (!')' .)* (')' / ^GroupUnclosed)
 
 // A group captures, or holds a form after `(?`: `:` does not capture, a name captures
 // by it, and flags apply inside. Every other form is refused.
+regexGroupEnd = ')'
+regexAlternation = '|'
 regexGroupOpen = '(' ('*' ^PcreControl(form='(*..)') / '?' regexGroupForm)?
 regexGroupForm = ':' / 'P<' regexName ('>' / ^GroupName) / '\'' regexName ('\'' / ^GroupName)
                  / '=' ^AnchorPending(a='(?=') / '!' ^AnchorPending(a='(?!')
@@ -81,7 +83,7 @@ regexGroupForm = ':' / 'P<' regexName ('>' / ^GroupName) / '\'' regexName ('\'' 
                  / regexFlag* ('-' regexFlag+)? (':' / ^GroupForm)
 regexFlag = [ims] / &[A-Za-z] ^FlagUnknown(f=.)
 regexName = [A-Za-z_] [A-Za-z0-9_]* / ^GroupName
-regexOp = '*' (&'?' ^NonGreedy(op='*'))? / '+' (&'?' ^NonGreedy(op='+'))? / '?'
+regexQuantifier = '*' (&'?' ^NonGreedy(op='*'))? / '+' (&'?' ^NonGreedy(op='+'))? / '?'
 
 // An escape is meaningful or refused. In and out of a class it is a shorthand, a
 // control, a code point or ASCII punctuation, which stands for itself.

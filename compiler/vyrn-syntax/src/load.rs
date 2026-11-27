@@ -21,6 +21,7 @@ pub fn load(src: &str) -> Result<Grammar, Refused> {
     let defs = definitions(src)?;
     let mut tokens: Vec<(String, String, bool)> = Vec::new();
     let mut builder: BTreeMap<Rc<str>, Vec<Rc<str>>> = BTreeMap::new();
+    let mut syntax = String::new();
     let mut by_name: HashMap<String, RuleId> = HashMap::new();
     // The directives and the rule names first, so a reference may precede its
     // rule. A throw waits for the second pass, which knows every name.
@@ -30,7 +31,7 @@ pub fn load(src: &str) -> Result<Grammar, Refused> {
         let words: Vec<&str> = d.split_whitespace().collect();
         let err = |what: &str| Refused::at(*line, 1, what);
         match words.as_slice() {
-            ["syntax", _] => {}
+            ["syntax", name] => syntax = name.to_string(),
             [head @ ("keyword" | "token"), name, lit] if *name != "=" => {
                 let spelling = unquote(lit).ok_or_else(|| err("a token spelling is a literal"))?;
                 tokens.push((name.to_string(), spelling, *head == "keyword"));
@@ -129,6 +130,7 @@ pub fn load(src: &str) -> Result<Grammar, Refused> {
     }
     let rule = |n: &str| by_name.get(n).copied();
     let mut g = Grammar {
+        name: syntax,
         scan_rule: rule("scan"),
         reserved: tokens.iter().filter(|t| t.2).map(|t| t.1.clone()).collect(),
         tokens,

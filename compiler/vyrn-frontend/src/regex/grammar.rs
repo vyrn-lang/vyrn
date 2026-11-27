@@ -99,7 +99,7 @@ pub(super) trait Hooks {
     fn _regex_piece(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
-    fn _regex_count(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn _regex_quantifier_count(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn _regex_atom(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -111,13 +111,13 @@ pub(super) trait Hooks {
     fn _regex_comment(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
-    fn _regex_group(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn _regex_subpattern(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn _regex_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
-    fn _regex_dot(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn _regex_class_dot(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn _regex_literal(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -132,7 +132,7 @@ pub(super) trait Hooks {
     fn _regex_item(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
-    fn _regex_posix(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn _regex_class_posix(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn _regex_member(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -144,7 +144,7 @@ pub(super) trait Hooks {
     fn _regex_bound(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
-    fn _regex_item_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn _regex_escape_in_class(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn _regex_single(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -165,13 +165,19 @@ pub(super) trait Hooks {
     fn regex_posix_name(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
-    fn regex_int(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn regex_number(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
-    fn regex_flags(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn regex_group_flags(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn regex_comment(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_group_end(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_alternation(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn regex_group_open(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -186,7 +192,7 @@ pub(super) trait Hooks {
     fn regex_name(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
-    fn regex_op(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn regex_quantifier(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn regex_shorthand(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -312,7 +318,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         self.depth += 1;
         { let branches = self.pos; self._regex_branch()?; loop { let p = self.pos; if !{
             let p0 = self.pos;
-            (self.eat_byte(b'|') && { self._regex_branch()?; true })
+            (self.regex_alternation()? && { self._regex_branch()?; true })
             || { self.pos = p0; false }
         } || self.pos == p { break; } }  }
         self.depth -= 1;
@@ -338,8 +344,8 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         let hit = {
             let p0 = self.pos;
             ({ let atom = self.pos; self._regex_atom()? && { let _ = (
-                self.regex_op()?
-                || self._regex_count()?
+                self.regex_quantifier()?
+                || self._regex_quantifier_count()?
             ); true } })
             || { self.pos = p0; false }
         };
@@ -350,13 +356,13 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         Ok(true)
     }
 
-    fn _regex_count(&mut self) -> Result<bool, String> {
+    fn _regex_quantifier_count(&mut self) -> Result<bool, String> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
-            (self.eat_byte(b'{') && { if !(self.regex_int()?) { { let rule = rule!(CountNumber); return Err(self.hooks.refuse(self.pos, rule)); } } true } && { if !(self.eat_byte(b'}') || {
+            (self.eat_byte(b'{') && { if !(self.regex_number()?) { { let rule = rule!(CountNumber); return Err(self.hooks.refuse(self.pos, rule)); } } true } && { if !(self.eat_byte(b'}') || {
                     let p0 = self.pos;
-                    (self.eat_byte(b',') && { if !(self.eat_byte(b'}')) { if !(self.regex_int()?) { { let rule = rule!(CountNumber); return Err(self.hooks.refuse(self.pos, rule)); } } if !(self.eat_byte(b'}')) { { let rule = rule!(CountUnclosed); return Err(self.hooks.refuse(self.pos, rule)); } }  } true })
+                    (self.eat_byte(b',') && { if !(self.eat_byte(b'}')) { if !(self.regex_number()?) { { let rule = rule!(CountNumber); return Err(self.hooks.refuse(self.pos, rule)); } } if !(self.eat_byte(b'}')) { { let rule = rule!(CountUnclosed); return Err(self.hooks.refuse(self.pos, rule)); } }  } true })
                     || { self.pos = p0; false }
                 }) { { let rule = rule!(CountForm); return Err(self.hooks.refuse(self.pos, rule)); } } true })
             || { self.pos = p0; false }
@@ -364,7 +370,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         if !hit {
             return Ok(false);
         }
-        self.hooks._regex_count(start, self.pos)?;
+        self.hooks._regex_quantifier_count(start, self.pos)?;
         Ok(true)
     }
 
@@ -372,10 +378,10 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         let start = self.pos;
         let hit = self._regex_flags()?
             || self._regex_comment()?
-            || self._regex_group()?
+            || self._regex_subpattern()?
             || self._regex_class()?
             || self._regex_escape()?
-            || self._regex_dot()?
+            || self._regex_class_dot()?
             || {
                 let p0 = self.pos;
                 ({ let p = self.pos; let m = self.eat_one(|c| c == '*' || c == '+' || c == '?'); self.pos = p; m } && { let rule = rule!(NoTerm); return Err(self.hooks.refuse(self.pos, rule)); })
@@ -411,7 +417,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
 
     fn _regex_flags(&mut self) -> Result<bool, String> {
         let start = self.pos;
-        let hit = self.regex_flags()?;
+        let hit = self.regex_group_flags()?;
         if !hit {
             return Ok(false);
         }
@@ -429,17 +435,17 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         Ok(true)
     }
 
-    fn _regex_group(&mut self) -> Result<bool, String> {
+    fn _regex_subpattern(&mut self) -> Result<bool, String> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
-            ({ let open = self.pos; self.regex_group_open()? && { let alt = self.pos; ({ self._regex_alt()?; true }) && { if !(self.eat_byte(b')')) { { let rule = rule!(GroupUnclosed); return Err(self.hooks.refuse(self.pos, rule)); } } true } } })
+            ({ let open = self.pos; self.regex_group_open()? && { let alt = self.pos; ({ self._regex_alt()?; true }) && { if !(self.regex_group_end()?) { { let rule = rule!(GroupUnclosed); return Err(self.hooks.refuse(self.pos, rule)); } } true } } })
             || { self.pos = p0; false }
         };
         if !hit {
             return Ok(false);
         }
-        self.hooks._regex_group(start, self.pos)?;
+        self.hooks._regex_subpattern(start, self.pos)?;
         Ok(true)
     }
 
@@ -457,13 +463,13 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         Ok(true)
     }
 
-    fn _regex_dot(&mut self) -> Result<bool, String> {
+    fn _regex_class_dot(&mut self) -> Result<bool, String> {
         let start = self.pos;
         let hit = self.eat_byte(b'.');
         if !hit {
             return Ok(false);
         }
-        self.hooks._regex_dot(start, self.pos)?;
+        self.hooks._regex_class_dot(start, self.pos)?;
         Ok(true)
     }
 
@@ -542,7 +548,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
 
     fn _regex_item(&mut self) -> Result<bool, String> {
         let start = self.pos;
-        let hit = self._regex_posix()?
+        let hit = self._regex_class_posix()?
             || self._regex_class()?
             || self._regex_member()?;
         if !hit {
@@ -552,7 +558,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         Ok(true)
     }
 
-    fn _regex_posix(&mut self) -> Result<bool, String> {
+    fn _regex_class_posix(&mut self) -> Result<bool, String> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
@@ -566,7 +572,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         if !hit {
             return Ok(false);
         }
-        self.hooks._regex_posix(start, self.pos)?;
+        self.hooks._regex_class_posix(start, self.pos)?;
         Ok(true)
     }
 
@@ -600,7 +606,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
 
     fn _regex_bound(&mut self) -> Result<bool, String> {
         let start = self.pos;
-        let hit = self._regex_item_escape()?
+        let hit = self._regex_escape_in_class()?
             || self._regex_single()?;
         if !hit {
             return Ok(false);
@@ -609,7 +615,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         Ok(true)
     }
 
-    fn _regex_item_escape(&mut self) -> Result<bool, String> {
+    fn _regex_escape_in_class(&mut self) -> Result<bool, String> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
@@ -619,7 +625,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         if !hit {
             return Ok(false);
         }
-        self.hooks._regex_item_escape(start, self.pos)?;
+        self.hooks._regex_escape_in_class(start, self.pos)?;
         Ok(true)
     }
 
@@ -696,17 +702,17 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         Ok(true)
     }
 
-    fn regex_int(&mut self) -> Result<bool, String> {
+    fn regex_number(&mut self) -> Result<bool, String> {
         let start = self.pos;
         let hit = (self.eat_one(|c| matches!(c, '0'..='9')) && { self.eat_while(|c| matches!(c, '0'..='9')); true });
         if !hit {
             return Ok(false);
         }
-        self.hooks.regex_int(start, self.pos)?;
+        self.hooks.regex_number(start, self.pos)?;
         Ok(true)
     }
 
-    fn regex_flags(&mut self) -> Result<bool, String> {
+    fn regex_group_flags(&mut self) -> Result<bool, String> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
@@ -720,7 +726,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         if !hit {
             return Ok(false);
         }
-        self.hooks.regex_flags(start, self.pos)?;
+        self.hooks.regex_group_flags(start, self.pos)?;
         Ok(true)
     }
 
@@ -735,6 +741,26 @@ impl<'s, H: Hooks> Scanner<'s, H> {
             return Ok(false);
         }
         self.hooks.regex_comment(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn regex_group_end(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = self.eat_byte(b')');
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_group_end(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn regex_alternation(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = self.eat_byte(b'|');
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_alternation(start, self.pos)?;
         Ok(true)
     }
 
@@ -862,7 +888,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         self.hooks.regex_name(start, self.pos)
     }
 
-    fn regex_op(&mut self) -> Result<bool, String> {
+    fn regex_quantifier(&mut self) -> Result<bool, String> {
         let start = self.pos;
         let hit = (matches!(self.peek_byte(), Some(b'*')) && {
                 let p0 = self.pos;
@@ -886,7 +912,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         if !hit {
             return Ok(false);
         }
-        self.hooks.regex_op(start, self.pos)?;
+        self.hooks.regex_quantifier(start, self.pos)?;
         Ok(true)
     }
 

@@ -325,7 +325,7 @@ impl Hooks for Build<'_> {
         Ok(())
     }
 
-    fn _regex_group(&mut self, _start: usize, _end: usize) -> Result<(), String> {
+    fn _regex_subpattern(&mut self, _start: usize, _end: usize) -> Result<(), String> {
         self.flags.pop();
         Ok(())
     }
@@ -374,7 +374,7 @@ impl Hooks for Build<'_> {
     }
 
     // `.` excludes LF and CR, as in ECMA-262, but under `s`.
-    fn _regex_dot(&mut self, start: usize, _end: usize) -> Result<(), String> {
+    fn _regex_class_dot(&mut self, start: usize, _end: usize) -> Result<(), String> {
         let breaks = match self.flags().dot_all {
             true => Chars(Vec::new()),
             false => Chars::of(&[(0x0a, 0x0a), (0x0d, 0x0d)]),
@@ -390,7 +390,7 @@ impl Hooks for Build<'_> {
         Ok(())
     }
 
-    fn _regex_item_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn _regex_escape_in_class(&mut self, start: usize, end: usize) -> Result<(), String> {
         let t = &self.b[start + 1..end];
         let set = match SHORTHANDS.contains(&t[0]) {
             true => shorthand(t[0]),
@@ -422,7 +422,7 @@ impl Hooks for Build<'_> {
         Ok(())
     }
 
-    fn _regex_posix(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn _regex_class_posix(&mut self, start: usize, end: usize) -> Result<(), String> {
         let negated = self.b[start + 2] == b'^';
         let name = &self.b[start + 2 + usize::from(negated)..end - 2];
         let set = posix(name);
@@ -476,7 +476,7 @@ impl Hooks for Build<'_> {
         Ok(())
     }
 
-    fn regex_op(&mut self, start: usize, _end: usize) -> Result<(), String> {
+    fn regex_quantifier(&mut self, start: usize, _end: usize) -> Result<(), String> {
         let (at, re) = self.last();
         let re = Box::new(re);
         let re = match self.b[start] {
@@ -489,7 +489,7 @@ impl Hooks for Build<'_> {
     }
 
     /// A count, at most 255.
-    fn regex_int(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn regex_number(&mut self, start: usize, end: usize) -> Result<(), String> {
         let v = String::from_utf8_lossy(&self.b[start..end])
             .parse::<u32>()
             .ok()
@@ -501,7 +501,7 @@ impl Hooks for Build<'_> {
 
     /// Expands `{m}`, `{m,}` or `{m,n}`: `m` copies of the atom, then `n - m`
     /// optional copies, or one `*` for an open bound.
-    fn _regex_count(&mut self, _start: usize, end: usize) -> Result<(), String> {
+    fn _regex_quantifier_count(&mut self, _start: usize, end: usize) -> Result<(), String> {
         let counts = std::mem::take(&mut self.counts);
         let m = counts[0];
         let n = match counts.get(1) {

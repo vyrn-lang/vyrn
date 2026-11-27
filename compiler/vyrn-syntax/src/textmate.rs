@@ -33,6 +33,9 @@ pub enum Scope {
     SupportType,
     SupportFunction,
     Variable,
+    Group,
+    Quantifier,
+    Alternation,
 }
 
 impl Scope {
@@ -55,9 +58,23 @@ impl Scope {
             Scope::SupportType => "support.type",
             Scope::SupportFunction => "support.function",
             Scope::Variable => "variable.other",
+            Scope::Group => "punctuation.definition.group.regexp",
+            Scope::Quantifier => "keyword.operator.quantifier.regexp",
+            Scope::Alternation => "keyword.operator.or.regexp",
         }
     }
 }
+
+/// The scopes an LSP sends as token types of their own, because no standard type
+/// names them: each scope, its type's id, and the standard type it falls back to. The
+/// editor's `package.json` declares each type and maps it to the scope's TextMate
+/// name, which `the_editor_declares_each_custom_token_type` holds.
+pub const CUSTOM_TOKENS: [(Scope, &str, &str); 4] = [
+    (Scope::Escape, "escapeSequence", "string"),
+    (Scope::Group, "regexpGroup", "regexp"),
+    (Scope::Quantifier, "regexpQuantifier", "regexp"),
+    (Scope::Alternation, "regexpAlternation", "regexp"),
+];
 
 /// The vocabulary: a rule of this name has this scope, and this text before its regex.
 const CLASSES: [(&str, Scope, &str); 7] = [
@@ -71,19 +88,35 @@ const CLASSES: [(&str, Scope, &str); 7] = [
 ];
 /// The rules whose scope only their callers place, so a regex cannot match them:
 /// [`crate::colour`] reads them, and a TextMate grammar takes them from [`Naming`].
-const PARTS: [(&str, Scope); 6] = [
+const PARTS: [(&str, Scope); 9] = [
     ("head", Scope::Function),
     ("ref", Scope::TypeName),
     ("capture", Scope::Parameter),
     ("label", Scope::Label),
     ("escape", Scope::Escape),
     ("any", Scope::Operator),
+    ("group", Scope::Group),
+    ("quantifier", Scope::Quantifier),
+    ("alternation", Scope::Alternation),
 ];
 
-/// The scope of the rule named `rule`, by [`CLASSES`] and [`PARTS`].
-pub(crate) fn scope_of(rule: &str) -> Option<Scope> {
-    let class = CLASSES.iter().find(|c| c.0 == rule).map(|c| c.1);
-    class.or_else(|| PARTS.iter().find(|p| p.0 == rule).map(|p| p.1))
+/// The scope of the rule named `rule` in the grammar named `syntax`, by [`CLASSES`]
+/// and [`PARTS`]: its whole name, or the word after the grammar's name when the rule
+/// starts with it, case ignored. `RegexClass` and `regexGroupOpen` of `Regex` are
+/// `class` and `group`.
+pub(crate) fn scope_of(syntax: &str, rule: &str) -> Option<Scope> {
+    let word = match rule.get(..syntax.len()) {
+        Some(head) if !syntax.is_empty() && head.eq_ignore_ascii_case(syntax) => {
+            let rest = &rule[syntax.len()..];
+            let end = (rest.char_indices().skip(1))
+                .find(|c| c.1.is_ascii_uppercase())
+                .map_or(rest.len(), |c| c.0);
+            rest[..end].to_ascii_lowercase()
+        }
+        _ => rule.to_string(),
+    };
+    let class = CLASSES.iter().find(|c| c.0 == word).map(|c| c.1);
+    class.or_else(|| PARTS.iter().find(|p| p.0 == word).map(|p| p.1))
 }
 
 /// Whether the token `s` is a bracket or a separator, which have no operator scope.
@@ -612,6 +645,26 @@ mod tests {
             committed == fresh,
             "{name} differs; rewrite it with VYRN_PIN=write"
         );
+    }
+
+    #[test]
+    fn the_editor_declares_each_custom_token_type() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let package = dir.join("../../editor/vscode/package.json");
+        let text = std::fs::read_to_string(package).expect("package.json reads");
+        for (scope, id, sup) in super::CUSTOM_TOKENS {
+            let name = scope.name();
+            let declared = format!(
+                "{{ \"id\": \"{id}\", \"superType\": \"{sup}\", \"description\": \"{name}\" }}"
+            );
+            assert!(text.contains(&declared), "package.json lacks {declared}");
+            let mapped = format!("\"{id}\": [\"{name}\"]");
+            assert_eq!(
+                text.matches(&mapped).count(),
+                2,
+                "package.json maps {mapped} for vyrn and vyx"
+            );
+        }
     }
 
     #[test]

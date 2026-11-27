@@ -79,6 +79,12 @@
         "path": "./syntax.tmLanguage.json"
       }
     ],
+    "semanticTokenTypes": [
+      { "id": "escapeSequence", "superType": "string", "description": "constant.character.escape" },
+      { "id": "regexpGroup", "superType": "regexp", "description": "punctuation.definition.group.regexp" },
+      { "id": "regexpQuantifier", "superType": "regexp", "description": "keyword.operator.quantifier.regexp" },
+      { "id": "regexpAlternation", "superType": "regexp", "description": "keyword.operator.or.regexp" }
+    ],
     "semanticTokenScopes": [
       {
         "language": "vyrn",
@@ -89,6 +95,10 @@
           "parameter": ["variable.parameter"],
           "macro": ["entity.name.function.macro"],
           "method": ["entity.name.function.member"],
+          "escapeSequence": ["constant.character.escape"],
+          "regexpGroup": ["punctuation.definition.group.regexp"],
+          "regexpQuantifier": ["keyword.operator.quantifier.regexp"],
+          "regexpAlternation": ["keyword.operator.or.regexp"],
           "*.modification": ["markup.deleted"]
         }
       },
@@ -101,6 +111,10 @@
           "parameter": ["variable.parameter"],
           "macro": ["entity.name.function.macro"],
           "method": ["entity.name.function.member"],
+          "escapeSequence": ["constant.character.escape"],
+          "regexpGroup": ["punctuation.definition.group.regexp"],
+          "regexpQuantifier": ["keyword.operator.quantifier.regexp"],
+          "regexpAlternation": ["keyword.operator.or.regexp"],
           "*.modification": ["markup.deleted"]
         }
       }

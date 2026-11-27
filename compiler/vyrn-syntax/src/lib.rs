@@ -33,7 +33,7 @@ pub use gen::{bytes, lexer};
 pub use load::load;
 pub use parser::{island_report_fn, parser, report, Island};
 pub use recognizer::recognizer;
-pub use textmate::{language_configuration, textmate, Naming, Scope};
+pub use textmate::{language_configuration, textmate, Naming, Scope, CUSTOM_TOKENS};
 
 /// Why a grammar does not load or does not lower: a sentence at a 1-based line and
 /// column of its file.
@@ -213,6 +213,8 @@ struct Rule {
 
 /// A loaded grammar.
 pub struct Grammar {
+    /// The name its `syntax` line gives it, which prefixes its rules' names.
+    name: String,
     rules: Vec<Rule>,
     by_name: HashMap<String, RuleId>,
     /// Token name and spelling, in file order, and whether a keyword reserves it.
@@ -231,6 +233,11 @@ pub struct Grammar {
 }
 
 impl Grammar {
+    /// Returns the name the grammar's `syntax` line gives it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Returns the rule named `name`.
     pub fn rule(&self, name: &str) -> Option<RuleId> {
         self.by_name.get(name).copied()

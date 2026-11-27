@@ -2028,7 +2028,11 @@ fn semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenType::OPERATOR,    // 13
             SemanticTokenType::REGEXP,      // 14
             SemanticTokenType::DECORATOR,   // 15: a label
-        ],
+                                            // 16 on: a scope no standard type names, in `CUSTOM_TOKENS` order.
+        ]
+        .into_iter()
+        .chain((vyrn_syntax::CUSTOM_TOKENS.iter()).map(|t| SemanticTokenType::new(t.1)))
+        .collect(),
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,     // bit 0
             SemanticTokenModifier::READONLY,        // bit 1
@@ -3519,7 +3523,7 @@ fn scope_token(s: vyrn_syntax::Scope) -> (u32, u32) {
     let library = 1 << 2;
     match s {
         Scope::Doc | Scope::Comment => (10, 0),
-        Scope::String | Scope::Char | Scope::Escape => (11, 0),
+        Scope::String | Scope::Char => (11, 0),
         Scope::Number => (12, 0),
         Scope::Operator => (13, 0),
         Scope::CharClass => (14, 0),
@@ -3531,6 +3535,13 @@ fn scope_token(s: vyrn_syntax::Scope) -> (u32, u32) {
         Scope::SupportType => (1, library),
         Scope::Parameter => (3, 0),
         Scope::Variable => (4, 0),
+        Scope::Escape | Scope::Group | Scope::Quantifier | Scope::Alternation => {
+            let custom = vyrn_syntax::CUSTOM_TOKENS.iter().position(|t| t.0 == s);
+            (
+                16 + custom.expect("CUSTOM_TOKENS lists the scope") as u32,
+                0,
+            )
+        }
     }
 }
 

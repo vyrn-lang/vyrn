@@ -125,7 +125,7 @@ impl Reader<'_> {
         let outer = std::mem::replace(&mut self.syntactic, rule.syntactic);
         let step = self.read(&rule.body, at);
         self.syntactic = outer;
-        if let (Step::To(stop), Some(scope)) = (&step, scope_of(&rule.name)) {
+        if let (Step::To(stop), Some(scope)) = (&step, scope_of(self.g.name(), &rule.name)) {
             self.mark(at, *stop, scope, true);
         }
         match step {
@@ -300,6 +300,33 @@ mod tests {
         let got = runs(&g, g.start().expect("a start rule"), " pay  12");
         let found: Vec<_> = got.iter().map(|r| (r.start, r.stop, r.scope)).collect();
         assert_eq!(found, [(1, 4, Scope::Keyword), (6, 8, Scope::Number)]);
+    }
+
+    #[test]
+    fn a_rule_takes_the_word_after_its_grammars_name() {
+        let g = crate::load(include_str!("../../../std/regex.syntax")).expect("regex.syntax loads");
+        let src = r"(?:a|b)*[xy]{2,3}\.";
+        let got = runs(&g, g.rule("RegexPattern").expect("a start rule"), src);
+        let found: Vec<_> = got
+            .iter()
+            .map(|r| (&src[r.start..r.stop], r.scope))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("(?:", Scope::Group),
+                ("|", Scope::Alternation),
+                (")", Scope::Group),
+                ("*", Scope::Quantifier),
+                ("[xy]", Scope::CharClass),
+                ("{", Scope::Quantifier),
+                ("2", Scope::Number),
+                (",", Scope::Quantifier),
+                ("3", Scope::Number),
+                ("}", Scope::Quantifier),
+                (r"\.", Scope::Escape),
+            ]
+        );
     }
 
     #[test]

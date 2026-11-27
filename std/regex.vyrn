@@ -608,7 +608,7 @@ fn lastChar(pattern: String, end: Int64) -> Int64 {
 /// The code point of the class bound `b`.
 fn boundChar(bd: modify Builder, pattern: String, b: rx.RegexBound) -> Int64 {
     return match b {
-        RegexBoundRegexItemEscape(e) => escapeChar(bd, pattern, e.start + 1, e.end),
+        RegexBoundRegexEscapeInClass(e) => escapeChar(bd, pattern, e.start + 1, e.end),
         RegexBoundRegexSingle(s) => charAt(pattern, s.start),
     }
 }
@@ -617,7 +617,7 @@ fn boundChar(bd: modify Builder, pattern: String, b: rx.RegexBound) -> Int64 {
 /// bounds.
 fn itemChars(bd: modify Builder, pattern: String, item: rx.RegexItem) -> Array<Int64> {
     return match item {
-        RegexItemRegexPosix(p) => posixChars(pattern, p.start),
+        RegexItemRegexClassPosix(p) => posixChars(pattern, p.start),
         RegexItemRegexClass(c) => classChars(bd, pattern, c),
         RegexItemRegexMember(m) => memberChars(bd, pattern, m),
     }
@@ -625,7 +625,7 @@ fn itemChars(bd: modify Builder, pattern: String, item: rx.RegexItem) -> Array<I
 
 fn memberChars(bd: modify Builder, pattern: String, m: rx.RegexMember) -> Array<Int64> {
     match m.lo {
-        RegexBoundRegexItemEscape(e) => {
+        RegexBoundRegexEscapeInClass(e) => {
             if isShorthand(pattern[e.start + 1]) {
                 return shorthandChars(pattern[e.start + 1])
             }
@@ -720,7 +720,7 @@ fn setFlags(bd: modify Builder, pattern: String, from: Int64, to: Int64) {
 }
 
 /// The group `g` under its own flags, which end at its `)`. A name names one group.
-fn fragGroup(bd: modify Builder, pattern: String, g: rx.RegexGroup) -> Frag {
+fn fragGroup(bd: modify Builder, pattern: String, g: rx.RegexSubpattern) -> Frag {
     let fold = bd.fold
     let dotAll = bd.dotAll
     let open = g.open.text
@@ -841,7 +841,7 @@ fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
         RegexAtomRegexComment(c) => {
             return fragEmpty(bd)
         }
-        RegexAtomRegexGroup(g) => {
+        RegexAtomRegexSubpattern(g) => {
             return fragGroup(bd, pattern, g)
         }
         RegexAtomRegexClass(c) => {
@@ -850,7 +850,7 @@ fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
         RegexAtomRegexEscape(e) => {
             return fragEscape(bd, pattern, e.start, e.end)
         }
-        RegexAtomRegexDot(d) => {
+        RegexAtomRegexClassDot(d) => {
             return fragChars(bd, dotChars(bd))
         }
         RegexAtomRegexLiteral(l) => {
@@ -889,7 +889,7 @@ type Bounds = { min: Int64, max: Int64, open: Bool }
 
 /// The bounds of `c`, whose text the grammar states: `{`, digits, then `}`, `,}` or
 /// `,`, digits and `}`.
-fn boundsOf(pattern: String, c: rx.RegexCount) -> Bounds {
+fn boundsOf(pattern: String, c: rx.RegexQuantifierCount) -> Bounds {
     let comma = digitsEnd(pattern, c.start + 1)
     let min = countValue(pattern, c.start + 1, comma)
     if pattern[comma] != ',' {
@@ -914,7 +914,7 @@ fn pieceSize(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Int64
     match piece.atom {
         RegexAtomRegexFlags(f) => {}
         RegexAtomRegexComment(c) => {}
-        RegexAtomRegexGroup(g) => {}
+        RegexAtomRegexSubpattern(g) => {}
         RegexAtomRegexClass(c) => {}
         RegexAtomRegexEscape(e) => {
             let q = quoteEnd(pattern, e.start, e.end)
@@ -922,7 +922,7 @@ fn pieceSize(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Int64
                 prefix = lastChar(pattern, q) - e.start - 2
             }
         }
-        RegexAtomRegexDot(d) => {}
+        RegexAtomRegexClassDot(d) => {}
         RegexAtomRegexLiteral(l) => {}
     }
     if let Some(c) = piece.count {
@@ -956,10 +956,10 @@ fn termSize(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Int64 {
     return match atom {
         RegexAtomRegexFlags(f) => 1,
         RegexAtomRegexComment(c) => 1,
-        RegexAtomRegexGroup(g) => altSize(bd, pattern, g.alt),
+        RegexAtomRegexSubpattern(g) => altSize(bd, pattern, g.alt),
         RegexAtomRegexClass(c) => charsSize(classChars(bd, pattern, c)),
         RegexAtomRegexEscape(e) => escapeSize(pattern, e.start, e.end),
-        RegexAtomRegexDot(d) => charsSize(dotChars(bd)),
+        RegexAtomRegexClassDot(d) => charsSize(dotChars(bd)),
         RegexAtomRegexLiteral(l) => l.end - l.start,
     }
 }
@@ -1021,7 +1021,7 @@ fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag 
     match piece.atom {
         RegexAtomRegexFlags(f) => {}
         RegexAtomRegexComment(c) => {}
-        RegexAtomRegexGroup(g) => {}
+        RegexAtomRegexSubpattern(g) => {}
         RegexAtomRegexClass(c) => {}
         RegexAtomRegexEscape(e) => {
             let q = quoteEnd(pattern, e.start, e.end)
@@ -1030,7 +1030,7 @@ fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag 
                 to = lastChar(pattern, q)
             }
         }
-        RegexAtomRegexDot(d) => {}
+        RegexAtomRegexClassDot(d) => {}
         RegexAtomRegexLiteral(l) => {}
     }
     let mut f = fragRepeat(bd, pattern, piece)
