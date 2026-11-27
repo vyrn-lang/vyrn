@@ -200,10 +200,10 @@ export fn showCps(a: Array<UInt32>) -> String {
 test "ascii and the three multi-byte widths decode to the builtin's codepoints" {
     assertEq(showCps(chars("hi")), "104,105")
     // 2-byte (U+00E9), 3-byte (U+20AC), 4-byte (U+1F600, astral).
-    assertEq(showCps(chars("é")), "233")
-    assertEq(showCps(chars("€")), "8364")
-    assertEq(showCps(chars("😀")), "128512")
-    assertEq(showCps(chars("a€😀é")), "97,8364,128512,233")
+    assertEq(showCps(chars("\u{e9}")), "233")
+    assertEq(showCps(chars("\u{20ac}")), "8364")
+    assertEq(showCps(chars("\u{1f600}")), "128512")
+    assertEq(showCps(chars("a\u{20ac}\u{1f600}\u{e9}")), "97,8364,128512,233")
     assertEq(showCps(chars("")), "")
     // U+FFFF and U+10000, the boundary between three bytes and four.
     assertEq(showCps(chars("\u{ffff}\u{10000}")), "65535,65536")
@@ -247,14 +247,14 @@ test "every malformed shape the validator distinguishes is refused" {
 test "a scalar count is not a byte count, except on ASCII" {
     assertEq(charCountV("").toString() + "/" + "".byteLength.toString(), "0/0")
     assertEq(charCountV("hello").toString() + "/" + "hello".byteLength.toString(), "5/5")
-    assertEq(charCountV("héllo").toString() + "/" + "héllo".byteLength.toString(), "5/6")
-    assertEq(charCountV("☕").toString() + "/" + "☕".byteLength.toString(), "1/3")
-    assertEq(charCountV("😀").toString() + "/" + "😀".byteLength.toString(), "1/4")
+    assertEq(charCountV("h\u{e9}llo").toString() + "/" + "h\u{e9}llo".byteLength.toString(), "5/6")
+    assertEq(charCountV("\u{2615}").toString() + "/" + "\u{2615}".byteLength.toString(), "1/3")
+    assertEq(charCountV("\u{1f600}").toString() + "/" + "\u{1f600}".byteLength.toString(), "1/4")
     // All four widths in one string, to catch a scan that mishandles the
     // transition between sequences: 4 scalars, 1 + 2 + 3 + 4 = 10 bytes.
-    assertEq(charCountV("aé€😀").toString() + "/" + "aé€😀".byteLength.toString(), "4/10")
+    assertEq(charCountV("a\u{e9}\u{20ac}\u{1f600}").toString() + "/" + "a\u{e9}\u{20ac}\u{1f600}".byteLength.toString(), "4/10")
     // A byte scan against a full decode.
-    assertEq(charCountV("aé€😀"), chars("aé€😀").length)
+    assertEq(charCountV("a\u{e9}\u{20ac}\u{1f600}"), chars("a\u{e9}\u{20ac}\u{1f600}").length)
 }
 
 test "line and column are 1-based, and the column counts bytes" {
@@ -273,7 +273,7 @@ test "line and column are 1-based, and the column counts bytes" {
     assertEq(lineAtV(crlf, 4).toString() + ":" + colAtV(crlf, 4).toString(), "2:1")
     // A multi-byte codepoint spans two columns: U+00E9 is bytes 0..2, so the byte
     // after it is column 3 and the codepoint after it is the second character.
-    let acc = bytes("éx")
+    let acc = bytes("\u{e9}x")
     assertEq(colAtV(acc, 2).toString(), "3")
     assertEq(colAtV(acc, 2), colAt(acc, 2))
 }

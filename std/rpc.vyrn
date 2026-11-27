@@ -77,13 +77,13 @@ fn rpcWhyNotSerializable(spelling: String, uncodable: String, iface: ModuleInter
         return ""
     }
     if spelling.startsWith("Stream<") {
-        return "a procedure answers all at once, and a stream is still producing — publish a feed with `sse` or `ws` from a dotted projection module beside the procedures"
+        return "a procedure answers all at once, and a stream is still producing \u{2014} publish a feed with `sse` or `ws` from a dotted projection module beside the procedures"
     }
     if uncodable != "" {
         return "`\{uncodable}` cannot cross a JSON wire"
     }
     if isNamedType(spelling, iface) == false {
-        return "it must be a type the contract exports by name — wrap it in a record, which is what keeps the wire an object and the payload versionable"
+        return "it must be a type the contract exports by name \u{2014} wrap it in a record, which is what keeps the wire an object and the payload versionable"
     }
     return ""
 }
@@ -100,7 +100,7 @@ export gen fn validateContract(iface: ModuleInterface) -> Option<Code> {
         if f.params.length > 1 {
             return Some(reportHere(
                 Error,
-                "procedure `\{f.name}` takes \{f.params.length.toString()} parameters — a procedure takes at most one; gather them into one exported record type",
+                "procedure `\{f.name}` takes \{f.params.length.toString()} parameters \u{2014} a procedure takes at most one; gather them into one exported record type",
             ))
         }
         if f.params.length == 1 {
@@ -666,7 +666,7 @@ gen fn rpcCollision(routes: Array<RpcRoute>) -> Option<Code> {
             if routes[i].path == routes[j].path {
                 return Some(reportHere(
                     Error,
-                    "procedures `\{routes[i].key}` and `\{routes[j].key}` both answer `\{routes[i].path}` — two procedures may not derive one path, so repin one of them",
+                    "procedures `\{routes[i].key}` and `\{routes[j].key}` both answer `\{routes[i].path}` \u{2014} two procedures may not derive one path, so repin one of them",
                 ))
             }
             j = j + 1
@@ -727,7 +727,7 @@ gen fn rpcTypeCollision(mods: Array<RpcModule>) -> Option<Code> {
                     t.origin.file,
                     t.origin.line,
                     t.origin.col,
-                    "`\{t.name}` is declared here as `\{t.source}`, and in `\{prior.from}` as `\{prior.source}` — one api directory derives one module, so one name may carry only one shape; rename one of them, or declare it once in a module both import",
+                    "`\{t.name}` is declared here as `\{t.source}`, and in `\{prior.from}` as `\{prior.source}` \u{2014} one api directory derives one module, so one name may carry only one shape; rename one of them, or declare it once in a module both import",
                 ))
             }
         }
@@ -783,7 +783,7 @@ fn rpcQualClashMessage(quals: Array<String>, keys: Array<String>) -> String {
         let mut j = i + 1
         while j < quals.length {
             if quals[i] == quals[j] {
-                return "procedures `\{keys[i]}` and `\{keys[j]}` both derive the flat name `\{quals[i]}` — camel-joining a module path and an export name is not unique, so rename one of them"
+                return "procedures `\{keys[i]}` and `\{keys[j]}` both derive the flat name `\{quals[i]}` \u{2014} camel-joining a module path and an export name is not unique, so rename one of them"
             }
             j = j + 1
         }

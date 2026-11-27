@@ -717,7 +717,7 @@ pub fn gen_scoped_path(
         .any(|root| resolved == *root || resolved.starts_with(&format!("{root}/")));
     if !ok {
         return Err(format!(
-            "generator read `{arg}` escapes its declared inputs ({}) — a generator may only \
+            "generator read `{arg}` escapes its declared inputs ({}) \u{2014} a generator may only \
              read under its constant path arguments",
             allowed.join(", ")
         ));

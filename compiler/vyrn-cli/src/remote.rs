@@ -98,7 +98,7 @@ fn ls_remote_ref(
         1 => Ok(live.remove(0).1),
         0 => Err(first_err),
         _ => Err(format!(
-            "`{spec}` is ambiguous: refs {} all exist in {url} — \
+            "`{spec}` is ambiguous: refs {} all exist in {url} \u{2014} \
              write `@ref=<ref>/<path>` to name the ref and the file path explicitly",
             live.iter()
                 .map(|(r, _)| format!("`{r}`"))
@@ -126,7 +126,7 @@ fn ls_remote_once(url: &str, r: &str) -> Result<String, String> {
 /// accepts the new content.
 pub fn upstream_changed(spec: &str, url: &str, got: &str, pinned: &str, remedy: &str) -> String {
     format!(
-        "`{spec}` fetched from {url} hashes {got}, but vyrn.lock pins {pinned} — \
+        "`{spec}` fetched from {url} hashes {got}, but vyrn.lock pins {pinned} \u{2014} \
          the upstream changed under an immutable URL; refusing to build \
          (run `{remedy}` to accept the new content deliberately)"
     )
@@ -202,7 +202,7 @@ impl RemoteResolver {
             if self.offline {
                 return Err(format!(
                     "`{spec}` is locked (sha256 {sha}) but not cached, and this is an \
-                     offline build — run once online, `vyrn vendor`, or drop any copy \
+                     offline build \u{2014} run once online, `vyrn vendor`, or drop any copy \
                      of the file with that hash into the cache"
                 ));
             }

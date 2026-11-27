@@ -885,7 +885,7 @@ mod tests {
     fn offsets_are_utf16_code_units_not_bytes() {
         // The emoji is one character, two UTF-16 units and four bytes, so a byte
         // offset would put every span after the comment two units early.
-        let src = "// 🌊\ntype T = Int64\n";
+        let src = "// \u{1f30a}\ntype T = Int64\n";
         let last = spans(src).pop().expect("the type name is coloured");
         assert_eq!(slice16(src, last.0, last.1), "Int64");
     }

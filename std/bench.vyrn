@@ -80,7 +80,7 @@ export fn formatDuration(ns: Int64) -> String {
         return "\{ns} ns"
     }
     if ns < 1000000 {
-        return "\{twoDecimals(ns, 1000)} µs"
+        return "\{twoDecimals(ns, 1000)} \u{b5}s"
     }
     if ns < 1000000000 {
         return "\{twoDecimals(ns, 1000000)} ms"
@@ -179,7 +179,7 @@ export fn benchMeasure(name: String, body: fn() -> Unit) -> BenchResult {
 export fn benchOne(name: String, width: Int64, body: fn() -> Unit) {
     let r = benchMeasure(name, body)
     let label = padRight("bench \"\{name}\"", width)
-    print("\{label}   min \{formatDuration(r.minNs)}   median \{formatDuration(r.medianNs)}   mean \{formatDuration(r.meanNs)}   (\{r.samples} samples × \{r.iters} iters)")
+    print("\{label}   min \{formatDuration(r.minNs)}   median \{formatDuration(r.medianNs)}   mean \{formatDuration(r.meanNs)}   (\{r.samples} samples \u{d7} \{r.iters} iters)")
 }
 
 /// The `--json` bench report: compact, benches in
@@ -208,7 +208,7 @@ export fn benchJson(results: Array<BenchResult>, backend: String, opt: String) -
 
 test "formatDuration picks human units" {
     assertEq(formatDuration(512), "512 ns")
-    assertEq(formatDuration(41205), "41.20 µs")
+    assertEq(formatDuration(41205), "41.20 \u{b5}s")
     assertEq(formatDuration(1290000), "1.29 ms")
     assertEq(formatDuration(2500000000), "2.50 s")
 }

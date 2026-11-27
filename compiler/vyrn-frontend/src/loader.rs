@@ -542,7 +542,9 @@ pub fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<St
         return Ok(normalize(&with_ext(format!("{root}/{rest}"))));
     }
     if spec.starts_with("http://") {
-        return Err(format!("insecure `http:` import `{spec}` — use https"));
+        return Err(format!(
+            "insecure `http:` import `{spec}` \u{2014} use https"
+        ));
     }
     // A remote specifier is its own key; the CLI's resolver fetches it through
     // the lockfile, the cache or the network.
@@ -688,7 +690,7 @@ fn audience_objection(
         to = to.audience.phrase()
     );
     Some(d.with_note(format!(
-        "audience `{}` is declared by vyrn.json:{} — {}; the importer's own audience comes from {}",
+        "audience `{}` is declared by vyrn.json:{} \u{2014} {}; the importer's own audience comes from {}",
         to.audience,
         to.audience.key(),
         audience::remedy(to.audience, importer, imported, map),
@@ -4910,7 +4912,7 @@ fn warn_foreign_entry(key: &str, session: Option<&crate::session::Session>) {
     }
     eprintln!("warning: ignoring generator cache entry `{key}`: this compiler did not write it");
     eprintln!(
-        "  note: the generator ran instead, so this build is correct — but something \
+        "  note: the generator ran instead, so this build is correct \u{2014} but something \
          other than `vyrn` is writing to the generator cache (`VYRN_GEN_CACHE_DIR`, \
          else `~/.vyrn/cache/gen`)"
     );
@@ -7361,12 +7363,12 @@ fn clash_diagnostics(
         );
         let fix = match spec {
             Some(s) => format!(
-                "import one of them as a namespace instead — `import * as {ns} from \"{s}\"` \
+                "import one of them as a namespace instead \u{2014} `import * as {ns} from \"{s}\"` \
                  reaches its exports as `{ns}.{}` and keeps them out of the flat namespace",
                 names[0],
                 ns = ns_suggestion(s)
             ),
-            None => "import one of them as a namespace (`import * as ns from ..`) instead — a \
+            None => "import one of them as a namespace (`import * as ns from ..`) instead \u{2014} a \
                      namespace keeps its exports out of the flat namespace"
                 .to_string(),
         };

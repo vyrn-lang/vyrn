@@ -198,11 +198,11 @@ export fn slice(s: String, start: Int64, end: Int64) -> Result<String, SliceErro
 test "the predicates answer the same on ASCII and on multi-byte text" {
     // A needle matches only at a character boundary, so a byte-wise scan never
     // lands mid-character.
-    assertEq(startsWith("café au lait", "café"), true)
-    assertEq(endsWith("café au lait", "lait"), true)
-    assertEq(contains("café au lait", "é a"), true)
-    assertEq(contains("日本語テキスト", "語テ"), true)
-    assertEq(contains("日本語テキスト", "zz"), false)
+    assertEq(startsWith("caf\u{e9} au lait", "caf\u{e9}"), true)
+    assertEq(endsWith("caf\u{e9} au lait", "lait"), true)
+    assertEq(contains("caf\u{e9} au lait", "\u{e9} a"), true)
+    assertEq(contains("\u{65e5}\u{672c}\u{8a9e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}", "\u{8a9e}\u{30c6}"), true)
+    assertEq(contains("\u{65e5}\u{672c}\u{8a9e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}", "zz"), false)
     // An empty needle is a prefix, a suffix, and a substring of everything.
     assertEq(startsWith("", ""), true)
     assertEq(endsWith("", ""), true)
@@ -228,11 +228,11 @@ test "an empty needle occurs at an offset up to the length and nowhere past it" 
 }
 
 test "stringOf cuts at character boundaries and answers None inside one" {
-    // "é" is the two bytes C3 A9, at offsets 3 and 4 of "café".
-    assertEq(stringOf("café", 0, 3) ?? "None", "caf")
-    assertEq(stringOf("café", 3, 5) ?? "None", "é")
-    assertEq(stringOf("café", 4, 5) ?? "None", "None")
-    assertEq(stringOf("café", 0, 4) ?? "None", "None")
-    assertEq(stringOf("café", 2, 2) ?? "None", "")
-    assertEq(stringOf("café", 5, 5) ?? "None", "")
+    // "\u{e9}" is the two bytes C3 A9, at offsets 3 and 4 of "caf\u{e9}".
+    assertEq(stringOf("caf\u{e9}", 0, 3) ?? "None", "caf")
+    assertEq(stringOf("caf\u{e9}", 3, 5) ?? "None", "\u{e9}")
+    assertEq(stringOf("caf\u{e9}", 4, 5) ?? "None", "None")
+    assertEq(stringOf("caf\u{e9}", 0, 4) ?? "None", "None")
+    assertEq(stringOf("caf\u{e9}", 2, 2) ?? "None", "")
+    assertEq(stringOf("caf\u{e9}", 5, 5) ?? "None", "")
 }

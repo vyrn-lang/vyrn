@@ -1809,13 +1809,13 @@ test "a dot and a negated class match a whole character" {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(replaceAll(dot, "é", "x"), "x")
-    assertEq(countMatches(dot, "aé€😀"), 4)
+    assertEq(replaceAll(dot, "\u{e9}", "x"), "x")
+    assertEq(countMatches(dot, "a\u{e9}\u{20ac}\u{1f600}"), 4)
     let neg = match compile("[^a]") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(replaceAll(neg, "aéb", "_"), "a__")
+    assertEq(replaceAll(neg, "a\u{e9}b", "_"), "a__")
 }
 
 test "the three repeats" {
@@ -1872,7 +1872,7 @@ test "an escape is a control, a code point, a line break or a quote" {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(countMatches(re, "xAé\nBAé\nB"), 2)
+    assertEq(countMatches(re, "xA\u{e9}\nBA\u{e9}\nB"), 2)
     let breaks = match compile("\\R") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
@@ -1887,7 +1887,7 @@ test "an escape is a control, a code point, a line break or a quote" {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(replaceAll(cls, "aé \tb", "-"), "a-b")
+    assertEq(replaceAll(cls, "a\u{e9} \tb", "-"), "a-b")
 }
 
 test "an escape with no meaning is refused" {
@@ -1924,7 +1924,7 @@ test "a class is a set of code points" {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(replaceAll(wide, "café€", "_"), "caf_€")
+    assertEq(replaceAll(wide, "caf\u{e9}\u{20ac}", "_"), "caf_\u{20ac}")
     let rest = match compile("[\\w--\\d]+|[a-c~~b-d]") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
@@ -2143,7 +2143,7 @@ fn draw(seed: modify Int64, n: Int64) -> Int64 {
 
 /// A pattern `compile` accepts, over the atoms the engines treat differently.
 fn genPattern(seed: modify Int64, depth: Int64) -> String {
-    let atoms = ["a", "b", "c", ".", "[ab]", "[^a]", "[a-c]", "(é)", "\\|", "(€)"]
+    let atoms = ["a", "b", "c", ".", "[ab]", "[^a]", "[a-c]", "(\u{e9})", "\\|", "(\u{20ac})"]
     let suffixes = ["", "", "*", "+", "?", "*?", "+?", "??"]
     let mut out = ""
     let branches = 1 + draw(seed, 2)
@@ -2209,7 +2209,7 @@ fn backtrackAt(p: Program, pc: Int64, hay: Array<UInt8>, at: Int64) -> Int64 {
 }
 
 test "the two lazy DFAs find the match a backtracking search finds from each offset" {
-    let pieces = ["a", "b", "c", "é", "è", "€", "|", "\n"]
+    let pieces = ["a", "b", "c", "\u{e9}", "\u{e8}", "\u{20ac}", "|", "\n"]
     let mut seed = 7
     let mut round = 0
     while round < 300 {

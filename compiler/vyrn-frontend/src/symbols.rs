@@ -1094,7 +1094,7 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
     match resolve_token(analysis, tok, member) {
         Some(Named::Local(b)) => Some(local_resolution(analysis, b)),
         Some(Named::NsMember(ns, m)) => {
-            let via = format!("— via namespace `{}`", ns.name);
+            let via = format!("\u{2014} via namespace `{}`", ns.name);
             let hover = hover_of(&m.detail, &[doc_piece(&m.doc), Some(&via)]);
             Some(Resolution {
                 definition: m.file.is_some() || ns.generated.is_some(),
@@ -1284,12 +1284,12 @@ fn row_declaration(b: &crate::prelude::Builtin, sp: &Spellings) -> String {
 /// `loader::builtin_alias_exports` read it. The `SymbolKind` tells a type from
 /// a constructor.
 pub(crate) static BUILTIN_TYPES_AND_CTORS: &[(&str, &str, SymbolKind, &str)] = &[
-    ("Result", "std/result", SymbolKind::Type, "Result<T, E> — the builtin result type (`Ok(T)` | `Err(E)`). Spelled explicitly by `import { Result, Ok, Err } from \"std/result\"`."),
-    ("Ok", "std/result", SymbolKind::Variant, "Ok(value: T) -> Result<T, E> — the success variant of the builtin `Result`."),
-    ("Err", "std/result", SymbolKind::Variant, "Err(error: E) -> Result<T, E> — the failure variant of the builtin `Result`."),
-    ("Option", "std/option", SymbolKind::Type, "Option<T> — the builtin option type (`Some(T)` | `None`). Spelled explicitly by `import { Option, Some, None } from \"std/option\"`."),
-    ("Some", "std/option", SymbolKind::Variant, "Some(value: T) -> Option<T> — the present variant of the builtin `Option`."),
-    ("None", "std/option", SymbolKind::Variant, "None -> Option<T> — the absent variant of the builtin `Option`."),
+    ("Result", "std/result", SymbolKind::Type, "Result<T, E> \u{2014} the builtin result type (`Ok(T)` | `Err(E)`). Spelled explicitly by `import { Result, Ok, Err } from \"std/result\"`."),
+    ("Ok", "std/result", SymbolKind::Variant, "Ok(value: T) -> Result<T, E> \u{2014} the success variant of the builtin `Result`."),
+    ("Err", "std/result", SymbolKind::Variant, "Err(error: E) -> Result<T, E> \u{2014} the failure variant of the builtin `Result`."),
+    ("Option", "std/option", SymbolKind::Type, "Option<T> \u{2014} the builtin option type (`Some(T)` | `None`). Spelled explicitly by `import { Option, Some, None } from \"std/option\"`."),
+    ("Some", "std/option", SymbolKind::Variant, "Some(value: T) -> Option<T> \u{2014} the present variant of the builtin `Option`."),
+    ("None", "std/option", SymbolKind::Variant, "None -> Option<T> \u{2014} the absent variant of the builtin `Option`."),
 ];
 
 fn builtin_type_or_ctor(name: &str) -> Option<(SymbolKind, String)> {
@@ -1510,7 +1510,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
                     .map(|s| Completion {
                         label: s.name.clone(),
                         kind: s.kind,
-                        detail: format!("{}\n\n— via namespace `{}`", s.detail, recv),
+                        detail: format!("{}\n\n\u{2014} via namespace `{}`", s.detail, recv),
                         doc: s.doc.clone(),
                     })
                     .collect();
@@ -1537,7 +1537,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
         out.push(Completion {
             label: "length".to_string(),
             kind: SymbolKind::Field,
-            detail: "length: Int64 — element count (read-only)".to_string(),
+            detail: "length: Int64 \u{2014} element count (read-only)".to_string(),
             doc: None,
         });
     }
@@ -1546,7 +1546,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
         out.push(Completion {
             label: "length".to_string(),
             kind: SymbolKind::Field,
-            detail: "length: Int64 — entry count (read-only)".to_string(),
+            detail: "length: Int64 \u{2014} entry count (read-only)".to_string(),
             doc: None,
         });
     }
@@ -1556,7 +1556,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
         out.push(Completion {
             label: "byteLength".to_string(),
             kind: SymbolKind::Field,
-            detail: "byteLength: Int64 — UTF-8 byte count (O(1), read-only)".to_string(),
+            detail: "byteLength: Int64 \u{2014} UTF-8 byte count (O(1), read-only)".to_string(),
             doc: None,
         });
     }
@@ -1637,7 +1637,7 @@ pub fn string_literal_completions(
         .map(|k| Completion {
             label: k.clone(),
             kind: SymbolKind::Variant,
-            detail: format!("{ty_name} — a key of this finite string type"),
+            detail: format!("{ty_name} \u{2014} a key of this finite string type"),
             doc: None,
         })
         .collect()
@@ -1666,7 +1666,7 @@ pub fn class_completions(
             .map(|c| Completion {
                 label: c.clone(),
                 kind: SymbolKind::Variant,
-                detail: format!("{ty_name} — theme utility/safelist class"),
+                detail: format!("{ty_name} \u{2014} theme utility/safelist class"),
                 doc: None,
             })
             .collect(),
@@ -1760,8 +1760,10 @@ pub fn class_token_hover(
         return None;
     }
     Some(match css_rule_for(&analysis.class_css, &token) {
-        Some(rule) => format!("**`{token}`** — `{ty_name}` utility class\n\n```css\n{rule}\n```"),
-        None => format!("**`{token}`** — safelisted (app-styled)"),
+        Some(rule) => {
+            format!("**`{token}`** \u{2014} `{ty_name}` utility class\n\n```css\n{rule}\n```")
+        }
+        None => format!("**`{token}`** \u{2014} safelisted (app-styled)"),
     })
 }
 
@@ -2332,7 +2334,7 @@ fn index_imported_symbols(
             let mut s = d.sym;
             let local = local_of(&s.name).expect("`keep` admitted it").local();
             if local != s.name {
-                s.detail = format!("{}\n\n— alias of `{}`", s.detail, s.name);
+                s.detail = format!("{}\n\n\u{2014} alias of `{}`", s.detail, s.name);
             }
             original_of.insert(local.to_string(), s.name.clone());
             s.name = local.to_string();
@@ -2617,7 +2619,7 @@ pub(crate) fn origin_note(m: &MappedSymbol) -> String {
     } else {
         format!("{}:{}", short_path(&m.file), m.line)
     };
-    out.push_str(&format!("— generated from `{}` in {at}", m.decl));
+    out.push_str(&format!("\u{2014} generated from `{}` in {at}", m.decl));
     out
 }
 
@@ -2630,7 +2632,7 @@ pub(crate) fn short_path(file: &str) -> String {
     if parts.len() <= 3 {
         return file.to_string();
     }
-    format!("…/{}", parts[parts.len() - 3..].join("/"))
+    format!("\u{2026}/{}", parts[parts.len() - 3..].join("/"))
 }
 
 /// A hover, and the part of it the editor shows as code.
@@ -2678,7 +2680,7 @@ fn hover_of(detail: &str, tail: &[Option<&str>]) -> Hover {
         Some((head, more)) => (head, Some(more)),
         None => (detail, None),
     };
-    let (signature, lead) = match head.split_once(" — ") {
+    let (signature, lead) = match head.split_once(" \u{2014} ") {
         _ if DECL.iter().any(|d| head.starts_with(d)) => (Some(head), None),
         Some((sig, doc)) if !sig.contains('\n') && sig.contains('(') && sig.contains("->") => {
             (Some(sig), Some(doc))
@@ -3728,7 +3730,7 @@ mod tests {
     fn every_builtin_method_entry_describes_itself() {
         for (b, _) in builtin_methods() {
             assert!(
-                b.detail.contains("—") && b.detail.len() > 20,
+                b.detail.contains("\u{2014}") && b.detail.len() > 20,
                 "`{}` has no readable detail: {:?}",
                 b.name,
                 b.detail
@@ -4375,7 +4377,7 @@ fn main() -> Int64 {
             MemoryNote {
                 name: "b".into(),
                 line: 5,
-                text: "reclaimed at block exit — freeing the String buffer".into(),
+                text: "reclaimed at block exit \u{2014} freeing the String buffer".into(),
                 last_use: None,
                 moved_into: None,
             },

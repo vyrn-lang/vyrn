@@ -68,7 +68,7 @@ export gen fn iconsAt(
 }
 
 fn cannotRead(collection: String, why: String) -> String {
-    return "std/icons cannot read the collection `\{collection}`: \{why} — a collection is a JSON file: a relative path, or a dependency in vyrn.json (`vyrn add <specifier> --name \{collection}`)"
+    return "std/icons cannot read the collection `\{collection}`: \{why} \u{2014} a collection is a JSON file: a relative path, or a dependency in vyrn.json (`vyrn add <specifier> --name \{collection}`)"
 }
 
 /// [`icons`] over collection text already read. `collectionPath` is only
@@ -104,7 +104,7 @@ gen fn iconsCode(
             collectionPath,
             line,
             col,
-            "icons(\"\{collectionPath}\", \"\") names no glyph — list the glyphs the program uses, separated by spaces",
+            "icons(\"\{collectionPath}\", \"\") names no glyph \u{2014} list the glyphs the program uses, separated by spaces",
         ))
         return vyrn""
     }
@@ -187,7 +187,7 @@ fn collectionOf(doc: Json, path: String) -> Collection {
     }
     if icons.length == 0 {
         return collectionError(
-            "the collection `\{path}` has no `icons` object — it is not an Iconify collection",
+            "the collection `\{path}` has no `icons` object \u{2014} it is not an Iconify collection",
         )
     }
     return Collection {
@@ -282,7 +282,7 @@ fn licenseLine(info: Json) -> String {
     if name == "" {
         return "License: see \{url}"
     }
-    return "License: \{name} — \{url}"
+    return "License: \{name} \u{2014} \{url}"
 }
 
 gen fn iconsEmit(
@@ -308,7 +308,7 @@ gen fn iconsEmit(
                 path,
                 line,
                 col,
-                "`\{want}` names a collection as well as a glyph — the collection is the first argument, so write `\{afterColon(want)}`",
+                "`\{want}` names a collection as well as a glyph \u{2014} the collection is the first argument, so write `\{afterColon(want)}`",
             ))
         } else {
             let fnName = camel(want)
@@ -318,7 +318,7 @@ gen fn iconsEmit(
                     path,
                     line,
                     col,
-                    "`\{want}` becomes `\{fnName}()`, which the generated module itself needs (\{joinWith(reservedNames(), "`, `")}) — import the collection twice and take one glyph in each",
+                    "`\{want}` becomes `\{fnName}()`, which the generated module itself needs (\{joinWith(reservedNames(), "`, `")}) \u{2014} import the collection twice and take one glyph in each",
                 ))
             } else if includes(taken, fnName) {
                 errs.push(iconErr(
@@ -326,7 +326,7 @@ gen fn iconsEmit(
                     path,
                     line,
                     col,
-                    "`\{want}` and an earlier glyph in this import both become `\{fnName}()` — import the collection twice and take one glyph in each",
+                    "`\{want}` and an earlier glyph in this import both become `\{fnName}()` \u{2014} import the collection twice and take one glyph in each",
                 ))
             } else {
                 body = body + glyphSource(coll, want, fnName, path, anchorFile, line, col, errs)
@@ -352,7 +352,7 @@ gen fn iconHelper() -> Code {
     return vyrn"""
         import { el, Html, Attr } from "std/html"
         /// One glyph: an inline `<svg>` that follows the surrounding colour and
-        /// font size. Decorative — give it an accessible name at the use site when
+        /// font size. Decorative \u{2014} give it an accessible name at the use site when
         /// the icon is the whole content.
         fn glyph(box: String, markup: String) -> Html {
             return el(
@@ -424,14 +424,14 @@ fn resolveGlyph(coll: Collection, want: String, hop: Int64) -> Found {
         }
     }
     return notFound(
-        "the collection `\{coll.path}` has no glyph `\{want}` — nearest is `\{nearest(coll, want)}`",
+        "the collection `\{coll.path}` has no glyph `\{want}` \u{2014} nearest is `\{nearest(coll, want)}`",
     )
 }
 
 fn aliasGlyph(coll: Collection, want: String, entry: Json, hop: Int64) -> Found {
     if hop >= aliasDepth() {
         return notFound(
-            "the alias `\{want}` in `\{coll.path}` is more than \{aliasDepth().toString()} hops from any glyph — the collection's `aliases` chain is broken or circular",
+            "the alias `\{want}` in `\{coll.path}` is more than \{aliasDepth().toString()} hops from any glyph \u{2014} the collection's `aliases` chain is broken or circular",
         )
     }
     let mut parent = ""
@@ -446,7 +446,7 @@ fn aliasGlyph(coll: Collection, want: String, entry: Json, hop: Int64) -> Found 
     }
     if extra.length > 0 {
         return notFound(
-            "`\{want}` is an alias asking for `\{joinWith(extra, "`, `")}`, which std/icons does not apply — name its parent `\{parent}` instead, or draw the transform in your own markup",
+            "`\{want}` is an alias asking for `\{joinWith(extra, "`, `")}`, which std/icons does not apply \u{2014} name its parent `\{parent}` instead, or draw the transform in your own markup",
         )
     }
     if parent == "" {
@@ -556,7 +556,7 @@ export gen fn iconProvider(
             file,
             line,
             col,
-            "this `<Icon>` provider binds no collection — name each pinned collection's `vyrn.json` alias, `iconProvider(attrs, file, line, col, \"ui\")`",
+            "this `<Icon>` provider binds no collection \u{2014} name each pinned collection's `vyrn.json` alias, `iconProvider(attrs, file, line, col, \"ui\")`",
         )
     }
     let ask = iconRequest(attrs)
@@ -576,7 +576,7 @@ export gen fn iconProvider(
 /// Why a tag with no name is refused, in the vocabulary of `collection`, the
 /// first one the provider binds.
 fn iconNoName(collection: String) -> String {
-    return "`<Icon>` needs a `name` — the glyph to draw, `name=\"\{collection}:github\"`"
+    return "`<Icon>` needs a `name` \u{2014} the glyph to draw, `name=\"\{collection}:github\"`"
 }
 
 type IconAsk = { name: String, size: String, label: String, class: String, error: String }
@@ -598,7 +598,7 @@ fn iconRequest(attrs: String) -> IconAsk {
         } else if f.key == "class" {
             ask.class = tagOf(f.value)
         } else if ask.error == "" {
-            ask.error = "`<Icon>` has no `\{f.key}` attribute — it takes `name`, and optionally `size` (a CSS length), `label` (the accessible name) and `class`"
+            ask.error = "`<Icon>` has no `\{f.key}` attribute \u{2014} it takes `name`, and optionally `size` (a CSS length), `label` (the accessible name) and `class`"
         }
     }
     return ask
@@ -614,17 +614,17 @@ fn iconCollectionOf(name: String, bound: Array<String>) -> IconWhere {
         let glyph = afterColon(name)
         if !includes(bound, prefix) {
             return iconNowhere(
-                "`\{name}` names the collection `\{prefix}`, and this provider binds `\{vocab}` — write one of those, or bind `\{prefix}` in the provider module",
+                "`\{name}` names the collection `\{prefix}`, and this provider binds `\{vocab}` \u{2014} write one of those, or bind `\{prefix}` in the provider module",
             )
         }
         if glyph == "" {
-            return iconNowhere("`\{name}` names a collection and no glyph — write `\{prefix}:github`")
+            return iconNowhere("`\{name}` names a collection and no glyph \u{2014} write `\{prefix}:github`")
         }
         return IconWhere { collection: prefix, glyph: glyph, error: "" }
     }
     if bound.length > 1 {
         return iconNowhere(
-            "`\{name}` names no collection, and this provider binds `\{vocab}` — write `\{bound[0]}:\{name}` for one of them",
+            "`\{name}` names no collection, and this provider binds `\{vocab}` \u{2014} write `\{bound[0]}:\{name}` for one of them",
         )
     }
     return IconWhere { collection: bound[0].copy(), glyph: name.copy(), error: "" }
@@ -864,7 +864,7 @@ test "a named glyph becomes one function over the shared helper" {
 
 test "the collection's licence is the generated header's own line" {
     let src = moduleText(toyCollection(), "toy", "github", "", 0, 0)
-    assert(contains(src, "/// License: MIT — https://example.test/L"))
+    assert(contains(src, "/// License: MIT \u{2014} https://example.test/L"))
 }
 
 test "a collection that declares no terms says so rather than saying nothing" {
@@ -890,7 +890,7 @@ test "a glyph that overrides its width gets its own viewBox" {
 
 test "an unknown glyph is a report with the nearest name, and no declaration" {
     let src = moduleText(toyCollection(), "toy", "githup", "", 0, 0)
-    assert(contains(src, "the collection `toy` has no glyph `githup` — nearest is `github`"))
+    assert(contains(src, "the collection `toy` has no glyph `githup` \u{2014} nearest is `github`"))
     assert(contains(src, "export fn githup") == false)
 }
 
@@ -918,7 +918,7 @@ test "a prefixed name is refused, naming the bare glyph to write" {
 
 test "an empty name list is refused" {
     let src = moduleText(toyCollection(), "toy", "  ", "", 0, 0)
-    assert(contains(src, "names no glyph — list the glyphs the program uses"))
+    assert(contains(src, "names no glyph \u{2014} list the glyphs the program uses"))
 }
 
 test "a collection that is not JSON is refused, naming the path" {
@@ -1000,12 +1000,12 @@ test "a prefix the provider does not bind is refused at the tag" {
 
 test "an attribute the provider does not know is refused by name" {
     let ask = iconRequest("{\"name\":\"toy:github\",\"colour\":\"red\"}")
-    assert(contains(ask.error, "`<Icon>` has no `colour` attribute — it takes `name`"))
+    assert(contains(ask.error, "`<Icon>` has no `colour` attribute \u{2014} it takes `name`"))
 }
 
 test "a tag with no name says what one looks like in this project's vocabulary" {
     assertEq(iconRequest("{}").name, "")
-    assert(contains(iconNoName("toy"), "`<Icon>` needs a `name` — the glyph to draw, `name=\"toy:github\"`"))
+    assert(contains(iconNoName("toy"), "`<Icon>` needs a `name` \u{2014} the glyph to draw, `name=\"toy:github\"`"))
 }
 
 test "size, label and class reach the use site" {

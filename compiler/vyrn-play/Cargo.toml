@@ -12,7 +12,7 @@ description = "The compiler's front end as a wasm module, for the playground on 
 #
 # THE BUILD COMMAND HAS TO RUN FROM THIS DIRECTORY. `.cargo/config.toml` beside
 # this file sets the linker's stack size, and cargo reads that file from the
-# working directory upward — `--manifest-path` from elsewhere silently misses it
+# working directory upward - `--manifest-path` from elsewhere silently misses it
 # and leaves the module with wasm-ld's 1 MB default, which the compiler's own
 # recursion exhausts on a deeply nested program.
 #
@@ -23,7 +23,7 @@ description = "The compiler's front end as a wasm module, for the playground on 
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
 # The page RUNS what this crate COMPILES. `play_compile` answers a
-# module's bytes, and the page instantiates them with `web/wasi-min.js` — the
+# module's bytes, and the page instantiates them with `web/wasi-min.js` - the
 # same runtime the `vyrn build --target wasm` demos in `web/` already use. This
 # crate cannot instantiate one itself: it IS a wasm module. The direct backend
 # is pure Rust plus `wasm-encoder`, so it needs no LLVM and no sysroot, which is

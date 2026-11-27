@@ -300,7 +300,7 @@ fn gqlEnum(t: TypeInfo, doc: String) -> String {
 fn gqlScalar(t: TypeInfo, iface: ModuleInterface) -> String {
     let raw = gqlRawDoc(t.name, iface)
     let folded = gqlFoldWs(t.shape[0].spelling)
-    let body = if raw != "" { raw + " — " + folded } else { folded }
+    let body = if raw != "" { raw + " \u{2014} " + folded } else { folded }
     return gqlDescBlock(body) + "scalar " + t.name + "\n"
 }
 
@@ -351,7 +351,7 @@ gen fn gqlDefine(defs: modify Array<GqlDef>, name: String, from: String) -> Code
     if taken != "" {
         return reportHere(
             Error,
-            "the GraphQL document would define `\{name}` twice — \{taken}, and \{from}; a document may not define one name twice, so rename the contract's type",
+            "the GraphQL document would define `\{name}` twice \u{2014} \{taken}, and \{from}; a document may not define one name twice, so rename the contract's type",
         )
     }
     defs.push(GqlDef { name: name.copy(), from: from.copy() })
@@ -364,7 +364,7 @@ gen fn gqlReservedName(name: String) -> Code {
     if name.startsWith("__") {
         return reportHere(
             Error,
-            "the GraphQL document would define `\{name}` — a name beginning with `__` is reserved for introspection, so rename the contract's type",
+            "the GraphQL document would define `\{name}` \u{2014} a name beginning with `__` is reserved for introspection, so rename the contract's type",
         )
     }
     return vyrn""
@@ -436,7 +436,7 @@ export gen fn sdl(contract: String) -> Code {
     doc = doc + "# (base + constraint in the description); Map => the JSON scalar;\n"
     doc = doc + "# payload enums (incl. Result) => tagged objects (one nullable\n"
     doc = doc + "# field per variant); a `mut fn` => Mutation, else Query.\n"
-    doc = doc + "\"\"\"An arbitrary JSON value — the wire form of a Vyrn Map<String, V>.\"\"\"\n"
+    doc = doc + "\"\"\"An arbitrary JSON value \u{2014} the wire form of a Vyrn Map<String, V>.\"\"\"\n"
     doc = doc + "scalar JSON\n"
 
     // Every name the document defines; a repeat is reported (`gqlDefine`).
@@ -1589,7 +1589,7 @@ test "gqlProject takes a leaf whole and answers null for a DECLARED member the v
     )
 }
 
-test "gqlProject reports a member the schema does not declare — M1's first hole" {
+test "gqlProject reports a member the schema does not declare \u{2014} M1's first hole" {
     // `toJson` omits a `None`, so only the type graph can refuse `shelved`. It
     // declares no type for it, so the `null` stays put.
     assertEq(
@@ -1600,7 +1600,7 @@ test "gqlProject reports a member the schema does not declare — M1's first hol
     )
 }
 
-test "gqlProject refuses a selection on a scalar — M1's second hole" {
+test "gqlProject refuses a selection on a scalar \u{2014} M1's second hole" {
     // `title` is `Title!`, so the `null` climbs through `Book!`, `[Book!]!` and
     // the non-null root: the `"data": null` case.
     assertEq(

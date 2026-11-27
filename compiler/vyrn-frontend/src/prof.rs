@@ -22,7 +22,7 @@ fn ms(d: Duration) -> String {
     if ns < 1_000 {
         format!("{ns} ns")
     } else if ns < 1_000_000 {
-        format!("{:.2} µs", ns as f64 / 1_000.0)
+        format!("{:.2} \u{b5}s", ns as f64 / 1_000.0)
     } else if ns < 1_000_000_000 {
         format!("{:.2} ms", ns as f64 / 1_000_000.0)
     } else {

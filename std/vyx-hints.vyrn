@@ -65,7 +65,7 @@ export gen fn vyxHintsConfigured(dir: String, config: String) -> Code {
     }
     let pol = vhPolicy(text)
     if pol.err != "" {
-        return reportHere(Error, "vyx-hints: `\{config}` is not a usable hints config — \{pol.err}") + vhModule(0)
+        return reportHere(Error, "vyx-hints: `\{config}` is not a usable hints config \u{2014} \{pol.err}") + vhModule(0)
     }
     let mut found: Array<Code> = []
     let checked = vhScan(pol.policy, dir, found)
@@ -239,7 +239,7 @@ fn vhElemRules(
                 dflt: Error,
                 line: line,
                 col: 0,
-                message: "`<\{tag}>` was removed from HTML; the platform still renders it, but nothing specifies how — write current markup",
+                message: "`<\{tag}>` was removed from HTML; the platform still renders it, but nothing specifies how \u{2014} write current markup",
             })
         } else if vhKnownTag(tag) == false {
             // A warning: a vocabulary table grows, so the rule stays quiet until
@@ -249,7 +249,7 @@ fn vhElemRules(
                 dflt: Warning,
                 line: line,
                 col: 0,
-                message: "`<\{tag}>` is not an HTML element — a typo? A custom element needs a `-` in its name; a component call starts with a capital",
+                message: "`<\{tag}>` is not an HTML element \u{2014} a typo? A custom element needs a `-` in its name; a component call starts with a capital",
             })
         }
     }
@@ -333,7 +333,7 @@ fn vhElemRules(
                 dflt: Warning,
                 line: v.line,
                 col: v.col,
-                message: "`\{a.name.text}` is not an ARIA attribute — a typo? The vocabulary is closed, and a misspelled name is silently ignored",
+                message: "`\{a.name.text}` is not an ARIA attribute \u{2014} a typo? The vocabulary is closed, and a misspelled name is silently ignored",
             })
         }
         // html/deprecated-attr (`html-validate` `no-deprecated-attr`, `"error"`).
@@ -345,7 +345,7 @@ fn vhElemRules(
                 dflt: Error,
                 line: v.line,
                 col: v.col,
-                message: "`\{a.name.text}` on `<\{tag}>` was removed from HTML; the platform may ignore it — write CSS or current markup",
+                message: "`\{a.name.text}` on `<\{tag}>` was removed from HTML; the platform may ignore it \u{2014} write CSS or current markup",
             })
         }
         // html/attr-name. Names only, not values. A name that is not global, not
@@ -372,7 +372,7 @@ fn vhElemRules(
                 dflt: Warning,
                 line: v.line,
                 col: v.col,
-                message: "`\{a.name.text}` is not an attribute of `<\{tag}>` — a typo, or an attribute that belongs on another element?",
+                message: "`\{a.name.text}` is not an attribute of `<\{tag}>` \u{2014} a typo, or an attribute that belongs on another element?",
             })
         }
         // a11y/autoplay (`html-validate` `no-autoplay`, WCAG 1.4.2). The
@@ -398,7 +398,7 @@ fn vhElemRules(
             dflt: Warning,
             line: aLine,
             col: aCol,
-            message: "`\{ent}` is not decoded here — text is emitted escaped, so the page shows those bytes literally; write the character itself",
+            message: "`\{ent}` is not decoded here \u{2014} text is emitted escaped, so the page shows those bytes literally; write the character itself",
         })
     }
 

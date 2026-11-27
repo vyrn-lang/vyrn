@@ -271,7 +271,7 @@ fn numberOk(raw: String) -> Bool {
 /// constructor over any `String`, so the check sits where every writer emits.
 fn emitNumber(raw: String) -> String {
     if !numberOk(raw) {
-        panic("json: `" + raw + "` is not a usable number — a `JNum` holds the RAW text of a JSON number (`-?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?`); text that is not one belongs in a `JStr`, which is escaped")
+        panic("json: `" + raw + "` is not a usable number \u{2014} a `JNum` holds the RAW text of a JSON number (`-?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?`); text that is not one belongs in a `JStr`, which is escaped")
     }
     return raw.copy()
 }

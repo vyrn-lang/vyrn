@@ -867,7 +867,7 @@ fn check_accum_inner(
                     // `x.m(..)` falls through to a free function named `m`.
                     None => format!(
                         "Vyrn has no inherent methods, so a helper is a plain \
-                         `fn {}(x: {}, ..)` at the top level — `x.{}(..)` calls that",
+                         `fn {}(x: {}, ..)` at the top level \u{2014} `x.{}(..)` calls that",
                         m.name, imp.ty, m.name
                     ),
                 };
@@ -5571,7 +5571,7 @@ impl<'a> Checker<'a> {
                     "diag" => "`diag` is",
                     "codeAt" => "`codeAt` is",
                     "at" => "`at` is",
-                    _ => "`vyrn\"…\"` code quotes are",
+                    _ => "`vyrn\"\u{2026}\"` code quotes are",
                 };
                 return Err(cerr!(line, GenOnlySurface, surface));
             }
@@ -8154,7 +8154,7 @@ mod tests {
             assert!(
                 RESERVED.contains(&n),
                 "`{n}` is forbidden inside a `gen fn` but is not a name the \
-                 compiler owns — it now forbids any user function spelled that way"
+                 compiler owns \u{2014} it now forbids any user function spelled that way"
             );
         }
     }

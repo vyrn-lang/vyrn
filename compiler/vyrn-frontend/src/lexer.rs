@@ -960,7 +960,7 @@ mod tests {
             "{}",
             e.message
         );
-        let e = lex("'é'").unwrap_err();
+        let e = lex("'\u{e9}'").unwrap_err();
         assert!(
             e.message.contains(
                 "byte literal must be a single ASCII byte; write the UTF-8 bytes explicitly"

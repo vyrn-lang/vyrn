@@ -405,7 +405,7 @@ fn refusal(
 
     let mut note = format!(
         "{}\n   = `{}` needs `{}`; target `{}` has {}",
-        shown.join(" → "),
+        shown.join(" \u{2192} "),
         c.carrier,
         c.cap.name(),
         artifact.target,
@@ -616,7 +616,9 @@ mod tests {
         );
         let note = d.note.unwrap();
         assert!(
-            note.starts_with("client/boot.vyrn → shared/format.vyrn → server/db.vyrn"),
+            note.starts_with(
+                "client/boot.vyrn \u{2192} shared/format.vyrn \u{2192} server/db.vyrn"
+            ),
             "{note}"
         );
         assert!(

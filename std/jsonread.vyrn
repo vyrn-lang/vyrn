@@ -785,7 +785,7 @@ test "the round-trip law holds for the awkward keys and values too" {
         JsonField { key: ctrl, value: JStr("\n\t") },
         JsonField { key: "Case", value: JNum("0") },
         JsonField { key: "case", value: JNum("-0") },
-        JsonField { key: "𝄞 above the BMP", value: JStr("𝄞") },
+        JsonField { key: "\u{1d11e} above the BMP", value: JStr("\u{1d11e}") },
         JsonField { key: "", value: JArr([]) },
         JsonField { key: "empty", value: JObj([]) },
         JsonField {

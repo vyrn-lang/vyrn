@@ -430,7 +430,7 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
                         Json::Str(s) => out.push((name.clone(), s.clone())),
                         other => {
                             return Err(format!(
-                                "`{k}.{name}` must be a string, found {} — vyrn.json's \
+                                "`{k}.{name}` must be a string, found {} \u{2014} vyrn.json's \
                                  `{k}` maps {what}",
                                 json_kind(other)
                             ))
@@ -860,7 +860,7 @@ fn read_blob_bytes(dir: &Path, sha: &str) -> Option<Result<Vec<u8>, String>> {
     let bytes = std::fs::read(&path).ok()?;
     if crate::hash::sha256_hex(&bytes) != sha {
         return Some(Err(format!(
-            "cached copy at `{}` does not match its recorded sha256 — delete it and \
+            "cached copy at `{}` does not match its recorded sha256 \u{2014} delete it and \
              re-fetch (or restore a good copy: any file hashing {sha} works)",
             path.display()
         )));

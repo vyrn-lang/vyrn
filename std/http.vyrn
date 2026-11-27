@@ -965,13 +965,13 @@ fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array
         let a = httpWithMethod(httpSocketRoute(w), "GET")
         for l in live {
             if httpSubsumes(a, httpWithMethod(httpLiveRoute(l), "GET")) {
-                panic("mount: the stream route " + l.pattern + " (" + l.derived + ") is unreachable — the socket " + w.pattern + " already answers it")
+                panic("mount: the stream route " + l.pattern + " (" + l.derived + ") is unreachable \u{2014} the socket " + w.pattern + " already answers it")
             }
         }
         for g in groups {
             for b in g {
                 if httpSubsumes(a, b) {
-                    panic("mount: " + b.method + " " + b.pattern + " (" + b.derived + ") is unreachable — the socket " + w.pattern + " already answers it")
+                    panic("mount: " + b.method + " " + b.pattern + " (" + b.derived + ") is unreachable \u{2014} the socket " + w.pattern + " already answers it")
                 }
             }
         }
@@ -981,7 +981,7 @@ fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array
         for g in groups {
             for b in g {
                 if httpSubsumes(a, b) {
-                    panic("mount: " + b.method + " " + b.pattern + " (" + b.derived + ") is unreachable — the stream route " + l.pattern + " already answers it")
+                    panic("mount: " + b.method + " " + b.pattern + " (" + b.derived + ") is unreachable \u{2014} the stream route " + l.pattern + " already answers it")
                 }
             }
         }
@@ -1027,7 +1027,7 @@ fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array
     for g in groups {
         for r in g {
             if r.method == "" {
-                panic("mount: route `" + r.pattern + "` (" + r.derived + ") has no method — wrap it in GET(..)/POST(..)/PUT(..)/PATCH(..)/DELETE(..)")
+                panic("mount: route `" + r.pattern + "` (" + r.derived + ") has no method \u{2014} wrap it in GET(..)/POST(..)/PUT(..)/PATCH(..)/DELETE(..)")
             }
         }
         let mut gj = 0
@@ -1036,7 +1036,7 @@ fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array
                 for a in earlier {
                     for b in g {
                         if httpSubsumes(a, b) {
-                            panic("mount: " + b.method + " " + b.pattern + " (group " + gi.toString() + ", " + b.derived + ") is unreachable — " + a.method + " " + a.pattern + " (group " + gj.toString() + ") already answers it")
+                            panic("mount: " + b.method + " " + b.pattern + " (group " + gi.toString() + ", " + b.derived + ") is unreachable \u{2014} " + a.method + " " + a.pattern + " (group " + gj.toString() + ") already answers it")
                         }
                     }
                 }
@@ -1053,7 +1053,7 @@ fn httpSelfShadow(a: Route, b: Route, aDesc: String, bDesc: String) -> String {
     if httpSubsumes(a, b) == false {
         return ""
     }
-    return "mount: " + bDesc + " is unreachable — " + aDesc + " already answers it"
+    return "mount: " + bDesc + " is unreachable \u{2014} " + aDesc + " already answers it"
 }
 
 /// Whether `a` matches every path `b` does. Reports only containment it can
@@ -1289,7 +1289,7 @@ gen fn httpProcedure(f: FnCode, iface: ModuleInterface, base: String) -> Code {
             """
     } else {
         vyrn"""
-            /// Path patterns `\{proc}` accepts — no placeholders (it takes no input).
+            /// Path patterns `\{proc}` accepts \u{2014} no placeholders (it takes no input).
             """
     }
     let adapter = httpAdapter(f, fields, cap)

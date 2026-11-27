@@ -81,8 +81,8 @@ static struct w2c_vyrn__wait g_vyrn__wait;
 
 /* The extern `vyrn` namespace. Only a browser page implements it, so a binary
    answers every name in it with the one refusal the interpreter and the
-   embedded engine give — `extern \`name\` is not available on this target` on
-   fd 2, exit 1 — and a program that never calls one never reaches a stub. The
+   embedded engine give - `extern \`name\` is not available on this target` on
+   fd 2, exit 1 - and a program that never calls one never reaches a stub. The
    driver writes this block from the header wasm2c just produced, so the
    signatures cannot disagree with the module's imports. It defines
    `VYRN_INSTANTIATE`, whose arguments are the namespaces the module imports,

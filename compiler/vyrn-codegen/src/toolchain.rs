@@ -416,7 +416,7 @@ fn demangle_w2c(sym: &str) -> String {
 pub fn require_tools(what: &str, var: &str, found: Option<PathBuf>) -> Option<PathBuf> {
     if found.is_none() && std::env::var_os("VYRN_REQUIRE_TOOLS").is_some() {
         panic!(
-            "VYRN_REQUIRE_TOOLS is set and `{what}` was not found — this run would have \
+            "VYRN_REQUIRE_TOOLS is set and `{what}` was not found \u{2014} this run would have \
              silently skipped the checks that need it. Point `{var}` at the binary, or \
              unset VYRN_REQUIRE_TOOLS to allow the skip."
         );
@@ -598,7 +598,7 @@ mod tests {
     fn a_mangled_import_name_comes_back_as_the_name_the_program_wrote() {
         assert_eq!(demangle_w2c("jsAdd"), "jsAdd");
         assert_eq!(demangle_w2c("0x5Fstart"), "_start");
-        assert_eq!(demangle_w2c("0xCE0xB4ata"), "δata");
+        assert_eq!(demangle_w2c("0xCE0xB4ata"), "\u{3b4}ata");
     }
 
     /// One test, so the variable is never raced; it restores it on exit.

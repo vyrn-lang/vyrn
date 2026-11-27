@@ -603,7 +603,7 @@ pub fn contract_completions(view: &ContractView, already: &[String]) -> Vec<Cont
             for shape in &m.shapes {
                 out.push(ContractCompletion {
                     label: m.name.clone(),
-                    detail: format!("{} — {}", shape.spelling, view.site()),
+                    detail: format!("{} \u{2014} {}", shape.spelling, view.site()),
                     doc: m.doc.clone(),
                     snippet: shape.snippet.clone(),
                     sort: format!("{:04}", rank),
@@ -636,9 +636,9 @@ pub fn contract_member_hover(view: &ContractView, name: &str) -> Option<String> 
         "member of {}{}",
         view.site(),
         if m.optional {
-            " — optional"
+            " \u{2014} optional"
         } else {
-            " — required"
+            " \u{2014} required"
         }
     ));
     Some(out)
