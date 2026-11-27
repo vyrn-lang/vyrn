@@ -7098,6 +7098,68 @@ fn a_match_pattern_is_coloured_by_the_regex_grammar() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A pattern of a refinement type is coloured past a refusal: the reading goes on
+/// where the refused form ends, so the `\.` after the refused `(?!` is an escape.
+#[test]
+fn a_where_pattern_is_coloured_past_a_refusal() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_email_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = r#"type Email = String where value =~ "^((?!\\.)[\\w\\-_.]*[^.])(@\\w+)(\\.\\w+(\\.\\w+)?[^.\\W])$"
+
+fn main() -> Int64 {
+    let e: Email = "a.b@x.com"
+    return 0
+}
+"#;
+    let path = dir.join("main.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", src);
+    let diags = read_diags_for(&mut client, "main.vyrn");
+    let at = diags.pointer("/params/diagnostics/0/range/start/character");
+    assert_eq!(at, Some(&serde_json::json!(37)), "{diags}");
+    let toks = semantic_tokens_full(&mut client, &uri);
+    let line: Vec<_> = (toks.iter())
+        .filter(|t| t.line == 0 && t.ch >= 37)
+        .map(|t| (t.ch, t.len, t.ty.as_str()))
+        .collect();
+    // The `)` that closes the first group reads as a stray one after the refusal.
+    let (group, class, esc) = ("regexpGroup", "regexp", "escapeSequence");
+    let quant = "regexpQuantifier";
+    let want = [
+        (37, 4, group),
+        (41, 3, esc),
+        (44, 1, group),
+        (45, 1, class),
+        (46, 6, esc),
+        (52, 3, class),
+        (55, 1, quant),
+        (56, 4, class),
+        (61, 1, group),
+        (63, 3, esc),
+        (66, 1, quant),
+        (67, 2, group),
+        (69, 6, esc),
+        (75, 1, quant),
+        (76, 1, group),
+        (77, 6, esc),
+        (83, 1, quant),
+        (84, 1, group),
+        (85, 1, quant),
+        (86, 3, class),
+        (89, 3, esc),
+        (92, 1, class),
+        (93, 1, group),
+        (94, 1, "operator"),
+    ];
+    assert_eq!(line, want, "{toks:?}");
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Every `vyrn.json` under a workspace folder is a module root: with the folder
 /// one level above `dsl/`, the server asks for `dsl/*.calc` at initialize, so a
 /// `.calc` file opened first is coloured and refused. A client whose
