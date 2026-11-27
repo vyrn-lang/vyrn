@@ -138,6 +138,8 @@ pub fn check_and_synthesize(
         .collect();
     let ((mut diags, derived, mut refused), binders, record) =
         checker::check_accum_with_sites(program);
+    // Every pass after the check sees a home call as the call it resolved to.
+    loader::resolve_home_calls(program, &record.homes);
     diags.splice(0..0, unordered);
     let mut record = Some(record);
     // What a `toJson` or `fromJson` generator writes joins the program and is checked

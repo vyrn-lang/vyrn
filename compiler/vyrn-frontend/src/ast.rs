@@ -421,6 +421,14 @@ pub struct Program {
     /// The island types of the program's written parsers, each under its
     /// linked name. Empty for a program no load linked.
     pub islands: std::sync::Arc<[crate::gen::Island]>,
+    /// The module key of each [`crate::prelude::HOMES`] type key whose home
+    /// the load linked. A declared type's home is its [`TypeDecl::module`].
+    pub homes: std::collections::BTreeMap<String, String>,
+    /// For each `(module, name)` a [`CallForm::Home`] call spells, the module
+    /// that declares `name`, as a refusal speaks it: the call is refused
+    /// [`crate::rules::Rule::NotImported`] where the receiver's home exports
+    /// no `name`. `None` is the root module.
+    pub home_misses: std::collections::BTreeMap<(Option<String>, String), String>,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only
@@ -2028,6 +2036,10 @@ pub enum CallForm {
     /// `recv::P.name(..)`: a method call that means `name` as protocol `P`
     /// declares it. `P` is spelled as an impl head spells it.
     Protocol(String),
+    /// `recv.name(..)` where no function in the module's scope is named
+    /// `name`: the checker calls `name` of the receiver's type's home module
+    /// and writes the callee's linked name back, as `Method`.
+    Home,
 }
 
 /// What the word before a call says of it: nothing, `await f(..)`, which waits

@@ -1,0 +1,6 @@
+import { Point } from "./a_module_that_declares_a_point.vyrn"
+
+fn main() -> Int64 {
+    let p = Point.at(1, 2)
+    return 0
+}

@@ -7307,25 +7307,25 @@ fn prelude_row(
 }
 
 /// A builtin call or method jumps to its row's declaration in the prelude document, and a
-/// row that routes to a Vyrn function links that function's file and line.
+/// home function, `Int64.parse`, to its declaration in its std file.
 #[test]
 fn a_builtin_jumps_to_its_row_in_the_prelude_document() {
     let (text, uri, mut client) = open_calc_editor("builtindef");
-    let (above, parse) = prelude_row(&mut client, &uri, &text, "parse(x.amount", 1);
-    assert!(parse.starts_with("fn parse(s: String)"), "{parse}");
-    let std = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
-    let runtime = std::fs::read_to_string(std.join("runtime.vyrn")).unwrap();
-    let declared = runtime
-        .lines()
-        .position(|l| l.contains("fn parseV("))
-        .unwrap()
-        + 1;
-    let link = format!("/std/runtime.vyrn#L{declared}");
+    let at = definition_at(&mut client, &uri, &text, "parse(x.amount", 1);
     assert!(
-        above.starts_with("/// Runs `runtime$parseV` at file:///"),
-        "{above}"
+        at["uri"]
+            .as_str()
+            .is_some_and(|u| u.ends_with("/std/int64.vyrn")),
+        "{at}"
     );
-    assert!(above.ends_with(&link), "{above}");
+    let std = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    let int64 = std::fs::read_to_string(std.join("int64.vyrn")).unwrap();
+    let declared = int64.lines().position(|l| l.contains("fn parse(")).unwrap();
+    assert_eq!(
+        at["range"]["start"]["line"].as_u64(),
+        Some(declared as u64),
+        "{at}"
+    );
     let (_, read) = prelude_row(&mut client, &uri, &text, "readFile(path)", 1);
     assert!(read.starts_with("fn readFile("), "{read}");
     let (above, copy) = prelude_row(&mut client, &uri, &text, "copy()", 1);

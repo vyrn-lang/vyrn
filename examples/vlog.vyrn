@@ -339,7 +339,7 @@ fn main() -> Int64 {
     }
     if cmd == "tail" {
         let n = match opt(a, "-n") {
-            Some(s) => match parse(s) {
+            Some(s) => match Int64.parse(s) {
                 Some(v) => v,
                 None => 10,
             },

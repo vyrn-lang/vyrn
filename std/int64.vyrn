@@ -1,0 +1,39 @@
+/// The functions of `Int64`, its home: `Int64.parse(s)` calls them with no
+/// import.
+
+/// `s` as a decimal `Int64`: an optional `-`, then digits, all consumed;
+/// anything else is `None`. `acc * 10 + d` wraps, so `"9223372036854775808"`
+/// is `Int64.min` (`examples/numbytes.vyrn`). It reads no `+`.
+export fn parse(s: String) -> Option<Int64> {
+    let n = s.byteLength
+    let mut i = 0
+    if n > 0 && Int64(s[0]) == 45 {
+        i = 1
+    }
+    if i == n {
+        return None
+    }
+    let mut acc: Int64 = 0
+    let mut at = i
+    while at < n {
+        let c = Int64(s[at])
+        if c < 48 || c > 57 {
+            return None
+        }
+        acc = acc * 10 + c - 48
+        at = at + 1
+    }
+    if i == 1 {
+        return Some(0 - acc)
+    }
+    return Some(acc)
+}
+
+test "parse reads an optional minus and digits, and nothing else" {
+    assertEq(parse("42") ?? 0, 42)
+    assertEq(parse("-7") ?? 0, 0 - 7)
+    assertEq(parse("") ?? 1, 1)
+    assertEq(parse("-") ?? 1, 1)
+    assertEq(parse("+3") ?? 1, 1)
+    assertEq(parse("1x") ?? 1, 1)
+}

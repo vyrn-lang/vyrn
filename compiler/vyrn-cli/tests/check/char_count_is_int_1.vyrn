@@ -1,2 +1,2 @@
-// A user function may still be named `charCount` (the builtin is a method).
+// `std/strings`, the home of `String`, exports `charCount`; the call needs no import.
 fn main() -> Int64 { return "héllo".charCount() }

@@ -125,6 +125,7 @@ import { join, arm, ifChain, ifChainOr } from "std/code"
 import { Symbol, symbol, strField, symbolMapFn } from "std/symbolmap"
 import { catalogue } from "std/i18n"
 import { syntax } from "std/syntax"
+import { lineAt } from "std/text"
 // Each by a namespace: a written module's names, such as `Row`, are program-wide.
 import * as vx from syntax("./vyx.syntax")
 import * as say from catalogue("./vyx.errors")

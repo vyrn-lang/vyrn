@@ -101,6 +101,47 @@ impl Origins {
     }
 }
 
+/// Whether `f` is a root of a reflection: an exported function of the
+/// reflected module. A body-less `extern` has no surface.
+fn is_root_fn(f: &Function) -> bool {
+    f.exported && !f.is_extern && f.module.is_none()
+}
+
+/// The type declarations a reflection of `program`'s root module lists: its
+/// own exported types, and each foreign exported type its exported functions'
+/// signatures reach. Injected (line 0) and synthetic (`Name.field`)
+/// declarations are left out.
+pub fn reflected_types(program: &Program) -> Vec<&TypeDecl> {
+    let types: HashMap<&str, &TypeDecl> = (program.type_decls.iter())
+        .map(|t| (t.name.as_str(), t))
+        .collect();
+    // Seed the closure from the roots' signatures, then walk declarations.
+    let mut reachable: HashSet<String> = HashSet::new();
+    let mut work: Vec<String> = Vec::new();
+    for f in &program.functions {
+        if is_root_fn(f) {
+            for p in &f.params {
+                crate::loader::type_heads(&p.ty, &mut |n| work.push(n.clone()));
+            }
+            crate::loader::type_heads(&f.ret, &mut |n| work.push(n.clone()));
+        }
+    }
+    while let Some(n) = work.pop() {
+        if !reachable.insert(n.clone()) {
+            continue;
+        }
+        if let Some(decl) = types.get(n.as_str()) {
+            // A predicate references `value`, never a type, so only the base adds names.
+            crate::loader::type_heads(&decl.base, &mut |n| work.push(n.clone()));
+        }
+    }
+
+    (program.type_decls.iter())
+        .filter(|t| t.exported && t.line != 0 && !is_synthetic(&t.name))
+        .filter(|t| t.module.is_none() || reachable.contains(&t.name))
+        .collect()
+}
+
 /// Builds the `ModuleInterface` literal for the reflected module's reachable
 /// type closure.
 ///
@@ -109,8 +150,8 @@ impl Origins {
 /// `types` holds every named type reachable from their signatures through
 /// fields, payloads, bases and generic arguments, whichever module declares
 /// it, plus the root's own exported types. Own declarations come first in
-/// source order, then foreign ones in linker order; `load` refuses a name
-/// declared twice. `specifiers` maps a declaration's module to the import
+/// source order, then foreign ones in linker order; `gen::linked_module_lit`
+/// refuses two of one written name. `specifiers` maps a declaration's module to the import
 /// specifier a generator uses to reach it; a missing entry gives `""`.
 ///
 /// `Reflect::Code` wraps the same literal in a `ModuleCode`, which pairs each
@@ -128,45 +169,13 @@ pub fn module_lit(
         .map(|t| (t.name.clone(), t.clone()))
         .collect();
 
-    // Roots: the reflected module's own exported functions. A body-less `extern`
-    // has no surface.
-    let is_root_fn = |f: &Function| f.exported && !f.is_extern && f.module.is_none();
-
     let roots: Vec<&Function> = program.functions.iter().filter(|f| is_root_fn(f)).collect();
     let params: Vec<Vec<Expr>> = roots
         .iter()
         .map(|f| f.params.iter().map(|p| param_info_lit(p, &types)).collect())
         .collect();
 
-    // Seed the closure from the roots' signatures, then walk declarations.
-    let mut reachable: HashSet<String> = HashSet::new();
-    let mut work: Vec<String> = Vec::new();
-    for f in &program.functions {
-        if is_root_fn(f) {
-            for p in &f.params {
-                crate::loader::type_heads(&p.ty, &mut |n| work.push(n.clone()));
-            }
-            crate::loader::type_heads(&f.ret, &mut |n| work.push(n.clone()));
-        }
-    }
-    while let Some(n) = work.pop() {
-        if !reachable.insert(n.clone()) {
-            continue;
-        }
-        if let Some(decl) = types.get(&n) {
-            // A predicate references `value`, never a type, so only the base adds names.
-            crate::loader::type_heads(&decl.base, &mut |n| work.push(n.clone()));
-        }
-    }
-
-    // Skip injected (line 0) and synthetic (`Name.field`) declarations. Own
-    // declarations always; foreign ones when the closure reaches them.
-    let decls: Vec<&TypeDecl> = program
-        .type_decls
-        .iter()
-        .filter(|t| t.exported && t.line != 0 && !is_synthetic(&t.name))
-        .filter(|t| t.module.is_none() || reachable.contains(&t.name))
-        .collect();
+    let decls = reflected_types(program);
     let type_info = |t: &TypeDecl| {
         let spec = specifiers.get(&t.module).map(|s| s.as_str()).unwrap_or("");
         let shape = shape_nodes(t, &types);

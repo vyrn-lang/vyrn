@@ -28,8 +28,8 @@ fn check_in(slot: &str, src: &str) -> String {
 /// first diagnostic must name the reserved word in the user's file.
 #[test]
 fn a_reserved_top_level_name_is_reported_once_at_its_declaration() {
-    // `lineAt` witnesses a routed builtin.
-    for name in ["pop", "lineAt"] {
+    // `readLine` witnesses a routed builtin.
+    for name in ["pop", "readLine"] {
         // The `print` links `std/num`, and linking a std module that uses the
         // builtin is what triggers the flood.
         let src = format!(

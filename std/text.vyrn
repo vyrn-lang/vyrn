@@ -1,7 +1,7 @@
 /// UTF-8 decoding and byte-offset line and column, in Vyrn.
 ///
-/// The engines route `s.charCount()` to `charCountV`, `lineAt` to `lineAtV` and
-/// `colAt` to `colAtV`; `chars` is an ordinary export. `utf8Width` is the one
+/// `lineAt` and `colAt` read a byte offset as a line and a column; `chars` and
+/// `decodeUtf8` decode. `utf8Width` is the one
 /// statement of what UTF-8 admits, and `decodeUtf8` and `stringFault` both ask it,
 /// so `tests/text.rs` checks them against Rust's `std::str::from_utf8`, not against
 /// each other.
@@ -133,24 +133,9 @@ export fn chars(s: String) -> Array<UInt32> {
     }
 }
 
-/// The number of Unicode scalar values in `s`: a byte scan that counts every byte
-/// that is not a continuation (`0b10xxxxxx`), with no allocation.
-export fn charCountV(s: String) -> Int64 {
-    let n = s.byteLength
-    let mut count = 0
-    let mut i = 0
-    while i < n {
-        if (Int64(s[i]) & 192) != 128 {
-            count = count + 1
-        }
-        i = i + 1
-    }
-    return count
-}
-
 /// The 1-based line of byte offset `off` in `b`: one more than the LF bytes before
 /// `off`. An offset past the end reads as the end, a negative one as 0. O(off).
-export fn lineAtV(b: Array<UInt8>, off: Int64) -> Int64 {
+export fn lineAt(b: Array<UInt8>, off: Int64) -> Int64 {
     let mut end = off
     if end > b.length {
         end = b.length
@@ -168,7 +153,7 @@ export fn lineAtV(b: Array<UInt8>, off: Int64) -> Int64 {
 
 /// The 1-based column of byte offset `off` in `b`, in bytes, not codepoints: the
 /// byte after a two-byte codepoint on an otherwise empty line is column 3.
-export fn colAtV(b: Array<UInt8>, off: Int64) -> Int64 {
+export fn colAt(b: Array<UInt8>, off: Int64) -> Int64 {
     let mut i = off
     if i > b.length {
         i = b.length
@@ -244,36 +229,22 @@ test "every malformed shape the validator distinguishes is refused" {
     )
 }
 
-test "a scalar count is not a byte count, except on ASCII" {
-    assertEq(charCountV("").toString() + "/" + "".byteLength.toString(), "0/0")
-    assertEq(charCountV("hello").toString() + "/" + "hello".byteLength.toString(), "5/5")
-    assertEq(charCountV("h\u{e9}llo").toString() + "/" + "h\u{e9}llo".byteLength.toString(), "5/6")
-    assertEq(charCountV("\u{2615}").toString() + "/" + "\u{2615}".byteLength.toString(), "1/3")
-    assertEq(charCountV("\u{1f600}").toString() + "/" + "\u{1f600}".byteLength.toString(), "1/4")
-    // All four widths in one string, to catch a scan that mishandles the
-    // transition between sequences: 4 scalars, 1 + 2 + 3 + 4 = 10 bytes.
-    assertEq(charCountV("a\u{e9}\u{20ac}\u{1f600}").toString() + "/" + "a\u{e9}\u{20ac}\u{1f600}".byteLength.toString(), "4/10")
-    // A byte scan against a full decode.
-    assertEq(charCountV("a\u{e9}\u{20ac}\u{1f600}"), chars("a\u{e9}\u{20ac}\u{1f600}").length)
-}
-
 test "line and column are 1-based, and the column counts bytes" {
     let b = bytes("ab\ncd\n\nx")
-    assertEq(lineAtV(b, 0).toString() + ":" + colAtV(b, 0).toString(), "1:1")
-    assertEq(lineAtV(b, 3).toString() + ":" + colAtV(b, 3).toString(), "2:1")
-    assertEq(lineAtV(b, 7).toString() + ":" + colAtV(b, 7).toString(), "4:1")
+    assertEq(lineAt(b, 0).toString() + ":" + colAt(b, 0).toString(), "1:1")
+    assertEq(lineAt(b, 3).toString() + ":" + colAt(b, 3).toString(), "2:1")
+    assertEq(lineAt(b, 7).toString() + ":" + colAt(b, 7).toString(), "4:1")
     // Past the end reads as the end.
-    assertEq(lineAtV(b, 99).toString() + ":" + colAtV(b, 99).toString(), "4:2")
+    assertEq(lineAt(b, 99).toString() + ":" + colAt(b, 99).toString(), "4:2")
     // No newline at all: one line, columns straight across.
     let flat = bytes("abcd")
-    assertEq(lineAtV(flat, 3).toString() + ":" + colAtV(flat, 3).toString(), "1:4")
+    assertEq(lineAt(flat, 3).toString() + ":" + colAt(flat, 3).toString(), "1:4")
     // `\r\n` is one line break, and the CR occupies a column of its own.
     let crlf = bytes("ab\r\ncd")
-    assertEq(lineAtV(crlf, 2).toString() + ":" + colAtV(crlf, 2).toString(), "1:3")
-    assertEq(lineAtV(crlf, 4).toString() + ":" + colAtV(crlf, 4).toString(), "2:1")
+    assertEq(lineAt(crlf, 2).toString() + ":" + colAt(crlf, 2).toString(), "1:3")
+    assertEq(lineAt(crlf, 4).toString() + ":" + colAt(crlf, 4).toString(), "2:1")
     // A multi-byte codepoint spans two columns: U+00E9 is bytes 0..2, so the byte
     // after it is column 3 and the codepoint after it is the second character.
     let acc = bytes("\u{e9}x")
-    assertEq(colAtV(acc, 2).toString(), "3")
-    assertEq(colAtV(acc, 2), colAt(acc, 2))
+    assertEq(colAt(acc, 2).toString(), "3")
 }

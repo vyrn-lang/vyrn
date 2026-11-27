@@ -2,8 +2,8 @@
 
 UTF-8 decoding and byte-offset line and column, in Vyrn.
 
-The engines route `s.charCount()` to `charCountV`, `lineAt` to `lineAtV` and
-`colAt` to `colAtV`; `chars` is an ordinary export. `utf8Width` is the one
+`lineAt` and `colAt` read a byte offset as a line and a column; `chars` and
+`decodeUtf8` decode. `utf8Width` is the one
 statement of what UTF-8 admits, and `decodeUtf8` and `stringFault` both ask it,
 so `tests/text.rs` checks them against Rust's `std::str::from_utf8`, not against
 each other.
@@ -59,28 +59,19 @@ The codepoints of `s`.
 The `None` arm is unreachable: every boundary that builds a `String` validates
 its UTF-8.
 
-## charCountV
+## lineAt
 
 ```vyrn
-fn charCountV(s: String) -> Int64
-```
-
-The number of Unicode scalar values in `s`: a byte scan that counts every byte
-that is not a continuation (`0b10xxxxxx`), with no allocation.
-
-## lineAtV
-
-```vyrn
-fn lineAtV(b: Array<UInt8>, off: Int64) -> Int64
+fn lineAt(b: Array<UInt8>, off: Int64) -> Int64
 ```
 
 The 1-based line of byte offset `off` in `b`: one more than the LF bytes before
 `off`. An offset past the end reads as the end, a negative one as 0. O(off).
 
-## colAtV
+## colAt
 
 ```vyrn
-fn colAtV(b: Array<UInt8>, off: Int64) -> Int64
+fn colAt(b: Array<UInt8>, off: Int64) -> Int64
 ```
 
 The 1-based column of byte offset `off` in `b`, in bytes, not codepoints: the

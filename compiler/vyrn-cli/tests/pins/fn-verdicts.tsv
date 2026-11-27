@@ -1149,6 +1149,9 @@ examples/show.vyrn	showValue	yes	no, its effect set is alloc
 examples/show.vyrn	main	no, it calls `tag`, which is not trap-free	no, its effect set is alloc, write-output
 examples/show.vyrn	Show$Point$show	yes	no, its effect set is alloc
 examples/show.vyrn	label	yes	no, its effect set is alloc
+examples/showrenders.vyrn	main	yes	no, its effect set is alloc, write-output
+examples/showrenders.vyrn	Show$Point$show	yes	no, its effect set is alloc
+examples/showrenders.vyrn	describe	yes	no, its effect set is alloc
 examples/simd.vyrn	lanes	yes	no, its effect set is write-output
 examples/simd.vyrn	main	yes	no, its effect set is write-output
 examples/simdbench.vyrn	min1	yes	no, `a` is Float32, and a kernel computes only integers and Bool
@@ -2430,6 +2433,7 @@ std/icons.vyrn	errsText	yes	no, its effect set is alloc
 std/icons.vyrn	toyCollection	yes	no, the result is String, not an integer, Bool or a read array of one
 std/imports.vyrn	procImports	yes	no, its effect set is alloc, gen-only
 std/imports.vyrn	importBlock	yes	no, its effect set is alloc, gen-only
+std/int64.vyrn	parse	yes	no, `s` is String, not an integer, Bool or a read array of one
 std/json.vyrn	json$copyJson	yes	no, its effect set is alloc
 std/json.vyrn	json$copyJsonArray	yes	no, its effect set is alloc
 std/json.vyrn	json$copyJsonFields	yes	no, its effect set is alloc
@@ -2980,6 +2984,7 @@ std/strings.vyrn	padStart	no, it calls `panic`	no, its effect set is alloc, trap
 std/strings.vyrn	padEnd	no, it calls `panic`	no, its effect set is alloc, trap
 std/strings.vyrn	toHex	yes	no, its effect set is alloc
 std/strings.vyrn	editDistance	yes	no, its effect set is alloc
+std/strings.vyrn	charCount	yes	no, `s` is String, not an integer, Bool or a read array of one
 std/strpred.vyrn	byteLengthV	yes	no, its effect set is alloc
 std/strpred.vyrn	startsWith	yes	no, `s` is String, not an integer, Bool or a read array of one
 std/strpred.vyrn	endsWith	yes	no, `s` is String, not an integer, Bool or a read array of one
@@ -3053,9 +3058,8 @@ std/text.vyrn	text$decodeUtf8	yes	no, its effect set is alloc
 std/text.vyrn	text$utf8Width	yes	yes, emulated Int64
 std/text.vyrn	text$stringFault	yes	no, the loop is no counter loop
 std/text.vyrn	text$chars	yes	no, its effect set is alloc
-std/text.vyrn	text$charCountV	yes	no, `s` is String, not an integer, Bool or a read array of one
-std/text.vyrn	text$lineAtV	yes	yes, emulated Int64
-std/text.vyrn	text$colAtV	yes	no, the loop is no counter loop
+std/text.vyrn	text$lineAt	yes	yes, emulated Int64
+std/text.vyrn	text$colAt	yes	no, the loop is no counter loop
 std/text.vyrn	text$showCps	yes	no, its effect set is alloc
 std/tile.vyrn	mmaInt8	no, it calls `mmaWith`, which is not trap-free	no, it is not trap-free
 std/tile.vyrn	mmaUInt8	no, it calls `mmaWith`, which is not trap-free	no, it is not trap-free

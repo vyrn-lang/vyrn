@@ -584,6 +584,8 @@ fn build(
         seen: Default::default(),
         unclosed: Default::default(),
         islands: Default::default(),
+        homes: Default::default(),
+        home_misses: Default::default(),
     };
     let mut bodies = Vec::new();
     let events = std::mem::take(&mut run.events);

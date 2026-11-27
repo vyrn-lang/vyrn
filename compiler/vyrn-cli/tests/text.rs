@@ -1,10 +1,8 @@
-//! The text tier: `std/text`'s `chars`, `decodeUtf8`, `charCount`, `lineAt` and
-//! `colAt`, judged against Rust or a pinned digest.
+//! The text tier: `std/text`'s `chars`, `decodeUtf8`, `lineAt` and `colAt`, and
+//! `std/strings`' `charCount`, judged against Rust or a pinned digest.
 //!
-//! The builtins are routed into `std/text`, so comparing a builtin with its Vyrn
-//! function compares one function with itself. `chars` is pinned by a digest;
-//! the malformed half is judged by `std::str::from_utf8`; `lineAt`/`colAt` by a
-//! count made in Rust.
+//! `chars` is pinned by a digest; the malformed half is judged by
+//! `std::str::from_utf8`; `lineAt`/`colAt` by a count made in Rust.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -284,7 +282,7 @@ fn decodeutf8_and_stringfrombytes_refuse_exactly_what_rust_refuses() {
 /// Every offset, because a walk can agree at 0 and disagree after the last
 /// newline. Offsets run from -3 to `len + 3` to pin the clamping.
 #[test]
-fn line_and_column_match_the_builtins_at_every_offset() {
+fn line_and_column_match_a_count_made_in_rust_at_every_offset() {
     let texts: [&str; 12] = [
         "",
         "x",
@@ -300,7 +298,9 @@ fn line_and_column_match_the_builtins_at_every_offset() {
         "é\né\né",              // a multi-byte codepoint spanning a column boundary
     ];
 
-    let harness = r#"fn row(b: Array<UInt8>, off: Int64) -> String {
+    let harness = r#"import { colAt, lineAt } from "std/text"
+
+fn row(b: Array<UInt8>, off: Int64) -> String {
     return lineAt(b, off).toString() + ":" + colAt(b, off).toString()
 }
 "#;
@@ -354,7 +354,7 @@ fn line_and_column_match_the_builtins_at_every_offset() {
     );
 }
 
-/// `charCountV` is a byte scan for non-continuation bytes and `charsV` a full
+/// `charCount` is a byte scan for non-continuation bytes and `chars` a full
 /// first-byte-dispatch decode, so they are independent implementations of one
 /// fact; `chars`'s answers are pinned by `CODEPOINT_DIGEST`. Counting a
 /// continuation byte over-counts and skipping a lead byte under-counts.

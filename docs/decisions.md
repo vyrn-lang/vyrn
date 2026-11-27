@@ -73,7 +73,7 @@ pull request.
 ### Functions and protocols
 
 - Protocol conformance is explicit (`impl P for T`) and checked where it is written: a missing method or an extra method is refused.
-- No inherent methods. `x.m(a)` is `m(x, a)`, so a helper needs no `impl`.
+- A function attaches to its type's home module: `T.f` is `f` of the module that declares `T` (`prelude::HOMES` for a language type), and `x.f()` reaches it where no function in scope takes the name (decided 2026-11-27 by the user). No `impl` block declares one, and a function has one home. `T.f` reaches every export of the home, and the home comes after the flat scope, so no accepted program changes meaning.
 - Compatibility hints for removed spellings were dropped on 2026-10-01 by the user's decision: a use of `str`, `concat`, `len`, `list`, `push`, `alen`, `array`, `Int` or `Float` gets the sentence any unknown name gets, and those names are free to declare. `at` and `toString` are free too since 2026-10-06: the parser decides a written method-form name once, and the sugar for `a[i]` and for interpolation never reaches a user's declaration.
 - Dispatch is static everywhere; there are no vtables. Records are legal impl targets and scalar refinement types are not.
 - Generic impls are keyed on the type constructor: one impl per protocol and constructor.
@@ -123,7 +123,7 @@ pull request.
 - An export a library shares with one companion module is `export to "<path>"`, a qualified export as in Java's `exports .. to`, so it stays off the public page and out of completion. The loader's visibility pass is its one check. An import in a `Code` result is judged as the author of its `import` keyword (`loader::author_of`): quote text as the module that holds the quote, so `export to` that module admits the import into any importer and through any generator that splices the quote; text `codeAt` copied as its input file, so a generator cannot copy an import its caller may not write. A refusal shows at that author's line, as any error in copied input shows in the input. A name the call site wrote resolves in the importer without an import; a name a quote spells resolves in the quote's module.
 - A sentence quotes a declaration as its module wrote it, never by the linker's name, through the loader's one rename table (`ast::Spellings`). Where one sentence shows two declarations of one spelling, each declared outside the sentence's module adds the path its module imports it by: `Cfg from "./lib/cfg"`. A runtime module's reserved spelling reads the same way: `json$Json` is `Json`. Hover, completion details and type hints follow the same rule.
 - Importing `Result` or `Option` from `std/result` or `std/option` is legal and changes nothing; ambient use stays legal.
-- A name whose body lives in std is an import, not a global, and a missing import names its module. `print`, `bytes`, `panic` and `parse` stay global.
+- A name whose body lives in std is an import, not a global, and a missing import names its module. `print`, `bytes` and `panic` stay global; `parse` is `Int64.parse` of `std/int64` since 2026-11-27.
 - Module state is a top-level `let` in any module, one instance per process and private to its module. `export let` is refused: export accessor functions.
 - Module state initializes before `main` in import order, lives for the whole run, and cannot be consumed or dropped.
 - Once-only work at run time is module state. No `once` keyword, because grammar is the most expensive thing to add.

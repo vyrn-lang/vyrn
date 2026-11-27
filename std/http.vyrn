@@ -41,6 +41,7 @@ import { validateContract } from "std/rpc"
 // symbol map is the only record that the two are one, which a rename needs.
 import { Symbol, symbol, symbolMapFn } from "std/symbolmap"
 import { endsWith, startsWith } from "std/strpred"
+import { parse } from "std/int64"
 
 /// What a mounted route runs: the request and the placeholder bindings. `None`
 /// declines, and `mount` tries the next group.

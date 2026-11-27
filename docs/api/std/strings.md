@@ -166,3 +166,12 @@ fn editDistance(a: String, b: String) -> Int64
 The optimal-string-alignment edit distance between `a` and `b`, in bytes:
 insertions, deletions, substitutions and adjacent transpositions, each
 costing 1.
+
+## charCount
+
+```vyrn
+fn charCount(s: String) -> Int64
+```
+
+The number of Unicode scalar values in `s`: a byte scan that counts every byte
+that is not a continuation (`0b10xxxxxx`), with no allocation. O(n).

@@ -1,0 +1,8 @@
+// `parse` is `std/int64`'s, reached as `Int64.parse(s)`, so the name is free.
+fn parse(s: String) -> Int64 {
+    return s.byteLength
+}
+
+fn main() -> Int64 {
+    return parse("ab") - (Int64.parse("2") ?? 0)
+}

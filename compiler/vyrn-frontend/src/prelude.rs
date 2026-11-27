@@ -102,6 +102,16 @@ fn row(
 /// names the offending part of the type.
 pub const DECODABLE: &str = "@Decodable";
 
+/// The home module of each type the language declares, by type key
+/// ([`crate::types::home_key`]): `T.f(..)` calls `f` that module exports, and
+/// `x.f(..)` reaches it where no function in scope is named `f`. A declared
+/// type's home is the module that declares it. A home links on a mention.
+pub const HOMES: &[(&str, &str)] = &[
+    ("Array", "std/arrays"),
+    ("Int64", "std/int64"),
+    ("String", "std/strings"),
+];
+
 fn bounded(mut f: Function, tp: &str, bound: &str) -> Function {
     f.type_bounds
         .insert(tp.to_string(), vec![bound.to_string()]);
@@ -718,13 +728,6 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Renders(Str))
             .fresh()
             .hover("x.toString() -> String \u{2014} render a number, Bool, or String"),
-        // The number of Unicode scalar values, O(n). Method-only, so it has no
-        // free spelling to import; it stays routed.
-        b("@charCount")
-            .sig(row("@charCount", &[], &[("s", Read, Str)], Int, &[]))
-            .method("charCount", &[Shape::Str])
-            .route("text$charCountV")
-            .hover("s.charCount() -> Int64 \u{2014} number of Unicode scalar values (O(n); counts non-continuation bytes)"),
         b("close")
             .sig(row("close", &["T"], &[("s", Consume, stm(t()))], Unit, &[]))
             .spec(Spec::Effect(Unit))
@@ -890,27 +893,6 @@ fn table() -> Vec<Builtin> {
         b("logger")
             .sig(row("logger", &[], &[("name", Read, Str)], Type::Logger, &[]))
             .spec(Spec::Logs),
-        // The 1-based line and column of a byte offset in a UTF-8 buffer. The
-        // parameter must be `Array<UInt8>`: over wider elements the byte offset
-        // means nothing. The routes carry this signature.
-        b("lineAt")
-            .sig(row(
-                "lineAt",
-                &[],
-                &[("b", Read, arr(u8_())), ("off", Read, Int)],
-                Int,
-                &[],
-            ))
-            .route("text$lineAtV"),
-        b("colAt")
-            .sig(row(
-                "colAt",
-                &[],
-                &[("b", Read, arr(u8_())), ("off", Read, Int)],
-                Int,
-                &[],
-            ))
-            .route("text$colAtV"),
         // `panic` diverges; with no `Never` type the return is spelled `Unit`.
         b("panic")
             .sig(row("panic", &[], &[("m", Read, Str)], Unit, &[]))
@@ -1157,9 +1139,6 @@ fn table() -> Vec<Builtin> {
             .sig(row("readLine", &[], &[], opt(Str), &[]))
             .route("runtime$readLineV")
             .effect(ReadInput),
-        b("parse")
-            .sig(row("parse", &[], &[("s", Read, Str)], opt(Int), &[]))
-            .route("runtime$parseV"),
         b("readFile")
             .sig(row(
                 "readFile",

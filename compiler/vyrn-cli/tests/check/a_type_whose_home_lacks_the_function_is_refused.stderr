@@ -1,0 +1,1 @@
+a_type_whose_home_lacks_the_function_is_refused.vyrn:4:19: `Point` has no function `at`: `./a_module_that_declares_a_point` exports none

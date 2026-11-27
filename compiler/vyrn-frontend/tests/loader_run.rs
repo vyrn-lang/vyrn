@@ -39,6 +39,7 @@ const RT_FILES: &[(&str, &str)] = &[
         include_str!("../../../std/runtime.vyrn"),
     ),
     ("std/mem.vyrn", include_str!("../../../std/mem.vyrn")),
+    ("std/int64.vyrn", include_str!("../../../std/int64.vyrn")),
 ];
 
 #[cfg(test)]
@@ -392,8 +393,8 @@ mod tests {
         assert!(d.message.contains("`f` is declared by both"), "{all}");
         let note = d.note.as_deref().unwrap_or("");
         assert!(note.contains("import * as b from \"./b\""), "{note}");
-        // `g` collides too, but the user never wrote it: a note, not an error.
-        assert!(note.contains("`g` collides the same way"), "{note}");
+        // No module imports both `g`s, so `g` is renamed apart and stays out of it.
+        assert!(!note.contains("`g`"), "{note}");
         assert!(!all.contains("is not defined in"), "{all}");
         assert!(!all.contains("imported twice"), "{all}");
     }
@@ -416,28 +417,17 @@ mod tests {
     }
 
     #[test]
-    fn a_collision_the_user_did_not_import_is_still_one_error() {
-        // Neither name is imported from both modules, but the flat namespace cannot hold
-        // two `g`s: one error, with the fix.
-        let a = "export fn f() -> Int64 { return 1 } \
+    fn a_name_two_modules_export_links_where_no_module_imports_both() {
+        // Both modules export `g`, and no module imports both flat, so the later is
+        // renamed apart and each module keeps its own.
+        let a = "export fn f() -> Int64 { return g() } \
                  export fn g() -> Int64 { return 1 }";
-        let b = "export fn h() -> Int64 { return 2 } \
+        let b = "export fn h() -> Int64 { return g() } \
                  export fn g() -> Int64 { return 2 }";
         let root = "import { f } from \"./a\" \n\
                     import { h } from \"./b\" \n\
-                    fn main() -> Int64 { return f() + h() }";
-        let ds = match load(
-            root,
-            "main.vyrn",
-            &opts(),
-            &map(&[("a.vyrn", a), ("b.vyrn", b)]),
-            None,
-        ) {
-            Ok(_) => panic!("expected a load error"),
-            Err(ds) => ds,
-        };
-        assert_eq!(ds.len(), 1, "{ds:?}");
-        assert!(ds[0].message.contains("`g` is declared by both"), "{ds:?}");
+                    fn main() -> Int64 { return f() * 10 + h() }";
+        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]), Ok(12));
     }
 
     #[test]
@@ -1288,8 +1278,8 @@ mod gen_tests {
 
     #[test]
     fn different_resolved_paths_stay_distinct_modules() {
-        // Calls resolving to different targets stay two modules: each emits `bump`, so
-        // the flat namespace collides.
+        // Calls resolving to different targets stay two modules: each emits `bump`,
+        // and no module imports both, so each keeps its own.
         let gen = "export gen fn mk(dir: String) -> Code { \
                        return vyrn\"export fn bump() -> Int64 { return 1 }\\n\" }";
         let a = "import { mk } from \"./gen\" \
@@ -1301,8 +1291,8 @@ mod gen_tests {
         let root = "import { a } from \"./a\" \
                     import { b } from \"./b\" \
                     fn main() -> Int64 { return a() + b() }";
-        let e = gen_err(root, &[("gen.vyrn", gen), ("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(e.contains("`bump` is declared by both"), "{e}");
+        let files = [("gen.vyrn", gen), ("a.vyrn", a), ("b.vyrn", b)];
+        assert_eq!(run(root, &files), Ok(2));
     }
 
     #[test]
@@ -1532,7 +1522,7 @@ fn main() -> Int64 { return shape().byteLength }"#;
         let wire_b = "export type T = { b: Int64 } export type B = { t: T }";
         let contract = "import { A } from \"./wireA\" \
                         import { B } from \"./wireB\" \
-                        export fn f(a: A) -> B { return B { t: T { b: 0 } } }";
+                        export fn f(a: A, b: B) -> Int64 { return 0 }";
         let gen = "export gen fn cnt(path: String) -> Code { \
                        let iface = moduleInterface(path) \
                        return vyrn\"export fn z() -> Int64 { return 0 }\\n\" }";
@@ -1985,7 +1975,7 @@ fn main() -> Int64 { return shape().byteLength }"#;
         // different file; the key folds in resolved inputs, so they never share an entry.
         let gen = "export gen fn consts(dir: String) -> Code { \
                        return match readFile(dir + \"/n.txt\") { \
-                           Ok(s) => vyrn\"export fn val() -> Int64 { return \\{parse(s) ?? 0} }\", \
+                           Ok(s) => vyrn\"export fn val() -> Int64 { return \\{Int64.parse(s) ?? 0} }\", \
                            Err(e) => vyrn\"\" } }";
         let a = "import { consts } from \"../gen\" \
                  import * as g from consts(\"./data\") \
@@ -2055,7 +2045,7 @@ fn main() -> Int64 { return shape().byteLength }"#;
         // Same importer, same arg: a re-load hits the cache, so the generation runs once.
         let gen = "export gen fn consts(dir: String) -> Code { \
                        return match readFile(dir + \"/n.txt\") { \
-                           Ok(s) => vyrn\"export fn val() -> Int64 { return \\{parse(s) ?? 0} }\", \
+                           Ok(s) => vyrn\"export fn val() -> Int64 { return \\{Int64.parse(s) ?? 0} }\", \
                            Err(e) => vyrn\"\" } }";
         let client = "import { consts } from \"../gen\" \
                       import { val } from consts(\"./data\") \

@@ -75,7 +75,7 @@ gen fn accountHover(text: String, l: ledger.Ledger, line: Int64, col: Int64) -> 
     let mut paid = 0
     for x in l.lines {
         if x.account.text.text == name {
-            paid = paid + (parse(x.amount.text.text) ?? 0)
+            paid = paid + (Int64.parse(x.amount.text.text) ?? 0)
         }
     }
     return "account `\{name}`: the ledger pays it \{paid.toString()}"

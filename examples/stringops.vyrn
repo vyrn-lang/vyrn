@@ -19,7 +19,7 @@ fn everyEvenIsA(s: String) -> Bool {
 type Greeting = String where value.byteLength >= 1 && value[0] == 'H'
 
 fn toInt(s: String) -> Int64 {
-    return match parse(s) {
+    return match Int64.parse(s) {
         Some(n) => n,
         None => 0 - 1, // sentinel for "not a number"
     }
