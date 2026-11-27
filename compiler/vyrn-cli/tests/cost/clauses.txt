@@ -4,7 +4,7 @@ fn fromInput(b: Array<Int64>) -> Int64
    23           where clause check: the value of line 22 is read from input
 fn main() -> Int64
    27           allocates `Array<Int64>`
-   28           allocates `String`
+   28           allocates `String`: rendering a value as text
 summary: allocating rows 3 (0 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 1 (0 in loops), checks proved 2 (1 in loops)
   at: trap-free: yes; kernel: yes, emulated Int64
   sum: trap-free: yes; kernel: yes, emulated Int64

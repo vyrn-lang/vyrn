@@ -12,7 +12,7 @@ use lsp_types::{
     InlayHint, InlayHintLabel, InlayHintTooltip, MarkupContent, MarkupKind, Position, Range,
 };
 use vyrn_frontend::core::Span;
-use vyrn_frontend::{Analysis, CostLine, FnCost};
+use vyrn_frontend::{Analysis, CostItem, CostLine, FnCost};
 use vyrn_lower::lastrun::{self, Found, Sites};
 
 use crate::{char_col_to_utf16, line_of_text};
@@ -115,7 +115,7 @@ fn markdown(value: String) -> MarkupContent {
 pub const WHY_COST: &str = "[vyrn why --cost](command:vyrn.whyCost)";
 
 /// One cost row of the document in the compact style: a verb's glyph on a line, or the blocks
-/// the last run made there. The line hint, the expression hover and `vyrn/costRows` read it.
+/// the last run made there. [`groups`], the expression hover and `vyrn/costRows` read it.
 pub struct Row {
     /// 1-based line.
     pub line: usize,
@@ -124,23 +124,20 @@ pub struct Row {
     pub count: usize,
     /// Where each fact of the row stands; empty for the last run's blocks.
     pub spans: Vec<Range>,
-    /// A bold title with the glyph and count, a line per noun with its reason, each linked to
-    /// its span, the loops around it and a fix where one is plain. [`WHY_COST`] is not in it.
+    /// A bold title with the glyph and count, a line per noun with its count and reason, the
+    /// loops around it and a fix where one is plain. [`WHY_COST`] is not in it.
     pub hover: String,
     /// Whether the row is a proof glyph, whose proofs [`resolve`] adds.
     pub proof: bool,
-    /// Where the row's glyphs stand when each is drawn apart: one per end of an expression a
-    /// fact is about, or one at the line's end for a row with no span. An editor keeps one
-    /// hover per position, so facts that end at one position share a glyph.
-    pub anchors: Vec<Anchor>,
-}
-
-/// One glyph of a [`Row`] at the end of the expressions it is about, with the hover of the
-/// facts that end there. [`WHY_COST`] is not in the hover.
-pub struct Anchor {
-    pub at: Position,
-    pub glyph: String,
-    pub hover: String,
+    /// The bare glyph and the title words; for a verb [`GLYPHS`] lacks and for the last run's
+    /// blocks, the row's label and no title.
+    mark: String,
+    title: &'static str,
+    /// Each noun with the range of each of its sites, `None` where no expression spells one;
+    /// empty for a row [`GLYPHS`] lacks.
+    items: Vec<(CostItem, Vec<Option<Range>>)>,
+    depth: u32,
+    fix: Option<&'static str>,
 }
 
 /// `span` as an LSP range of `src`; `None` for [`Span::NONE`].
@@ -155,148 +152,184 @@ fn range(src: &str, span: &Span) -> Option<Range> {
     })
 }
 
-/// A Markdown link to range `r` of the document `uri`, in the fragment VS Code opens: 1-based
-/// lines and UTF-16 columns.
-fn link(text: &str, uri: &str, r: &Range) -> String {
-    let (s, e) = (r.start, r.end);
-    format!(
-        "[{text}]({uri}#L{},{}-L{},{})",
-        s.line + 1,
-        s.character + 1,
-        e.line + 1,
-        e.character + 1
-    )
+/// One line of a hover: the count of the item's sites it covers, when more than one, then the
+/// item in words.
+fn item_line(item: &CostItem, n: usize) -> String {
+    match n {
+        1 => format!("\n- {}", item.text(1)),
+        n => format!("\n- {n}\u{d7} {}", item.text(1)),
+    }
 }
 
-/// One row as a compact glyph: its glyph and count, and a hover with a bold title, one line per
-/// noun linked to its first span with a numbered link to each further one, the loops around it
-/// and a fix where one is plain. A verb [`GLYPHS`] lacks shows its words.
-fn compact(row: &CostLine, uri: &str, src: &str) -> Row {
-    let item_ranges: Vec<Vec<Range>> = (row.items.iter())
-        .map(|(_, spans)| spans.iter().filter_map(|s| range(src, s)).collect())
-        .collect();
-    let spans: Vec<Range> = item_ranges.iter().flatten().copied().collect();
-    let proof = PROOFS.contains(&row.verb);
-    let Some(&(_, glyph, title)) = GLYPHS.iter().find(|g| g.0 == row.verb) else {
-        let (glyph, hover) = (row.label.clone(), row.text.clone());
-        return line_row(row.line, glyph, row.count, spans, hover, proof, src);
-    };
-    let items: Vec<String> = (row.items.iter().zip(&item_ranges))
-        .map(|((item, _), ranges)| match ranges.split_first() {
-            Some((first, rest)) => {
-                let more = (rest.iter().enumerate())
-                    .map(|(k, r)| format!(" {}", link(&(k + 2).to_string(), uri, r)));
-                format!("\n- {}{}", link(item, uri, first), more.collect::<String>())
-            }
-            None => format!("\n- {item}"),
-        })
-        .collect();
-    let mut tail = match row.depth {
+/// The note on the loops around a fact and the fixes that close a hover.
+fn tail(depth: u32, fixes: &[&str]) -> String {
+    let mut out = match depth {
         0 => String::new(),
         1 => "\n\nIn a loop.".to_string(),
         d => format!("\n\nIn {d} nested loops."),
     };
-    if row.verb == "grows" && row.depth > 0 {
-        tail += "\n\nFix: `reserve` the capacity before the loop.";
+    for fix in fixes {
+        out += &format!("\n\nFix: {fix}");
     }
-    let counted = format!("{glyph}{}", superscript(row.count));
-    let hover = format!(
-        "**{glyph} {title} {}**\n{}{tail}",
-        row.count,
-        items.concat()
-    );
-    let mut ends: Vec<Position> = spans.iter().map(|r| r.end).collect();
-    ends.sort_by_key(|p| (p.line, p.character));
-    ends.dedup();
-    if ends.is_empty() {
-        return line_row(row.line, counted, row.count, spans, hover, proof, src);
-    }
-    let anchors = (ends.into_iter())
-        .map(|at| {
-            let here = (items.iter().zip(&item_ranges))
-                .filter(|(_, ranges)| ranges.iter().any(|r| r.end == at))
-                .map(|(item, _)| item.as_str());
-            Anchor {
-                at,
-                glyph: glyph.to_string(),
-                hover: format!("**{glyph} {title}**\n{}{tail}", here.collect::<String>()),
-            }
-        })
+    out
+}
+
+/// One row as a compact glyph: its glyph and count, and a hover with a bold title, a line per
+/// noun with its count and reason, the loops around it and a fix where one is plain. A verb
+/// [`GLYPHS`] lacks shows its words.
+fn compact(row: &CostLine, src: &str) -> Row {
+    let items: Vec<(CostItem, Vec<Option<Range>>)> = (row.items.iter())
+        .map(|i| (i.clone(), i.spans.iter().map(|s| range(src, s)).collect()))
         .collect();
+    let spans: Vec<Range> = (items.iter())
+        .flat_map(|(_, r)| r.iter().flatten().copied())
+        .collect();
+    let proof = PROOFS.contains(&row.verb);
+    let Some(&(_, glyph, title)) = GLYPHS.iter().find(|g| g.0 == row.verb) else {
+        let (mark, hover) = (row.label.clone(), row.text.clone());
+        return Row {
+            line: row.line,
+            glyph: mark.clone(),
+            count: row.count,
+            spans,
+            hover,
+            proof,
+            mark,
+            title: "",
+            items: Vec::new(),
+            depth: 0,
+            fix: None,
+        };
+    };
+    let fix =
+        (row.verb == "grows" && row.depth > 0).then_some("`reserve` the capacity before the loop.");
+    let lines: String = (items.iter()).map(|(i, r)| item_line(i, r.len())).collect();
+    let hover = format!(
+        "**{glyph} {title} {}**\n{lines}{}",
+        row.count,
+        tail(row.depth, fix.as_slice())
+    );
     Row {
         line: row.line,
-        glyph: counted,
+        glyph: format!("{glyph}{}", superscript(row.count)),
         count: row.count,
         spans,
         hover,
         proof,
-        anchors,
+        mark: glyph.to_string(),
+        title,
+        items,
+        depth: row.depth,
+        fix,
     }
 }
 
-/// A row whose one glyph stands at the end of its line.
-fn line_row(
-    line: usize,
-    glyph: String,
-    count: usize,
-    spans: Vec<Range>,
-    hover: String,
-    proof: bool,
-    src: &str,
-) -> Row {
-    let anchors = vec![Anchor {
-        at: line_end(src, line),
-        glyph: glyph.clone(),
-        hover: hover.clone(),
-    }];
-    Row {
-        line,
-        glyph,
-        count,
-        spans,
-        hover,
-        proof,
-        anchors,
+/// The facts of one line whose expressions end at one position, drawn as one hint there, or at
+/// the line's end for facts no expression spells.
+pub struct Group {
+    pub at: Position,
+    /// Each verb's glyph with the count of its facts here in superscript.
+    pub label: String,
+    /// Per verb a bold title with its count and a line per noun, then the loops around them
+    /// and the fixes once. [`WHY_COST`] is not in it.
+    pub hover: String,
+    pub proof: bool,
+}
+
+/// The groups of `rows`, line by line: one after each expression a fact is about, where the
+/// facts whose expressions end there share it, and one at the line's end for facts no
+/// expression spells and rows with no facts.
+pub fn groups(rows: &[Row], src: &str) -> Vec<Group> {
+    let key = |p: Position| (p.line, p.character);
+    let mut out = Vec::new();
+    for line in rows.chunk_by(|a, b| a.line == b.line) {
+        let mut ends: Vec<Position> = line
+            .iter()
+            .flat_map(|r| r.spans.iter().map(|s| s.end))
+            .collect();
+        ends.sort_by_key(|p| key(*p));
+        ends.dedup();
+        let places = ends.into_iter().map(Some).chain([None]);
+        for place in places {
+            let here = |r: &Option<Range>| r.map(|r| r.end) == place;
+            let (mut label, mut parts, mut proof) = (String::new(), Vec::new(), false);
+            let (mut depth, mut fixes) = (0, Vec::new());
+            for row in line {
+                if row.items.is_empty() {
+                    if place.is_none() {
+                        label += &row.mark;
+                        parts.push(row.hover.clone());
+                        proof |= row.proof;
+                    }
+                    continue;
+                }
+                let mut count = 0;
+                let mut lines = String::new();
+                for (item, ranges) in &row.items {
+                    let n = ranges.iter().filter(|r| here(r)).count();
+                    if n > 0 {
+                        count += n;
+                        lines += &item_line(item, n);
+                    }
+                }
+                if count == 0 {
+                    continue;
+                }
+                label += &format!("{}{}", row.mark, superscript(count));
+                parts.push(format!("**{} {} {count}**\n{lines}", row.mark, row.title));
+                proof |= row.proof;
+                depth = depth.max(row.depth);
+                fixes.extend(row.fix.filter(|f| !fixes.contains(f)));
+            }
+            if parts.is_empty() {
+                continue;
+            }
+            out.push(Group {
+                at: place.unwrap_or_else(|| line_end(src, line[0].line)),
+                label,
+                hover: format!("{}{}", parts.join("\n\n"), tail(depth, &fixes)),
+                proof,
+            });
+        }
     }
+    out
 }
 
 /// The compact rows of one line's rows of `f`: one per row, then, after a fresh run, the
 /// blocks it made on the line.
-fn compact_rows(
-    f: &FnCost,
-    rows: &[&CostLine],
-    run: Option<&Sites>,
-    uri: &str,
-    src: &str,
-) -> Vec<Row> {
-    let mut out: Vec<Row> = rows.iter().map(|r| compact(r, uri, src)).collect();
+fn compact_rows(f: &FnCost, rows: &[&CostLine], run: Option<&Sites>, src: &str) -> Vec<Row> {
+    let mut out: Vec<Row> = rows.iter().map(|r| compact(r, src)).collect();
     // A check or a kept call makes no block, so a run counts none for it.
     let blocking: Vec<&&CostLine> = rows.iter().filter(|r| blocks(r.verb)).collect();
     if let Some(run) = run.filter(|_| !blocking.is_empty()) {
         let [blocks, bytes] = (blocking.iter())
             .map(|r| ran(run, f, r))
             .fold([0, 0], |a, b| [a[0] + b[0], a[1] + b[1]]);
-        out.push(line_row(
-            rows[0].line,
-            format!("{LAST_RUN}{blocks}"),
-            blocks as usize,
-            Vec::new(),
-            format!(
+        let mark = format!("{LAST_RUN}{blocks}");
+        out.push(Row {
+            line: rows[0].line,
+            glyph: mark.clone(),
+            count: blocks as usize,
+            spans: Vec::new(),
+            hover: format!(
                 "**{LAST_RUN} last run {blocks}**\n\n{blocks} blocks, {bytes} bytes on this line \
                  in the last `vyrn run --profile`."
             ),
-            false,
-            src,
-        ));
+            proof: false,
+            mark,
+            title: "",
+            items: Vec::new(),
+            depth: 0,
+            fix: None,
+        });
     }
     out
 }
 
-/// The compact rows of lines `from..=to` (1-based) of the document `uri` at `path`, whose
-/// buffer is `src`: by function, then by line.
+/// The compact rows of lines `from..=to` (1-based) of the document at `path`, whose buffer is
+/// `src`: by function, then by line.
 pub fn rows(
     analysis: &Analysis,
-    uri: &str,
     path: Option<&str>,
     src: &str,
     from: usize,
@@ -316,7 +349,7 @@ pub fn rows(
             _ => None,
         };
         for line_rows in rows.chunk_by(|a, b| a.line == b.line) {
-            out.extend(compact_rows(f, line_rows, fresh, uri, src));
+            out.extend(compact_rows(f, line_rows, fresh, src));
         }
     }
     out
@@ -333,11 +366,11 @@ fn line_end(src: &str, line: usize) -> Position {
 
 /// The hints for lines `from..=to` (1-based) that allocate, copy, grow a container, enter an
 /// allocating function, keep a check, prove one or erase a call; a line with none of them has
-/// no hint. In the compact style a hint stands at each [`Anchor`], after the expression its
-/// facts are about, and shows the glyphs anchored there with their hovers, then [`WHY_COST`]:
-/// an editor hovers a hint as its own element, so each expression's glyphs have their own
-/// hover. A hint with a proof glyph carries the document's `uri` and its line as `data`, for
-/// [`resolve`]. The full style shows only costs, in words, at the end of each line.
+/// no hint. In the compact style a hint stands after each [`Group`], the outermost expression
+/// that holds its facts, with the group's glyphs and hover, then [`WHY_COST`]: an editor hovers
+/// a hint as its own element. A hint with a proof glyph carries the document's `uri` and its
+/// line as `data`, for [`resolve`]. The full style shows only costs, in words, at the end of
+/// each line.
 pub fn hints(
     analysis: &Analysis,
     uri: &str,
@@ -357,20 +390,12 @@ pub fn hints(
         data,
     };
     if crate::compact_hints() {
-        let rows = rows(analysis, uri, path, src, from, to);
-        let mut anchors: Vec<(&Anchor, &Row)> = (rows.iter())
-            .flat_map(|r| r.anchors.iter().map(move |a| (a, r)))
-            .collect();
-        anchors.sort_by_key(|(a, _)| (a.at.line, a.at.character));
-        return (anchors.chunk_by(|x, y| x.0.at == y.0.at))
-            .map(|here| {
-                let at = here[0].0.at;
-                let glyphs: Vec<&str> = here.iter().map(|(a, _)| a.glyph.as_str()).collect();
-                let hovers: Vec<&str> = here.iter().map(|(a, _)| a.hover.as_str()).collect();
-                let data = (here.iter().any(|(_, r)| r.proof))
-                    .then(|| serde_json::json!({ "uri": uri, "line": at.line as usize + 1 }));
-                let tip = format!("{}\n\n{WHY_COST}", hovers.join("\n\n"));
-                hint(at, glyphs.join(""), tip, data)
+        let rows = rows(analysis, path, src, from, to);
+        return (groups(&rows, src).into_iter())
+            .map(|g| {
+                let data = (g.proof)
+                    .then(|| serde_json::json!({ "uri": uri, "line": g.at.line as usize + 1 }));
+                hint(g.at, g.label, format!("{}\n\n{WHY_COST}", g.hover), data)
             })
             .collect();
     }

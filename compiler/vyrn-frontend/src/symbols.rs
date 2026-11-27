@@ -207,12 +207,30 @@ pub struct CostLine {
     pub label: String,
     /// The row in full, code in backticks, as `why --cost` prints it.
     pub text: String,
-    /// Each noun of the row with its reason, code in backticks (`CostRow::items`), and the
-    /// span of each time the line states it, [`crate::core::Span::NONE`] where no source
-    /// expression spells it.
-    pub items: Vec<(String, Vec<crate::core::Span>)>,
+    /// Each noun of the row with its reason and its spans (`CostRow::cost_items`).
+    pub items: Vec<CostItem>,
     /// How many facts the row joins: the sum of the counts its nouns carry.
     pub count: usize,
+}
+
+/// One noun of a [`CostLine`]: the noun in the verb's words, code in backticks, its reason
+/// with the separator the verb puts before it (empty for none), and the span of each time the
+/// line states it, [`crate::core::Span::NONE`] where no source expression spells it.
+#[derive(Debug, Clone)]
+pub struct CostItem {
+    pub noun: String,
+    pub reason: String,
+    pub spans: Vec<crate::core::Span>,
+}
+
+impl CostItem {
+    /// The item for `n` of its sites, as `why --cost` prints it: `` `String` x2: the reason ``.
+    pub fn text(&self, n: usize) -> String {
+        match n {
+            1 => format!("{}{}", self.noun, self.reason),
+            n => format!("{} x{n}{}", self.noun, self.reason),
+        }
+    }
 }
 
 /// One `import * as ns` binding and the exported declarations it exposes.

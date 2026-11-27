@@ -15,7 +15,7 @@ use vyrn_frontend::core::{
     rows, Body, BorrowKind, Callee, Copied, Ctor, Lit, Made, Name, NameInfo, Op, Rhs, Span, St, Val,
 };
 
-use vyrn_frontend::symbols::{CostLine, FnCost};
+use vyrn_frontend::symbols::{CostItem, CostLine, FnCost};
 
 use crate::elide::Proof;
 use crate::facts::{Premise, Src};
@@ -41,7 +41,7 @@ pub struct Fact {
 pub enum Kind {
     /// The row makes a fresh block every time it runs: the type it makes,
     /// spelled.
-    Alloc(String),
+    Alloc(String, &'static str),
     /// A rebuilding builtin (`push`, `tally`, `reserve`): a block only when
     /// the capacity runs out. The payload is the builtin's name.
     Grows(String),
@@ -128,7 +128,7 @@ impl Kind {
         match self {
             Kind::Erased(_) => Some(Verb::Erases),
             Kind::Copy { .. } => Some(Verb::Copies),
-            Kind::Alloc(_) => Some(Verb::Allocates),
+            Kind::Alloc(..) => Some(Verb::Allocates),
             Kind::Enters(..) => Some(Verb::Enters),
             Kind::Grows(_) => Some(Verb::Grows),
             Kind::Stays(..) => Some(Verb::Stays),
@@ -477,10 +477,18 @@ pub struct CostRow {
 }
 
 impl CostRow {
-    /// Each noun as `say` spells it, with its count: `String x3`.
+    /// Each noun once as `say` spells it, with the count of its sites under every reason:
+    /// `String x3`.
     fn nouns(&self, say: impl Fn(&str) -> String) -> Vec<String> {
-        (self.whats.iter())
-            .map(|(noun, _, at)| match at.len() {
+        let mut counted: Vec<(&str, usize)> = Vec::new();
+        for (noun, _, at) in &self.whats {
+            match counted.iter_mut().find(|c| c.0 == noun) {
+                Some(c) => c.1 += at.len(),
+                None => counted.push((noun, at.len())),
+            }
+        }
+        (counted.into_iter())
+            .map(|(noun, n)| match n {
                 1 => say(noun),
                 n => format!("{} x{n}", say(noun)),
             })
@@ -507,9 +515,17 @@ impl CostRow {
     /// Each noun of the row with its count and reason, code in backticks: `` `String` x2 ``,
     /// `` `push(..)` ``, `index check: the reason`.
     pub fn items(&self, verb: Verb) -> Vec<String> {
+        (self.cost_items(verb).iter())
+            .map(|i| i.text(i.spans.len()))
+            .collect()
+    }
+
+    /// Each noun of the row in the verb's words, its reason after the verb's separator, and
+    /// its spans, so an editor can word an item for some of its sites.
+    pub fn cost_items(&self, verb: Verb) -> Vec<CostItem> {
         let (say, sep): (fn(&str) -> String, &str) = match verb {
             Verb::Copies => (|n| format!("`{n}`"), ": "),
-            Verb::Allocates => (|n| format!("`{n}`"), ""),
+            Verb::Allocates => (|n| format!("`{n}`"), ": "),
             Verb::Enters => (|n| format!("`{n}(..)`"), " from "),
             Verb::Grows => (|n| format!("`{n}(..)`"), ""),
             Verb::Keeps => (|n| format!("{n} check"), ": "),
@@ -518,10 +534,14 @@ impl CostRow {
             Verb::Proves => (|n| format!("{n} check proved"), ""),
             Verb::Erases => (|n| format!("`{n}(..)` erased"), ""),
         };
-        (self.nouns(say).into_iter().zip(&self.whats))
-            .map(|(noun, (_, why, _))| match why.is_empty() {
-                true => noun,
-                false => format!("{noun}{sep}{why}"),
+        (self.whats.iter())
+            .map(|(noun, why, at)| CostItem {
+                noun: say(noun),
+                reason: match why.is_empty() {
+                    true => String::new(),
+                    false => format!("{sep}{why}"),
+                },
+                spans: at.clone(),
             })
             .collect()
     }
@@ -573,7 +593,7 @@ pub fn table(
         for f in &facts {
             let (slot, what) = match &f.kind {
                 Kind::Copy { ty, why } => (Some(2), (ty.clone(), why.to_string())),
-                Kind::Alloc(w) => (Some(0), (w.clone(), String::new())),
+                Kind::Alloc(w, why) => (Some(0), (w.clone(), why.to_string())),
                 Kind::Enters(c, from) => (Some(0), (c.clone(), named(from))),
                 Kind::Grows(b) => (Some(1), (b.clone(), String::new())),
                 Kind::Check {
@@ -625,9 +645,7 @@ pub fn fn_costs(program: &Program, world: &World) -> Vec<FnCost> {
                 depth: row.depth,
                 label: row.label(verb),
                 text: row.text(verb),
-                items: (row.items(verb).into_iter())
-                    .zip(row.whats.iter().map(|w| w.2.clone()))
-                    .collect(),
+                items: row.cost_items(verb),
                 count: row.count(),
             })
             .collect()
@@ -669,7 +687,7 @@ fn row_kind(
     };
     if let Some(what) = rhs.copies(names) {
         let why = match what {
-            Copied::Render => "interpolating a `String` copies it",
+            Copied::Render => "copied into the template",
             Copied::Value if bound.is_some_and(|n| names[n.index()].implicit_copy) => {
                 "the value is borrowed, and its new holder must own it"
             }
@@ -698,7 +716,18 @@ fn row_kind(
             return None;
         }
     }
-    rhs.allocates(names, bound).map(|m| Kind::Alloc(ty(m)))
+    rhs.allocates(names, bound)
+        .map(|m| Kind::Alloc(ty(m), made_why(m)))
+}
+
+/// Why `made` allocates, in a few words, where its noun does not say it.
+fn made_why(made: Made<'_>) -> &'static str {
+    use vyrn_frontend::ast::BinOp;
+    match made {
+        Made::Call("@concat") | Made::Prim(Op::Bin(BinOp::Add)) => "joining Strings",
+        Made::Call("@str") => "rendering a value as text",
+        _ => "",
+    }
 }
 
 /// Whether `callee` rebuilds its receiver and may reallocate it: `push`,

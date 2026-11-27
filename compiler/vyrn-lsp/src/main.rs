@@ -908,11 +908,9 @@ fn handle_cost_lenses(server: &Server, params: serde_json::Value) -> Vec<serde_j
 }
 
 /// `vyrn/costRows`: the cost rows of the document `uri` ([`cost::rows`]), each
-/// `{ line, glyph, count, spans, hover, anchors }`, `line` 0-based and `spans` LSP ranges,
-/// each `hover` ending with the report's link. `anchors` holds `{ at, glyph, hover }` per
-/// expression end ([`cost::Anchor`]), where a client draws glyphs apart. Empty when the client
-/// turned cost hints off, and for a document that does not check. The line hints and the
-/// expression hover read the same rows.
+/// `{ line, glyph, count, spans, hover }`, `line` 0-based and `spans` LSP ranges, `hover`
+/// ending with the report's link. Empty when the client turned cost hints off, and for a
+/// document that does not check. The hints and the expression hover read the same rows.
 fn handle_cost_rows(server: &Server, params: serde_json::Value) -> Vec<serde_json::Value> {
     let uri = (params.get("uri"))
         .and_then(|v| v.as_str())
@@ -924,22 +922,15 @@ fn handle_cost_rows(server: &Server, params: serde_json::Value) -> Vec<serde_jso
         return Vec::new();
     };
     let path = uri_path(&uri);
-    let rows = cost::rows(analysis, uri.as_str(), path.as_deref(), &src, 1, usize::MAX);
+    let rows = cost::rows(analysis, path.as_deref(), &src, 1, usize::MAX);
     (rows.into_iter())
         .map(|r| {
-            let why = |hover: &str| format!("{hover}\n\n{}", cost::WHY_COST);
-            let anchors: Vec<serde_json::Value> = (r.anchors.iter())
-                .map(
-                    |a| serde_json::json!({ "at": a.at, "glyph": a.glyph, "hover": why(&a.hover) }),
-                )
-                .collect();
             serde_json::json!({
                 "line": r.line - 1,
                 "glyph": r.glyph,
                 "count": r.count,
                 "spans": r.spans,
-                "hover": why(&r.hover),
-                "anchors": anchors,
+                "hover": format!("{}\n\n{}", r.hover, cost::WHY_COST),
             })
         })
         .collect()
@@ -1042,8 +1033,9 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     })
 }
 
-/// The cost row whose expression holds `pos` in the Vyrn document `uri`, the innermost where
-/// several do: its hover and that expression's range. `None` without cost hints.
+/// The cost hover of the innermost fact expression that holds `pos` in the Vyrn document
+/// `uri`: the hover of the hint after it ([`cost::groups`]), and that expression's range.
+/// `None` without cost hints.
 fn cost_hover(server: &Server, uri: &Url, text: &str, pos: Position) -> Option<(String, Range)> {
     if !is_vyrn_uri(uri) || !cost_hints() {
         return None;
@@ -1051,9 +1043,8 @@ fn cost_hover(server: &Server, uri: &Url, text: &str, pos: Position) -> Option<(
     let (analysis, _) = lookup(server, uri)?;
     let line = pos.line as usize + 1;
     let path = uri_path(uri);
-    let rows = cost::rows(analysis, uri.as_str(), path.as_deref(), text, line, line);
+    let rows = cost::rows(analysis, path.as_deref(), text, line, line);
     let key = |p: Position| (p.line, p.character);
-    let holds = |r: &Range| key(r.start) <= key(pos) && key(pos) < key(r.end);
     // A span inside another starts no earlier and ends no later, so it is the shorter.
     let width = |r: &Range| {
         (
@@ -1061,15 +1052,11 @@ fn cost_hover(server: &Server, uri: &Url, text: &str, pos: Position) -> Option<(
             r.end.character.abs_diff(r.start.character),
         )
     };
-    (rows.iter())
-        .flat_map(|row| {
-            row.spans
-                .iter()
-                .filter(|r| holds(r))
-                .map(move |r| (row, *r))
-        })
-        .min_by_key(|(_, r)| width(r))
-        .map(|(row, r)| (format!("{}\n\n{}", row.hover, cost::WHY_COST), r))
+    let r = (rows.iter().flat_map(|row| row.spans.iter().copied()))
+        .filter(|r| key(r.start) <= key(pos) && key(pos) < key(r.end))
+        .min_by_key(width)?;
+    let g = (cost::groups(&rows, text).into_iter()).find(|g| g.at == r.end)?;
+    Some((format!("{}\n\n{}", g.hover, cost::WHY_COST), r))
 }
 
 fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoDefinitionResponse> {

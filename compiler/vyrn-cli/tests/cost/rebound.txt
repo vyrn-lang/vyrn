@@ -1,11 +1,11 @@
 compiler/vyrn-cli/tests/shapes/a-name-rebound-to-a-borrow-keeps-its-copy.vyrn
 fn mkSs() -> Array<String>
-    8           allocates `String` x3, `Array<String>`
+    8           allocates `String` x3: joining Strings, `Array<String>`
 fn vyrnTestMain() -> Int64
-   12           allocates `String`, `P`, `A`, `R`
+   12           allocates `String`: joining Strings, `P`, `A`, `R`
    13           allocates `Map<String, String>`
-   14           allocates `String`
-   15           allocates `String`
+   14           allocates `String`: joining Strings
+   15           allocates `String`: joining Strings
    16           copies `String`: the value is borrowed, and its new holder must own it
                 index check: it needs `xs.length >= 2`, and `xs` is the result of `mkSs(..)` at line 11, whose signature does not state it
    18           copies `String`: the value is borrowed, and its new holder must own it

@@ -3,7 +3,7 @@ fn div32(a: Int32, b: Int32) -> Int32
    26           division check: it needs `b >= 1`, and `b` is a parameter, so the function cannot know what its callers pass; add `where value >= 1` to `b`, and each call checks it where the caller cannot show it; division check: it needs `b >= 0`, and `b` is a parameter, so the function cannot know what its callers pass; add `where value >= 0` to `b`, and each call checks it where the caller cannot show it
 fn main() -> Int64
    79           allocates `Array<Int32>`
-   82           allocates `String` x19
+   82           allocates `String` x7: rendering a value as text, `String` x12: joining Strings
 summary: allocating rows 20 (0 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 2 (0 in loops), checks proved 0 (0 in loops)
   add32: trap-free: yes; kernel: yes, native
   tri: trap-free: yes; kernel: yes, native

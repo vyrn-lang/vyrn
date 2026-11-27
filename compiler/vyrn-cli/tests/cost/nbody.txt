@@ -1,10 +1,10 @@
 examples/nbody.vyrn
 fn fixed9(v: Float64) -> String
-   26           allocates `String`
-   28  loop 1   copies `String`: interpolating a `String` copies it
-       loop 1   allocates `String`
-   30           copies `String` x2: interpolating a `String` copies it
-                allocates `String` x4
+   26           allocates `String`: rendering a value as text
+   28  loop 1   copies `String`: copied into the template
+       loop 1   allocates `String`: joining Strings
+   30           copies `String` x2: copied into the template
+                allocates `String`: rendering a value as text, `String` x3: joining Strings
 fn system() -> Array<Body>
    45           `push(..)` may allocate when it outgrows its capacity
    46           `push(..)` may allocate when it outgrows its capacity
