@@ -18,23 +18,23 @@ fn unpack(key: Int64, k: Int64) -> String
 fn pack(frag: String) -> Int64
    84           allocates `Array<UInt8>`  last run: 5 blocks, 64 bytes
 fn fixed3(x: Float64) -> String
-   93           allocates `String`  last run: 40 blocks, 480 bytes
-   95  loop 1   copies `String`: interpolating a `String` copies it  last run: 3 blocks, 48 bytes
-       loop 1   allocates `String`  last run: 3 blocks, 48 bytes
-   97           copies `String`: interpolating a `String` copies it  last run: 20 blocks, 320 bytes
-                allocates `String` x3  last run: 80 blocks, 1,120 bytes
+   93           allocates `String`: rendering a value as text  last run: 40 blocks, 480 bytes
+   95  loop 1   copies `String`: copied into the template  last run: 3 blocks, 48 bytes
+       loop 1   allocates `String`: joining Strings  last run: 3 blocks, 48 bytes
+   97           copies `String`: copied into the template  last run: 20 blocks, 320 bytes
+                allocates `String`: rendering a value as text, `String` x2: joining Strings  last run: 80 blocks, 1,120 bytes
 fn ranked(m: Map<Int64, Int64>) -> Array<Entry>
   102           allocates `Array<Int64>`  last run: 2 blocks, 200 bytes
   107  loop 1   `push(..)` may allocate when it outgrows its capacity  last run: 12 blocks, 1,536 bytes
 fn report(seq: Array<UInt8>, k: Int64) -> Unit
-  116  loop 1   copies `String` x2: interpolating a `String` copies it  last run: 40 blocks, 640 bytes
-       loop 1   allocates `String` x2  last run: 40 blocks, 800 bytes
+  116  loop 1   copies `String` x2: copied into the template  last run: 40 blocks, 640 bytes
+       loop 1   allocates `String` x2: joining Strings  last run: 40 blocks, 800 bytes
 fn syntheticSequence(n: Int64) -> Array<UInt8>
   130           allocates `Array<UInt8>`  last run: 0 blocks, 0 bytes
   136  loop 1   `push(..)` may allocate when it outgrows its capacity  last run: 0 blocks, 0 bytes
 fn main() -> Int64
-  157  loop 1   copies `String`: interpolating a `String` copies it  last run: 5 blocks, 104 bytes
-       loop 1   allocates `String` x3  last run: 20 blocks, 312 bytes
+  157  loop 1   copies `String`: copied into the template  last run: 5 blocks, 104 bytes
+       loop 1   allocates `String`: rendering a value as text, `String` x2: joining Strings  last run: 20 blocks, 312 bytes
 summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 1 (1 in loops), checks proved 20 (15 in loops)
   namedFragments: trap-free: yes; kernel: no, its effect set is alloc
   code: trap-free: yes; kernel: yes, emulated Int64

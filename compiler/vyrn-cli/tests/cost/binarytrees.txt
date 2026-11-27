@@ -2,9 +2,9 @@ examples/binarytrees.vyrn
 fn make(depth: Int64) -> Tree
    13           allocates `Tree`
 fn run(n: Int64) -> Unit
-   52           allocates `String` x5
-   58  loop 1   allocates `String` x7
-   61           allocates `String` x5
+   52           allocates `String` x2: rendering a value as text, `String` x3: joining Strings
+   58  loop 1   allocates `String` x3: rendering a value as text, `String` x4: joining Strings
+   61           allocates `String` x2: rendering a value as text, `String` x3: joining Strings
 summary: allocating rows 18 (7 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 0 (0 in loops), checks proved 0 (0 in loops)
   make: trap-free: yes; kernel: no, its effect set is alloc
   check: trap-free: yes; kernel: no, it is recursive

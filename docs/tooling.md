@@ -578,18 +578,17 @@ blocks of the last run. The proof glyph's hover is resolved on demand
 proofs traced (`vyrn_lower::JUDGE_PROOFS`) and adds the proofs of the line as
 `vyrn why --proofs` prints them. Measured on 2026-11-26, the CLI's `why
 --proofs` takes 297 ms on `site/export.vyrn` against 173 ms for `check`, so a
-hover costs about one analysis and an edit nothing. A hint stands after each
-expression a fact is about, or at the line's end for a fact no expression
-spells, so each expression's glyphs have their own hover: an editor hovers an
-inlay hint as its own element. Its label holds the glyphs anchored there, and
-its hover groups their facts by glyph: per glyph a bold title, a line per noun
-with its reason, linked to its expression as a
-file URI with a range fragment (`#L73,9-L73,40`, 1-based lines and UTF-16
-columns), the loops around it and a fix where one is plain (`reserve` before a
-loop that grows); one link at the end runs `vyrn why --cost` on the file. A
-hover inside a costly expression adds, after the name's own hover, the hover
-of the innermost row whose span holds the position, and its range is that
-expression, so the client highlights it. In the `full` style a row is a few plain words, such as `copies String, allocates String x3`
+hover costs about one analysis and an edit nothing. Each fact joins the
+outermost costly expression of its line that holds it (`cost::groups`), so a
+template with its holes, or a call with its arguments, is one hint after that
+expression; facts no expression spells stand at the line's end. The hint's
+label holds each verb's glyph with its count there. Its hover holds per verb a
+bold title with the count and one line per noun and reason, with the count
+where it is more than one (`3x String: joining Strings`), then the loops around
+them and the fixes once (`reserve` before a loop that grows), and one link that
+runs `vyrn why --cost` on the file. A hover inside a costly expression adds,
+after the name's own hover, the same hover as the expression's hint, and its
+range is that expression, so the client highlights it. In the `full` style a row is a few plain words, such as `copies String, allocates String x3`
 or `index checked`, and the tooltip holds each row of `vyrn why --cost` in
 Markdown, with the full reason and the loops around it.
 
@@ -609,14 +608,11 @@ A client that draws the rows itself reads them from the request
 `vyrn/costRows`, which the server advertises as the experimental capability
 `vyrn/costRows`. The request takes `{ uri }` and answers the document's rows in
 source order, the same rows the hints and the expression hover read: one
-`{ line, glyph, count, spans, hover, anchors }` per glyph of a line, `line` 0-based,
+`{ line, glyph, count, spans, hover }` per glyph of a line, `line` 0-based,
 `glyph` the label with its count in superscript, `spans` the LSP ranges of its
 facts (empty for the last run's blocks and for a fact no expression spells),
-`hover` the glyph's Markdown, ending with the `vyrn why --cost` link, and
-`anchors`, one `{ at, glyph, hover }` per end of an expression the facts are
-about (one at the line's end for a row with no span), with the hover of the
-facts that end there. An editor finds a hover by text position, so a client
-that draws glyphs apart anchors each at its `at`. A proof
+and `hover` the glyph's Markdown, ending with the `vyrn why --cost` link. A
+proof
 glyph's hover lists the proved checks without their proofs, which only
 `inlayHint/resolve` traces. The answer is empty when `costHints` is off and
 while the document has an error. A client that sends the initialization option
