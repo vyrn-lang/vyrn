@@ -152,6 +152,8 @@ pub struct Carried {
     /// 1-based line of the carrier, or `0` for the `logging` declaration, which
     /// the AST keeps no line for.
     pub line: usize,
+    /// 1-based column of the carrier's name, or `0` where `line` is `0`.
+    pub col: usize,
     /// Whether the effect judgment answers for this carrier: true for a call,
     /// false for a declaration. Only the scan knows which it found.
     pub judged: bool,
@@ -192,6 +194,7 @@ pub fn call_carrier(name: &str, externs: &std::collections::HashSet<String>) -> 
 pub fn carried(program: &mut Program) -> Vec<Carried> {
     let externs = extern_imports(program);
     let visit = |e: &mut crate::ast::Expr, out: &mut Vec<Carried>| {
+        let col = e.col();
         let crate::ast::Expr::Call { name, line, .. } = e else {
             return;
         };
@@ -200,6 +203,7 @@ pub fn carried(program: &mut Program) -> Vec<Carried> {
                 cap,
                 carrier: name.clone(),
                 line: *line,
+                col,
                 judged: true,
             });
         }
@@ -214,6 +218,7 @@ pub fn carried(program: &mut Program) -> Vec<Carried> {
             cap: Capability::Fs,
             carrier: format!("logging {{ sink: file(\"{path}\") }}"),
             line: 0,
+            col: 0,
             judged: false,
         });
     }
@@ -423,7 +428,7 @@ fn refusal(
     refuse!(
         "floor",
         c.line,
-        0,
+        c.col,
         FloorCannotInclude,
         artifact = artifact.name,
         target = artifact.target,
@@ -593,6 +598,7 @@ mod tests {
                             cap: *cap,
                             carrier: carrier.to_string(),
                             line: 7,
+                            col: 0,
                             judged: true,
                         })
                         .collect(),
