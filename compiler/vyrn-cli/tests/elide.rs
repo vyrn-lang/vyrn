@@ -8311,3 +8311,116 @@ fn a_lemma_that_traps_or_recurs_is_called_and_why_says_so() {
         assert!(out.contains(line), "{out}");
     }
 }
+
+/// A record fact is its declaration's: a store into a user record's `n` keeps
+/// every check of `std/json`'s reader, whose `n` no coercion joins to it.
+/// The two roots differ only in the user field's name.
+#[test]
+fn a_user_field_that_shares_a_name_leaves_the_reader_its_facts() {
+    let rows = |field: &str| {
+        let dir = scratch("elide");
+        let file = dir.join("p.vyrn");
+        let src = format!(
+            "type R = {{ a: Int32 }}\n\ntype Zbook = {{ {field}: Int64 }}\n\n\
+             fn one() -> Int64 {{\n    return 1\n}}\n\n\
+             fn make() -> Zbook {{\n    return Zbook {{ {field}: one() }}\n}}\n\n\
+             fn main() -> Int64 {{\n    match fromJson<R>(\"{{\\\"a\\\":1}}\") {{\n        \
+             Valid(r) => print(r.a.toString()),\n        Invalid(e) => print(\"refused\"),\n    \
+             }}\n    print(make().{field}.toString())\n    return 0\n}}\n"
+        );
+        std::fs::write(&file, src).unwrap();
+        let log = dir.join("counts.tsv");
+        let out = vyrn()
+            .arg("run")
+            .arg(&file)
+            .env("VYRN_CHECKS", &log)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", norm(&out.stderr));
+        (std::fs::read_to_string(&log).unwrap().lines())
+            .map(|l| l.split_once('\t').map_or(l, |(_, r)| r).to_string())
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(rows("n"), rows("m"));
+}
+
+/// A value of another record type reaches a `Reader` by width at a call
+/// argument, and by an equal field set at a call argument, a return, a `let`
+/// with a declared type, a field store and an array literal's element. Each
+/// is built with `n` below zero, so the reader's check stays and traps.
+#[test]
+fn a_record_coerced_into_a_reader_keeps_the_readers_check() {
+    let head = "type Reader = { src: Array<Int64>, n: Int64 }
+
+fn start(xs: consume Array<Int64>) -> Reader {
+    return Reader { src: xs, n: 0 }
+}
+
+fn minus() -> Int64 {
+    return 0 - 1
+}
+
+fn peek(r: Reader) -> Int64 {
+    if r.n < r.src.length {
+        return r.src[r.n]
+    }
+    return 0
+}
+
+fn main() -> Int64 {
+    print(peek(start([1, 2, 3])).toString())
+";
+    let twin = "type Twin = { src: Array<Int64>, n: Int64 }\n";
+    let wide = "type Twin = { src: Array<Int64>, n: Int64, k: Int64 }\n";
+    let make = |k: &str| format!("    let w = Twin {{ src: [4, 5], n: minus(){k} }}\n");
+    let forms = [
+        (
+            wide,
+            String::new(),
+            format!("{}    print(peek(w).toString())\n", make(", k: 0")),
+        ),
+        (
+            twin,
+            String::new(),
+            format!("{}    print(peek(w).toString())\n", make("")),
+        ),
+        (
+            twin,
+            format!("fn twin() -> Reader {{\n{}    return w\n}}\n", make("")),
+            "    print(peek(twin()).toString())\n".to_string(),
+        ),
+        (
+            twin,
+            String::new(),
+            format!(
+                "{}    let r: Reader = w\n    print(peek(r).toString())\n",
+                make("")
+            ),
+        ),
+        (
+            twin,
+            "type Holder = { r: Reader }\n".to_string(),
+            format!(
+                "    let mut h = Holder {{ r: start([1]) }}\n{}    h.r = w\n    \
+                 print(peek(h.r).toString())\n",
+                make("")
+            ),
+        ),
+        (
+            twin,
+            String::new(),
+            format!(
+                "{}    let rs: Array<Reader> = [w]\n    print(peek(rs[0]).toString())\n",
+                make("")
+            ),
+        ),
+    ];
+    for (ty, decl, body) in forms {
+        let dir = scratch("elide");
+        let file = dir.join("p.vyrn");
+        let src = format!("{ty}\n{decl}\n{head}{body}    return 0\n}}\n");
+        std::fs::write(&file, &src).unwrap();
+        let (err, _) = run_oracle(&dir, &file, "peek");
+        assert_eq!(err, "error: array index -1 out of bounds\n", "{src}");
+    }
+}
