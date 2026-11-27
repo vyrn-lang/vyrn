@@ -6535,7 +6535,7 @@ fn a_proof_glyph_resolves_to_the_proofs_of_its_line() {
     let proofs: Vec<&serde_json::Value> = (hints.iter())
         .filter(|h| h["position"]["line"] == 72 && !h["data"].is_null())
         .collect();
-    assert_eq!(proofs.len(), 1, "{hints:?}");
+    assert!(!proofs.is_empty(), "{hints:?}");
     let hint = proofs[0].clone();
     assert!(
         hint["label"].as_str().unwrap().contains('\u{21d2}'),
@@ -6550,41 +6550,48 @@ fn a_proof_glyph_resolves_to_the_proofs_of_its_line() {
     assert!(tip.starts_with("```\n   73  division check: "), "{tip}");
 }
 
-/// A line's one hover groups its facts by glyph: a bold title with the count, a line per noun
-/// with its reason linked to its span, the loops around it, a plain fix, and the report's link
-/// once, at the end.
+/// Each expression a fact is about has its own hint after it, whose hover holds the facts that
+/// end there: a bold title, a line per noun with its reason linked to its span, the loops
+/// around it, a plain fix, and the report's link once, at the end.
 #[test]
-fn a_line_hover_groups_its_facts_by_glyph_and_links_the_report() {
+fn each_costly_expression_has_its_own_hint_and_hover() {
     let (path, text) = knucleotide();
     let (mut client, uri) = open_with_style(&path, &text, "compact");
     let hints = compact_hints(&mut client, &uri);
     let line: Vec<&(u64, String, String)> = hints.iter().filter(|h| h.0 == 73).collect();
-    assert_eq!(line.len(), 1, "one hint per line: {line:?}");
-    let (label, tip) = (&line[0].1, &line[0].2);
-    assert_eq!(label, "\u{2197} ? \u{21d2}\u{b3}");
+    let labels: Vec<&str> = line.iter().map(|h| h.1.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["\u{21d2}", "\u{21d2}", "?", "\u{2197}"],
+        "{line:?}"
+    );
+    let grow = &line[3].2;
     assert!(
-        tip.starts_with(&format!(
-            "**\u{2197} may grow 1**\n\n- [`push(..)`]({uri}#L73,"
+        grow.starts_with(&format!(
+            "**\u{2197} may grow**\n\n- [`push(..)`]({uri}#L73,"
         )),
-        "{tip}"
+        "{grow}"
     );
     assert!(
-        tip.contains("In a loop.") && tip.contains("Fix: `reserve`"),
-        "{tip}"
+        grow.contains("In a loop.") && grow.contains("Fix: `reserve`"),
+        "{grow}"
+    );
+    let kept = &line[2].2;
+    assert!(
+        kept.starts_with("**? check kept**\n\n- [index check: "),
+        "{kept}"
     );
     assert!(
-        tip.contains("\n\n**? check kept 1**\n\n- [index check: "),
-        "{tip}"
+        kept.contains("the result of `modulusOf(..)` at line 71"),
+        "{kept}"
     );
-    assert!(
-        tip.contains("the result of `modulusOf(..)` at line 71"),
-        "{tip}"
-    );
-    assert_eq!(tip.matches("command:vyrn.whyCost").count(), 1, "{tip}");
-    assert!(
-        tip.ends_with("[vyrn why --cost](command:vyrn.whyCost)"),
-        "{tip}"
-    );
+    for (_, _, tip) in &line {
+        assert_eq!(tip.matches("command:vyrn.whyCost").count(), 1, "{tip}");
+        assert!(
+            tip.ends_with("[vyrn why --cost](command:vyrn.whyCost)"),
+            "{tip}"
+        );
+    }
 }
 
 /// Each fact's link selects the expression that costs, not the line.
@@ -6604,12 +6611,17 @@ fn a_hover_link_selects_the_costly_expression() {
             found.push(format!("{line} {}", linked_text(&text, link)));
         }
     }
-    assert_eq!(found, PROBE_LINKS, "{found:#?}");
+    found.sort();
+    found.dedup();
+    let mut probe = PROBE_LINKS.map(String::from).to_vec();
+    probe.sort();
+    probe.dedup();
+    assert_eq!(found, probe, "{found:#?}");
 }
 
-/// The expressions of the facts on lines 73 and 95 of `examples/knucleotide.vyrn`, in hover
-/// order: the push, its index check, the division's two proved checks and the modulus's, then
-/// the hole a template copies and the literal it allocates.
+/// The expressions of the facts on lines 73 and 95 of `examples/knucleotide.vyrn`: the push, its
+/// index check, the division's two proved checks and the modulus's, then the hole a template
+/// copies and the literal it allocates.
 const PROBE_LINKS: [&str; 7] = [
     "73 w.push(alphabet[(key / d) % 4])",
     "73 alphabet[(key / d) % 4]",
@@ -6735,7 +6747,8 @@ fn a_decorations_client_gets_cost_rows_and_no_cost_hints() {
     );
 }
 
-/// After a fresh profile the compact line ends in the blocks the run made there.
+/// After a fresh profile the line ends in the blocks the run made there, beside the glyph of
+/// the allocating expression that ends the line.
 #[test]
 fn a_fresh_profile_adds_a_last_run_glyph() {
     let path = word_file("compact");
@@ -6743,8 +6756,8 @@ fn a_fresh_profile_adds_a_last_run_glyph() {
     let (mut client, uri) = open_with_style(&path, WORD, "compact");
     let hints = compact_hints(&mut client, &uri);
     let glyphs: Vec<(u64, &str)> = hints.iter().map(|h| (h.0, h.1.as_str())).collect();
-    assert_eq!(glyphs, [(2, "\u{229e}\u{b2} \u{d7}3")]);
-    let run = &hints[0].2;
+    assert_eq!(glyphs, [(2, "\u{229e}"), (2, "\u{229e}\u{d7}3")]);
+    let run = &hints[1].2;
     assert!(run.contains("3 blocks, 40 bytes"), "{run}");
 }
 

@@ -578,9 +578,12 @@ blocks of the last run. The proof glyph's hover is resolved on demand
 proofs traced (`vyrn_lower::JUDGE_PROOFS`) and adds the proofs of the line as
 `vyrn why --proofs` prints them. Measured on 2026-11-26, the CLI's `why
 --proofs` takes 297 ms on `site/export.vyrn` against 173 ms for `check`, so a
-hover costs about one analysis and an edit nothing. The hint's label holds the
-line's glyphs, and its hover groups the facts by glyph: per glyph a bold title
-with the count, a line per noun with its reason, linked to its expression as a
+hover costs about one analysis and an edit nothing. A hint stands after each
+expression a fact is about, or at the line's end for a fact no expression
+spells, so each expression's glyphs have their own hover: an editor hovers an
+inlay hint as its own element. Its label holds the glyphs anchored there, and
+its hover groups their facts by glyph: per glyph a bold title, a line per noun
+with its reason, linked to its expression as a
 file URI with a range fragment (`#L73,9-L73,40`, 1-based lines and UTF-16
 columns), the loops around it and a fix where one is plain (`reserve` before a
 loop that grows); one link at the end runs `vyrn why --cost` on the file. A
@@ -606,10 +609,14 @@ A client that draws the rows itself reads them from the request
 `vyrn/costRows`, which the server advertises as the experimental capability
 `vyrn/costRows`. The request takes `{ uri }` and answers the document's rows in
 source order, the same rows the hints and the expression hover read: one
-`{ line, glyph, count, spans, hover }` per glyph of a line, `line` 0-based,
+`{ line, glyph, count, spans, hover, anchors }` per glyph of a line, `line` 0-based,
 `glyph` the label with its count in superscript, `spans` the LSP ranges of its
 facts (empty for the last run's blocks and for a fact no expression spells),
-and `hover` the glyph's Markdown, ending with the `vyrn why --cost` link. A proof
+`hover` the glyph's Markdown, ending with the `vyrn why --cost` link, and
+`anchors`, one `{ at, glyph, hover }` per end of an expression the facts are
+about (one at the line's end for a row with no span), with the hover of the
+facts that end there. An editor finds a hover by text position, so a client
+that draws glyphs apart anchors each at its `at`. A proof
 glyph's hover lists the proved checks without their proofs, which only
 `inlayHint/resolve` traces. The answer is empty when `costHints` is off and
 while the document has an error. A client that sends the initialization option
@@ -681,13 +688,6 @@ Settings:
   restarts the server.
 - `vyrn.hints.style`: `compact` (the default) or `full`, the server's
   `hintStyle`. A change restarts the server.
-- `vyrn.hints.render`: `decorations` (the default) or `inlay`. With
-  `decorations` the extension sends `costRendering`, asks `vyrn/costRows` when
-  a file opens, changes or is saved, and draws each glyph as its own decoration
-  after the line's text, with its own hover, and each fact's expression as a
-  decoration with the glyph's hover, so the pointer moving from one glyph to the
-  next switches the hover. With `inlay` the server's line hints show them. A
-  change restarts the server.
 - `vyrn.path`: the compiler. When empty: `compiler/target/release/vyrn`, then
   the debug build, then `cargo run -p vyrn-cli`.
 

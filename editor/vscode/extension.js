@@ -103,7 +103,6 @@ function activate(context) {
     initializationOptions: () => ({
       costHints: vsc.workspace.getConfiguration("vyrn").get("costHints", true),
       hintStyle: vsc.workspace.getConfiguration("vyrn").get("hints.style", "compact"),
-      costRendering: costRendering(vsc.workspace.getConfiguration("vyrn")),
     }),
     // A compact cost hover ends in a link to `vyrn.whyCost`; no other command runs from one.
     markdown: { isTrusted: { enabledCommands: ["vyrn.whyCost"] } },
@@ -134,7 +133,6 @@ function activate(context) {
   // rejection that would crash the Extension Development Host.
   const started = client.start();
   context.subscriptions.push(started);
-  const redrawCosts = registerCostDecorations(context, vsc, lspState);
   // The read-only documents a definition lands in, a generated module's or the
   // builtins': the server answers their text (`vyrn/generatedSource`).
   for (const scheme of ["vyrn-gen", "vyrn-builtin"]) {
@@ -152,9 +150,9 @@ function activate(context) {
   // The server reads these settings once, at `initialize`.
   context.subscriptions.push(
     vsc.workspace.onDidChangeConfiguration((e) => {
-      const read = ["vyrn.costHints", "vyrn.hints.style", "vyrn.hints.render"];
+      const read = ["vyrn.costHints", "vyrn.hints.style"];
       if (read.some((k) => e.affectsConfiguration(k)) && lspState.client) {
-        lspState.client.restart().then(redrawCosts, () => undefined);
+        lspState.client.restart().catch(() => undefined);
       }
     })
   );
@@ -164,7 +162,6 @@ function activate(context) {
       // to recompute lenses now that "▶ Run dev server" can be answered.
       lspState.client = client;
       vsc.commands.executeCommand("vyrn._refreshDevLens");
-      redrawCosts();
     })
     .catch((err) => {
       vsc.window.showErrorMessage(
@@ -737,113 +734,9 @@ async function associateLanguages(vsc) {
   vsc.window.showInformationMessage(`Vyrn: ${written} language association(s) written.`);
 }
 
-/**
- * The server's `costRendering` initialization option for the `vyrn` settings `cfg`:
- * `decorations` when `vyrn.hints.render` asks the extension to draw the cost rows, which
- * turns the server's cost inlay hints off; `inlay` otherwise.
- *
- * @param {{ get: (key: string, fallback: string) => string }} cfg
- */
-function costRendering(cfg) {
-  return cfg.get("hints.render", "decorations") === "decorations" ? "decorations" : "inlay";
-}
-
-/**
- * The decorations of the rows `vyrn/costRows` answers: per row its glyph at the end of its
- * 0-based `line`, and each span of its facts, both with the row's hover. A glyph is its own
- * decoration, so the pointer that moves to the next glyph leaves the first one's hover.
- *
- * @param {{ line: number, glyph: string, spans: { start: object, end: object }[], hover: string }[]} rows
- */
-function costDecorations(rows) {
-  const glyphs = [];
-  const spans = [];
-  for (const r of rows) {
-    glyphs.push({ line: r.line, glyph: r.glyph, hover: r.hover });
-    for (const range of r.spans) spans.push({ range, hover: r.hover });
-  }
-  return { glyphs, spans };
-}
-
-/**
- * Draws the cost rows of each visible Vyrn editor as decorations when `vyrn.hints.render` is
- * `decorations`: it asks `vyrn/costRows` when a document opens, changes or is saved and when
- * the visible editors change, the events on which VS Code asks for inlay hints.
- *
- * @param {import("vscode").ExtensionContext} context
- * @param {typeof import("vscode")} vsc
- * @param {{ client: import("vscode-languageclient/node").LanguageClient | null }} lspState
- */
-function registerCostDecorations(context, vsc, lspState) {
-  const colour = (id) => new vsc.ThemeColor(id);
-  const glyphType = vsc.window.createTextEditorDecorationType({
-    after: {
-      color: colour("editorInlayHint.foreground"),
-      backgroundColor: colour("editorInlayHint.background"),
-      // A margin is outside the glyph's box, so the pointer crossing it leaves the hover.
-      margin: "0 0 0 1ch",
-    },
-  });
-  const spanType = vsc.window.createTextEditorDecorationType({});
-  context.subscriptions.push(glyphType, spanType);
-  const hover = (text) => {
-    const md = new vsc.MarkdownString(text);
-    md.isTrusted = { enabledCommands: ["vyrn.whyCost"] };
-    return md;
-  };
-  const range = (r) =>
-    new vsc.Range(r.start.line, r.start.character, r.end.line, r.end.character);
-  /** @param {import("vscode").TextEditor} editor */
-  const draw = async (editor) => {
-    const doc = editor.document;
-    if (doc.languageId !== "vyrn") return;
-    let rows = [];
-    const on = costRendering(vsc.workspace.getConfiguration("vyrn")) === "decorations";
-    if (on && lspState.client) {
-      try {
-        rows = await lspState.client.sendRequest("vyrn/costRows", { uri: doc.uri.toString() });
-      } catch (_e) {
-        rows = []; // server down or not ready: no decorations, no error noise.
-      }
-    }
-    const { glyphs, spans } = costDecorations(rows || []);
-    editor.setDecorations(
-      glyphType,
-      glyphs.map((g) => {
-        const end = doc.lineAt(Math.min(g.line, doc.lineCount - 1)).range.end;
-        return {
-          range: new vsc.Range(end, end),
-          hoverMessage: hover(g.hover),
-          renderOptions: { after: { contentText: g.glyph } },
-        };
-      })
-    );
-    editor.setDecorations(
-      spanType,
-      spans.map((s) => ({ range: range(s.range), hoverMessage: hover(s.hover) }))
-    );
-  };
-  const drawDoc = (doc) =>
-    vsc.window.visibleTextEditors.filter((e) => e.document === doc).forEach(draw);
-  // The server analyses a change before it answers the request after it, so a short pause
-  // only spares the requests of a burst of keystrokes.
-  let pending;
-  context.subscriptions.push(
-    vsc.workspace.onDidOpenTextDocument(drawDoc),
-    vsc.workspace.onDidSaveTextDocument(drawDoc),
-    vsc.workspace.onDidChangeTextDocument((e) => {
-      clearTimeout(pending);
-      pending = setTimeout(() => drawDoc(e.document), 300);
-    }),
-    vsc.window.onDidChangeVisibleTextEditors((editors) => editors.forEach(draw))
-  );
-  // Redraws every visible editor, for the server's start and restart.
-  return () => vsc.window.visibleTextEditors.forEach(draw);
-}
-
 function deactivate() {}
 
-// `onPath`, `beside`, `costRendering` and `costDecorations` are exported for the tests under
+// `onPath`, `beside` and `languageAssociations` are exported for the tests under
 // `test/`. VS Code reads `activate`/`deactivate` and ignores the rest.
 module.exports = {
   activate,
@@ -851,6 +744,4 @@ module.exports = {
   onPath,
   beside,
   languageAssociations,
-  costRendering,
-  costDecorations,
 };

@@ -186,16 +186,6 @@
           ],
           "description": "How the cost hints read. A change restarts the language server."
         },
-        "vyrn.hints.render": {
-          "type": "string",
-          "enum": ["decorations", "inlay"],
-          "default": "decorations",
-          "enumDescriptions": [
-            "The extension draws each cost glyph at the line's end with its own hover, and each costly expression with its hover.",
-            "The language server's inlay hints: one per line, whose hover lists the line's facts."
-          ],
-          "description": "How the cost rows are drawn. A change restarts the language server."
-        },
         "vyrn.path": {
           "type": "string",
           "default": "",

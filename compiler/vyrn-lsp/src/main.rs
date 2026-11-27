@@ -908,9 +908,11 @@ fn handle_cost_lenses(server: &Server, params: serde_json::Value) -> Vec<serde_j
 }
 
 /// `vyrn/costRows`: the cost rows of the document `uri` ([`cost::rows`]), each
-/// `{ line, glyph, count, spans, hover }`, `line` 0-based and `spans` LSP ranges, `hover`
-/// ending with the report's link. Empty when the client turned cost hints off, and for a
-/// document that does not check. The line hints and the expression hover read the same rows.
+/// `{ line, glyph, count, spans, hover, anchors }`, `line` 0-based and `spans` LSP ranges,
+/// each `hover` ending with the report's link. `anchors` holds `{ at, glyph, hover }` per
+/// expression end ([`cost::Anchor`]), where a client draws glyphs apart. Empty when the client
+/// turned cost hints off, and for a document that does not check. The line hints and the
+/// expression hover read the same rows.
 fn handle_cost_rows(server: &Server, params: serde_json::Value) -> Vec<serde_json::Value> {
     let uri = (params.get("uri"))
         .and_then(|v| v.as_str())
@@ -925,14 +927,19 @@ fn handle_cost_rows(server: &Server, params: serde_json::Value) -> Vec<serde_jso
     let rows = cost::rows(analysis, uri.as_str(), path.as_deref(), &src, 1, usize::MAX);
     (rows.into_iter())
         .map(|r| {
+            let why = |hover: &str| format!("{hover}\n\n{}", cost::WHY_COST);
+            let anchors: Vec<serde_json::Value> = (r.anchors.iter())
+                .map(
+                    |a| serde_json::json!({ "at": a.at, "glyph": a.glyph, "hover": why(&a.hover) }),
+                )
+                .collect();
             serde_json::json!({
                 "line": r.line - 1,
                 "glyph": r.glyph,
                 "count": r.count,
                 "spans": r.spans,
-                "hover": format!("{}
-
-{}", r.hover, cost::WHY_COST),
+                "hover": why(&r.hover),
+                "anchors": anchors,
             })
         })
         .collect()
