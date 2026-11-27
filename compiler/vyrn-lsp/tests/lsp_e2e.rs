@@ -2239,6 +2239,8 @@ const SEM_TYPES: &[&str] = &[
     "regexpGroup",
     "regexpQuantifier",
     "regexpAlternation",
+    "regexpLookaround",
+    "regexpAnchor",
 ];
 
 /// One decoded semantic token at an absolute 0-based position; `mods` is the
@@ -7138,7 +7140,7 @@ fn main() -> Int64 {
 }
 
 /// The Email pattern of a refinement type checks, and each construct of it has its
-/// colour: its `^`, its lookahead and its escapes.
+/// colour: its anchors, its lookahead and its escapes.
 #[test]
 fn a_where_pattern_with_a_lookahead_is_coloured() {
     let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -7165,13 +7167,14 @@ fn main() -> Int64 {
         .filter(|t| t.line == 0 && t.ch >= 36)
         .map(|t| (t.ch, t.len, t.ty.as_str()))
         .collect();
-    let (group, class, esc, op) = ("regexpGroup", "regexp", "escapeSequence", "operator");
-    let quant = "regexpQuantifier";
+    let (group, class, esc) = ("regexpGroup", "regexp", "escapeSequence");
+    let (quant, look, anchor) = ("regexpQuantifier", "regexpLookaround", "regexpAnchor");
     let want = [
-        (36, 1, op),
+        (36, 1, anchor),
         (37, 1, group),
-        (38, 3, op),
+        (38, 3, look),
         (41, 3, esc),
+        (44, 1, look),
         (45, 1, class),
         (46, 6, esc),
         (52, 3, class),
@@ -7192,7 +7195,7 @@ fn main() -> Int64 {
         (89, 3, esc),
         (92, 1, class),
         (93, 1, group),
-        (94, 1, op),
+        (94, 1, anchor),
     ];
     assert_eq!(line, want, "{toks:?}");
     let _ = client.child.kill();

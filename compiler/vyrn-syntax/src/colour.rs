@@ -355,6 +355,26 @@ mod tests {
     }
 
     #[test]
+    fn an_assertion_has_a_colour_of_its_own() {
+        let g = crate::load(include_str!("../../../std/regex.syntax")).expect("regex.syntax loads");
+        let src = r"(?=a)^x\b{start}$";
+        let got = runs(&g, g.rule("RegexPattern").expect("a start rule"), src);
+        let found: Vec<_> = got
+            .iter()
+            .map(|r| (&src[r.start..r.stop], r.scope))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("(?=", Scope::Lookaround),
+                (")", Scope::Lookaround),
+                ("^", Scope::Anchor),
+                (r"\b{start}$", Scope::Anchor),
+            ]
+        );
+    }
+
+    #[test]
     fn the_colours_go_on_past_a_refusal() {
         let g = crate::load(include_str!("../../../std/regex.syntax")).expect("regex.syntax loads");
         let src = "a**[b]|c";

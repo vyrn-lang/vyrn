@@ -28,9 +28,10 @@ RegexQuantifierCount = '{' (regexNumber / ^CountNumber)
                        ('}' / ',' ('}' / (regexNumber / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
 
 // The order states the language: a literal is what no other alternative takes.
-RegexAtom = RegexFlags / RegexComment / &'(?' RegexLookaround / RegexSubpattern / RegexClass / RegexEscape
+RegexAtom = RegexFlags / RegexComment / &'(?' RegexLook / RegexSubpattern / RegexClass / RegexAnchor
+            / RegexEscape
             / RegexClassDot / &('*' / '+' / '?') ^NoTerm / &'{' ^NoCountTerm / &'}' ^StrayBrace
-            / RegexAnchor / RegexLiteral
+            / RegexLiteral
 // `(?i)` sets flags for the rest of its group, `(?i:..)` for its own; `(?#..)` is a
 // comment. Each matches the empty string.
 RegexFlags = regexGroupFlags
@@ -38,9 +39,9 @@ RegexComment = regexComment
 RegexSubpattern = open:regexGroupOpen alt:RegexAlt (regexGroupEnd / ^GroupUnclosed)
 // An assertion matches no character, so no repeat follows it. `^` and `$` are the
 // text's ends, or a line's under `m`; `\b`, `\B`, `\<` and `\>` are word boundaries.
-RegexLookaround = open:regexLookaroundOpen alt:RegexAlt (regexLookaroundEnd / ^GroupUnclosed) regexNoRepeat?
-RegexAnchor = ('^' / '$') regexNoRepeat?
-RegexEscape = '\\' (regexQuote / regexShorthand / regexAnchor / regexSense / regexForeign
+RegexLook = open:regexLookaroundOpen alt:RegexAlt (regexLookaroundEnd / ^GroupUnclosed) regexNoRepeat?
+RegexAnchor = ('^' / '$' / regexAnchor) regexNoRepeat?
+RegexEscape = '\\' (regexQuote / regexShorthand / regexSense / regexForeign
                     / ^PatternBackslash)
 RegexClassDot = '.'
 RegexLiteral = regexChar
@@ -108,7 +109,7 @@ regexCode = 'x' (&('00' / '{' '0'+ '}') ^NulEscape / hex hex / '{' hex+ '}' / ^H
             / '0' (&[0-9] ^OctalEscape / ^NulEscape)
 regexLookaroundOpen = '(?=' / '(?!' / '(?<=' / '(?<!'
 regexLookaroundEnd = ')'
-regexAnchor = ('b{start}' / 'b{end}' / 'b{start-half}' / 'b{end-half}' / [bBAzZ<>]) regexNoRepeat?
+regexAnchor = '\\' ('b{start}' / 'b{end}' / 'b{start-half}' / 'b{end-half}' / [bBAzZ<>])
 regexNoRepeat = &('*' / '+' / '?' / '{') ^AssertionRepeat
 // The forms another engine gives a meaning this one refuses, and every other escape.
 regexForeign = 'p' ^PropertyClass(form='\\p') / 'P' ^PropertyClass(form='\\P')

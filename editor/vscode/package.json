@@ -83,7 +83,9 @@
       { "id": "escapeSequence", "superType": "string", "description": "constant.character.escape" },
       { "id": "regexpGroup", "superType": "regexp", "description": "punctuation.definition.group.regexp" },
       { "id": "regexpQuantifier", "superType": "regexp", "description": "keyword.operator.quantifier.regexp" },
-      { "id": "regexpAlternation", "superType": "regexp", "description": "keyword.operator.or.regexp" }
+      { "id": "regexpAlternation", "superType": "regexp", "description": "keyword.operator.or.regexp" },
+      { "id": "regexpLookaround", "superType": "regexp", "description": "keyword.operator.lookaround.regexp" },
+      { "id": "regexpAnchor", "superType": "regexp", "description": "keyword.control.anchor.regexp" }
     ],
     "semanticTokenScopes": [
       {
@@ -99,6 +101,8 @@
           "regexpGroup": ["punctuation.definition.group.regexp"],
           "regexpQuantifier": ["keyword.operator.quantifier.regexp"],
           "regexpAlternation": ["keyword.operator.or.regexp"],
+          "regexpLookaround": ["keyword.operator.lookaround.regexp"],
+          "regexpAnchor": ["keyword.control.anchor.regexp"],
           "*.modification": ["markup.deleted"]
         }
       },
@@ -115,6 +119,8 @@
           "regexpGroup": ["punctuation.definition.group.regexp"],
           "regexpQuantifier": ["keyword.operator.quantifier.regexp"],
           "regexpAlternation": ["keyword.operator.or.regexp"],
+          "regexpLookaround": ["keyword.operator.lookaround.regexp"],
+          "regexpAnchor": ["keyword.control.anchor.regexp"],
           "*.modification": ["markup.deleted"]
         }
       }

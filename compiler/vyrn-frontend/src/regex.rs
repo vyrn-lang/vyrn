@@ -358,7 +358,7 @@ impl Hooks for Build<'_> {
         Ok(())
     }
 
-    fn _regex_lookaround(&mut self, start: usize, _end: usize) -> Result<(), String> {
+    fn _regex_look(&mut self, start: usize, _end: usize) -> Result<(), String> {
         self.looks -= 1;
         self.flags.pop();
         let body = Box::new(self.last().1);
@@ -380,8 +380,9 @@ impl Hooks for Build<'_> {
         Ok(())
     }
 
-    fn _regex_anchor(&mut self, start: usize, _end: usize) -> Result<(), String> {
-        let re = anchor(&self.b[start..start + 1], self.flags().lines);
+    fn _regex_anchor(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let t = &self.b[start..end];
+        let re = anchor(t.strip_prefix(b"\\").unwrap_or(t), self.flags().lines);
         self.terms.push((start, re));
         Ok(())
     }
@@ -422,7 +423,6 @@ impl Hooks for Build<'_> {
                 Chars::of(&[(0x0a, 0x0d)]).re(),
             ]),
             c if SHORTHANDS.contains(&c) => shorthand(c).re(),
-            b'b' | b'B' | b'A' | b'z' | b'Z' | b'<' | b'>' => anchor(t, self.flags().lines),
             _ => self.char_term(escape_char(t)?),
         };
         self.terms.push((start, re));

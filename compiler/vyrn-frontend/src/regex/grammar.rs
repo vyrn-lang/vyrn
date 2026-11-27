@@ -112,7 +112,7 @@ pub(super) trait Hooks {
     fn _regex_subpattern(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
-    fn _regex_lookaround(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn _regex_look(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn _regex_anchor(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -396,11 +396,12 @@ impl<'s, H: Hooks> Scanner<'s, H> {
             || self._regex_comment()?
             || {
                 let p0 = self.pos;
-                ({ let p = self.pos; let m = self.eat_lit(b"(?"); self.pos = p; m } && self._regex_lookaround()?)
+                ({ let p = self.pos; let m = self.eat_lit(b"(?"); self.pos = p; m } && self._regex_look()?)
                 || { self.pos = p0; false }
             }
             || self._regex_subpattern()?
             || self._regex_class()?
+            || self._regex_anchor()?
             || self._regex_escape()?
             || self._regex_class_dot()?
             || {
@@ -418,7 +419,6 @@ impl<'s, H: Hooks> Scanner<'s, H> {
                 ({ let p = self.pos; let m = self.eat_byte(b'}'); self.pos = p; m } && { let rule = rule!(StrayBrace); return Err(self.hooks.refuse(self.pos, rule)); })
                 || { self.pos = p0; false }
             }
-            || self._regex_anchor()?
             || self._regex_literal()?;
         if !hit {
             return Ok(false);
@@ -461,7 +461,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         Ok(true)
     }
 
-    fn _regex_lookaround(&mut self) -> Result<bool, String> {
+    fn _regex_look(&mut self) -> Result<bool, String> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
@@ -471,7 +471,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         if !hit {
             return Ok(false);
         }
-        self.hooks._regex_lookaround(start, self.pos)?;
+        self.hooks._regex_look(start, self.pos)?;
         Ok(true)
     }
 
@@ -479,7 +479,11 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
-            (self.eat_one(|c| c == '^' || c == '$') && { let _ = self.regex_no_repeat()?; true })
+            ((
+                self.eat_byte(b'^')
+                || self.eat_byte(b'$')
+                || self.regex_anchor()?
+            ) && { let _ = self.regex_no_repeat()?; true })
             || { self.pos = p0; false }
         };
         if !hit {
@@ -493,7 +497,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
-            (self.eat_byte(b'\\') && { if !(self.regex_quote()? || self.regex_shorthand()? || self.regex_anchor()? || self.regex_sense()? || self.regex_foreign()?) { { let rule = rule!(PatternBackslash); return Err(self.hooks.refuse(self.pos, rule)); } } true })
+            (self.eat_byte(b'\\') && { if !(self.regex_quote()? || self.regex_shorthand()? || self.regex_sense()? || self.regex_foreign()?) { { let rule = rule!(PatternBackslash); return Err(self.hooks.refuse(self.pos, rule)); } } true })
             || { self.pos = p0; false }
         };
         if !hit {
@@ -1150,13 +1154,13 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         let start = self.pos;
         let hit = {
             let p0 = self.pos;
-            ((
+            (self.eat_byte(b'\\') && (
                 (matches!(self.peek_byte(), Some(b'b')) && self.eat_lit(b"b{start}"))
                 || (matches!(self.peek_byte(), Some(b'b')) && self.eat_lit(b"b{end}"))
                 || (matches!(self.peek_byte(), Some(b'b')) && self.eat_lit(b"b{start-half}"))
                 || (matches!(self.peek_byte(), Some(b'b')) && self.eat_lit(b"b{end-half}"))
                 || self.eat_one(|c| matches!(c, 'b' | 'B' | 'A' | 'z' | 'Z' | '<' | '>'))
-            ) && { let _ = self.regex_no_repeat()?; true })
+            ))
             || { self.pos = p0; false }
         };
         if !hit {

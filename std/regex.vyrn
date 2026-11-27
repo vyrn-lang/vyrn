@@ -840,7 +840,7 @@ fn fragAssert(bd: modify Builder, k: Int64, negate: Bool) -> Frag {
 }
 
 /// The lookaround `l`. Its flags end at its `)`, as a group's do.
-fn fragLookaround(bd: modify Builder, pattern: String, l: rx.RegexLookaround) -> Frag {
+fn fragLookaround(bd: modify Builder, pattern: String, l: rx.RegexLook) -> Frag {
     let open = l.open.text
     let behind = open[2] == '<'
     let negate = open[open.byteLength - 1] == '!'
@@ -951,9 +951,15 @@ fn fragAnchor(bd: modify Builder, a: String) -> Frag {
     return fragEither(bd, inside, fragWords(bd, true, true))
 }
 
-/// Whether the escape `\c` is an assertion.
-fn isAnchor(c: UInt8) -> Bool {
-    return c == 'b' || c == 'B' || c == 'A' || c == 'z' || c == 'Z' || c == '<' || c == '>'
+/// The assertion `a` matches, without its backslash.
+fn anchorText(pattern: String, a: rx.RegexAnchor) -> String {
+    return substring(pattern, if pattern[a.start] == '\\' { a.start + 1 } else { a.start }, a.end)
+}
+
+/// The terms of the assertion `a`, as the compiler's builder counts them: a
+/// lookaround is one, so `\b` and `\B` are two pairs and `\<` and `\>` one.
+fn anchorSize(a: String) -> Int64 {
+    return if a == "b" || a == "B" { 4 } else if a == "<" || a == ">" || a == "b{start}" || a == "b{end}" { 2 } else { 1 }
 }
 
 /// The number of the capturing group whose `(` is at `at`, from 1, numbered on its
@@ -1018,9 +1024,6 @@ fn fragEscape(bd: modify Builder, pattern: String, start: Int64, end: Int64) -> 
     if isShorthand(c) {
         return fragChars(bd, shorthandChars(c))
     }
-    if isAnchor(c) {
-        return fragAnchor(bd, substring(pattern, start + 1, end))
-    }
     return fragChar(bd, escapeChar(bd, pattern, start + 1, end))
 }
 
@@ -1031,11 +1034,6 @@ fn escapeSize(pattern: String, start: Int64, end: Int64) -> Int64 {
     let c = pattern[start + 1]
     if c == 'R' {
         return 3
-    }
-    // A lookaround is one term: `\b` and `\B` are two pairs, `\<` and `\>` one pair.
-    if isAnchor(c) {
-        let a = substring(pattern, start + 1, end)
-        return if a == "b" || a == "B" { 4 } else if a == "<" || a == ">" || a == "b{start}" || a == "b{end}" { 2 } else { 1 }
     }
     if c == 'Q' {
         let to = quoteEnd(pattern, start, end)
@@ -1093,11 +1091,11 @@ fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
         RegexAtomRegexLiteral(l) => {
             return fragChar(bd, charAt(pattern, l.start))
         }
-        RegexAtomRegexLookaround(l) => {
+        RegexAtomRegexLook(l) => {
             return fragLookaround(bd, pattern, l)
         }
         RegexAtomRegexAnchor(a) => {
-            return fragAnchor(bd, substring(pattern, a.start, a.start + 1))
+            return fragAnchor(bd, anchorText(pattern, a))
         }
     }
 }
@@ -1167,7 +1165,7 @@ fn pieceSize(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Int64
         }
         RegexAtomRegexClassDot(d) => {}
         RegexAtomRegexLiteral(l) => {}
-        RegexAtomRegexLookaround(l) => {}
+        RegexAtomRegexLook(l) => {}
         RegexAtomRegexAnchor(a) => {}
     }
     if let Some(c) = piece.count {
@@ -1206,8 +1204,8 @@ fn termSize(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Int64 {
         RegexAtomRegexEscape(e) => escapeSize(pattern, e.start, e.end),
         RegexAtomRegexClassDot(d) => charsSize(dotChars(bd)),
         RegexAtomRegexLiteral(l) => l.end - l.start,
-        RegexAtomRegexLookaround(l) => 1,
-        RegexAtomRegexAnchor(a) => 1,
+        RegexAtomRegexLook(l) => 1,
+        RegexAtomRegexAnchor(a) => anchorSize(anchorText(pattern, a)),
     }
 }
 
@@ -1283,7 +1281,7 @@ fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag 
         }
         RegexAtomRegexClassDot(d) => {}
         RegexAtomRegexLiteral(l) => {}
-        RegexAtomRegexLookaround(l) => {}
+        RegexAtomRegexLook(l) => {}
         RegexAtomRegexAnchor(a) => {}
     }
     let mut f = fragRepeat(bd, pattern, piece)

@@ -36,6 +36,8 @@ pub enum Scope {
     Group,
     Quantifier,
     Alternation,
+    Lookaround,
+    Anchor,
 }
 
 impl Scope {
@@ -61,6 +63,8 @@ impl Scope {
             Scope::Group => "punctuation.definition.group.regexp",
             Scope::Quantifier => "keyword.operator.quantifier.regexp",
             Scope::Alternation => "keyword.operator.or.regexp",
+            Scope::Lookaround => "keyword.operator.lookaround.regexp",
+            Scope::Anchor => "keyword.control.anchor.regexp",
         }
     }
 }
@@ -69,11 +73,13 @@ impl Scope {
 /// names them: each scope, its type's id, and the standard type it falls back to. The
 /// editor's `package.json` declares each type and maps it to the scope's TextMate
 /// name, which `the_editor_declares_each_custom_token_type` holds.
-pub const CUSTOM_TOKENS: [(Scope, &str, &str); 4] = [
+pub const CUSTOM_TOKENS: [(Scope, &str, &str); 6] = [
     (Scope::Escape, "escapeSequence", "string"),
     (Scope::Group, "regexpGroup", "regexp"),
     (Scope::Quantifier, "regexpQuantifier", "regexp"),
     (Scope::Alternation, "regexpAlternation", "regexp"),
+    (Scope::Lookaround, "regexpLookaround", "regexp"),
+    (Scope::Anchor, "regexpAnchor", "regexp"),
 ];
 
 /// The vocabulary: a rule of this name has this scope, and this text before its regex.
@@ -88,7 +94,7 @@ const CLASSES: [(&str, Scope, &str); 7] = [
 ];
 /// The rules whose scope only their callers place, so a regex cannot match them:
 /// [`crate::colour`] reads them, and a TextMate grammar takes them from [`Naming`].
-const PARTS: [(&str, Scope); 9] = [
+const PARTS: [(&str, Scope); 11] = [
     ("head", Scope::Function),
     ("ref", Scope::TypeName),
     ("capture", Scope::Parameter),
@@ -98,6 +104,8 @@ const PARTS: [(&str, Scope); 9] = [
     ("group", Scope::Group),
     ("quantifier", Scope::Quantifier),
     ("alternation", Scope::Alternation),
+    ("lookaround", Scope::Lookaround),
+    ("anchor", Scope::Anchor),
 ];
 
 /// The scope of the rule named `rule` in the grammar named `syntax`, by [`CLASSES`]
