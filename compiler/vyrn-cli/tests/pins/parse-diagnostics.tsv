@@ -48,6 +48,7 @@ compiler/vyrn-cli/tests/check/a_declared_show_renders_in_all_three_renderers_4.v
 compiler/vyrn-cli/tests/check/a_default_must_have_the_members_declared_type.vyrn	0	cbf29ce484222325	20	19	1685a97b0ad899c7
 compiler/vyrn-cli/tests/check/a_derived_record_cannot_have_a_where_clause.vyrn	0	cbf29ce484222325	20	19	46b5add3ca4ccf55
 compiler/vyrn-cli/tests/check/a_derived_type_chain_past_its_depth_limit_does_not_resolve.vyrn	0	cbf29ce484222325	20	19	b7c97365f503504e
+compiler/vyrn-cli/tests/check/a_dot_call_reaches_the_home_of_its_receivers_type.vyrn	0	cbf29ce484222325	20	19	efc908e659032840
 compiler/vyrn-cli/tests/check/a_dot_call_skips_a_local_that_is_not_a_function.vyrn	0	cbf29ce484222325	20	17	2c6b960c9ec2907c
 compiler/vyrn-cli/tests/check/a_fact_clause_names_an_order.vyrn	0	cbf29ce484222325	20	17	20494b0e2227ada8
 compiler/vyrn-cli/tests/check/a_fact_clause_orders_the_elements_of_its_array.vyrn	0	cbf29ce484222325	20	18	98f77552a6eeab88
@@ -159,6 +160,7 @@ compiler/vyrn-cli/tests/check/a_module_declaring_a_len_function.vyrn	0	cbf29ce48
 compiler/vyrn-cli/tests/check/a_module_exporting_a_type_a_root_also_names.vyrn	0	cbf29ce484222325	20	18	4f9064466832d70a
 compiler/vyrn-cli/tests/check/a_module_exporting_an_enum_and_a_record.vyrn	0	cbf29ce484222325	20	18	78904e5329556ca9
 compiler/vyrn-cli/tests/check/a_module_state_initializer_cannot_wait.vyrn	0	cbf29ce484222325	20	17	b364954eaba7c2c5
+compiler/vyrn-cli/tests/check/a_module_that_declares_a_point.vyrn	0	cbf29ce484222325	20	17	d7321e580af25a08
 compiler/vyrn-cli/tests/check/a_module_that_doubles_a_stream.vyrn	0	cbf29ce484222325	20	19	13de1d9fdea152dc
 compiler/vyrn-cli/tests/check/a_module_that_doubles_an_array.vyrn	0	cbf29ce484222325	20	19	2d8f3f424a1085d6
 compiler/vyrn-cli/tests/check/a_module_that_only_exports_a_contract_is_a_library.vyrn	0	cbf29ce484222325	20	19	a11f467f003da61d
@@ -272,6 +274,7 @@ compiler/vyrn-cli/tests/check/a_test_word_before_no_string_is_no_declaration.vyr
 compiler/vyrn-cli/tests/check/a_type_cannot_take_the_name_of_option.vyrn	0	cbf29ce484222325	20	19	72cbeb1e7f876806
 compiler/vyrn-cli/tests/check/a_type_may_follow_a_projection_in_an_impl.vyrn	0	cbf29ce484222325	20	20	c90eebde30b2f60c
 compiler/vyrn-cli/tests/check/a_type_parameter_takes_no_type_arguments.vyrn	1	9388477c56da98fc	20	20	2f1c8731f9375f13
+compiler/vyrn-cli/tests/check/a_type_whose_home_lacks_the_function_is_refused.vyrn	0	cbf29ce484222325	20	17	0d53c4de879fc6ca
 compiler/vyrn-cli/tests/check/a_union_flattens_and_keeps_each_member_once_in_source_order.vyrn	0	cbf29ce484222325	20	18	9798e976f1c5c8db
 compiler/vyrn-cli/tests/check/a_union_has_no_constructor.vyrn	0	cbf29ce484222325	20	20	34362b2cb021a9e9
 compiler/vyrn-cli/tests/check/a_union_written_in_every_type_position_checks.vyrn	0	cbf29ce484222325	20	18	f86beefb7f8ae529

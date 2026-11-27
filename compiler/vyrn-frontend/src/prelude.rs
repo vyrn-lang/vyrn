@@ -102,6 +102,12 @@ fn row(
 /// names the offending part of the type.
 pub const DECODABLE: &str = "@Decodable";
 
+/// The home module of each type the language declares, by type key
+/// ([`crate::types::home_key`]): `T.f(..)` calls `f` that module exports, and
+/// `x.f(..)` reaches it where no function in scope is named `f`. A declared
+/// type's home is the module that declares it. A home links on a mention.
+pub const HOMES: &[(&str, &str)] = &[("Array", "std/arrays"), ("String", "std/strings")];
+
 fn bounded(mut f: Function, tp: &str, bound: &str) -> Function {
     f.type_bounds
         .insert(tp.to_string(), vec![bound.to_string()]);

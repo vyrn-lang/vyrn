@@ -73,7 +73,7 @@ pull request.
 ### Functions and protocols
 
 - Protocol conformance is explicit (`impl P for T`) and checked where it is written: a missing method or an extra method is refused.
-- No inherent methods. `x.m(a)` is `m(x, a)`, so a helper needs no `impl`.
+- A function attaches to its type's home module: `T.f` is `f` of the module that declares `T` (`prelude::HOMES` for a language type), and `x.f()` reaches it where no function in scope takes the name (decided 2026-11-27 by the user). No `impl` block declares one, and a function has one home. `T.f` reaches every export of the home, and the home comes after the flat scope, so no accepted program changes meaning.
 - Compatibility hints for removed spellings were dropped on 2026-10-01 by the user's decision: a use of `str`, `concat`, `len`, `list`, `push`, `alen`, `array`, `Int` or `Float` gets the sentence any unknown name gets, and those names are free to declare. `at` and `toString` are free too since 2026-10-06: the parser decides a written method-form name once, and the sugar for `a[i]` and for interpolation never reaches a user's declaration.
 - Dispatch is static everywhere; there are no vtables. Records are legal impl targets and scalar refinement types are not.
 - Generic impls are keyed on the type constructor: one impl per protocol and constructor.

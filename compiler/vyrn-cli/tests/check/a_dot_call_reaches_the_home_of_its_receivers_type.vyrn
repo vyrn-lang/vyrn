@@ -1,0 +1,20 @@
+// No import names `norm`, `origin`, `trim` or `map`: `T.f(..)` calls `f` of
+// the home of `T`, and `x.f()` reaches the home of `x`'s type where no
+// function in scope is named `f`.
+import { Point } from "./a_module_that_declares_a_point.vyrn"
+
+fn twice(x: Int64) -> Int64 {
+    return x * 2
+}
+
+fn main() -> Int64 {
+    let p = Point { x: 3, y: 4 }
+    print(p.norm())
+    print(Point.norm(Point.origin()))
+    print("  a  ".trim())
+    print(String.trim("  b  "))
+    let xs: Array<Int64> = [1, 2, 3]
+    print(xs.map(twice)[2])
+    print(Array.map(xs, twice)[0])
+    return 0
+}

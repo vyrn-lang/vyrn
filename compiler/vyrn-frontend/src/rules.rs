@@ -1123,6 +1123,8 @@ rules! {
         "namespace `{ns}` (module `{target}`) has no exported member `{member}`: \
         namespaces reach exported declarations only, one level deep";
     NotNamespace { ns } "`{ns}` is not an in-scope namespace";
+    TypeLacksFunction { ty, name, module }
+        "`{ty}` has no function `{name}`: `{module}` exports none";
     NamespacedVariant { head, enum_name, variant }
         "`{head}.{enum_name}.{variant}` is not a namespaced enum \
         variant (namespaces are one level deep)";

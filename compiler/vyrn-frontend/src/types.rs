@@ -99,6 +99,17 @@ pub fn type_key(ty: &Type) -> Option<String> {
     }
 }
 
+/// The key a type's home is found by ([`crate::prelude::HOMES`]): its
+/// [`type_key`], or the name of a sized integer, a float or `Array`, which no
+/// impl keys on.
+pub fn home_key(ty: &Type) -> Option<String> {
+    match ty {
+        Type::IntN { .. } | Type::Float | Type::Float32 => Some(ty.to_string()),
+        Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) => Some("Array".to_string()),
+        _ => type_key(ty),
+    }
+}
+
 /// The flattened name of an `impl` method, e.g. `Show$Int64$show`. `$` is no
 /// identifier character, so no source spells one. A type key may hold `$`
 /// (`Copy$json$Json$copy`); a protocol or method name never does, so the first

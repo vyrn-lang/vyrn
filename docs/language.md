@@ -460,6 +460,7 @@ fn area(width: Int64, height: Int64) -> Int64 {
 - Every parameter states its type, and the result type follows `->`. Nothing is inferred across a function boundary but a private function's facts: what its result holds is inferred as a summary, while an exported function states its facts in `where` clauses. A function without `->` returns `Unit`.
 - `return` leaves the function. A function that returns a value must return on every path.
 - `x.f(a)` calls `f(x, a)` when `f` is in scope, so any function reads as a method on its first argument.
+- A function attaches to its type's home: the module that declares the type, or for `String` and `Array` (`ArrayN` and `SmallArray` too) `std/strings` and `std/arrays`. `T.f(a)` calls `f` that home exports, as `ns.f(a)` calls an export of `ns`, and needs no import of `f`: `String.trim(s)`, `Point.origin()`. A home that exports no `f` is refused. `x.f(a)` reaches `f` of the home of `x`'s type where no local, protocol method or function in scope is named `f`, so `s.trim()` needs no import. A generic receiver has no home. A language type's home links only where a program writes such a call.
 - `f<T>(..)` passes type arguments explicitly. A partial list is legal; the rest are inferred.
 - `mut fn` declares that a function changes state. Nothing checks it; `std/graphql` reads it to tell a mutation from a query.
 
@@ -895,4 +896,5 @@ Each line is a program the compiler refuses, and the reason.
 - A function or type name declared twice. Every body is still checked, under each declaration, so one run prints every error.
 - An `impl` of a protocol for a scalar refinement type.
 - `x.m()` where two protocols declare `m` for the receiver: name one, `x::P.m()`.
+- `T.f(..)` where the home of `T` exports no `f`.
 - An extern signature with a type the host boundary cannot carry.

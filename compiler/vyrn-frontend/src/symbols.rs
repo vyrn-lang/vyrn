@@ -131,6 +131,11 @@ pub struct Analysis {
     /// so `ns.` completes and `ns.member` hovers and jumps. Filled
     /// only by [`analyze_linked`].
     pub namespaces: Vec<NamespaceInfo>,
+    /// Each type with a home module the document reaches, named by its type
+    /// key, with the functions the home exports: `T.` and `x.` complete them,
+    /// and `T.f` and `x.f` hover and jump into the home. Filled only by
+    /// [`analyze_linked`].
+    pub homes: Vec<NamespaceInfo>,
     /// The origin tables of every generated module reachable from this document,
     /// for hover, completion and go-to-definition inside generator
     /// input files. Empty without a linker or without a span with an origin.
@@ -609,6 +614,7 @@ fn analyze_inner(
     // Namespace bindings and their exports; needs the linker to map
     // each namespace import to its module.
     let namespaces = index_namespaces(&graph, &program, linker, &origin_index);
+    let homes = index_homes(checked.as_ref(), &tok_info, linker);
 
     // Member tables for `.foo` completion. Impls and protocols come from the
     // linked program when there is one, since impls are global; bounds come from
@@ -802,6 +808,7 @@ fn analyze_inner(
         class_call,
         class_css,
         namespaces,
+        homes,
         origins,
         remapped,
         symbol_maps: origin_index.all,
@@ -881,6 +888,7 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         class_call: String::new(),
         class_css: String::new(),
         namespaces: Vec::new(),
+        homes: Vec::new(),
         origins: crate::origin::OriginMaps::default(),
         remapped: Vec::new(),
         symbol_maps: Vec::new(),
@@ -1007,7 +1015,7 @@ fn resolve_token<'a, M>(
         }
     }
     if let Some(recv) = receiver_before_dot(analysis, tok.line, tok.col) {
-        let ns = (analysis.namespaces.iter()).find(|n| n.name == recv.text);
+        let ns = (analysis.namespaces.iter().chain(&analysis.homes)).find(|n| n.name == recv.text);
         if let (None, Some(ns)) = (local_at(analysis, recv), ns) {
             if let Some(m) = ns.members.iter().find(|m| m.name == tok.text) {
                 return Some(Named::NsMember(ns, m));
@@ -1054,7 +1062,8 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
             Some(p) => protocol_member_symbol(analysis, &p.text, &c.label),
             None => (analysis.symbols.iter())
                 .filter(|s| s.name == c.label && s.kind == SymbolKind::Method)
-                .max_by_key(|s| (s.file.is_none(), s.line)),
+                .max_by_key(|s| (s.file.is_none(), s.line))
+                .or_else(|| home_member(analysis, tok)),
         };
         Some((c, decl))
     };
@@ -1094,7 +1103,10 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
     match resolve_token(analysis, tok, member) {
         Some(Named::Local(b)) => Some(local_resolution(analysis, b)),
         Some(Named::NsMember(ns, m)) => {
-            let via = format!("\u{2014} via namespace `{}`", ns.name);
+            let via = match analysis.homes.iter().any(|h| std::ptr::eq(h, ns)) {
+                true => format!("\u{2014} in the home of `{}`", ns.name),
+                false => format!("\u{2014} via namespace `{}`", ns.name),
+            };
             let hover = hover_of(&m.detail, &[doc_piece(&m.doc), Some(&via)]);
             Some(Resolution {
                 definition: m.file.is_some() || ns.generated.is_some(),
@@ -1515,6 +1527,9 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
                     })
                     .collect();
             }
+            if let Some(home) = analysis.homes.iter().find(|n| &n.name == recv) {
+                return home.members.iter().map(home_completion).collect();
+            }
         }
     }
     // A receiver that cannot be typed has nothing to suggest.
@@ -1582,6 +1597,14 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
         }
         _ => {}
     }
+    // The functions of the home of the receiver's type, which `x.f()` reaches.
+    if let Some(key) = crate::types::home_key(&ty) {
+        let home = analysis.homes.iter().find(|h| h.name == key);
+        out.extend(
+            home.into_iter()
+                .flat_map(|h| h.members.iter().map(home_completion)),
+        );
+    }
     // Concrete receiver: every `impl P for T` whose `T` is the receiver's type
     // (`n: Int64` with `impl Pretty for Int64` offers `n.pretty`).
     for (t, _, c) in &analysis.impl_members {
@@ -1607,6 +1630,16 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
         }
     }
     out
+}
+
+/// The completion of a home's function.
+fn home_completion(s: &Symbol) -> Completion {
+    Completion {
+        label: s.name.clone(),
+        kind: s.kind,
+        detail: s.detail.clone(),
+        doc: s.doc.clone(),
+    }
 }
 
 /// Completions for the content of a string literal whose expected type is a
@@ -2401,6 +2434,55 @@ fn index_namespaces(
         }
     }
     out
+}
+
+/// The home of every [`crate::prelude::HOMES`] type, read even where no
+/// mention linked it, and of each declared type of another module the
+/// document's tokens spell, with the functions each home exports.
+fn index_homes(
+    linked: Option<&ast::Program>,
+    tokens: &[TokenInfo],
+    linker: Option<Linker<'_>>,
+) -> Vec<NamespaceInfo> {
+    let (Some(linked), Some((root_path, opts, resolver))) = (linked, linker) else {
+        return Vec::new();
+    };
+    let root_key = crate::loader::normalize(root_path);
+    let primitive = (crate::prelude::HOMES.iter()).filter_map(|(t, spec)| {
+        Some((
+            t.to_string(),
+            crate::loader::resolve_spec(spec, &root_key, opts).ok()?,
+        ))
+    });
+    let spelled = |n: &str| tokens.iter().any(|t| t.text == n);
+    let declared = (linked.type_decls.iter())
+        .filter(|t| t.exported && t.line != 0 && spelled(&t.name))
+        .filter_map(|t| Some((t.name.clone(), t.module.clone()?)));
+    let mut read: HashMap<String, Vec<Symbol>> = HashMap::new();
+    let mut out = Vec::new();
+    for (name, key) in primitive.chain(declared) {
+        let members = read.entry(key.clone()).or_insert_with(|| {
+            let all = namespace_members(&key, (&root_key, opts), resolver, None);
+            all.into_iter()
+                .filter(|s| s.kind == SymbolKind::Function)
+                .collect()
+        });
+        out.push(NamespaceInfo {
+            name,
+            members: members.clone(),
+            generated: None,
+        });
+    }
+    out
+}
+
+/// The function of the home of the receiver's type that `tok`, a member
+/// after a typed receiver, names.
+fn home_member<'a>(analysis: &'a Analysis, tok: &TokenInfo) -> Option<&'a Symbol> {
+    let ty = resolve_receiver_type(analysis, tok.line, tok.col)?;
+    let key = crate::types::home_key(&ty)?;
+    let home = analysis.homes.iter().find(|h| h.name == key)?;
+    home.members.iter().find(|m| m.name == tok.text)
 }
 
 /// The exported declarations of `target` that `importer`, a module key read
@@ -3984,6 +4066,32 @@ mod tests {
             "{:?}",
             a.locals
         );
+    }
+
+    #[test]
+    fn a_types_home_completes_hovers_and_jumps_after_the_type_and_a_value() {
+        use crate::loader::{LoadOptions, MapResolver};
+        let api = "export type Box = { n: Int64 }\n\
+                   export fn size(b: Box) -> Int64 { return b.n }";
+        let resolver = MapResolver([("api.vyrn".to_string(), api.to_string())].into());
+        let root = "import { Box } from \"./api\"\n\
+                    fn main() -> Int64 {\n\
+                    \x20   let b = Box { n: 1 }\n\
+                    \x20   return b.size() + Box.size(b)\n\
+                    }";
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver, None);
+        assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
+        for col in [14, 27] {
+            let labels: Vec<String> = (member_completions(&a, 4, col).into_iter())
+                .map(|c| c.label)
+                .collect();
+            assert!(labels.iter().any(|l| l == "size"), "col {col}: {labels:?}");
+            let r = resolve(&a, 4, col).expect("`size` resolves");
+            assert_eq!(
+                (r.target_file.as_deref(), r.target_line),
+                (Some("api.vyrn"), 2)
+            );
+        }
     }
 
     #[test]

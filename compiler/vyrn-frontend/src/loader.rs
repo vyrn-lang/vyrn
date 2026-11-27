@@ -1068,6 +1068,9 @@ struct Module {
     /// link registers its declarations under that key, and it holds a copy of
     /// that module's imports. `None` for every other module.
     joins: Option<String>,
+    /// The linked names its `T.f(..)` calls resolved to, which it sees as an
+    /// importer sees what it imports.
+    type_calls: HashSet<String>,
 }
 
 /// The state one load walks: the modules entered, their loading state, the
@@ -1947,6 +1950,8 @@ fn load_modules(
                     seen: Default::default(),
                     unclosed: Default::default(),
                     islands: Default::default(),
+                    homes: Default::default(),
+                    home_misses: Default::default(),
                 },
                 import_targets: Vec::new(),
                 generated: None,
@@ -1957,6 +1962,7 @@ fn load_modules(
                 cut: None,
                 unclosed: false,
                 joins: None,
+                type_calls: HashSet::new(),
             };
             module.refs = Rc::new(program_ref_names(&module.program));
             w.modules.push(module);
@@ -2192,6 +2198,7 @@ fn load_modules(
             cut: cut.then(|| parsed.clone()),
             unclosed: false,
             joins: None,
+            type_calls: HashSet::new(),
         });
         Ok(())
     }
@@ -2262,6 +2269,34 @@ fn load_modules(
         // its references with everything else.
         if let Some(m) = w.modules.iter_mut().find(|m| m.key == target) {
             m.injected = Some(rt.prefix);
+        }
+    }
+
+    // A language type's home links on a mention ([`crate::prelude::HOMES`]):
+    // a `T.f(..)` head naming the type, or a dot call no loaded module
+    // declares, which only a home can answer.
+    let (heads, orphans) = home_mentions(&w.modules[..mentioning]);
+    for (ty, spec) in crate::prelude::HOMES {
+        if !heads.contains(ty) && orphans.is_empty() {
+            continue;
+        }
+        let Ok(target) = resolve_spec(spec, &root_key, opts) else {
+            continue;
+        };
+        if w.states.contains_key(&target) {
+            continue;
+        }
+        let Ok(text) = resolver.read(&target) else {
+            continue;
+        };
+        if !heads.contains(ty) && !exports_any(&text, &orphans) {
+            continue;
+        }
+        let text = Some(text.as_str());
+        if let Err(diags) = visit(
+            &target, text, None, opts, resolver, engine, &mut w, &root_key,
+        ) {
+            return Err(failed(diags, w.origins));
         }
     }
 
@@ -5705,6 +5740,22 @@ fn resolve_aliases(
 
     let spellings = spellings(modules, &foreign_renames, &name_module_count, root_key);
 
+    // The type heads of each module's `T.f(..)` calls, as written: passes 3 and
+    // 4 leave such a call's name to pass 5, as they leave a namespace's.
+    let homes: Vec<(&str, String)> = (crate::prelude::HOMES.iter())
+        .filter_map(|(t, spec)| Some((*t, resolve_spec(spec, root_key, opts).ok()?)))
+        .filter(|(_, k)| module_exports.contains_key(k))
+        .collect();
+    let written_heads: Vec<HashMap<String, String>> = modules
+        .iter()
+        .map(|m| type_heads_of(m, modules, &homes))
+        .collect();
+    let guarded = |i: usize, key: &str| {
+        let mut ns = ns_names_of(&ns_bindings, key);
+        ns.extend(written_heads[i].keys().cloned());
+        ns
+    };
+
     // Pass 3: apply the foreign-decl renames to the definition and its module's
     // references. The module's own namespace bindings keep its `ns.member(..)`
     // sugar out of the plain-name rewrite; pass 5 owns those.
@@ -5715,11 +5766,11 @@ fn resolve_aliases(
             .or_default()
             .insert(original.clone(), s.clone());
     }
-    for tm in modules.iter_mut() {
+    for (i, tm) in modules.iter_mut().enumerate() {
         let Some(map) = renames_by_module.get(tm.key.as_str()) else {
             continue;
         };
-        let ns_names = ns_names_of(&ns_bindings, &tm.key);
+        let ns_names = guarded(i, &tm.key);
         rename_decls_in_module(&mut tm.program, map, &ns_names);
     }
 
@@ -5752,9 +5803,9 @@ fn resolve_aliases(
     // Pass 4: apply the per-module reference rewrites, and turn each import into
     // a bare import of the resolved decl, so registration and visibility need
     // no alias logic.
-    for m in modules.iter_mut() {
+    for (i, m) in modules.iter_mut().enumerate() {
         if let Some(map) = rewrites.get(&m.key) {
-            let ns_names = ns_names_of(&ns_bindings, &m.key);
+            let ns_names = guarded(i, &m.key);
             // The module's own variants guard the rewrite (see
             // [`Renamer::variants`]): an alias local or injected spelling that
             // collides with one must not fold the constructor sites.
@@ -5770,12 +5821,17 @@ fn resolve_aliases(
         }
     }
 
-    // Pass 5: resolve `ns.member` uses in each namespaced module to
-    // the program-wide symbol. After the alias rewrites, which touch only plain
+    // Pass 5: resolve `ns.member` and `T.f(..)` uses in each module to the
+    // program-wide symbol. After the alias rewrites, which touch only plain
     // names. The walk is scope-aware: a local shadows a namespace.
-    for m in modules.iter_mut() {
+    let type_heads: Vec<HashMap<String, String>> = modules
+        .iter()
+        .map(|m| type_heads_of(m, modules, &homes))
+        .collect();
+    for (m, types) in modules.iter_mut().zip(type_heads) {
         let binds: HashMap<String, String> = match ns_bindings.get(&m.key) {
             Some(b) if !b.is_empty() => b.iter().cloned().collect(),
+            _ if !types.is_empty() => HashMap::new(),
             _ => continue,
         };
         let mut nr = NsResolver {
@@ -5783,14 +5839,73 @@ fn resolve_aliases(
             foreign_renames: &foreign_renames,
             module_exports: &module_exports,
             module_variants: &module_variants,
+            types,
+            type_calls: HashSet::new(),
             module_key: m.key.clone(),
             root_key: root_key.to_string(),
             opts,
             errors,
         };
         nr.resolve_program(&mut m.program);
+        m.type_calls = nr.type_calls;
     }
     spellings
+}
+
+/// The types `m` writes as the head of a `T.f(..)` call, by linked name,
+/// each with its home module key: `m` itself, the module an import names it
+/// from, or a [`crate::prelude::HOMES`] row in `homes`. A namespace or a
+/// local of that name is the walk's to tell apart.
+fn type_heads_of(
+    m: &Module,
+    modules: &[Module],
+    homes: &[(&str, String)],
+) -> HashMap<String, String> {
+    let p = &m.program;
+    let declares =
+        |m: &Module, t: &str| (m.program.type_decls.iter()).any(|d| d.line != 0 && d.name == t);
+    let home = |t: &str| {
+        if declares(m, t) {
+            return Some(m.key.clone());
+        }
+        let imported = p.imports.iter().zip(&m.import_targets);
+        let from = imported.filter(|(i, _)| i.names.iter().any(|n| n.original == t));
+        for (_, target) in from {
+            if modules.iter().any(|o| &o.key == target && declares(o, t)) {
+                return Some(target.clone());
+            }
+        }
+        homes.iter().find(|(h, _)| *h == t).map(|(_, k)| k.clone())
+    };
+    let mut out = HashMap::new();
+    let bodies = (p.functions.iter())
+        .chain(
+            p.impls
+                .iter()
+                .flat_map(|i| i.methods.iter().chain(&i.places)),
+        )
+        .filter_map(|f| f.body.written())
+        .chain(p.tests.iter().chain(&p.benches).map(|t| &t.body));
+    for b in bodies {
+        crate::ast::each_expr(b, &mut |e| {
+            if let Expr::Call {
+                form: CallForm::Method,
+                args,
+                ..
+            } = e
+            {
+                if let Some(Expr::Var { name: t, .. }) = args.first() {
+                    if !out.contains_key(t) {
+                        if let Some(k) = home(t) {
+                            out.insert(t.clone(), k);
+                        }
+                    }
+                }
+            }
+            true
+        });
+    }
+    out
 }
 
 /// The [`Spellings`] of a load: each declaration of a name two modules
@@ -5921,6 +6036,11 @@ struct NsResolver<'a> {
     /// Variant names of each exported enum per module, to tell variant
     /// construction from a type-name argument.
     module_variants: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+    /// The types the module sees, by linked name, each with its home module
+    /// key: `T.f(..)` calls `f` that module exports.
+    types: HashMap<String, String>,
+    /// The linked names the `T.f(..)` calls resolved to ([`Module::type_calls`]).
+    type_calls: HashSet<String>,
     module_key: String,
     root_key: String,
     opts: &'a LoadOptions,
@@ -6112,6 +6232,29 @@ impl BodyVisitMut for NsResolver<'_> {
                         args.remove(0);
                         *form = CallForm::Plain;
                         return true;
+                    }
+                    let home = self.types.get(head).filter(|_| !locals.contains(head));
+                    if let (CallForm::Method, Some(home)) = (&form, home) {
+                        let member = crate::prelude::method_surface(name);
+                        let exports = self.module_exports.get(home);
+                        if exports.is_some_and(|s| s.contains(member)) {
+                            *name = resolved_name(self.foreign_renames, home, member);
+                            self.type_calls.insert(name.clone());
+                            args.remove(0);
+                            *form = CallForm::Plain;
+                            return true;
+                        }
+                        // A variant takes no qualifier, which the checker states.
+                        let variants = self.module_variants.get(home).into_iter().flatten();
+                        if !variants.into_iter().any(|(_, vs)| vs.contains(member)) {
+                            let rule = rule!(
+                                TypeLacksFunction,
+                                ty = head,
+                                name = member,
+                                module = spoken(&self.module_key, home, self.opts)
+                            );
+                            self.err(l, col, rule);
+                        }
                     }
                 }
                 // `ns.Enum.Variant(payload)`: the first argument is `ns.Enum` and
@@ -6435,8 +6578,26 @@ fn link(
         d.from_generated = true;
         d
     };
+    // The modules a type's home can be: one that declares an exported type,
+    // and each `HOMES` row's target. A dot call one of them answers is marked
+    // `CallForm::Home` instead of refused here; the checker picks the home by
+    // the receiver's type.
+    let homes: BTreeMap<String, String> = (crate::prelude::HOMES.iter())
+        .filter_map(|(t, spec)| Some((t.to_string(), resolve_spec(spec, root_key, opts).ok()?)))
+        .filter(|(_, k)| modules.iter().any(|m| &m.key == k))
+        .collect();
+    let home_modules: HashSet<&str> = (modules.iter())
+        .filter(|m| (m.program.type_decls.iter()).any(|t| t.exported && t.line != 0))
+        .map(home)
+        .chain(homes.values().map(String::as_str))
+        .collect();
+    // Per module, each name its dot calls spell that a home may answer, with
+    // the module that declares it as a refusal speaks it.
+    let mut marks: Vec<(String, BTreeMap<String, String>)> = Vec::new();
     for m in &modules {
-        let mut visible: HashSet<String> = HashSet::new(); // foreign names imported here
+        let mut marked: BTreeMap<String, String> = BTreeMap::new();
+        // Foreign names imported here, and what its `T.f(..)` calls name.
+        let mut visible: HashSet<String> = m.type_calls.clone();
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             // A namespace import reaches every exported decl of the
             // target that admits this module, and its `ns.member` uses already
@@ -6553,6 +6714,8 @@ fn link(
             }
         }
         let mut check_name = |name: &str, line: usize, what: &str, errors: &mut Vec<Diagnostic>| {
+            let dot = what == "method";
+            let what = if dot { "function" } else { what };
             // Resolve constructors and methods to their owning declarations.
             // Same-named variants or methods in different modules are ordinary,
             // so every candidate is tried before the use is called foreign.
@@ -6581,7 +6744,7 @@ fn link(
             }
             if candidates.is_empty() {
                 // A plain reference to a top-level decl.
-                if let Some((def_module, _)) = owner.get(name) {
+                if let Some((def_module, exported)) = owner.get(name) {
                     if def_module != home(m) {
                         if the_importers(name, line, def_module) {
                             return;
@@ -6592,7 +6755,13 @@ fn link(
                         let rule = match shut_out(name, def_module, m, (line, 1)) {
                             Some(to) => exported_only_to(name, to, def_module, &m.key, opts),
                             None => {
+                                let homed =
+                                    dot && *exported && home_modules.contains(def_module.as_str());
                                 let def_module = spoken(&m.key, def_module, opts);
+                                if homed {
+                                    marked.insert(name.to_string(), def_module);
+                                    return;
+                                }
                                 rule!(NotImported, what, name, def_module)
                             }
                         };
@@ -6678,6 +6847,17 @@ fn link(
                 }
             }
         }
+        if !marked.is_empty() {
+            marks.push((m.key.clone(), marked));
+        }
+    }
+    let mut home_misses = BTreeMap::new();
+    for (key, marked) in marks {
+        let at = (key != root_key).then(|| key.clone());
+        if let Some(m) = modules.iter_mut().find(|m| m.key == key) {
+            mark_home_calls(&mut m.program, &marked);
+        }
+        home_misses.extend(marked.into_iter().map(|(n, def)| ((at.clone(), n), def)));
     }
 
     drop(visible_span);
@@ -6781,6 +6961,8 @@ fn link(
     program.module_hashes = module_hashes;
     program.unclosed = unclosed;
     program.spellings = std::sync::Arc::new(spellings);
+    program.homes = homes;
+    program.home_misses = home_misses;
     let ours = |m: &Option<String>| order_key.as_deref() == Some(m.as_deref().unwrap_or(root_key));
     program.orders = crate::order::Names::of(&program, &ours);
     if !opts.proved.is_empty() {
@@ -6799,6 +6981,84 @@ fn link(
     }
     program.number();
     Ok(program)
+}
+
+/// The [`crate::prelude::HOMES`] type names `modules` write as the head of a
+/// `T.f(..)` call, and each name a dot call spells that no module declares or
+/// imports and no builtin is: the calls only a home module may answer.
+fn home_mentions(modules: &[Module]) -> (Vec<&'static str>, Vec<String>) {
+    let mut heads = Vec::new();
+    let mut candidates: Vec<String> = Vec::new();
+    for m in modules {
+        let p = &m.program;
+        let ns = |n: &str| p.imports.iter().any(|i| i.namespace.as_deref() == Some(n));
+        let known = |n: &str| {
+            n.starts_with('@')
+                || crate::checker::RESERVED.contains(&n)
+                || crate::prelude::builtin(n).is_some()
+                || decls(p).any(|d| d.name == n)
+                || (p.imports.iter()).any(|i| i.names.iter().any(|x| x.local() == n))
+        };
+        let bodies = (p.functions.iter())
+            .chain(
+                p.impls
+                    .iter()
+                    .flat_map(|i| i.methods.iter().chain(&i.places)),
+            )
+            .filter_map(|f| f.body.written())
+            .chain(p.tests.iter().chain(&p.benches).map(|t| &t.body));
+        for b in bodies {
+            crate::ast::each_expr(b, &mut |e| {
+                let Expr::Call {
+                    form: CallForm::Method,
+                    name,
+                    args,
+                    ..
+                } = e
+                else {
+                    return true;
+                };
+                let head = match args.first() {
+                    Some(Expr::Var { name, .. }) => Some(name.as_str()),
+                    _ => None,
+                };
+                let home = crate::prelude::HOMES.iter().find(|(t, _)| head == Some(*t));
+                match home {
+                    Some((t, _)) if !heads.contains(t) => heads.push(*t),
+                    Some(_) => {}
+                    None if head.is_some_and(ns) || known(name) => {}
+                    None if candidates.contains(name) => {}
+                    None => candidates.push(name.clone()),
+                }
+                true
+            });
+        }
+    }
+    let method = |pr: &crate::ast::ProtocolDecl, n: &str| pr.methods.iter().any(|s| s.name == n);
+    let declared = |n: &str| {
+        crate::prelude::protocols(&[]).any(|pr| method(pr, n))
+            || (modules.iter()).any(|m| {
+                decls(&m.program).any(|d| d.name == n)
+                    || m.program.protocols.iter().any(|pr| method(pr, n))
+            })
+    };
+    candidates.retain(|n| !declared(n));
+    (heads, candidates)
+}
+
+/// Whether the module source `text` exports a function one of `names` names.
+/// A text that does not lex exports none; its load reports why.
+fn exports_any(text: &str, names: &[String]) -> bool {
+    if !names.iter().any(|n| text.contains(n.as_str())) {
+        return false;
+    }
+    let Ok(tokens) = lexer::lex(text) else {
+        return false;
+    };
+    (tokens.windows(3)).any(|w| match (&w[0].tok, &w[1].tok, &w[2].tok) {
+        (lexer::Tok::Export, lexer::Tok::Fn, lexer::Tok::Ident(n)) => names.contains(n),
+        _ => false,
+    })
 }
 
 /// Whether a skimmed body's tokens can mention a builtin whose mention links a
@@ -7169,12 +7429,86 @@ fn drop_unreached(
     {
         crate::ast::expr_spelled(p, &mut roots);
     }
+    // A home call names its callee as written; the checker picks the home, so
+    // every function of that written name stays.
+    let spellings = program.spellings.clone();
+    let written = |n: &str| {
+        spellings
+            .decls
+            .get(n)
+            .map(|(w, _)| w.clone())
+            .unwrap_or_else(|| n.to_string())
+    };
+    let homed: HashSet<&str> = program
+        .home_misses
+        .keys()
+        .map(|(_, n)| n.as_str())
+        .collect();
+    if !homed.is_empty() {
+        let named = program.functions.iter().map(|f| f.name.as_str());
+        roots.extend(named.filter(|n| homed.contains(written(n).as_str())));
+    }
     let keep = reached(program, roots);
     let kept: Vec<bool> = (program.functions.iter())
         .map(|f| !is_lazy(&f.module) || keep.contains(f.name.as_str()))
         .collect();
     let functions = std::mem::take(&mut program.functions).into_iter().zip(kept);
     program.functions = functions.filter_map(|(f, k)| k.then_some(f)).collect();
+}
+
+/// Marks each `recv.name(..)` call in `p` whose name `names` holds as a
+/// [`CallForm::Home`] call.
+fn mark_home_calls(p: &mut Program, names: &BTreeMap<String, String>) {
+    struct Marker<'n>(&'n BTreeMap<String, String>);
+    impl BodyVisitMut for Marker<'_> {
+        fn expr(&mut self, e: &mut Expr, _: &HashSet<String>) -> bool {
+            if let Expr::Call { form, name, .. } = e {
+                if *form == CallForm::Method && self.0.contains_key(name.as_str()) {
+                    *form = CallForm::Home;
+                }
+            }
+            true
+        }
+    }
+    each_body_mut(p, &mut Marker(names));
+}
+
+/// Writes each [`CallForm::Home`] call's callee the checker resolved, by
+/// call node, into the call, which becomes a `Method` call.
+pub(crate) fn resolve_home_calls(p: &mut Program, callees: &HashMap<NodeId, String>) {
+    struct Writer<'c>(&'c HashMap<NodeId, String>);
+    impl BodyVisitMut for Writer<'_> {
+        fn expr(&mut self, e: &mut Expr, _: &HashSet<String>) -> bool {
+            if let Expr::Call { form, name, id, .. } = e {
+                if let (CallForm::Home, Some(callee)) = (&form, self.0.get(&id.0)) {
+                    name.clone_from(callee);
+                    *form = CallForm::Method;
+                }
+            }
+            true
+        }
+    }
+    if !callees.is_empty() {
+        each_body_mut(p, &mut Writer(callees));
+    }
+}
+
+/// Hands `v` every written body of `p`: functions, impl methods and
+/// projections, tests and benches, each scope starting at its parameters.
+fn each_body_mut(p: &mut Program, v: &mut impl BodyVisitMut) {
+    let impls = p
+        .impls
+        .iter_mut()
+        .flat_map(|i| i.methods.iter_mut().chain(&mut i.places));
+    for f in p.functions.iter_mut().chain(impls) {
+        let mut locals: HashSet<String> = f.params.iter().map(|q| q.name.clone()).collect();
+        if let Some(b) = f.body.written_mut() {
+            body_block_mut(b, &mut locals, v);
+        }
+    }
+    for t in p.tests.iter_mut().chain(&mut p.benches) {
+        body_block_mut(&mut t.body, &mut HashSet::new(), v);
+    }
 }
 
 /// Keeps what the gen fn `gen` reaches ([`reached`]) in every module and drops
@@ -7530,7 +7864,12 @@ impl BodyVisit<'_> for RefNames<'_> {
                         self.out.push((format!("{recv}.{name}"), *line, "function"));
                     }
                 } else if !locals.contains(name) {
-                    self.out.push((name.clone(), *line, "function"));
+                    let noun = if *form == CallForm::Method {
+                        "method"
+                    } else {
+                        "function"
+                    };
+                    self.out.push((name.clone(), *line, noun));
                     // `f(x)` is also how method sugar `x.f()` arrives. For
                     // `program_ref_kinds`, count it, so a name seen only here is
                     // told apart from one also used as a variable, a type or a

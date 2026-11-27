@@ -1,0 +1,10 @@
+// The home of `Point`: its exported functions attach to the type.
+export type Point = { x: Int64, y: Int64 }
+
+export fn norm(p: Point) -> Int64 {
+    return p.x * p.x + p.y * p.y
+}
+
+export fn origin() -> Point {
+    return Point { x: 0, y: 0 }
+}

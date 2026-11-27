@@ -1059,6 +1059,9 @@ fn check_accum_inner(
         gen_fns: &gen_fns,
         islands: &program.islands[..],
         orders: &program.orders,
+        homes: &program.homes,
+        home_misses: &program.home_misses,
+        home_index: Default::default(),
         record_reads: recording && program.session.get().is_some(),
         record_uses: USES.with(|u| u.get()),
     };
@@ -1656,6 +1659,9 @@ pub struct Recorded {
     /// states it. The core builds it as a trap and binds its name `Err`, so
     /// the typed judgment judges the rest of the body.
     pub trapped: HashSet<NodeId>,
+    /// The linked callee of each [`crate::ast::CallForm::Home`] call, keyed
+    /// by the call node, which the driver writes into the call.
+    pub homes: HashMap<NodeId, String>,
 }
 
 impl Recorded {
@@ -1674,6 +1680,7 @@ impl Recorded {
         self.entries.extend(tail.entries);
         self.islands.extend(tail.islands);
         self.trapped.extend(tail.trapped);
+        self.homes.extend(tail.homes);
     }
 }
 
@@ -1748,6 +1755,13 @@ struct Cx<'a> {
     islands: &'a [crate::gen::Island],
     /// `std/order`'s compiler-known declarations.
     orders: &'a crate::order::Names,
+    /// [`Program::homes`].
+    homes: &'a std::collections::BTreeMap<String, String>,
+    /// [`Program::home_misses`].
+    home_misses: &'a std::collections::BTreeMap<(Option<String>, String), String>,
+    /// Each exported function a home call may reach, by its module and written
+    /// name, with its linked name; built on the first home call.
+    home_index: std::sync::OnceLock<HashMap<(Option<String>, String), String>>,
     /// Whether a recording check records read rows ([`Recorded::reads`]): yes
     /// in a host with a session ([`crate::session`]), which rechecks per
     /// function. `vyrn check` has none, and a row costs a push per name lookup.
@@ -5307,7 +5321,64 @@ impl<'a> Checker<'a> {
                 };
             }
         }
+        if *form == CallForm::Home {
+            let callee = self.home_callee(name, &args[0], scope, fn_ret, line)?;
+            if let Some(r) = &mut self.acc.borrow_mut().record {
+                r.homes.insert(node, callee.clone());
+            }
+            return self.call_declared(
+                &callee,
+                (args, dot),
+                written,
+                line,
+                scope,
+                expected,
+                fn_ret,
+            );
+        }
         self.call_declared(name, (args, dot), written, line, scope, expected, fn_ret)
+    }
+
+    /// The linked name of `name` as the home module of `recv`'s type exports
+    /// it: the module that declares the type, or its [`crate::prelude::HOMES`]
+    /// row. A home that exports none refuses the call as the loader would
+    /// have, had no home been a candidate.
+    fn home_callee(
+        &self,
+        name: &str,
+        recv: &Expr,
+        scope: &Scope,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<String, Diagnostic> {
+        let ty = self.expr(recv, scope, None, fn_ret)?;
+        let module = crate::types::home_key(&ty).and_then(|k| match self.types.get(k.as_str()) {
+            Some((_, d)) => Some(d.module.clone()),
+            None => self.homes.get(&k).map(|m| Some(m.clone())),
+        });
+        let index = self.home_index.get_or_init(|| {
+            let exported = self
+                .functions
+                .iter()
+                .filter(|f| f.exported && f.export_to.is_empty());
+            (exported.map(|f| {
+                let written = self
+                    .spellings
+                    .decls
+                    .get(&f.name)
+                    .map_or(&f.name, |(w, _)| w);
+                ((f.module.clone(), written.clone()), f.name.clone())
+            }))
+            .collect()
+        });
+        if let Some(callee) = module.and_then(|m| index.get(&(m, name.to_string()))) {
+            return Ok(callee.clone());
+        }
+        let here = self.frame.borrow().here.clone();
+        Err(match self.home_misses.get(&(here, name.to_string())) {
+            Some(def_module) => cerr!(line, NotImported, what = "function", name, def_module),
+            None => cerr!(line, UnknownFunction, name = DeclName(name)),
+        })
     }
 
     /// Whether a call of `name` a protocol declares dispatches to the method

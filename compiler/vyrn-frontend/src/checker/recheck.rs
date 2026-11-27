@@ -453,6 +453,7 @@ fn in_unit(r: &Recorded, unit: u32) -> Recorded {
         entries: Vec::new(),
         islands: r.islands.clone(),
         trapped: r.trapped.iter().map(at).collect(),
+        homes: (r.homes.iter()).map(|(k, c)| (at(k), c.clone())).collect(),
     }
 }
 
