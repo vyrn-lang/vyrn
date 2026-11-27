@@ -232,6 +232,8 @@ rules! {
         impl of `{protocol}`; write one generic impl (`impl<T> {protocol} for {key}<T>`) to \
         cover every instantiation";
     ImplUnsupported { protocol, ty, why } "`impl {protocol} for {ty}` is not supported: {why}";
+    ImplLanguageDefines { protocol, ty }
+        "`impl {protocol} for {ty}` is refused: the language already defines `{protocol}` for `{ty}`";
     NoMain {} "no `main` function found";
     MainSignature {} "`main` must have signature `fn main() -> Int64`";
     ExternTakesFn {}

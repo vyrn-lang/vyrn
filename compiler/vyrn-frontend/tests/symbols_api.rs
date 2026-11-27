@@ -646,7 +646,7 @@ fn analyze_linked_missing_module_still_indexes_root() {
 /// receiver and the bound protocol's methods for a bounded generic.
 #[test]
 fn member_completion_offers_protocol_methods() {
-    let src = "protocol Show {\n    fn show(self) -> String\n}\n\nimpl Show for Int64 {\n    fn show(self) -> String { return self.toString() }\n}\n\nfn describe<T: Show>(x: T) -> String {\n    return x.show()\n}\n\nfn main() -> Int64 {\n    let n: Int64 = 5\n    let s = n.show()\n    return 0\n}\n";
+    let src = "protocol Pretty {\n    fn pretty(self) -> String\n}\n\nimpl Pretty for Int64 {\n    fn pretty(self) -> String { return self.toString() }\n}\n\nfn describe<T: Pretty>(x: T) -> String {\n    return x.pretty()\n}\n\nfn main() -> Int64 {\n    let n: Int64 = 5\n    let s = n.pretty()\n    return 0\n}\n";
     let a = analyze(src);
     assert!(
         a.diagnostics.is_empty(),
@@ -654,32 +654,32 @@ fn member_completion_offers_protocol_methods() {
         a.diagnostics
     );
 
-    // Line 15 `    let s = n.show()`: the dot is at col 14.
+    // Line 15 `    let s = n.pretty()`: the dot is at col 14.
     let labels: HashSet<String> = member_completions(&a, 15, 15)
         .into_iter()
         .map(|c| c.label)
         .collect();
     assert!(
-        labels.contains("show"),
+        labels.contains("pretty"),
         "impl method offered for Int64 receiver: {labels:?}"
     );
 
-    // Line 10 `    return x.show()` in `describe<T: Show>`.
+    // Line 10 `    return x.pretty()` in `describe<T: Pretty>`.
     let labels: HashSet<String> = member_completions(&a, 10, 14)
         .into_iter()
         .map(|c| c.label)
         .collect();
     assert!(
-        labels.contains("show"),
+        labels.contains("pretty"),
         "protocol method offered for bounded T: {labels:?}"
     );
 
     // The impl method is a user symbol, so go-to-definition works.
     let r = resolve(&a, 15, 15).expect("method name resolves");
-    assert_eq!(r.name, "show");
+    assert_eq!(r.name, "pretty");
     assert!(r.definition, "user impl method has a source declaration");
     assert!(
-        r.hover.contains("show"),
+        r.hover.contains("pretty"),
         "hover shows the signature: {}",
         r.hover
     );

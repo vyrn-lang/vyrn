@@ -1583,7 +1583,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
         _ => {}
     }
     // Concrete receiver: every `impl P for T` whose `T` is the receiver's type
-    // (`n: Int64` with `impl Show for Int64` offers `n.show`).
+    // (`n: Int64` with `impl Pretty for Int64` offers `n.pretty`).
     for (t, _, c) in &analysis.impl_members {
         if *t == ty {
             out.push(c.clone());

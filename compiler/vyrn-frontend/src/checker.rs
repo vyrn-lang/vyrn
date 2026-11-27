@@ -943,6 +943,13 @@ fn check_accum_inner(
             }
         }
         match crate::types::type_key(&imp.ty) {
+            _ if crate::types::language_defines(&imp.protocol, &imp.ty) => out.push(cerr_at!(
+                imp.line,
+                imp.head_span(),
+                ImplLanguageDefines,
+                protocol = imp.protocol,
+                ty = imp.ty
+            )),
             Some(key) if dispatches_on(&imp.ty, &types) => {
                 // A second impl for one (protocol, type constructor) key is
                 // refused at its declaration, naming the first. Not "overlaps":

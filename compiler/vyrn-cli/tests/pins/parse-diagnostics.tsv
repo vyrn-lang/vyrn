@@ -246,7 +246,6 @@ compiler/vyrn-cli/tests/check/a_runtime_module_type_reads_as_its_module_wrote_it
 compiler/vyrn-cli/tests/check/a_runtime_module_type_reads_as_its_module_wrote_it_in_the_checker.vyrn	0	cbf29ce484222325	20	19	70367b5b544db843
 compiler/vyrn-cli/tests/check/a_runtime_module_type_reads_as_its_module_wrote_it_in_the_kernel.vyrn	0	cbf29ce484222325	20	20	21124e3ac28454fe
 compiler/vyrn-cli/tests/check/a_scalar_field_store_in_a_region_is_accepted.vyrn	0	cbf29ce484222325	20	18	7a0d7ab4f581a04e
-compiler/vyrn-cli/tests/check/a_scalar_renders_by_the_language_whatever_is_declared.vyrn	0	cbf29ce484222325	20	18	d8822b908b8e42f3
 compiler/vyrn-cli/tests/check/a_schema_cannot_name_its_root_and_a_def_alike.vyrn	0	cbf29ce484222325	20	14	9a3a34067369d24a
 compiler/vyrn-cli/tests/check/a_second_open_rule_is_rejected.vyrn	1	6905807b876c1bdc	20	20	689ade6e78e6f5ec
 compiler/vyrn-cli/tests/check/a_served_stream_returns_to_its_caller.vyrn	0	cbf29ce484222325	20	17	2d9d50ab2c998b57
@@ -1366,7 +1365,7 @@ examples/projection.vyrn	0	cbf29ce484222325	20	15	249fac8563f60e2c
 examples/projection_generator_site.vyrn	0	cbf29ce484222325	20	18	462137971797857c
 examples/projection_shadows_param.vyrn	0	cbf29ce484222325	20	16	15d944ffc0842fd1
 examples/projectionfree.vyrn	0	cbf29ce484222325	20	18	2c83c361f1e17230
-examples/protocol.vyrn	0	cbf29ce484222325	20	18	0c8b37dbb2b6b13e
+examples/protocol.vyrn	0	cbf29ce484222325	20	18	ce6ab065a5e51c28
 examples/protocol_conformance.vyrn	0	cbf29ce484222325	20	15	4b0a67d4165d9c87
 examples/protocol_extra.vyrn	0	cbf29ce484222325	20	15	fe2293261fa03496
 examples/protocol_incomplete.vyrn	0	cbf29ce484222325	20	18	4f936b380d2ab8f5
@@ -1418,7 +1417,7 @@ examples/shelf/server.vyrn	0	cbf29ce484222325	20	19	ec21f93c6c06f2d8
 examples/shelf/shared/types.vyrn	0	cbf29ce484222325	20	16	310894c0c6d9dffa
 examples/shelf/shared/util.vyrn	0	cbf29ce484222325	20	18	e8529151ec8b271e
 examples/shelf/shared/wire.vyrn	0	cbf29ce484222325	20	20	6e405b0ba932cec6
-examples/show.vyrn	0	cbf29ce484222325	20	16	4348da0cb7374de7
+examples/show.vyrn	0	cbf29ce484222325	20	20	c13623f3678caefc
 examples/simd.vyrn	0	cbf29ce484222325	20	15	fb95541472f6b038
 examples/simdbench.vyrn	0	cbf29ce484222325	20	18	6cbfa77a4439d8c6
 examples/simdint.vyrn	0	cbf29ce484222325	20	15	214c7410443fc63f
@@ -1534,7 +1533,7 @@ site/guide/maps.vyrn	0	cbf29ce484222325	20	18	123ad345a8988625
 site/guide/matching.vyrn	0	cbf29ce484222325	20	18	121d6eadcee38ab4
 site/guide/numbers.vyrn	0	cbf29ce484222325	20	18	29afb5b43b16cc1b
 site/guide/options.vyrn	0	cbf29ce484222325	20	18	02c84c534db4fb30
-site/guide/protocols.vyrn	0	cbf29ce484222325	20	19	358993cbaacc834b
+site/guide/protocols.vyrn	0	cbf29ce484222325	20	19	447e6c496e1c6132
 site/guide/records.vyrn	0	cbf29ce484222325	20	17	00c89d171102be61
 site/guide/regions.vyrn	0	cbf29ce484222325	20	17	08a0fb82c2f210b4
 site/guide/schema.vyrn	0	cbf29ce484222325	20	17	e443c53c0ba73b32

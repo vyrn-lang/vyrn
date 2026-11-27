@@ -3168,3 +3168,18 @@ fn a_parse_refusal_spells_the_token_it_found() {
          main.vyrn:3:9: expected RParen, found `\"a\\{x + 1}b\\n\"`\n"
     );
 }
+
+#[test]
+fn an_impl_of_what_the_language_defines_is_refused() {
+    let src = "impl Show for Int64 {\n    fn show(self) -> String { return \"\" }\n}\n\n\
+               impl Index for String {\n    fn at(read self, i: Int64) -> String { return \"\" }\n}\n\n\
+               impl Iterate for Array<Int64> {\n    fn size(read self) -> Int64 { return 0 }\n}\n\n\
+               impl Hashable for String {\n    fn hash(self) -> UInt64 { return 0 }\n}\n\n\
+               fn main() -> Int64 {\n    return 0\n}\n";
+    assert_eq!(
+        refused_src("language-defines", src),
+        "main.vyrn:1:1: `impl Show for Int64` is refused: the language already defines `Show` for `Int64`\n\
+         main.vyrn:5:1: `impl Index for String` is refused: the language already defines `Index` for `String`\n\
+         main.vyrn:9:1: `impl Iterate for Array<Int64>` is refused: the language already defines `Iterate` for `Array<Int64>`\n"
+    );
+}

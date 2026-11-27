@@ -9,7 +9,7 @@ Type::F64x2	5	1	8	1	1	0	16
 Type::Mask32x4	4	1	6	1	0	0	12
 Type::Mask64x2	4	1	7	1	0	0	13
 Type::Bool	22	1	31	7	0	1	62
-Type::Str	28	1	74	14	1	2	120
+Type::Str	28	1	74	15	1	2	121
 Type::Unit	18	1	19	10	1	0	49
 Type::Named	36	2	12	22	10	7	89
 Type::Union	2	1	0	6	0	0	9
@@ -23,11 +23,11 @@ Type::Param	21	1	2	6	6	2	38
 Type::App	13	1	1	13	1	0	29
 Type::Order	4	1	0	2	0	0	7
 Type::Elem	2	1	0	3	1	0	7
-Type::Array	20	2	30	11	3	2	68
+Type::Array	20	2	30	12	3	2	69
 Type::ArrayN	9	5	15	9	1	1	40
 Type::SmallArray	13	2	21	6	2	1	45
 Type::ConstInt	2	1	0	1	0	0	4
-Type::Map	15	1	21	9	8	2	56
+Type::Map	15	1	21	10	8	2	57
 Type::Stream	13	1	9	4	2	0	29
 Type::Task	7	1	2	5	1	0	16
 Type::Logger	0	1	3	1	3	0	8
@@ -35,4 +35,4 @@ Type::Fn	21	3	21	14	1	0	60
 Type::Lazy	5	1	2	9	0	0	17
 Type::Never	1	2	2	3	2	0	10
 Type::Err	81	1	0	3	0	0	85
-all	447	52	426	267	58	27	1277
+all	447	52	426	270	58	27	1280

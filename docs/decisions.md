@@ -78,6 +78,7 @@ pull request.
 - Dispatch is static everywhere; there are no vtables. Records are legal impl targets and scalar refinement types are not.
 - Generic impls are keyed on the type constructor: one impl per protocol and constructor.
 - An impl of `MustUse`, `Owned` or `Copy` is declared in its type's module, and a built-in type takes none (decided 2026-11-05 by the user). The kernel reads the three in every body that holds the type, so an impl elsewhere would change verdicts that module's own load gave (`loader::foreign_kernel_impls`).
+- The language defines `Show` for every scalar and `Iterate` and `Index` for `String`, `Array` and `Map`, so an impl of one is refused; `Hashable` for `Int64` and `String` stays (decided 2026-11-27 by the user, `types::language_defines`).
 - A generic call or record literal solves its callee's type parameters renamed apart (`T'n`, fresh per instantiation), so a caller's `T` never meets the callee's. A sentence and the check's record carry the written name.
 - Protocols take associated types, not type parameters. No `protocol P<T>` and no `T::Output`: an operator like `?` has nowhere to name the instance.
 - A protocol method and a function of one name do not clash: the form picks the declaration, so `x.len()` is the method and `len(x)` the function, in a module that reaches both (decided 2026-11-18 by the user). A module that reaches only the function calls it in either form, so a std body dispatches as in its own load.

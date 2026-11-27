@@ -576,16 +576,16 @@ A bound limits a parameter: `<T: Ord>`, `<T: Show + Eq>`. The built-in bounds ar
 A protocol names methods. `impl P for T` provides them for one type, a built-in type included.
 
 ```vyrn
-protocol Show {
-    fn show(self) -> String
+protocol Pretty {
+    fn pretty(self) -> String
 }
-impl Show for Bool {
-    fn show(self) -> String {
+impl Pretty for Bool {
+    fn pretty(self) -> String {
         return if self { "yes" } else { "no" }
     }
 }
-fn label<T: Show>(x: T) -> String {
-    return "[" + x.show() + "]"
+fn label<T: Pretty>(x: T) -> String {
+    return "[" + x.pretty() + "]"
 }
 ```
 
@@ -601,11 +601,11 @@ fn label<T: Show>(x: T) -> String {
 
 The compiler knows these protocol names, and a program implements them without declaring or importing them. The prelude declares `Show`, `Owned`, `MustUse`, `Hashable` and `Fallible`, so an impl of one is checked as an impl of any declared protocol is; a program's own declaration of the name replaces the prelude's. An impl of `Copy`, `Index` or `Iterate` is checked for each member's receiver and parameter capabilities only, because its members' types are the impl's own and `Index`'s members are each optional.
 
-An impl of `MustUse`, `Owned` or `Copy` is declared in the module that declares its type, so no program changes how another module's code treats it. A built-in type takes none.
+An impl of `MustUse`, `Owned` or `Copy` is declared in the module that declares its type, so no program changes how another module's code treats it. A built-in type takes none. The language renders every scalar and iterates and indexes `String`, `Array` and `Map`, so `impl Show` for a scalar and `impl Iterate` or `impl Index` for one of those three is refused.
 
 | Protocol | Members | Effect |
 |---|---|---|
-| `Show` | `fn show(self) -> String` | Renders the type in `print`, `toString()` and interpolation. A scalar always renders as the language renders it. |
+| `Show` | `fn show(self) -> String` | Renders the type in `print`, `toString()` and interpolation. A scalar renders as the language renders it. |
 | `Copy` | `fn copy(self) -> T` | Replaces the structural `x.copy()`. |
 | `Owned` | `fn release(consume self)` | Says how the type is released. A self-referring type must declare it. |
 | `MustUse` | none | A value must be disposed of by name, as a `Stream` must. |

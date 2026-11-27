@@ -3,18 +3,18 @@
 // one function per concrete type, no table lookup at run time.
 import { joinWith } from "std/strings"
 
-protocol Show {
-    fn show(self) -> String
+protocol Pretty {
+    fn pretty(self) -> String
 }
 
-impl Show for Int64 {
-    fn show(self) -> String {
+impl Pretty for Int64 {
+    fn pretty(self) -> String {
         return self.toString()
     }
 }
 
-impl Show for Bool {
-    fn show(self) -> String {
+impl Pretty for Bool {
+    fn pretty(self) -> String {
         if self {
             return "yes"
         }
@@ -22,8 +22,8 @@ impl Show for Bool {
     }
 }
 
-fn label<T: Show>(x: T) -> String {
-    return "[" + x.show() + "]"
+fn label<T: Pretty>(x: T) -> String {
+    return "[" + x.pretty() + "]"
 }
 
 export fn demo() -> String {

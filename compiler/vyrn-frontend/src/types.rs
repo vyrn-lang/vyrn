@@ -263,10 +263,8 @@ pub const COPY: &str = "Copy";
 
 pub const COPY_COPY: &str = "copy";
 
-/// The protocol through which a type says how it renders as text. A scalar
-/// always renders by the language's lowering, so `impl Show for Int64` changes
-/// nothing (and `examples/protocol.vyrn`'s `self.toString()` body cannot
-/// recurse).
+/// The protocol through which a type says how it renders as text. The
+/// language renders a scalar ([`renders`]), so no impl may.
 pub const SHOW: &str = "Show";
 
 pub const SHOW_SHOW: &str = "show";
@@ -309,6 +307,18 @@ pub fn show_dispatch(impls: &Impls, written: &Type, base: &Type) -> Option<Strin
 /// `fn nth(read self, i: Int64) -> read Item`.
 const ITERATE: &str = "Iterate";
 
+const INDEX: &str = "Index";
+
+/// Whether the language defines `protocol` for `ty`, so no impl may: it renders
+/// every scalar, and iterates and indexes `String`, `Array` and `Map`.
+pub fn language_defines(protocol: &str, ty: &Type) -> bool {
+    match protocol {
+        SHOW => renders(ty),
+        ITERATE | INDEX => matches!(ty, Type::Str | Type::Array(_) | Type::Map(..)),
+        _ => false,
+    }
+}
+
 const ITERATE_SIZE: &str = "size";
 
 /// A projection, not a method: it is found in the impl's `places`.
@@ -323,7 +333,7 @@ pub const ITERATE_NTH: &str = "nth";
 pub const KNOWN_PROTOCOLS: &[(&str, &[(&str, Capability, &[Capability])])] = &[
     (COPY, &[(COPY_COPY, Capability::Read, &[])]),
     (
-        "Index",
+        INDEX,
         &[
             ("at", Capability::Read, &[Capability::Read]),
             ("atSet", Capability::Modify, &[Capability::Read]),
