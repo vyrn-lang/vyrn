@@ -1,0 +1,5 @@
+type Never = String where value =~ "a^b"
+
+fn main() -> Int64 {
+    return 0
+}

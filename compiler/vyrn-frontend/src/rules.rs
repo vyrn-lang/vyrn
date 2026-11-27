@@ -296,6 +296,8 @@ rules! {
     ProjectionArity { name, want, got }
         "projection `{name}` expects {want} argument(s) besides `self`, got {got}";
     ProjectionArgType { name, got, want } "projection `{name}` argument is {got}, expected {want}";
+    EmptyRefinement { name }
+        "no string matches the patterns of `{name}`, so no value of it exists";
     ConstFailsPredicate { cv, name, pred }
         "{cv} does not satisfy `{name}` (predicate `where {pred}` is false)";
     ValueFailsPredicate { name, pred }

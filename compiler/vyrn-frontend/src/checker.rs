@@ -1649,8 +1649,8 @@ pub struct Recorded {
     /// with the entry's serial. A serial names one record of one body, so a
     /// reader keyed by it may reuse what it derived from that record.
     pub entries: Vec<(SourceBody, u64)>,
-    /// Each string literal that crosses into an island type, in the order
-    /// typed; a body typed twice repeats its sites.
+    /// Each string literal that crosses into an island type, once, in the order
+    /// first typed ([`Recorded::add_site`]).
     pub islands: Vec<crate::gen::IslandSite>,
     /// Each statement whose refusal the checker states, the innermost that
     /// states it. The core builds it as a trap and binds its name `Err`, so
@@ -1675,9 +1675,23 @@ impl Recorded {
         self.stored.extend(tail.stored);
         self.reads.extend(tail.reads);
         self.entries.extend(tail.entries);
-        self.islands.extend(tail.islands);
+        for site in tail.islands {
+            self.add_site(site);
+        }
         self.trapped.extend(tail.trapped);
         self.homes.extend(tail.homes);
+    }
+
+    /// Adds `site` unless its literal is one already. A body is typed once per
+    /// check that reads it and a `where` predicate once per boundary of its type,
+    /// and the editor colours a literal once.
+    fn add_site(&mut self, site: crate::gen::IslandSite) {
+        let same = |s: &crate::gen::IslandSite| {
+            (s.line, s.col) == (site.line, site.col) && s.module == site.module
+        };
+        if !self.islands.iter().any(same) {
+            self.islands.push(site);
+        }
     }
 }
 
@@ -2422,7 +2436,7 @@ impl<'a> Checker<'a> {
         };
         if let Some(r) = self.acc.borrow_mut().record.as_mut() {
             let (line, col) = expr.start();
-            r.islands.push(crate::gen::IslandSite {
+            r.add_site(crate::gen::IslandSite {
                 module: self.frame.borrow().here.clone(),
                 line,
                 col,
@@ -2908,7 +2922,12 @@ impl<'a> Checker<'a> {
             t,
             "refinement",
             std::iter::once(("value".to_string(), t.base.clone())),
-        )
+        )?;
+        if crate::finite::matches_nothing(t) {
+            let name = DeclName(&t.name);
+            return Err(cerr!(t.line, EmptyRefinement, name));
+        }
+        Ok(())
     }
 
     /// Checks annotation `a` on `t`: it sits on a member `t` declares, and it

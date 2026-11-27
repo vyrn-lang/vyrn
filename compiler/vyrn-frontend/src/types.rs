@@ -869,14 +869,14 @@ fn collect_string_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> b
         let b = collect_string_constraints(rhs, out);
         return a && b;
     }
-    // `=~` is a full match, so the pattern is anchored. Vyrn's regex subset
-    // means the same in ECMA-262.
+    // `=~` is a full match and a JSON Schema pattern a search, so the pattern is
+    // anchored around a group: `^a|b$` would anchor each branch on one side only.
     if *op == BinOp::Match {
         if is_value(lhs) {
             if let Expr::Str(pat, _) = &**rhs {
                 out.push((
                     "pattern".to_string(),
-                    format!("\"{}\"", json_escape(&format!("^{pat}$"))),
+                    format!("\"{}\"", json_escape(&format!("^(?:{pat})$"))),
                 ));
                 return true;
             }

@@ -1,5 +1,5 @@
 {
-  "anchorPending": "an assertion (`{$a}`) is not supported",
+  "assertionRepeat": "a repeat after an assertion, which matches no character",
   "backwards": "a character range that runs backwards",
   "classAnchor": "an anchor or a backreference (`\\\\{$c}`) cannot stand inside a character class",
   "classBackslash": "a backslash at the end of a character class",
@@ -20,6 +20,7 @@
   "groupName": "a group name that is not a letter or `_` and then letters, digits and `_` up to its closing `>` or `'`",
   "groupUnclosed": "a group with no closing `)`",
   "hexDigits": "a code point escape (`\\\\{$e}`) with no digits of its form: `\\\\xHH`, `\\\\uHHHH`, `\\\\x\\{H..\\}`, `\\\\u\\{H..\\}` or `\\\\o\\{O..\\}`",
+  "lookCapture": "a capturing group inside a lookaround: write `(?:..)`",
   "nameTwice": "a group name that names two groups",
   "noCountTerm": "a counted repetition (`\\{m,n\\}`) with no term before it",
   "noTerm": "a repeat (`*`, `+` or `?`) with no term before it",

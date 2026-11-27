@@ -1,0 +1,7 @@
+fn f(s: String) -> Bool {
+    return s =~ "a\\b*"
+}
+
+fn main() -> Int64 {
+    return 0
+}

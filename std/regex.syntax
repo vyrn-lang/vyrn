@@ -9,13 +9,15 @@ nest 250 ^TooDeep
 // What each builder raises from the tree, because a grammar compares no numbers: a
 // range that runs backwards, a count above 255, a count whose maximum is below its
 // minimum, counts that expand the pattern past 16384 terms, a code point above
-// 10FFFF or in the surrogates, and a group name used twice.
+// 10FFFF or in the surrogates, a group name used twice, and a capturing group inside
+// a lookaround.
 row Backwards
 row CountLarge
 row CountOrder
 row CountBudget
 row CodepointRange
 row NameTwice
+row LookCapture
 
 RegexPattern = RegexAlt (eof / ^StrayParen)
 
@@ -26,15 +28,20 @@ RegexQuantifierCount = '{' (regexNumber / ^CountNumber)
                        ('}' / ',' ('}' / (regexNumber / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
 
 // The order states the language: a literal is what no other alternative takes.
-RegexAtom = RegexFlags / RegexComment / RegexSubpattern / RegexClass / RegexEscape / RegexClassDot
-            / &('*' / '+' / '?') ^NoTerm / &'{' ^NoCountTerm / &'}' ^StrayBrace
-            / '^' ^AnchorPending(a='^') / '$' ^AnchorPending(a='$') / RegexLiteral
+RegexAtom = RegexFlags / RegexComment / &'(?' RegexLook / RegexSubpattern / RegexClass / RegexAnchor
+            / RegexEscape
+            / RegexClassDot / &('*' / '+' / '?') ^NoTerm / &'{' ^NoCountTerm / &'}' ^StrayBrace
+            / RegexLiteral
 // `(?i)` sets flags for the rest of its group, `(?i:..)` for its own; `(?#..)` is a
 // comment. Each matches the empty string.
 RegexFlags = regexGroupFlags
 RegexComment = regexComment
 RegexSubpattern = open:regexGroupOpen alt:RegexAlt (regexGroupEnd / ^GroupUnclosed)
-RegexEscape = '\\' (regexQuote / regexShorthand / regexAnchor / regexSense / regexForeign
+// An assertion matches no character, so no repeat follows it. `^` and `$` are the
+// text's ends, or a line's under `m`; `\b`, `\B`, `\<` and `\>` are word boundaries.
+RegexLook = open:regexLookaroundOpen alt:RegexAlt (regexLookaroundEnd / ^GroupUnclosed) regexNoRepeat?
+RegexAnchor = ('^' / '$' / regexAnchor) regexNoRepeat?
+RegexEscape = '\\' (regexQuote / regexShorthand / regexSense / regexForeign
                     / ^PatternBackslash)
 RegexClassDot = '.'
 RegexLiteral = regexChar
@@ -72,8 +79,6 @@ regexGroupEnd = ')'
 regexAlternation = '|'
 regexGroupOpen = '(' ('*' ^PcreControl(form='(*..)') / '?' regexGroupForm)?
 regexGroupForm = ':' / 'P<' regexName ('>' / ^GroupName) / '\'' regexName ('\'' / ^GroupName)
-                 / '=' ^AnchorPending(a='(?=') / '!' ^AnchorPending(a='(?!')
-                 / '<=' ^AnchorPending(a='(?<=') / '<!' ^AnchorPending(a='(?<!')
                  / '<' regexName ('>' / ^GroupName)
                  / '>' ^PcreControl(form='(?>') / 'R' ^PcreControl(form='(?R)')
                  / [0-9+] ^PcreControl(form='(?N)') / '-' [0-9] ^PcreControl(form='(?N)')
@@ -102,10 +107,10 @@ regexCode = 'x' (&('00' / '{' '0'+ '}') ^NulEscape / hex hex / '{' hex+ '}' / ^H
                    / ^HexDigits(e='u'))
             / 'o' (&('{' '0'+ '}') ^NulEscape / '{' [0-7]+ '}' / ^HexDigits(e='o'))
             / '0' (&[0-9] ^OctalEscape / ^NulEscape)
-regexAnchor = 'b' ^AnchorPending(a='\\b') / 'B' ^AnchorPending(a='\\B')
-              / 'A' ^AnchorPending(a='\\A') / 'z' ^AnchorPending(a='\\z')
-              / 'Z' ^AnchorPending(a='\\Z') / '<' ^AnchorPending(a='\\<')
-              / '>' ^AnchorPending(a='\\>')
+regexLookaroundOpen = '(?=' / '(?!' / '(?<=' / '(?<!'
+regexLookaroundEnd = ')'
+regexAnchor = '\\' ('b{start}' / 'b{end}' / 'b{start-half}' / 'b{end-half}' / [bBAzZ<>])
+regexNoRepeat = &('*' / '+' / '?' / '{') ^AssertionRepeat
 // The forms another engine gives a meaning this one refuses, and every other escape.
 regexForeign = 'p' ^PropertyClass(form='\\p') / 'P' ^PropertyClass(form='\\P')
                / 'X' ^PcreControl(form='\\X') / 'C' ^PcreControl(form='\\C')

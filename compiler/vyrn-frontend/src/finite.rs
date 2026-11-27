@@ -40,6 +40,13 @@ fn regex_dfa_of_type(decl: &TypeDecl) -> Option<Dfa> {
     Some(dfa)
 }
 
+/// Returns whether no string satisfies `decl`, a validated `String` type whose
+/// predicate is a pure `=~` conjunction: `"a^b"`, or two clauses no string meets
+/// both of.
+pub fn matches_nothing(decl: &TypeDecl) -> bool {
+    regex_dfa_of_type(decl).is_some_and(|d| d.is_empty())
+}
+
 /// Returns the `value =~ "literal"` clauses of a validated `String` type, in
 /// order: the input of [`regex_dfa_of_type`], and a cheap key for its language
 /// that the enumeration memo uses.

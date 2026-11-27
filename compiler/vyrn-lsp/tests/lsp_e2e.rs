@@ -2239,6 +2239,8 @@ const SEM_TYPES: &[&str] = &[
     "regexpGroup",
     "regexpQuantifier",
     "regexpAlternation",
+    "regexpLookaround",
+    "regexpAnchor",
 ];
 
 /// One decoded semantic token at an absolute 0-based position; `mods` is the
@@ -7094,6 +7096,108 @@ fn a_match_pattern_is_coloured_by_the_regex_grammar() {
         .map(|&(c, l, t)| (c, l, t.to_string()))
         .collect();
     assert_eq!(inside, want, "{toks:?}");
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The pattern of a refinement type is typed at each boundary of the type, and its
+/// literal is one island site, so each of its tokens is sent once.
+#[test]
+fn a_where_pattern_is_one_island_site() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_site_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "type Code = String where value =~ \"[a-z]{2}\"
+
+fn main() -> Int64 {
+    let c: Code = \"ab\"
+    return 0
+}
+";
+    let path = dir.join("main.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", src);
+    let diags = read_diags_for(&mut client, "main.vyrn");
+    let none = diags.pointer("/params/diagnostics");
+    assert_eq!(none, Some(&serde_json::json!([])), "{diags}");
+    let toks = semantic_tokens_full(&mut client, &uri);
+    let line: Vec<_> = (toks.iter())
+        .filter(|t| t.line == 0 && t.ch >= 35)
+        .map(|t| (t.ch, t.len, t.ty.as_str()))
+        .collect();
+    let want = [
+        (35, 5, "regexp"),
+        (40, 1, "regexpQuantifier"),
+        (41, 1, "number"),
+        (42, 1, "regexpQuantifier"),
+    ];
+    assert_eq!(line, want, "{toks:?}");
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The Email pattern of a refinement type checks, and each construct of it has its
+/// colour: its anchors, its lookahead and its escapes.
+#[test]
+fn a_where_pattern_with_a_lookahead_is_coloured() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_email_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = r#"type Email = String where value =~ "^((?!\\.)[\\w\\-_.]*[^.])(@\\w+)(\\.\\w+(\\.\\w+)?[^.\\W])$"
+
+fn main() -> Int64 {
+    let e: Email = "a.b@x.com"
+    return 0
+}
+"#;
+    let path = dir.join("main.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", src);
+    let diags = read_diags_for(&mut client, "main.vyrn");
+    let none = diags.pointer("/params/diagnostics");
+    assert_eq!(none, Some(&serde_json::json!([])), "{diags}");
+    let toks = semantic_tokens_full(&mut client, &uri);
+    let line: Vec<_> = (toks.iter())
+        .filter(|t| t.line == 0 && t.ch >= 36)
+        .map(|t| (t.ch, t.len, t.ty.as_str()))
+        .collect();
+    let (group, class, esc) = ("regexpGroup", "regexp", "escapeSequence");
+    let (quant, look, anchor) = ("regexpQuantifier", "regexpLookaround", "regexpAnchor");
+    let want = [
+        (36, 1, anchor),
+        (37, 1, group),
+        (38, 3, look),
+        (41, 3, esc),
+        (44, 1, look),
+        (45, 1, class),
+        (46, 6, esc),
+        (52, 3, class),
+        (55, 1, quant),
+        (56, 4, class),
+        (60, 2, group),
+        (63, 3, esc),
+        (66, 1, quant),
+        (67, 2, group),
+        (69, 6, esc),
+        (75, 1, quant),
+        (76, 1, group),
+        (77, 6, esc),
+        (83, 1, quant),
+        (84, 1, group),
+        (85, 1, quant),
+        (86, 3, class),
+        (89, 3, esc),
+        (92, 1, class),
+        (93, 1, group),
+        (94, 1, anchor),
+    ];
+    assert_eq!(line, want, "{toks:?}");
     let _ = client.child.kill();
     let _ = std::fs::remove_dir_all(&dir);
 }

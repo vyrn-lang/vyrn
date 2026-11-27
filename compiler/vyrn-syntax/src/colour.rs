@@ -7,7 +7,7 @@
 //! and a punctuation literal that is no bracket or separator is an operator. A
 //! refusal, or a form only a syntactic rule holds, ends a rule where it stands: the
 //! rules around it keep their marks, and the nearest repetition, or the start rule,
-//! reads on one character past it. [`naming`] is what the TextMate grammar of a `.syntax` file
+//! reads on where it stopped, or one character on if it stopped where it started. [`naming`] is what the TextMate grammar of a `.syntax` file
 //! needs beyond `syntax.syntax`, because a regex matches without the context that
 //! places a head, a reference, a label or a capture.
 
@@ -49,7 +49,7 @@ pub fn runs(g: &Grammar, start: RuleId, src: &str) -> Vec<Run> {
     let mut at = at;
     // Each restart moves at least one character, so the loop ends.
     while let Step::End(p) = r.rule(start, at) {
-        match next_char(src, p.max(at)) {
+        match past(src, at, p) {
             Some(next) => at = next,
             None => break,
         }
@@ -101,9 +101,14 @@ pub fn naming() -> Naming {
     }
 }
 
-/// The byte after the character at `at`, or `None` at the end of `src`.
-fn next_char(src: &str, at: usize) -> Option<usize> {
-    src.get(at..)?.chars().next().map(|c| at + c.len_utf8())
+/// Where a reading that started at `at` and ended at a refusal at `p` goes on: at
+/// `p` when the refused form took text, so the character there is read, or else
+/// one character past `at`. `None` at the end of `src`.
+fn past(src: &str, at: usize, p: usize) -> Option<usize> {
+    match p > at {
+        true => Some(p).filter(|&p| p < src.len()),
+        false => src.get(at..)?.chars().next().map(|c| at + c.len_utf8()),
+    }
 }
 
 /// What one reading step did.
@@ -267,14 +272,14 @@ impl Reader<'_> {
         }
     }
 
-    /// Reads `x` while it matches and moves. Past a refusal it reads on one character
-    /// after it, so each round moves and the loop ends.
+    /// Reads `x` while it matches and moves. Past a refusal it reads on at [`past`], so
+    /// each round moves and the loop ends.
     fn repeat(&mut self, x: &E, mut at: usize) -> Step {
         loop {
             match self.read(x, at) {
                 Step::To(p) if p > at => at = p,
                 Step::To(_) | Step::Miss => return Step::To(at),
-                Step::End(p) => match next_char(self.src, p.max(at)) {
+                Step::End(p) => match past(self.src, at, p) {
                     Some(next) => at = next,
                     None => return Step::To(self.src.len()),
                 },
@@ -350,6 +355,26 @@ mod tests {
     }
 
     #[test]
+    fn an_assertion_has_a_colour_of_its_own() {
+        let g = crate::load(include_str!("../../../std/regex.syntax")).expect("regex.syntax loads");
+        let src = r"(?=a)^x\b{start}$";
+        let got = runs(&g, g.rule("RegexPattern").expect("a start rule"), src);
+        let found: Vec<_> = got
+            .iter()
+            .map(|r| (&src[r.start..r.stop], r.scope))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("(?=", Scope::Lookaround),
+                (")", Scope::Lookaround),
+                ("^", Scope::Anchor),
+                (r"\b{start}$", Scope::Anchor),
+            ]
+        );
+    }
+
+    #[test]
     fn the_colours_go_on_past_a_refusal() {
         let g = crate::load(include_str!("../../../std/regex.syntax")).expect("regex.syntax loads");
         let src = "a**[b]|c";
@@ -366,6 +391,14 @@ mod tests {
                 ("|", Scope::Alternation),
             ]
         );
+        // `(?R` is refused after its text, so the reading goes on at the `\.` there.
+        let src = r"(?R\.)";
+        let got = runs(&g, g.rule("RegexPattern").expect("a start rule"), src);
+        let found: Vec<_> = got
+            .iter()
+            .map(|r| (&src[r.start..r.stop], r.scope))
+            .collect();
+        assert_eq!(found, [("(?R", Scope::Group), (r"\.", Scope::Escape)]);
         let (g, file) = format();
         let got = runs(&g, file, "a = ( 'y\nb = 'x'\n");
         let last = got.last().map(|r| (r.start, r.stop, r.scope));

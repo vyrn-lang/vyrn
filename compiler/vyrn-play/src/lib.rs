@@ -244,7 +244,7 @@ fn css(scope: vyrn_syntax::Scope) -> &'static str {
         S::Doc | S::Comment => "c",
         S::TypeName | S::SupportType => "t",
         S::Function | S::Parameter | S::Variable => "f",
-        S::Operator | S::Group | S::Quantifier | S::Alternation => "i",
+        S::Operator | S::Group | S::Quantifier | S::Alternation | S::Lookaround | S::Anchor => "i",
     }
 }
 

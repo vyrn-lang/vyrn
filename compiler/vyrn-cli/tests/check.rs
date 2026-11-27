@@ -92,6 +92,21 @@ fn every_program_prints_its_stderr() {
     );
 }
 
+/// The Email pattern of a refinement type, with a lookahead and anchors, matches at
+/// run time what its tests say.
+#[test]
+fn an_email_pattern_runs_its_tests() {
+    let out = vyrn()
+        .arg("test")
+        .arg("an_email_pattern_with_a_lookahead_is_checked.vyrn")
+        .current_dir(check_dir())
+        .output()
+        .expect("run vyrn test");
+    let text = norm(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("1 passed, 0 failed"), "{text}");
+}
+
 /// Prints what `vyrn check` prints for a program the load refuses, checked in this process.
 fn check_here(root: &str) -> String {
     let src = std::fs::read_to_string(root).expect("read the program");
