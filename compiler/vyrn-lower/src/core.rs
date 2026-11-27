@@ -7402,6 +7402,10 @@ impl<'a> Builder<'a> {
             out.push(St::Let(n, Rhs::Read(Place::Global(name.to_string()))));
             kind = Callee::Value(n);
             vec![Capability::Read; args.len()]
+        } else if name == vyrn_frontend::types::SHOW_SHOW && self.renders(args) {
+            // `x.show()` where the language renders `x` and no impl does is
+            // `x.toString()` (decided 2026-11-27 by the user).
+            return self.call("@str", args, line, ret, dest, out);
         } else {
             return gap_d("a call this slice cannot attribute", name, line);
         };
@@ -7650,6 +7654,23 @@ impl<'a> Builder<'a> {
             (Some(f), None) => Some(f),
             _ => None,
         }
+    }
+
+    /// Whether `args` is one receiver `toString` renders with no impl
+    /// selected here: a type the language renders (`types::renders`), or a
+    /// type parameter bounded by `Show`, whose instance selects.
+    fn renders(&self, args: &[Expr]) -> bool {
+        use vyrn_frontend::types::{renders, resolved, SHOW};
+        let [recv] = args else {
+            return false;
+        };
+        if let Some(Type::Param(t)) = node_ty(self.own, recv.id()) {
+            let bounds = self.bounds.and_then(|b| b.get(&t));
+            return bounds.is_some_and(|bs| bs.iter().any(|b| b == SHOW));
+        }
+        let decls = self.proto.types();
+        self.ty_of(recv)
+            .is_ok_and(|t| renders(&resolved(&t, decls)))
     }
 
     /// The `impl Copy` function `x.copy()` calls on `recv`'s type, and its

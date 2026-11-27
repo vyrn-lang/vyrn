@@ -1,0 +1,23 @@
+// `x.show()` on a type the language renders is `x.toString()`, so a generic
+// body bounded by `Show` takes a number, a `String` and a `Bool` as it takes
+// a type with an `impl Show`.
+
+type Point = { x: Int64, y: Int64 }
+
+impl Show for Point {
+    fn show(self) -> String {
+        return "(\{self.x}, \{self.y})"
+    }
+}
+
+fn describe<T: Show>(x: T) -> String {
+    return "= " + x.show()
+}
+
+fn main() -> Int64 {
+    print(describe(42)) // = 42
+    print(describe("hi")) // = hi
+    print(describe(true)) // = true
+    print(describe(Point { x: 1, y: 2 })) // = (1, 2)
+    return 0
+}
