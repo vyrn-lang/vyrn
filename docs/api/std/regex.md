@@ -34,8 +34,11 @@ match starts and ends on a character boundary.
 ## Regex
 
 ```vyrn
-type Regex = { op: Array<Int64>, a: Array<Int64>, b: Array<Int64>, cls: Array<ByteSet>, start: Int64, classOf: Array<UInt8>, classCount: Int64 }
+type Regex = { fwd: Program, rev: Program }
 ```
+
+A compiled pattern: `fwd` matches it, and `rev`, its reverse, reads it backward
+after a loop over any byte, so a backward pass finds where matches start.
 
 ## Match
 
@@ -60,7 +63,9 @@ often: the whole cost of a pattern is paid here.
 fn find(re: Regex, hay: String, from: Int64) -> Option<Match>
 ```
 
-The first match at or after `from`, or `None`.
+The first match at or after `from`, or `None`. It reads `hay` from `from` to its
+end once, so a loop of finds over one haystack is quadratic; `countMatches` and
+`replaceAll` read it once in all.
 
 ## countMatches
 

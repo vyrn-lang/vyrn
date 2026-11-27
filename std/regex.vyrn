@@ -55,7 +55,11 @@ let opMatch = 2
 /// is `cls[pc]`, in bounds wherever `op[pc]` is.
 type ByteSet = { w0: UInt64, w1: UInt64, w2: UInt64, w3: UInt64 }
 
-export type Regex = {
+/// A compiled pattern: `fwd` matches it, and `rev`, its reverse, reads it backward
+/// after a loop over any byte, so a backward pass finds where matches start.
+export type Regex = { fwd: Program, rev: Program }
+
+type Program = {
     op: Array<Int64>,
     a: Array<Int64>,
     b: Array<Int64>,
@@ -1118,7 +1122,7 @@ fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
     // Read the classes before the builder gives its arrays up, so nothing is
     // copied.
     let classOf = byteClasses(bd)
-    return Ok(Regex {
+    let fwd = Program {
         op: consume bd.op,
         a: consume bd.a,
         b: consume bd.b,
@@ -1126,7 +1130,115 @@ fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
         start: f.start,
         classCount: Int64(classOf[255]) + 1,
         classOf: classOf,
-    })
+    }
+    return Ok(Regex { rev: reverse(fwd, m), fwd: fwd })
+}
+
+/// The reverse of `p`, whose match is `m`, after a loop over any byte. Each pc `r` of
+/// `p` is a state that leads to every pc that leads to `r` in `p`: a class pc of `p`
+/// is a class test on that edge, a split pc an empty edge, and `p`'s start the
+/// match. A state is a chain of splits, one per edge, each operand `a` an edge; its
+/// class tests follow the chain. Two passes: the first lays out each state's pcs.
+fn reverse(p: Program, m: Int64) -> Program {
+    let n = p.op.length
+    // The pcs of `p` that lead to each pc, as lists through `nextFrom`.
+    let mut firstFrom: Array<Int64> = []
+    while firstFrom.length < n {
+        firstFrom.push(0 - 1)
+    }
+    let mut from: Array<Int64> = []
+    let mut nextFrom: Array<Int64> = []
+    let mut q = 0
+    while q < n {
+        let mut k = 0
+        while k < 2 {
+            let to = if k == 0 { p.b[q] } else { p.a[q] }
+            if p.op[q] != opMatch && (k == 0 || p.op[q] == opSplit) && to >= 0 && to < n {
+                from.push(q)
+                nextFrom.push(firstFrom[to])
+                firstFrom[to] = from.length - 1
+            }
+            k = k + 1
+        }
+        q = q + 1
+    }
+    // pc 0 never matches and pc 1 matches; each state's chain then its tests.
+    let mut entry: Array<Int64> = []
+    let mut size = 2
+    let mut r = 0
+    while r < n {
+        entry.push(size)
+        let mut e = firstFrom[r]
+        let mut links = if r == p.start { 1 } else { 0 }
+        let mut tests = 0
+        while e >= 0 {
+            links = links + 1
+            if p.op[from[e]] == opClass {
+                tests = tests + 1
+            }
+            e = nextFrom[e]
+        }
+        size = size + tests + if links == 0 { 1 } else { links }
+        r = r + 1
+    }
+    let mut out = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, names: [], nameAt: [] }
+    emit(out, opClass, 0 - 1, 0, noBytes())
+    emit(out, opMatch, 0, 0, noBytes())
+    let mut s = 0
+    while s < n {
+        let mut links = if s == p.start { 1 } else { 0 }
+        let mut f = firstFrom[s]
+        while f >= 0 {
+            links = links + 1
+            f = nextFrom[f]
+        }
+        let test = entry[s] + if links == 0 { 1 } else { links }
+        // The chain's operands: the match, then each edge in list order.
+        let mut targets: Array<Int64> = []
+        if s == p.start {
+            targets.push(1)
+        }
+        let mut e = firstFrom[s]
+        let mut tests: Array<Int64> = []
+        while e >= 0 {
+            let q = from[e]
+            if p.op[q] == opClass {
+                targets.push(test + tests.length)
+                tests.push(q)
+            } else {
+                targets.push(entry[q])
+            }
+            e = nextFrom[e]
+        }
+        if targets.length == 0 {
+            emit(out, opSplit, 0, 0, noBytes())
+        }
+        let mut i = 0
+        while i < targets.length {
+            let after = if i + 1 < targets.length { out.op.length + 1 } else { 0 }
+            emit(out, opSplit, targets[i], after, noBytes())
+            i = i + 1
+        }
+        let mut j = 0
+        while j < tests.length {
+            emit(out, opClass, 0 - 1, entry[tests[j]], p.cls[tests[j]])
+            j = j + 1
+        }
+        s = s + 1
+    }
+    let all: UInt64 = 18446744073709551615
+    let start = emit(out, opSplit, entry[m], 0, noBytes())
+    out.b[start] = emit(out, opClass, 0 - 1, start, ByteSet { w0: all, w1: all, w2: all, w3: all })
+    // The tests are `p`'s classes and one of every byte, which cuts no class.
+    return Program {
+        op: consume out.op,
+        a: consume out.a,
+        b: consume out.b,
+        cls: consume out.cls,
+        start: start,
+        classCount: p.classCount,
+        classOf: p.classOf.copy(),
+    }
 }
 
 // A Thompson simulation: one set of live pcs, stepped one input byte at a time.
@@ -1135,7 +1247,7 @@ fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
 
 /// The pc after instruction `pc` takes byte `c`, or -1 when it is not a class
 /// that holds `c`.
-fn follow(re: Regex, pc: Int64, c: Int64) -> Int64 {
+fn follow(re: Program, pc: Int64, c: Int64) -> Int64 {
     if re.op[pc] != opClass || !hasByte(re.cls[pc], c) {
         return 0 - 1
     }
@@ -1144,12 +1256,12 @@ fn follow(re: Regex, pc: Int64, c: Int64) -> Int64 {
 
 /// Adds `pc` and everything reachable from it without consuming, marking each
 /// with `sc.gen`.
-fn addThread(re: Regex, list: modify Array<Int64>, sc: modify Scan, pc: Int64) {
+fn addThread(re: Program, list: modify Array<Int64>, sc: modify Scan, pc: Int64) {
     let mut stack: Array<Int64> = [pc]
     while stack.length > 0 {
         let p = stack[stack.length - 1]
         stack.pop()
-        if p < 0 || p >= re.op.length {
+        if p < 0 || p >= re.op.length || p >= sc.mark.length {
             continue
         }
         if sc.mark[p] == sc.gen {
@@ -1166,8 +1278,32 @@ fn addThread(re: Regex, list: modify Array<Int64>, sc: modify Scan, pc: Int64) {
     }
 }
 
+/// The class and match pcs after the pcs `list` take byte `c`.
+fn stepList(re: Program, list: Array<Int64>, c: Int64, sc: modify Scan) -> Array<Int64> {
+    let mut next: Array<Int64> = []
+    sc.gen = sc.gen + 1
+    let mut j = 0
+    while j < list.length {
+        addThread(re, next, sc, follow(re, list[j], c))
+        j = j + 1
+    }
+    return next
+}
+
+/// Whether the pcs `list` hold a match.
+fn listAccepts(re: Program, list: Array<Int64>) -> Bool {
+    let mut k = 0
+    while k < list.length {
+        if re.op[list[k]] == opMatch {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
 /// The end of the longest match that starts exactly at `at`, or -1 for no match.
-fn nfaMatchAt(re: Regex, hay: Array<UInt8>, at: Int64, sc: modify Scan) -> Int64 {
+fn nfaMatchAt(re: Program, hay: Array<UInt8>, at: Int64, sc: modify Scan) -> Int64 {
     let mut clist: Array<Int64> = []
     sc.gen = sc.gen + 1
     addThread(re, clist, sc, re.start)
@@ -1175,27 +1311,13 @@ fn nfaMatchAt(re: Regex, hay: Array<UInt8>, at: Int64, sc: modify Scan) -> Int64
     let mut i = at
     while clist.length > 0 {
         // An accept here is a candidate; leftmost-longest keeps looking.
-        let mut k = 0
-        while k < clist.length {
-            if re.op[clist[k]] == opMatch {
-                best = i
-                k = clist.length
-            } else {
-                k = k + 1
-            }
+        if listAccepts(re, clist) {
+            best = i
         }
         if i >= hay.length {
             return best
         }
-        let c = Int64(hay[i])
-        let mut nlist: Array<Int64> = []
-        sc.gen = sc.gen + 1
-        let mut j = 0
-        while j < clist.length {
-            addThread(re, nlist, sc, follow(re, clist[j], c))
-            j = j + 1
-        }
-        clist = nlist
+        clist = stepList(re, clist, Int64(hay[i]), sc)
         i = i + 1
     }
     return best
@@ -1230,12 +1352,12 @@ type Scan = {
 
 /// The state of the class and match pcs marked with `sc.gen`, added if it is
 /// new, or -1 when a new state would pass the cap.
-fn intern(re: Regex, sc: modify Scan) -> Int64 {
+fn intern(re: Program, sc: modify Scan) -> Int64 {
     let mut set: Array<Int64> = []
     let mut key = ""
     let mut accepts = false
     let mut pc = 0
-    while pc < sc.mark.length {
+    while pc < sc.mark.length && pc < re.op.length {
         if sc.mark[pc] == sc.gen && re.op[pc] != opSplit {
             set.push(pc)
             key = key + "\{pc},"
@@ -1264,7 +1386,7 @@ fn intern(re: Regex, sc: modify Scan) -> Int64 {
 }
 
 /// A search with no edges built, which may add `cap` table entries.
-fn newScan(re: Regex, cap: Int64) -> Scan {
+fn newScan(re: Program, cap: Int64) -> Scan {
     let mut mark: Array<Int64> = []
     let mut i = 0
     while i < re.op.length {
@@ -1285,68 +1407,144 @@ fn newScan(re: Regex, cap: Int64) -> Scan {
     return sc
 }
 
-/// The leftmost-longest match that starts at or after `from`, or `None`.
-fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64 where value >= 0, sc: modify Scan) -> Option<Match> {
+/// The state after the state `s` takes byte `c`, built on first use, or -1 when the
+/// table is full. A walk reads a built edge itself and calls this on a miss.
+fn stepState(re: Program, s: Int64, c: Int64, sc: modify Scan) -> Int64 {
+    let edge = s + Int64(re.classOf[c])
+    let t = sc.next[edge]
+    if t >= 0 {
+        return t
+    }
+    sc.gen = sc.gen + 1
+    let mut scratch: Array<Int64> = []
+    let set = s / re.classCount
+    let mut j = 0
+    while j < sc.sets[set].length {
+        addThread(re, scratch, sc, follow(re, sc.sets[set][j], c))
+        j = j + 1
+    }
+    let u = intern(re, sc)
+    // A state is 256 entries before the table's end; the walk cannot see that
+    // through `ids`, so the test states it.
+    if u < 0 || u > sc.next.length - 256 {
+        return 0 - 1
+    }
+    sc.next[edge] = u
+    return u
+}
+
+/// The end of the longest match that starts exactly at `at`, or -1 for no match.
+fn longestAt(re: Program, hay: Array<UInt8>, at: Int64, sc: modify Scan) -> Int64 {
     let dead = sc.dead
-    let mut at = from
-    while at <= hay.length {
-        let mut s = 0
-        let mut best = if sc.accepts[0] { at } else { 0 - 1 }
-        let mut i = at
-        while i < hay.length {
-            let c = Int64(hay[i])
-            let edge = s + Int64(re.classOf[c])
-            let mut t = sc.next[edge]
+    let mut s = 0
+    let mut best = if sc.accepts[0] { at } else { 0 - 1 }
+    let mut i = at
+    while i < hay.length {
+        let c = Int64(hay[i])
+        let mut t = sc.next[s + Int64(re.classOf[c])]
+        if t < 0 {
+            t = stepState(re, s, c, sc)
+            if t < 0 || t > sc.next.length - 256 {
+                return nfaMatchAt(re, hay, at, sc)
+            }
+        }
+        if t == dead {
+            return best
+        }
+        s = t
+        i = i + 1
+        if sc.accepts[s] {
+            best = i
+        }
+    }
+    return best
+}
+
+/// The offsets of `hay` from `from` on where a match starts, last first, by one
+/// backward pass of `rev`, the reversed pattern after a loop over any byte: the pass
+/// is in an accepting state at an offset where a match of the pattern starts.
+fn matchStarts(rev: Program, hay: Array<UInt8>, from: Int64 where value >= 0, cap: Int64) -> Array<Int64> {
+    let mut starts: Array<Int64> = []
+    let mut sc = newScan(rev, cap)
+    let mut s = 0
+    // Past the table's cap the pass steps the state's pcs instead.
+    let mut list: Array<Int64> = []
+    let mut lazy = true
+    if sc.accepts[0] {
+        starts.push(hay.length)
+    }
+    let mut i = hay.length - 1
+    while i >= from {
+        let c = Int64(hay[i])
+        let mut accepts = false
+        if lazy {
+            let mut t = sc.next[s + Int64(rev.classOf[c])]
             if t < 0 {
-                sc.gen = sc.gen + 1
-                let mut scratch: Array<Int64> = []
-                let set = s / re.classCount
-                let mut j = 0
-                while j < sc.sets[set].length {
-                    let next = follow(re, sc.sets[set][j], c)
-                    addThread(re, scratch, sc, next)
-                    j = j + 1
-                }
-                t = intern(re, sc)
-                // A state is 256 entries before the table's end; the walk
-                // cannot see that through `ids`, so the test states it.
-                if t < 0 || t > sc.next.length - 256 {
-                    best = nfaMatchAt(re, hay, at, sc)
-                    break
-                }
-                sc.next[edge] = t
+                t = stepState(rev, s, c, sc)
             }
-            if t == dead {
-                break
+            if t < 0 || t > sc.next.length - 256 {
+                lazy = false
+                let held = joinHoles(sc.sets[s / rev.classCount], [])
+                list = stepList(rev, held, c, sc)
+                accepts = listAccepts(rev, list)
+            } else {
+                s = t
+                accepts = sc.accepts[s]
             }
-            s = t
-            i = i + 1
-            if sc.accepts[s] {
-                best = i
+        } else {
+            list = stepList(rev, list, c, sc)
+            accepts = listAccepts(rev, list)
+        }
+        if accepts {
+            starts.push(i)
+        }
+        i = i - 1
+    }
+    return starts
+}
+
+/// One search over one haystack: the offsets matches start at that no match has
+/// passed, last first, and the forward lazy DFA.
+type Search = { starts: Array<Int64>, fwd: Scan }
+
+fn newSearch(re: Regex, hay: Array<UInt8>, from: Int64 where value >= 0, cap: Int64) -> Search {
+    return Search { starts: matchStarts(re.rev, hay, from, cap), fwd: newScan(re.fwd, cap) }
+}
+
+/// The leftmost-longest match that starts at or after `from`, or `None`: the first
+/// offset a match starts at, and the longest match from it. A search of a haystack
+/// reads it once backward and, from each match, forward to the end of the longest.
+fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64 where value >= 0, se: modify Search) -> Option<Match> {
+    while se.starts.length > 0 {
+        let at = se.starts[se.starts.length - 1]
+        if at >= from {
+            let end = longestAt(re.fwd, hay, at, se.fwd)
+            if end >= 0 {
+                return Some(Match { at: at, end: end })
             }
         }
-        if best >= 0 {
-            return Some(Match { at: at, end: best })
-        }
-        at = at + 1
+        se.starts.pop()
     }
     return None
 }
 
-/// The first match at or after `from`, or `None`.
+/// The first match at or after `from`, or `None`. It reads `hay` from `from` to its
+/// end once, so a loop of finds over one haystack is quadratic; `countMatches` and
+/// `replaceAll` read it once in all.
 export fn find(re: Regex, hay: String, from: Int64) -> Option<Match> {
-    let mut sc = newScan(re, dfaCap)
-    return nextMatch(re, bytes(hay), from, sc)
+    let raw = bytes(hay)
+    let mut se = newSearch(re, raw, from, dfaCap)
+    return nextMatch(re, raw, from, se)
 }
 
 /// How many non-overlapping matches `re` has in `hay`: `aa` in `aaa` is one. An
 /// empty match advances by one byte.
 export fn countMatches(re: Regex, hay: String) -> Int64 {
     let raw = bytes(hay)
-    let mut sc = newScan(re, dfaCap)
+    let mut se = newSearch(re, raw, 0, dfaCap)
     let mut n = 0
     let mut i = 0
-    while let Some(m) = nextMatch(re, raw, i, sc) {
+    while let Some(m) = nextMatch(re, raw, i, se) {
         n = n + 1
         i = if m.end > m.at { m.end } else { m.at + 1 }
     }
@@ -1357,11 +1555,11 @@ export fn countMatches(re: Regex, hay: String) -> Int64 {
 /// there are no captures, so no `$1`.
 export fn replaceAll(re: Regex, hay: String, with: String) -> String {
     let raw = bytes(hay)
-    let mut sc = newScan(re, dfaCap)
+    let mut se = newSearch(re, raw, 0, dfaCap)
     let mut out = ""
     let mut kept = 0
     let mut i = 0
-    while let Some(m) = nextMatch(re, raw, i, sc) {
+    while let Some(m) = nextMatch(re, raw, i, se) {
         out = out + substring(hay, kept, m.at) + with
         kept = m.end
         i = if m.end > m.at { m.end } else { m.at + 1 }
@@ -1717,7 +1915,7 @@ fn genPattern(seed: modify Int64, depth: Int64) -> String {
     return out
 }
 
-test "the lazy DFA finds every match the Thompson simulation finds" {
+test "the two lazy DFAs find every match the Thompson simulation finds at each offset" {
     let pieces = ["a", "b", "c", "é", "è", "€", "|", "\n"]
     let mut seed = 7
     let mut round = 0
@@ -1733,19 +1931,19 @@ test "the lazy DFA finds every match the Thompson simulation finds" {
             hay = hay + pieces[draw(seed, pieces.length)]
         }
         let raw = bytes(hay)
-        let mut oracle = newScan(re, 0)
+        let mut oracle = newScan(re.fwd, 0)
         let mut ends: Array<Int64> = []
         let mut i = 0
         while i <= raw.length {
-            ends.push(nfaMatchAt(re, raw, i, oracle))
+            ends.push(nfaMatchAt(re.fwd, raw, i, oracle))
             i = i + 1
         }
         // The whole table, the two fixed states alone, and one state more: the
         // last two fall back part way through a walk.
-        let caps = [dfaCap, 0, re.classCount]
+        let caps = [dfaCap, 0, re.fwd.classCount]
         let mut k = 0
         while k < caps.length {
-            let mut sc = newScan(re, caps[k])
+            let mut sc = newSearch(re, raw, 0, caps[k])
             let mut from = 0
             while from <= raw.length {
                 let mut at = from
