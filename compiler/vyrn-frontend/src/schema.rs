@@ -596,10 +596,11 @@ fn convert(
             if let Some(Json::Num(n)) = schema.get("maxLength") {
                 clauses.push(len_cmp(BinOp::LtEq, *n as i64));
             }
+            // A JSON Schema pattern holds where it matches anywhere in the string, as
+            // an ECMA-262 search does, and `=~` matches whole.
             let mut add_pattern = |p: &str| -> Result<(), String> {
-                let inner = p.strip_prefix('^').unwrap_or(p);
-                let inner = inner.strip_suffix('$').unwrap_or(inner);
-                crate::regex::compile(inner).map_err(|e| {
+                let whole = format!("[\\s\\S]*(?:{p})[\\s\\S]*");
+                crate::regex::compile(&whole).map_err(|e| {
                     format!(
                         "{module}: type `{name}`: `pattern` `{p}` is outside Vyrn's \
                          regex subset: {e}"
@@ -609,7 +610,7 @@ fn convert(
                     id: Id::NEW,
                     op: BinOp::Match,
                     lhs: Box::new(value_var()),
-                    rhs: Box::new(Expr::str(inner)),
+                    rhs: Box::new(Expr::str(whole)),
                     line: 1,
                 });
                 Ok(())
@@ -1110,7 +1111,31 @@ mod tests {
         let decls =
             synth(r#"{"title": "Slug", "type": "string", "minLength": 1, "pattern": "^[a-z]+$"}"#);
         let pred = crate::checker::pred_summary(decls[0].predicate.as_ref().unwrap());
-        assert_eq!(pred, "value.byteLength >= 1 && value =~ \"[a-z]+\"");
+        assert_eq!(
+            pred,
+            r#"value.byteLength >= 1 && value =~ "[\\s\\S]*(?:^[a-z]+$)[\\s\\S]*""#
+        );
+    }
+
+    /// A JSON Schema pattern is unanchored: `a` holds for any string with an `a`
+    /// in it, and `^a|b$` for one that starts with `a` or ends with `b`.
+    #[test]
+    fn an_imported_pattern_matches_anywhere() {
+        let matches = |pattern: &str, s: &str| {
+            let doc = format!(r#"{{"title": "T", "type": "string", "pattern": "{pattern}"}}"#);
+            let decls = synth(&doc);
+            let Some(Expr::Binary { rhs, .. }) = decls[0].predicate.as_ref() else {
+                panic!("a =~ clause");
+            };
+            let Expr::Str(whole, _) = &**rhs else {
+                panic!("a literal pattern");
+            };
+            crate::regex::compile(whole)
+                .expect("it compiles")
+                .matches(s)
+        };
+        assert!(matches("a", "xay") && !matches("a", "xy"));
+        assert!(matches("^a|b$", "ax") && matches("^a|b$", "xb") && !matches("^a|b$", "xa"));
     }
 
     #[test]
