@@ -17,12 +17,21 @@ term `m` to `n` times, each count at most 255, and a `?` after a repeat or a
 count makes it lazy. `(?:..)` groups without a name, `(?<n>..)`, `(?P<n>..)`
 and `(?'n'..)` name a group, and `(?#..)` is a comment.
 The flags `i` (ASCII case folding), `s` (`.` takes `\n` and `\r`) and `m` hold
-for the rest of a group after `(?ims-ims)`, or inside `(?ims-ims:..)`. `^`, `$`
-and every other assertion are refused, and the empty pattern matches the empty
-string. A Thompson NFA with no backtracking, so the time is linear in the pattern
-size times the input for every pattern. A search runs it as two lazy DFAs, one
-forward to a match's end and one back to its start: one table read per byte. It
-has no backreferences or lookaround.
+for the rest of a group after `(?ims-ims)`, or inside `(?ims-ims:..)`, and the
+empty pattern matches the empty string. A Thompson NFA with no backtracking, so
+the time is linear in the pattern size times the input for every pattern. A
+search runs it as two lazy DFAs, one forward to a match's end and one back to its
+start: one table read per byte. It has no backreferences.
+
+`(?=..)`, `(?!..)`, `(?<=..)` and `(?<!..)` look ahead and behind, nested to any
+depth, and see the whole text, before `from` too. `^` and `$` are the text's ends,
+or a line's under `m`; `\A` and `\z` are the text's ends, and `\Z` is the end
+or a final `\n`. `\b` is a word boundary and `\B` any other position, `\<` and
+`\b{start}` a word's start, `\>` and `\b{end}` its end, and `\b{start-half}` and
+`\b{end-half}` the side of each that is no word character. A search of a pattern
+with an assertion first runs one pass per lookaround body over the text, and then
+the NFA, not the lazy DFAs: the time stays linear. A capturing group inside a
+lookaround is refused.
 
 `captures` gives a match's groups, numbered from 1 in the order of their `(`;
 `(?:..)` and `(?i:..)` do not count. `capture` and `named` read one.
@@ -41,7 +50,7 @@ match starts and ends on a character boundary.
 ## Regex
 
 ```vyrn
-type Regex = { fwd: Program, rev: Program, names: Array<String> }
+type Regex = { fwd: Program, rev: Program, names: Array<String>, looks: Array<Look> }
 ```
 
 A compiled pattern: `fwd` is the pattern after a loop over any byte, so a forward

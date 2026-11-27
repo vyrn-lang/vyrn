@@ -8,7 +8,7 @@
 /// A row a rule refuses with, and the text of each of its holes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rule {
-    AnchorPending { a: String },
+    AssertionRepeat {  },
     ClassAnchor { c: String },
     ClassBackslash {  },
     ClassRange {  },
@@ -42,7 +42,7 @@ impl Rule {
     /// The row's name and the text of each of its holes, as a catalogue keys them.
     pub fn row(&self) -> (&'static str, Vec<(&'static str, &str)>) {
         match self {
-            Rule::AnchorPending { a } => ("AnchorPending", vec![("a", a.as_str())]),
+            Rule::AssertionRepeat {  } => ("AssertionRepeat", vec![]),
             Rule::ClassAnchor { c } => ("ClassAnchor", vec![("c", c.as_str())]),
             Rule::ClassBackslash {  } => ("ClassBackslash", vec![]),
             Rule::ClassRange {  } => ("ClassRange", vec![]),
@@ -110,6 +110,12 @@ pub(super) trait Hooks {
         Ok(())
     }
     fn _regex_subpattern(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn _regex_lookaround(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn _regex_anchor(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn _regex_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -220,7 +226,16 @@ pub(super) trait Hooks {
     fn regex_code(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
+    fn regex_lookaround_open(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_lookaround_end(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
     fn regex_anchor(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_no_repeat(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn regex_foreign(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -379,6 +394,11 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         let start = self.pos;
         let hit = self._regex_flags()?
             || self._regex_comment()?
+            || {
+                let p0 = self.pos;
+                ({ let p = self.pos; let m = self.eat_lit(b"(?"); self.pos = p; m } && self._regex_lookaround()?)
+                || { self.pos = p0; false }
+            }
             || self._regex_subpattern()?
             || self._regex_class()?
             || self._regex_escape()?
@@ -398,16 +418,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
                 ({ let p = self.pos; let m = self.eat_byte(b'}'); self.pos = p; m } && { let rule = rule!(StrayBrace); return Err(self.hooks.refuse(self.pos, rule)); })
                 || { self.pos = p0; false }
             }
-            || {
-                let p0 = self.pos;
-                (self.eat_byte(b'^') && { let rule = rule!(AnchorPending, a = "^"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            }
-            || {
-                let p0 = self.pos;
-                (self.eat_byte(b'$') && { let rule = rule!(AnchorPending, a = "$"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            }
+            || self._regex_anchor()?
             || self._regex_literal()?;
         if !hit {
             return Ok(false);
@@ -447,6 +458,34 @@ impl<'s, H: Hooks> Scanner<'s, H> {
             return Ok(false);
         }
         self.hooks._regex_subpattern(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn _regex_lookaround(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = {
+            let p0 = self.pos;
+            ({ let open = self.pos; self.regex_lookaround_open()? && { let alt = self.pos; ({ self._regex_alt()?; true }) && { if !(self.regex_lookaround_end()?) { { let rule = rule!(GroupUnclosed); return Err(self.hooks.refuse(self.pos, rule)); } } true } && { let _ = self.regex_no_repeat()?; true } } })
+            || { self.pos = p0; false }
+        };
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks._regex_lookaround(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn _regex_anchor(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = {
+            let p0 = self.pos;
+            (self.eat_one(|c| c == '^' || c == '$') && { let _ = self.regex_no_repeat()?; true })
+            || { self.pos = p0; false }
+        };
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks._regex_anchor(start, self.pos)?;
         Ok(true)
     }
 
@@ -800,22 +839,6 @@ impl<'s, H: Hooks> Scanner<'s, H> {
                 let p0 = self.pos;
                 (self.eat_byte(b'\'') && { self.regex_name()?; true } && { if !((matches!(self.peek_byte(), Some(b'\'')) && self.eat_byte(b'\''))) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } true })
                 || { self.pos = p0; false }
-            }) || (matches!(self.peek_byte(), Some(b'=')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'=') && { let rule = rule!(AnchorPending, a = "(?="); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            }) || (matches!(self.peek_byte(), Some(b'!')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'!') && { let rule = rule!(AnchorPending, a = "(?!"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            }) || (matches!(self.peek_byte(), Some(b'<')) && {
-                let p0 = self.pos;
-                (self.eat_lit(b"<=") && { let rule = rule!(AnchorPending, a = "(?<="); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            }) || (matches!(self.peek_byte(), Some(b'<')) && {
-                let p0 = self.pos;
-                (self.eat_lit(b"<!") && { let rule = rule!(AnchorPending, a = "(?<!"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
             }) || (matches!(self.peek_byte(), Some(b'<')) && {
                 let p0 = self.pos;
                 (self.eat_byte(b'<') && { self.regex_name()?; true } && { if !((matches!(self.peek_byte(), Some(b'>')) && self.eat_byte(b'>'))) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } true })
@@ -1100,47 +1123,60 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         Ok(true)
     }
 
+    fn regex_lookaround_open(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = (matches!(self.peek_byte(), Some(b'(')) && self.eat_lit(b"(?="))
+            || (matches!(self.peek_byte(), Some(b'(')) && self.eat_lit(b"(?!"))
+            || (matches!(self.peek_byte(), Some(b'(')) && self.eat_lit(b"(?<="))
+            || (matches!(self.peek_byte(), Some(b'(')) && self.eat_lit(b"(?<!"));
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_lookaround_open(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn regex_lookaround_end(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = self.eat_byte(b')');
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_lookaround_end(start, self.pos)?;
+        Ok(true)
+    }
+
     fn regex_anchor(&mut self) -> Result<bool, String> {
         let start = self.pos;
-        let hit = (matches!(self.peek_byte(), Some(b'b')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'b') && { let rule = rule!(AnchorPending, a = "\\b"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            })
-            || (matches!(self.peek_byte(), Some(b'B')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'B') && { let rule = rule!(AnchorPending, a = "\\B"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            })
-            || (matches!(self.peek_byte(), Some(b'A')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'A') && { let rule = rule!(AnchorPending, a = "\\A"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            })
-            || (matches!(self.peek_byte(), Some(b'z')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'z') && { let rule = rule!(AnchorPending, a = "\\z"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            })
-            || (matches!(self.peek_byte(), Some(b'Z')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'Z') && { let rule = rule!(AnchorPending, a = "\\Z"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            })
-            || (matches!(self.peek_byte(), Some(b'<')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'<') && { let rule = rule!(AnchorPending, a = "\\<"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            })
-            || (matches!(self.peek_byte(), Some(b'>')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'>') && { let rule = rule!(AnchorPending, a = "\\>"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            });
+        let hit = {
+            let p0 = self.pos;
+            ((
+                (matches!(self.peek_byte(), Some(b'b')) && self.eat_lit(b"b{start}"))
+                || (matches!(self.peek_byte(), Some(b'b')) && self.eat_lit(b"b{end}"))
+                || (matches!(self.peek_byte(), Some(b'b')) && self.eat_lit(b"b{start-half}"))
+                || (matches!(self.peek_byte(), Some(b'b')) && self.eat_lit(b"b{end-half}"))
+                || self.eat_one(|c| matches!(c, 'b' | 'B' | 'A' | 'z' | 'Z' | '<' | '>'))
+            ) && { let _ = self.regex_no_repeat()?; true })
+            || { self.pos = p0; false }
+        };
         if !hit {
             return Ok(false);
         }
         self.hooks.regex_anchor(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn regex_no_repeat(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = {
+            let p0 = self.pos;
+            ({ let p = self.pos; let m = self.eat_one(|c| c == '*' || c == '+' || c == '?' || c == '{'); self.pos = p; m } && { let rule = rule!(AssertionRepeat); return Err(self.hooks.refuse(self.pos, rule)); })
+            || { self.pos = p0; false }
+        };
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_no_repeat(start, self.pos)?;
         Ok(true)
     }
 

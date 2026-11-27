@@ -1,0 +1,19 @@
+type Email = String where value =~ "^((?!\\.)[\\w\\-_.]*[^.])(@\\w+)(\\.\\w+(\\.\\w+)?[^.\\W])$"
+
+fn main() -> Int64 {
+    let e: Email = "a.b@x.com"
+    return 0
+}
+
+fn isEmail(s: String) -> Bool {
+    return s =~ "^((?!\\.)[\\w\\-_.]*[^.])(@\\w+)(\\.\\w+(\\.\\w+)?[^.\\W])$"
+}
+
+test "an address matches and a leading or trailing dot does not" {
+    assert(isEmail("a.b@x.com"))
+    assert(isEmail("a_b-c@mail.co.uk"))
+    assert(!isEmail(".a@x.com"))
+    assert(!isEmail("a.@x.com"))
+    assert(!isEmail("a@x.com."))
+    assert(!isEmail("a@x"))
+}

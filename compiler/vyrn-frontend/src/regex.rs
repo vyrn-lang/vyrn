@@ -10,6 +10,11 @@
 //! ECMA-262 means on ASCII (`.` excludes `\n` and `\r`), so a pattern round-trips
 //! to a JSON Schema `pattern`. A literal, a class member, `.` and a negated class
 //! are code points, and the DFA reads their UTF-8 bytes.
+//!
+//! The DFA is exact for lookahead and lookbehind too, nested to any depth, so a
+//! finite string type over a pattern with an assertion is proved by containment
+//! like any other: [`Terms`] builds it by derivatives, and an anchor or a word
+//! boundary is a lookaround over one byte ([`anchor`]).
 
 /// A set of bytes: one bit per byte value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -170,6 +175,13 @@ enum Re {
     Star(Box<Re>),
     Plus(Box<Re>),
     Opt(Box<Re>),
+    /// An assertion: the body matches, or with `negate` does not, from here on
+    /// when `ahead`, or else up to here.
+    Look {
+        ahead: bool,
+        negate: bool,
+        body: Box<Re>,
+    },
 }
 
 #[rustfmt::skip]
@@ -186,7 +198,8 @@ const EXPANSION_BUDGET: usize = 16_384;
 /// Node count of `re`: the unit [`EXPANSION_BUDGET`] charges.
 fn re_size(re: &Re) -> usize {
     match re {
-        Re::Empty | Re::Class(_) => 1,
+        // A body is one term however often a count copies it: equal bodies are one.
+        Re::Empty | Re::Class(_) | Re::Look { .. } => 1,
         Re::Concat(ps) | Re::Alt(ps) => ps.iter().map(re_size).sum::<usize>(),
         Re::Star(r) | Re::Plus(r) | Re::Opt(r) => re_size(r),
     }
@@ -214,14 +227,17 @@ struct Build<'a> {
     flags: Vec<Flags>,
     /// The names of the named groups read so far.
     names: Vec<Vec<u8>>,
+    /// The lookarounds open around the term being read.
+    looks: usize,
 }
 
-/// The flags that change what an atom means: `i` folds ASCII case and `s` lets `.`
-/// take `\n` and `\r`. `m` changes only `^` and `$`, which `AnchorPending` refuses.
+/// The flags that change what an atom means: `i` folds ASCII case, `s` lets `.`
+/// take `\n` and `\r`, and `m` makes `^` and `$` a line's ends.
 #[derive(Clone, Copy, Default)]
 struct Flags {
     fold: bool,
     dot_all: bool,
+    lines: bool,
 }
 
 impl Flags {
@@ -233,6 +249,7 @@ impl Flags {
                 b'-' => on = false,
                 b'i' => self.fold = on,
                 b's' => self.dot_all = on,
+                b'm' => self.lines = on,
                 _ => {}
             }
         }
@@ -315,6 +332,9 @@ impl Hooks for Build<'_> {
             (None, 3..) => self.flags().with(&t[2..t.len() - 1]),
             _ => self.flags(),
         };
+        if self.looks > 0 && (name.is_some() || t.len() == 1) {
+            return Err(say("LookCapture", &[]));
+        }
         if let Some(name) = name {
             if self.names.iter().any(|n| n == name) {
                 return Err(say("NameTwice", &[]));
@@ -331,6 +351,41 @@ impl Hooks for Build<'_> {
     }
 
     /// `(?i)` sets the flags for the rest of its group and matches the empty string.
+    /// A lookaround's flags hold until its `)`, as a group's do.
+    fn regex_lookaround_open(&mut self, _start: usize, _end: usize) -> Result<(), String> {
+        self.looks += 1;
+        self.flags.push(self.flags());
+        Ok(())
+    }
+
+    fn _regex_lookaround(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        self.looks -= 1;
+        self.flags.pop();
+        let body = Box::new(self.last().1);
+        // `(?=`, `(?!`, `(?<=` or `(?<!`, and a `)` after it.
+        let (ahead, negate) = match (self.b[start + 2], self.b[start + 3]) {
+            (b'=', _) => (true, false),
+            (b'!', _) => (true, true),
+            (_, b'=') => (false, false),
+            _ => (false, true),
+        };
+        self.terms.push((
+            start,
+            Re::Look {
+                ahead,
+                negate,
+                body,
+            },
+        ));
+        Ok(())
+    }
+
+    fn _regex_anchor(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let re = anchor(&self.b[start..start + 1], self.flags().lines);
+        self.terms.push((start, re));
+        Ok(())
+    }
+
     fn _regex_flags(&mut self, start: usize, end: usize) -> Result<(), String> {
         let flags = self.flags().with(&self.b[start + 2..end - 1]);
         *self.flags.last_mut().expect("the pattern's flags stay") = flags;
@@ -367,6 +422,7 @@ impl Hooks for Build<'_> {
                 Chars::of(&[(0x0a, 0x0d)]).re(),
             ]),
             c if SHORTHANDS.contains(&c) => shorthand(c).re(),
+            b'b' | b'B' | b'A' | b'z' | b'Z' | b'<' | b'>' => anchor(t, self.flags().lines),
             _ => self.char_term(escape_char(t)?),
         };
         self.terms.push((start, re));
@@ -617,6 +673,7 @@ fn parse(pattern: &str) -> Result<Re, Refusal> {
         in_grammar: false,
         flags: vec![Flags::default()],
         names: Vec::new(),
+        looks: 0,
     };
     let mut scanner = grammar::Scanner::new(pattern, build);
     if let Err(why) = scanner._regex_pattern() {
@@ -627,6 +684,50 @@ fn parse(pattern: &str) -> Result<Re, Refusal> {
     }
     // The pattern is one alternation, which leaves one term.
     Ok(scanner.hooks.terms.pop().map_or(Re::Empty, |t| t.1))
+}
+
+/// The assertion `t`: `^` or `$`, or the text after the backslash of `\b`, `\B`,
+/// `\A`, `\z`, `\Z`, `\<`, `\>` or a `\b{..}`, which the grammar admits. Each is a
+/// lookaround over one byte, which is a character's own byte for `\n` and the ASCII
+/// of `\w`: `^` is `(?<![\s\S])`, or `(?<![^\n])` on `lines`, and a word boundary is
+/// a word character on one side and none on the other.
+fn anchor(t: &[u8], lines: bool) -> Re {
+    let look = |ahead, negate, body: Re| Re::Look {
+        ahead,
+        negate,
+        body: Box::new(body),
+    };
+    let any = || Re::Class(ByteClass::range(0, 255));
+    let edge = || match lines {
+        true => Chars::of(&[(0x0a, 0x0a)]).complement().re(),
+        false => any(),
+    };
+    let w = |ahead, negate| look(ahead, negate, shorthand(b'w').re());
+    let start = || concat(vec![w(false, true), w(true, false)]);
+    let end = || concat(vec![w(false, false), w(true, true)]);
+    match t {
+        b"^" => look(false, true, edge()),
+        b"$" => look(true, true, edge()),
+        b"A" => look(false, true, any()),
+        b"z" => look(true, true, any()),
+        b"Z" => look(
+            true,
+            false,
+            concat(vec![
+                Re::Opt(Box::new(char_re(10))),
+                look(true, true, any()),
+            ]),
+        ),
+        b"b" => Re::Alt(vec![end(), start()]),
+        b"B" => Re::Alt(vec![
+            concat(vec![w(false, false), w(true, false)]),
+            concat(vec![w(false, true), w(true, true)]),
+        ]),
+        b"<" | b"b{start}" => start(),
+        b">" | b"b{end}" => end(),
+        b"b{start-half}" => w(false, true),
+        _ => w(true, true),
+    }
 }
 
 /// The escapes that stand for a set: `\d`, `\w`, `\s`, `\h`, their capitals, which
@@ -716,12 +817,19 @@ fn char_re(c: u32) -> Re {
 }
 
 /// A term of the derivative construction: an index into [`Terms`]. Equal terms
-/// are one index, so a DFA state is a term.
+/// are one index.
+///
+/// A term matches a span of the text from a position, and it may look at the whole
+/// text around the span: `M(t, i, j)`. Its language is the rests it matches whole:
+/// a DFA state is a term for the rest of the text, and one component per lookbehind
+/// body, which says at each position whether the text so far ends in that body.
 type T = u32;
 
-/// The empty language and the empty string, the first two terms.
+/// The empty language, the empty string and every string: terms 0, 1 and 3, after
+/// the class of every byte.
 const EMPTY: T = 0;
 const EPS: T = 1;
+const SIGMA: T = 3;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Node {
@@ -735,18 +843,38 @@ enum Node {
     Alt(Vec<T>),
     /// The body is not `Empty`, `Eps` or a `Star`.
     Star(T),
+    /// Two or more terms, ascending, none an `And`, `Empty` or `SIGMA`.
+    And(Vec<T>),
+    /// The spans `M` of the body does not match. The body is no `Not`.
+    Not(T),
+    /// The empty span where the rest of the text is in the body's language: a
+    /// lookahead, `(?=A)` as `A SIGMA` and `(?!A)` as `Not(A SIGMA)`.
+    Guard(T),
+    /// The empty span where the text so far ends in lookbehind body `k`, or does
+    /// not when the flag is false.
+    Behind(u32, bool),
 }
 
-/// The terms built so far, each one's nullability, and the derivatives taken.
-/// The constructors keep the forms [`Node`] states, and those similarity rules make
-/// the derivatives of a term finite (Brzozowski 1964).
+/// The terms built so far, facts about each, and the work already done. The
+/// constructors keep the forms [`Node`] states, and those similarity rules keep
+/// the derivatives of a term finite (Brzozowski 1964, with the Boolean operators).
 struct Terms {
     nodes: Vec<Node>,
     ids: std::collections::HashMap<Node, T>,
-    /// Whether term `t` matches the empty string, at `t`.
+    /// Whether term `t` holds no `And`, `Not`, `Guard` or `Behind`, so whether it
+    /// matches the empty span depends on nothing around it.
+    plain: Vec<bool>,
+    /// For a plain term, whether it matches the empty span.
     nullable: Vec<bool>,
-    /// The derivative of a term by a byte that stands for its run.
-    derived: std::collections::HashMap<(T, u8), T>,
+    /// Each lookbehind body.
+    bodies: Vec<T>,
+    /// Each context: the components of a state, one per body.
+    contexts: Vec<Vec<T>>,
+    context_ids: std::collections::HashMap<Vec<T>, u32>,
+    /// The derivative of a term by a byte that stands for its run, in a context.
+    derived: std::collections::HashMap<(T, u8, u32), T>,
+    /// The condition on the rest under which a term matches the empty span here.
+    conditions: std::collections::HashMap<(T, u32), T>,
 }
 
 impl Terms {
@@ -754,11 +882,18 @@ impl Terms {
         let mut terms = Terms {
             nodes: Vec::new(),
             ids: Default::default(),
+            plain: Vec::new(),
             nullable: Vec::new(),
+            bodies: Vec::new(),
+            contexts: Vec::new(),
+            context_ids: Default::default(),
             derived: Default::default(),
+            conditions: Default::default(),
         };
         terms.node(Node::Empty);
         terms.node(Node::Eps);
+        let any = terms.node(Node::Class(ByteClass::range(0, 255)));
+        terms.node(Node::Star(any));
         terms
     }
 
@@ -766,14 +901,24 @@ impl Terms {
         if let Some(&t) = self.ids.get(&n) {
             return t;
         }
-        let nullable = match &n {
-            Node::Empty | Node::Class(_) => false,
-            Node::Eps | Node::Star(_) => true,
-            Node::Cat(l, r) => self.nullable[*l as usize] && self.nullable[*r as usize],
-            Node::Alt(ts) => ts.iter().any(|&t| self.nullable[t as usize]),
+        let (p, z) = (&self.plain, &self.nullable);
+        let (plain, nullable) = match &n {
+            Node::Empty | Node::Class(_) => (true, false),
+            Node::Eps => (true, true),
+            Node::Star(r) => (p[*r as usize], true),
+            Node::Cat(l, r) => (
+                p[*l as usize] && p[*r as usize],
+                z[*l as usize] && z[*r as usize],
+            ),
+            Node::Alt(ts) => (
+                ts.iter().all(|&t| p[t as usize]),
+                ts.iter().any(|&t| z[t as usize]),
+            ),
+            Node::And(_) | Node::Not(_) | Node::Guard(_) | Node::Behind(..) => (false, false),
         };
         let t = self.nodes.len() as T;
         self.nodes.push(n.clone());
+        self.plain.push(plain);
         self.nullable.push(nullable);
         self.ids.insert(n, t);
         t
@@ -815,6 +960,42 @@ impl Terms {
         }
     }
 
+    fn and(&mut self, ts: Vec<T>) -> T {
+        let mut all = Vec::new();
+        for t in ts {
+            match &self.nodes[t as usize] {
+                Node::And(inner) => all.extend_from_slice(inner),
+                Node::Empty => return EMPTY,
+                _ if t == SIGMA => {}
+                _ => all.push(t),
+            }
+        }
+        all.sort_unstable();
+        all.dedup();
+        match all.len() {
+            0 => SIGMA,
+            1 => all[0],
+            _ => self.node(Node::And(all)),
+        }
+    }
+
+    fn not(&mut self, a: T) -> T {
+        match self.nodes[a as usize] {
+            Node::Not(x) => x,
+            Node::Empty => SIGMA,
+            _ if a == SIGMA => EMPTY,
+            _ => self.node(Node::Not(a)),
+        }
+    }
+
+    fn guard(&mut self, g: T) -> T {
+        match g {
+            SIGMA => EPS,
+            EMPTY => EMPTY,
+            _ => self.node(Node::Guard(g)),
+        }
+    }
+
     fn star(&mut self, a: T) -> T {
         match self.nodes[a as usize] {
             Node::Empty | Node::Eps => EPS,
@@ -823,7 +1004,18 @@ impl Terms {
         }
     }
 
-    /// The term of `re`.
+    /// The context of the components `comps`.
+    fn context(&mut self, comps: Vec<T>) -> u32 {
+        let next = self.contexts.len() as u32;
+        let id = *self.context_ids.entry(comps.clone()).or_insert(next);
+        if id == next {
+            self.contexts.push(comps);
+        }
+        id
+    }
+
+    /// The term of `re`. A lookbehind body is a term of its own, and its component
+    /// starts as `SIGMA body`.
     fn of(&mut self, re: &Re) -> T {
         match re {
             Re::Empty => EPS,
@@ -849,53 +1041,179 @@ impl Terms {
                 let t = self.of(r);
                 self.alt(vec![t, EPS])
             }
+            Re::Look {
+                ahead: true,
+                negate,
+                body,
+            } => {
+                let b = self.of(body);
+                let g = self.cat(b, SIGMA);
+                let g = if *negate { self.not(g) } else { g };
+                self.guard(g)
+            }
+            Re::Look {
+                ahead: false,
+                negate,
+                body,
+            } => {
+                let b = self.of(body);
+                let k = match self.bodies.iter().position(|&x| x == b) {
+                    Some(k) => k,
+                    None => {
+                        self.bodies.push(b);
+                        self.bodies.len() - 1
+                    }
+                };
+                self.node(Node::Behind(k as u32, !negate))
+            }
         }
     }
 
-    /// The term of the strings `s` such that the byte `b` then `s` is in `t`.
-    fn derive(&mut self, t: T, b: u8) -> T {
-        if let Some(&d) = self.derived.get(&(t, b)) {
+    /// The components a text starts with: `SIGMA body` for each body.
+    fn first_context(&mut self) -> u32 {
+        let comps = (0..self.bodies.len())
+            .map(|k| self.cat(SIGMA, self.bodies[k]))
+            .collect();
+        self.context(comps)
+    }
+
+    /// Whether `t` matches the empty span at the end of the text, in context `cx`.
+    fn ends(&self, t: T, cx: u32) -> bool {
+        if self.plain[t as usize] {
+            return self.nullable[t as usize];
+        }
+        match &self.nodes[t as usize] {
+            Node::Empty | Node::Class(_) => false,
+            Node::Eps | Node::Star(_) => true,
+            Node::Cat(..) => {
+                let mut x = t;
+                while let Node::Cat(l, r) = self.nodes[x as usize] {
+                    if !self.ends(l, cx) {
+                        return false;
+                    }
+                    x = r;
+                }
+                self.ends(x, cx)
+            }
+            Node::Alt(ts) => ts.iter().any(|&t| self.ends(t, cx)),
+            Node::And(ts) => ts.iter().all(|&t| self.ends(t, cx)),
+            Node::Not(x) => !self.ends(*x, cx),
+            Node::Guard(g) => self.ends(*g, cx),
+            Node::Behind(k, holds) => {
+                self.ends(self.contexts[cx as usize][*k as usize], cx) == *holds
+            }
+        }
+    }
+
+    /// The rests under which `t` matches the empty span here, in context `cx`: for a
+    /// plain term, every rest or none.
+    fn condition(&mut self, t: T, cx: u32) -> T {
+        if self.plain[t as usize] {
+            return if self.nullable[t as usize] {
+                SIGMA
+            } else {
+                EMPTY
+            };
+        }
+        if let Some(&c) = self.conditions.get(&(t, cx)) {
+            return c;
+        }
+        let c = match self.nodes[t as usize].clone() {
+            Node::Empty | Node::Class(_) => EMPTY,
+            Node::Eps | Node::Star(_) => SIGMA,
+            Node::Cat(..) => {
+                let mut parts = Vec::new();
+                let mut x = t;
+                while let Node::Cat(l, r) = self.nodes[x as usize] {
+                    parts.push(self.condition(l, cx));
+                    x = r;
+                }
+                parts.push(self.condition(x, cx));
+                self.and(parts)
+            }
+            Node::Alt(ts) => {
+                let cs = ts.iter().map(|&t| self.condition(t, cx)).collect();
+                self.alt(cs)
+            }
+            Node::And(ts) => {
+                let cs = ts.iter().map(|&t| self.condition(t, cx)).collect();
+                self.and(cs)
+            }
+            Node::Not(x) => {
+                let c = self.condition(x, cx);
+                self.not(c)
+            }
+            Node::Guard(g) => g,
+            Node::Behind(k, holds) => {
+                let c = self.condition(self.contexts[cx as usize][k as usize], cx);
+                if holds {
+                    c
+                } else {
+                    self.not(c)
+                }
+            }
+        };
+        self.conditions.insert((t, cx), c);
+        c
+    }
+
+    /// The term `d` with `M(d, i + 1, j) = M(t, i, j)` where the byte at `i` is `b`,
+    /// in context `cx`: the strings `s` such that `b` then `s` is in `t`.
+    fn derive(&mut self, t: T, b: u8, cx: u32) -> T {
+        let cx = if self.plain[t as usize] { 0 } else { cx };
+        if let Some(&d) = self.derived.get(&(t, b, cx)) {
             return d;
         }
         let d = match self.nodes[t as usize].clone() {
-            Node::Empty | Node::Eps => EMPTY,
+            Node::Empty | Node::Eps | Node::Guard(_) | Node::Behind(..) => EMPTY,
             Node::Class(c) => match c.contains(b) {
                 true => EPS,
                 false => EMPTY,
             },
             Node::Alt(ts) => {
-                let ds = ts.iter().map(|&t| self.derive(t, b)).collect();
+                let ds = ts.iter().map(|&t| self.derive(t, b, cx)).collect();
                 self.alt(ds)
             }
+            Node::And(ts) => {
+                let ds = ts.iter().map(|&t| self.derive(t, b, cx)).collect();
+                self.and(ds)
+            }
+            Node::Not(x) => {
+                let d = self.derive(x, b, cx);
+                self.not(d)
+            }
             Node::Star(r) => {
-                let dr = self.derive(r, b);
+                let dr = self.derive(r, b, cx);
                 self.cat(dr, t)
             }
-            // Down the spine while the left term can match the empty string: the
-            // recursion goes only into a left term, so its depth is the nesting.
+            // A part for each left term that takes `b`, under the condition the terms
+            // before it put on the rest as they match the empty span. The recursion
+            // goes only into a left term, so its depth is the nesting.
             Node::Cat(..) => {
                 let mut parts = Vec::new();
+                let mut held = SIGMA;
                 let mut x = t;
                 loop {
-                    match self.nodes[x as usize] {
-                        Node::Cat(l, r) => {
-                            let dl = self.derive(l, b);
-                            parts.push(self.cat(dl, r));
-                            if !self.nullable[l as usize] {
-                                break;
-                            }
-                            x = r;
-                        }
-                        _ => {
-                            parts.push(self.derive(x, b));
-                            break;
-                        }
+                    let (l, r) = match self.nodes[x as usize] {
+                        Node::Cat(l, r) => (l, r),
+                        _ => (x, EPS),
+                    };
+                    let dl = self.derive(l, b, cx);
+                    let dh = self.derive(held, b, cx);
+                    let rest = self.cat(dl, r);
+                    let g = self.guard(dh);
+                    parts.push(self.cat(g, rest));
+                    let c = self.condition(l, cx);
+                    held = self.and(vec![held, c]);
+                    if held == EMPTY || r == EPS {
+                        break;
                     }
+                    x = r;
                 }
                 self.alt(parts)
             }
         };
-        self.derived.insert((t, b), d);
+        self.derived.insert((t, b, cx), d);
         d
     }
 }
@@ -906,7 +1224,7 @@ fn classes<'a>(re: &'a Re, out: &mut Vec<&'a ByteClass>) {
         Re::Empty => {}
         Re::Class(c) => out.push(c),
         Re::Concat(ps) | Re::Alt(ps) => ps.iter().for_each(|p| classes(p, out)),
-        Re::Star(r) | Re::Plus(r) | Re::Opt(r) => classes(r, out),
+        Re::Star(r) | Re::Plus(r) | Re::Opt(r) | Re::Look { body: r, .. } => classes(r, out),
     }
 }
 
@@ -1490,8 +1808,10 @@ pub fn compile(pattern: &str) -> Result<Dfa, Refusal> {
 /// pathological pattern is a compile error, not a hang.
 const DFA_STATE_BUDGET: usize = 8_192;
 
-/// The DFA of `pattern` by derivatives: a state is a term, and the state a run of
-/// bytes leads to is the term's derivative by the run's first byte.
+/// The DFA of `pattern` by derivatives: a state is the term of the rest of the text
+/// and its components, and the state a run of bytes leads to derives each of them
+/// by the run's first byte. A state accepts where its term matches the empty span
+/// at the end.
 fn compile_uncached(pattern: &str) -> Result<Dfa, Refusal> {
     let re = parse(pattern)?;
     let mut all = Vec::new();
@@ -1501,7 +1821,7 @@ fn compile_uncached(pattern: &str) -> Result<Dfa, Refusal> {
         .chain((1..=255u8).filter(|&b| all.iter().any(|c| c.contains(b) != c.contains(b - 1))))
         .collect();
     let mut terms = Terms::new();
-    let start = terms.of(&re);
+    let start = (terms.of(&re), terms.first_context());
     let mut number = std::collections::HashMap::from([(start, 0u32)]);
     let mut states = vec![start];
     let mut table: Vec<u32> = Vec::new();
@@ -1513,8 +1833,8 @@ fn compile_uncached(pattern: &str) -> Result<Dfa, Refusal> {
                 "pattern compiles past the maximum ({DFA_STATE_BUDGET} DFA states)"
             )));
         }
-        let t = states[k];
-        accepting.push(terms.nullable[t as usize]);
+        let (t, cx) = states[k];
+        accepting.push(terms.ends(t, cx));
         let mut run = 0;
         for b in 0..=255u8 {
             if firsts.get(run + 1) == Some(&b) {
@@ -1522,7 +1842,9 @@ fn compile_uncached(pattern: &str) -> Result<Dfa, Refusal> {
             }
             let next = match firsts[run] == b {
                 true => {
-                    let d = terms.derive(t, b);
+                    let comps = terms.contexts[cx as usize].clone();
+                    let comps = comps.iter().map(|&c| terms.derive(c, b, cx)).collect();
+                    let d = (terms.derive(t, b, cx), terms.context(comps));
                     *number.entry(d).or_insert_with(|| {
                         states.push(d);
                         states.len() as u32 - 1
@@ -1854,8 +2176,22 @@ mod tests {
         let says = |p: &str| compile(p).err().map(|e| e.to_string());
         let says = |p: &str, s: &str| assert_eq!(says(p).as_deref(), Some(s), "{p}");
         says("(?x)a", "a flag (`x`) that is none of `i`, `m` and `s`");
-        says("(?=a)", "an assertion (`(?=`) is not supported");
-        says("a^", "an assertion (`^`) is not supported");
+        says(
+            "(?=a)*",
+            "a repeat after an assertion, which matches no character",
+        );
+        says(
+            "a^{2}",
+            "a repeat after an assertion, which matches no character",
+        );
+        says(
+            "(?=(a))",
+            "a capturing group inside a lookaround: write `(?:..)`",
+        );
+        says(
+            "(?<!(?<n>a))",
+            "a capturing group inside a lookaround: write `(?:..)`",
+        );
         says(
             "(?>a)",
             "a PCRE control form (`(?>`), which only a backtracking engine has",
@@ -1886,7 +2222,10 @@ mod tests {
             "\\1",
             "the escape `\\1` means nothing: a backslash makes only ASCII punctuation literal",
         );
-        says("\\b", "an assertion (`\\b`) is not supported");
+        says(
+            "\\b+",
+            "a repeat after an assertion, which matches no character",
+        );
         says(
             "[\\A]",
             "an anchor or a backreference (`\\A`) cannot stand inside a character class",
@@ -2206,5 +2545,170 @@ mod tests {
             Err(w) => assert_eq!(w, "nav.profile.label"),
             Ok(()) => panic!("expected a witness"),
         }
+    }
+
+    #[test]
+    fn an_assertion_holds_at_a_position_and_takes_no_character() {
+        assert!(m("^abc$", "abc"));
+        assert_eq!(dfa("a^b").enumerate(1), Some(vec![]));
+        assert!(m("(?m)a$\\n^b", "a\nb"));
+        assert!(!m("a$\\nb", "a\nb"));
+        assert!(m("a\\Z\\n", "a\n"));
+        assert!(m("a\\b-", "a-"));
+        assert!(m("a\\Bb", "ab") && !m("a\\bb", "ab"));
+        assert!(m("(?!\\.)[a-z.]+", "a.b") && !m("(?!\\.)[a-z.]+", ".ab"));
+        assert!(m("[a-z]+(?<!x)", "abc") && !m("[a-z]+(?<!x)", "abx"));
+        // A lookbehind whose body grows, and one inside a lookahead.
+        assert!(m("a+(?<=^a{2,3})b", "aab") && !m("a+(?<=^a{2,3})b", "aaaab"));
+        assert!(m("(?=a(?<=^a))a", "a"));
+        // No string is wholly `(?<=a)b`: the lookbehind looks before the text.
+        assert_eq!(dfa("(?<=a)b").enumerate(1), Some(vec![]));
+        assert!(m("\\<a+\\>", "aa") && !m("x\\b{start-half}", "x"));
+    }
+
+    #[test]
+    fn a_language_with_an_assertion_is_proved_by_containment() {
+        // A known result: the toy of the design note is the DFA of `[a-z]+`.
+        let (a, b) = (dfa("(?!\\.)[a-z]+"), dfa("[a-z]+"));
+        assert_eq!((&a.accepting, &a.table), (&b.accepting, &b.table));
+        // The empty language is in every language and finite.
+        let empty = dfa("a^b");
+        assert!(empty.is_finite() && contains(&dfa("x"), &empty).is_ok());
+        // A singleton.
+        let one = dfa("^(?=ab)a(?<=a)b$");
+        assert_eq!(one.enumerate(4), Some(vec!["ab".to_string()]));
+        assert!(contains(&dfa("[ab]+"), &one).is_ok());
+        // Adversarial: the witness is longer than any literal of the pattern.
+        let sup = dfa("(?:a|b)*(?<!aaa)");
+        assert_eq!(contains(&sup, &dfa("a*")), Err("aaa".to_string()));
+    }
+
+    /// The ends of the spans `re` matches in `text` from `i`, by the definition of
+    /// each form: a test oracle with no derivative in it.
+    fn spans(re: &Re, text: &[u8], i: usize) -> std::collections::BTreeSet<usize> {
+        use std::collections::BTreeSet;
+        let after = |from: &BTreeSet<usize>, r: &Re| -> BTreeSet<usize> {
+            from.iter().flat_map(|&j| spans(r, text, j)).collect()
+        };
+        match re {
+            Re::Empty => BTreeSet::from([i]),
+            Re::Class(c) => (text.get(i).filter(|&&b| c.contains(b)))
+                .map(|_| i + 1)
+                .into_iter()
+                .collect(),
+            Re::Concat(ps) => ps.iter().fold(BTreeSet::from([i]), |at, p| after(&at, p)),
+            Re::Alt(bs) => bs.iter().flat_map(|b| spans(b, text, i)).collect(),
+            Re::Opt(r) => spans(r, text, i).into_iter().chain([i]).collect(),
+            Re::Plus(r) => {
+                let first = spans(r, text, i);
+                let star = Re::Star(r.clone());
+                after(&first, &star)
+            }
+            Re::Star(r) => {
+                let mut reach = BTreeSet::from([i]);
+                loop {
+                    let more: BTreeSet<usize> = &reach | &after(&reach, r);
+                    if more == reach {
+                        return reach;
+                    }
+                    reach = more;
+                }
+            }
+            Re::Look {
+                ahead,
+                negate,
+                body,
+            } => {
+                let holds = match ahead {
+                    true => !spans(body, text, i).is_empty(),
+                    false => (0..=i).any(|j| spans(body, text, j).contains(&i)),
+                };
+                match holds != *negate {
+                    true => BTreeSet::from([i]),
+                    false => BTreeSet::new(),
+                }
+            }
+        }
+    }
+
+    /// A draw below `n` from the generator state `seed`, which it advances.
+    fn draw(seed: &mut u64, n: usize) -> usize {
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*seed >> 33) as usize % n
+    }
+
+    /// A pattern over the assertions and the atoms they look at.
+    fn assertion_pattern(seed: &mut u64, depth: u32) -> String {
+        let atoms = [
+            "a", "b", "[ab]", "\\w", "\\W", ".", "-", "\\n", "^", "$", "\\b", "\\B", "\\A", "\\z",
+            "\\Z", "\\<", "\\>", "(?m)",
+        ];
+        let opens = ["(?=", "(?!", "(?<=", "(?<!", "(?:"];
+        let repeats = ["", "", "", "*", "+", "?", "{1,2}"];
+        let mut out = String::new();
+        for b in 0..1 + draw(seed, 2) {
+            if b > 0 {
+                out.push('|');
+            }
+            for _ in 0..1 + draw(seed, 3) {
+                let pick = draw(seed, atoms.len() + 4);
+                if pick >= atoms.len() && depth > 0 {
+                    let open = opens[draw(seed, opens.len())];
+                    let inner = assertion_pattern(seed, depth - 1);
+                    out.push_str(&format!("{open}{inner})"));
+                    if open == "(?:" {
+                        out.push_str(repeats[draw(seed, repeats.len())]);
+                    }
+                    continue;
+                }
+                let atom = atoms[pick % atoms.len()];
+                out.push_str(atom);
+                if pick % atoms.len() < 8 {
+                    out.push_str(repeats[draw(seed, repeats.len())]);
+                }
+            }
+        }
+        out
+    }
+
+    /// The licence of the derivative construction: on every text of up to five bytes
+    /// over `a`, `b`, `-` and LF, the DFA of each generated pattern accepts where the
+    /// definition matches the whole text.
+    #[test]
+    fn the_dfa_of_an_assertion_matches_what_the_definition_matches() {
+        let alphabet = b"ab-\n";
+        let mut texts: Vec<Vec<u8>> = vec![Vec::new()];
+        let mut from = 0;
+        for _ in 0..5 {
+            let to = texts.len();
+            for t in from..to {
+                for &c in alphabet {
+                    let mut x = texts[t].clone();
+                    x.push(c);
+                    texts.push(x);
+                }
+            }
+            from = to;
+        }
+        let (mut seed, mut patterns, mut accepted) = (7u64, 0, 0);
+        while patterns < 400 {
+            let pattern = assertion_pattern(&mut seed, 2);
+            let Ok(got) = compile(&pattern) else {
+                continue;
+            };
+            let re = parse(&pattern).expect("it compiled");
+            for t in &texts {
+                let want = spans(&re, t, 0).contains(&t.len());
+                let text = std::str::from_utf8(t).expect("ASCII");
+                assert_eq!(got.matches(text), want, "`{pattern}` on {text:?}");
+                accepted += usize::from(want);
+            }
+            patterns += 1;
+        }
+        assert_eq!((patterns, texts.len()), (400, 1365));
+        // The texts each pattern accepts, summed: the agreement is not all on rejection.
+        assert_eq!(accepted, 4735);
     }
 }

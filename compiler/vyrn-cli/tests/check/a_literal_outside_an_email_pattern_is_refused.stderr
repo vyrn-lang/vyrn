@@ -1,0 +1,1 @@
+a_literal_outside_an_email_pattern_is_refused.vyrn:4:0: ".a@x.com" does not satisfy `Email` (predicate `where value =~ "^((?!\\.)[\\w\\-_.]*[^.])(@\\w+)(\\.\\w+(\\.\\w+)?[^.\\W])$"` is false)

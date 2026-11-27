@@ -7137,10 +7137,10 @@ fn main() -> Int64 {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A pattern of a refinement type is coloured past a refusal: the reading goes on
-/// where the refused form ends, so the `\.` after the refused `(?!` is an escape.
+/// The Email pattern of a refinement type checks, and each construct of it has its
+/// colour: its `^`, its lookahead and its escapes.
 #[test]
-fn a_where_pattern_is_coloured_past_a_refusal() {
+fn a_where_pattern_with_a_lookahead_is_coloured() {
     let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("vyrn_lsp_email_{}_{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -7158,26 +7158,26 @@ fn main() -> Int64 {
     let mut client = spawn_client();
     did_open(&mut client, &uri, "vyrn", src);
     let diags = read_diags_for(&mut client, "main.vyrn");
-    let at = diags.pointer("/params/diagnostics/0/range/start/character");
-    assert_eq!(at, Some(&serde_json::json!(37)), "{diags}");
+    let none = diags.pointer("/params/diagnostics");
+    assert_eq!(none, Some(&serde_json::json!([])), "{diags}");
     let toks = semantic_tokens_full(&mut client, &uri);
     let line: Vec<_> = (toks.iter())
-        .filter(|t| t.line == 0 && t.ch >= 37)
+        .filter(|t| t.line == 0 && t.ch >= 36)
         .map(|t| (t.ch, t.len, t.ty.as_str()))
         .collect();
-    // The `)` that closes the first group reads as a stray one after the refusal.
-    let (group, class, esc) = ("regexpGroup", "regexp", "escapeSequence");
+    let (group, class, esc, op) = ("regexpGroup", "regexp", "escapeSequence", "operator");
     let quant = "regexpQuantifier";
     let want = [
-        (37, 4, group),
+        (36, 1, op),
+        (37, 1, group),
+        (38, 3, op),
         (41, 3, esc),
-        (44, 1, group),
         (45, 1, class),
         (46, 6, esc),
         (52, 3, class),
         (55, 1, quant),
         (56, 4, class),
-        (61, 1, group),
+        (60, 2, group),
         (63, 3, esc),
         (66, 1, quant),
         (67, 2, group),
@@ -7192,7 +7192,7 @@ fn main() -> Int64 {
         (89, 3, esc),
         (92, 1, class),
         (93, 1, group),
-        (94, 1, "operator"),
+        (94, 1, op),
     ];
     assert_eq!(line, want, "{toks:?}");
     let _ = client.child.kill();

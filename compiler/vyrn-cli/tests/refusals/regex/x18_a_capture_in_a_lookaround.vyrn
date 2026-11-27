@@ -1,5 +1,5 @@
 fn f(s: String) -> Bool {
-    return s =~ "a\\b"
+    return s =~ "a(?=(b))"
 }
 
 fn main() -> Int64 {

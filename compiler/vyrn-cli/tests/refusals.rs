@@ -953,8 +953,8 @@ fn the_regex_refusals_are_the_catalogues_sentences() {
             "the escape `\\y` means nothing: a backslash makes only ASCII punctuation literal",
         ),
         (
-            "x02_a_boundary_escape.vyrn",
-            "an assertion (`\\b`) is not supported",
+            "x02_a_repeated_assertion.vyrn",
+            "a repeat after an assertion, which matches no character",
         ),
         (
             "x03_an_anchor_in_a_class.vyrn",
@@ -1015,6 +1015,10 @@ fn the_regex_refusals_are_the_catalogues_sentences() {
         (
             "x17_a_group_name_used_twice.vyrn",
             "invalid regex `(?<a>b)(?<a>c)`: a group name that names two groups",
+        ),
+        (
+            "x18_a_capture_in_a_lookaround.vyrn",
+            "invalid regex `a(?=(b))`: a capturing group inside a lookaround: write `(?:..)`",
         ),
     ];
     let dir = dir().join("regex");

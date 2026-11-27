@@ -1164,7 +1164,7 @@ mod tests {
                 "`weird`",
             ),
             (
-                r#"{"title": "X", "type": "string", "pattern": "a(?=b)"}"#,
+                r#"{"title": "X", "type": "string", "pattern": "a(?R)"}"#,
                 "regex subset",
             ),
         ] {

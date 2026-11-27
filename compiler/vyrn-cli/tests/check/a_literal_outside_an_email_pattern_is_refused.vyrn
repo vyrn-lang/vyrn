@@ -1,0 +1,6 @@
+type Email = String where value =~ "^((?!\\.)[\\w\\-_.]*[^.])(@\\w+)(\\.\\w+(\\.\\w+)?[^.\\W])$"
+
+fn main() -> Int64 {
+    let e: Email = ".a@x.com"
+    return 0
+}

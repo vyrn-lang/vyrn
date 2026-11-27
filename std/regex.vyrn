@@ -15,12 +15,21 @@
 /// count makes it lazy. `(?:..)` groups without a name, `(?<n>..)`, `(?P<n>..)`
 /// and `(?'n'..)` name a group, and `(?#..)` is a comment.
 /// The flags `i` (ASCII case folding), `s` (`.` takes `\n` and `\r`) and `m` hold
-/// for the rest of a group after `(?ims-ims)`, or inside `(?ims-ims:..)`. `^`, `$`
-/// and every other assertion are refused, and the empty pattern matches the empty
-/// string. A Thompson NFA with no backtracking, so the time is linear in the pattern
-/// size times the input for every pattern. A search runs it as two lazy DFAs, one
-/// forward to a match's end and one back to its start: one table read per byte. It
-/// has no backreferences or lookaround.
+/// for the rest of a group after `(?ims-ims)`, or inside `(?ims-ims:..)`, and the
+/// empty pattern matches the empty string. A Thompson NFA with no backtracking, so
+/// the time is linear in the pattern size times the input for every pattern. A
+/// search runs it as two lazy DFAs, one forward to a match's end and one back to its
+/// start: one table read per byte. It has no backreferences.
+///
+/// `(?=..)`, `(?!..)`, `(?<=..)` and `(?<!..)` look ahead and behind, nested to any
+/// depth, and see the whole text, before `from` too. `^` and `$` are the text's ends,
+/// or a line's under `m`; `\A` and `\z` are the text's ends, and `\Z` is the end
+/// or a final `\n`. `\b` is a word boundary and `\B` any other position, `\<` and
+/// `\b{start}` a word's start, `\>` and `\b{end}` its end, and `\b{start-half}` and
+/// `\b{end-half}` the side of each that is no word character. A search of a pattern
+/// with an assertion first runs one pass per lookaround body over the text, and then
+/// the NFA, not the lazy DFAs: the time stays linear. A capturing group inside a
+/// lookaround is refused.
 ///
 /// `captures` gives a match's groups, numbered from 1 in the order of their `(`;
 /// `(?:..)` and `(?i:..)` do not count. `capture` and `named` read one.
@@ -59,6 +68,10 @@ let opMatch = 2
 /// to `b[i]`. Every other walk passes it as an empty edge.
 let opSave = 3
 
+/// `op[i]` goes on to `b[i]` where lookaround body `a[i] / 2` holds at the offset,
+/// or where it does not for an odd `a[i]` ([`holds`]).
+let opAssert = 4
+
 /// A set of bytes: byte `c` is in it when bit `c % 64` of word `c / 64` is set.
 ///
 /// Four words and not an array, so a membership test reads no array and has no
@@ -74,7 +87,13 @@ export type Regex = {
     rev: Program,
     // The name of group `k` at `k - 1`, or "" for a group with none.
     names: Array<String>,
+    // Each lookaround body, inner ones before the bodies that hold them.
+    looks: Array<Look>,
 }
+
+/// A lookaround body: whether it looks `behind`, where its pcs start in `fwd`, and
+/// where its reverse starts in `rev`, which a lookahead's pass reads.
+type Look = { behind: Bool, fwd: Int64, rev: Int64 }
 
 type Program = {
     op: Array<Int64>,
@@ -87,6 +106,8 @@ type Program = {
     // most `c`, so a `UInt8` holds it.
     classOf: Array<UInt8>,
     classCount: Int64,
+    // The lookaround bodies of the pattern, which an assertion's bit indexes.
+    looks: Int64,
 }
 
 /// One match: a half-open byte range of the haystack.
@@ -131,15 +152,24 @@ type Builder = {
     // The terms counted repetition has copied, against `countBudget`.
     expanded: Int64,
     // The flags of the group being walked: `fold` is `i`, which folds ASCII case,
-    // and `dotAll` is `s`, which lets `.` take `\n` and `\r`. `m` changes only `^`
-    // and `$`, which `AnchorPending` refuses.
+    // `dotAll` is `s`, which lets `.` take `\n` and `\r`, and `lines` is `m`, which
+    // makes `^` and `$` a line's ends.
     fold: Bool,
     dotAll: Bool,
+    lines: Bool,
     // The offset of each capturing group's `(`, by number from 1, and its name or
     // "" in `names`: a count walks a group once per copy, and a name names one
     // group.
     groupAt: Array<Int64>,
     names: Array<String>,
+    // The lookarounds around the term being walked.
+    lookDepth: Int64,
+    // Each lookaround body by its key, whether it looks behind, its first pc and its
+    // match pc. A count walks a lookaround once per copy, and the key finds its body.
+    lookKeys: Array<String>,
+    lookBehind: Array<Bool>,
+    lookStart: Array<Int64>,
+    lookEnd: Array<Int64>,
 }
 
 /// The terms counted repetition may copy in one pattern. Nested counts multiply,
@@ -167,7 +197,8 @@ fn regexSay(row: rx.Row) -> String {
         StrayBrace => say.tStrayBrace__En(),
         StrayParen => say.tStrayParen__En(),
         TooDeep => say.tTooDeep__En(),
-        AnchorPending(a) => say.tAnchorPending__En(a),
+        AssertionRepeat => say.tAssertionRepeat__En(),
+        LookCapture => say.tLookCapture__En(),
         ClassAnchor(c) => say.tClassAnchor__En(c),
         ClassRange => say.tClassRange__En(),
         CodepointRange => say.tCodepointRange__En(),
@@ -735,6 +766,8 @@ fn setFlags(bd: modify Builder, pattern: String, from: Int64, to: Int64) {
             bd.fold = on
         } else if pattern[i] == 's' {
             bd.dotAll = on
+        } else if pattern[i] == 'm' {
+            bd.lines = on
         }
         i = i + 1
     }
@@ -744,6 +777,7 @@ fn setFlags(bd: modify Builder, pattern: String, from: Int64, to: Int64) {
 fn fragGroup(bd: modify Builder, pattern: String, g: rx.RegexSubpattern) -> Frag {
     let fold = bd.fold
     let dotAll = bd.dotAll
+    let lines = bd.lines
     let open = g.open.text
     let named = open.byteLength > 2 && (open[2] == 'P' || open[2] == '<' || open[2] == '\'')
     if !named && open.byteLength > 2 {
@@ -751,7 +785,11 @@ fn fragGroup(bd: modify Builder, pattern: String, g: rx.RegexSubpattern) -> Frag
         let f = fragAlt(bd, pattern, g.alt)
         bd.fold = fold
         bd.dotAll = dotAll
+        bd.lines = lines
         return f
+    }
+    if bd.lookDepth > 0 {
+        refuse(bd, LookCapture)
     }
     let name = if named { substring(open, if open[2] == 'P' { 4 } else { 3 }, open.byteLength - 1) } else { "" }
     let k = groupNumber(bd, g.start, name)
@@ -762,7 +800,160 @@ fn fragGroup(bd: modify Builder, pattern: String, g: rx.RegexSubpattern) -> Frag
     patch(bd, f.holes, last)
     bd.fold = fold
     bd.dotAll = dotAll
+    bd.lines = lines
     return Frag { start: first, holes: [last * 2 + 1] }
+}
+
+/// The flags of `bd` as a key's prefix: two bodies of one text are one body only
+/// under the same flags.
+fn flagKey(bd: Builder) -> String {
+    return (if bd.fold { "i" } else { "" }) + (if bd.dotAll { "s" } else { "" }) + (if bd.lines { "m" } else { "" }) + ":"
+}
+
+/// The lookaround body of `key`, or -1 for one not built.
+fn lookOf(bd: Builder, key: String) -> Int64 {
+    let mut k = 0
+    while k < bd.lookKeys.length {
+        if bd.lookKeys[k] == key {
+            return k
+        }
+        k = k + 1
+    }
+    return 0 - 1
+}
+
+/// Adds the body `f` of `key` with its own match, and answers its number.
+fn addLook(bd: modify Builder, key: String, behind: Bool, f: consume Frag) -> Int64 {
+    let m = emit(bd, opMatch, 0, 0, noBytes())
+    patch(bd, f.holes, m)
+    bd.lookKeys.push(key.copy())
+    bd.lookBehind.push(behind)
+    bd.lookStart.push(f.start)
+    bd.lookEnd.push(m)
+    return bd.lookKeys.length - 1
+}
+
+/// The test that body `k` holds here, or does not when `negate`.
+fn fragAssert(bd: modify Builder, k: Int64, negate: Bool) -> Frag {
+    let pc = emit(bd, opAssert, 2 * k + (if negate { 1 } else { 0 }), 0, noBytes())
+    return Frag { start: pc, holes: [pc * 2 + 1] }
+}
+
+/// The lookaround `l`. Its flags end at its `)`, as a group's do.
+fn fragLookaround(bd: modify Builder, pattern: String, l: rx.RegexLookaround) -> Frag {
+    let open = l.open.text
+    let behind = open[2] == '<'
+    let negate = open[open.byteLength - 1] == '!'
+    let key = (if behind { "<" } else { ">" }) + flagKey(bd) + substring(pattern, l.alt.start, l.alt.end)
+    let mut k = lookOf(bd, key)
+    if k < 0 {
+        let fold = bd.fold
+        let dotAll = bd.dotAll
+        let lines = bd.lines
+        bd.lookDepth = bd.lookDepth + 1
+        let f = fragAlt(bd, pattern, l.alt)
+        bd.lookDepth = bd.lookDepth - 1
+        bd.fold = fold
+        bd.dotAll = dotAll
+        bd.lines = lines
+        k = addLook(bd, key, behind, f)
+    }
+    return fragAssert(bd, k, negate)
+}
+
+/// The body of one byte of `set` under `key`, built once.
+fn lookSet(bd: modify Builder, key: String, behind: Bool, set: ByteSet) -> Int64 {
+    let k = lookOf(bd, key)
+    if k >= 0 {
+        return k
+    }
+    return addLook(bd, key, behind, fragSet(bd, set))
+}
+
+/// `f` then `g`.
+fn fragThen(bd: modify Builder, f: consume Frag, g: consume Frag) -> Frag {
+    patch(bd, f.holes, g.start)
+    return Frag { start: f.start, holes: consume g.holes }
+}
+
+/// `f` or `g`.
+fn fragEither(bd: modify Builder, f: consume Frag, g: consume Frag) -> Frag {
+    let sp = emit(bd, opSplit, f.start, g.start, noBytes())
+    return Frag { start: sp, holes: joinHoles(f.holes, g.holes) }
+}
+
+/// Whether the text before is a word character, unless `notBefore`, and the text
+/// after is one, unless `notAfter`.
+fn fragWords(bd: modify Builder, notBefore: Bool, notAfter: Bool) -> Frag {
+    let before = fragAssert(bd, lookSet(bd, "<w", true, wordBytes()), notBefore)
+    let after = fragAssert(bd, lookSet(bd, ">w", false, wordBytes()), notAfter)
+    return fragThen(bd, before, after)
+}
+
+/// The bytes of `\w`.
+fn wordBytes() -> ByteSet {
+    let mut w = noBytes()
+    addRange(w, 48, 57)
+    addRange(w, 65, 90)
+    addRange(w, 95, 95)
+    addRange(w, 97, 122)
+    return w
+}
+
+/// The assertion `a`: `^` or `$`, or the text after the backslash of `\b`, `\B`,
+/// `\A`, `\z`, `\Z`, `\<`, `\>` or a `\b{..}`. Each is a lookaround over one byte,
+/// which is a character's own byte for `\n` and the ASCII of `\w`, as the compiler's
+/// builder states them (`regex::anchor`).
+fn fragAnchor(bd: modify Builder, a: String) -> Frag {
+    let mut edge = allBytes()
+    if bd.lines {
+        edge.w0 = edge.w0 ^ 1024
+    }
+    let side = if bd.lines { "nl" } else { "any" }
+    if a == "^" {
+        return fragAssert(bd, lookSet(bd, "<" + side, true, edge), true)
+    }
+    if a == "$" {
+        return fragAssert(bd, lookSet(bd, ">" + side, false, edge), true)
+    }
+    if a == "A" {
+        return fragAssert(bd, lookSet(bd, "<any", true, allBytes()), true)
+    }
+    if a == "z" {
+        return fragAssert(bd, lookSet(bd, ">any", false, allBytes()), true)
+    }
+    if a == "Z" {
+        let mut k = lookOf(bd, ">Z")
+        if k < 0 {
+            let nl = fragOp(bd, fragRange(bd, 10, 10), "?", false)
+            let end = fragAssert(bd, lookSet(bd, ">any", false, allBytes()), true)
+            k = addLook(bd, ">Z", false, fragThen(bd, nl, end))
+        }
+        return fragAssert(bd, k, false)
+    }
+    if a == "b{start-half}" {
+        return fragAssert(bd, lookSet(bd, "<w", true, wordBytes()), true)
+    }
+    if a == "b{end-half}" {
+        return fragAssert(bd, lookSet(bd, ">w", false, wordBytes()), true)
+    }
+    if a == "<" || a == "b{start}" {
+        return fragWords(bd, true, false)
+    }
+    if a == ">" || a == "b{end}" {
+        return fragWords(bd, false, true)
+    }
+    if a == "b" {
+        let end = fragWords(bd, false, true)
+        return fragEither(bd, end, fragWords(bd, true, false))
+    }
+    let inside = fragWords(bd, false, false)
+    return fragEither(bd, inside, fragWords(bd, true, true))
+}
+
+/// Whether the escape `\c` is an assertion.
+fn isAnchor(c: UInt8) -> Bool {
+    return c == 'b' || c == 'B' || c == 'A' || c == 'z' || c == 'Z' || c == '<' || c == '>'
 }
 
 /// The number of the capturing group whose `(` is at `at`, from 1, numbered on its
@@ -827,6 +1018,9 @@ fn fragEscape(bd: modify Builder, pattern: String, start: Int64, end: Int64) -> 
     if isShorthand(c) {
         return fragChars(bd, shorthandChars(c))
     }
+    if isAnchor(c) {
+        return fragAnchor(bd, substring(pattern, start + 1, end))
+    }
     return fragChar(bd, escapeChar(bd, pattern, start + 1, end))
 }
 
@@ -837,6 +1031,11 @@ fn escapeSize(pattern: String, start: Int64, end: Int64) -> Int64 {
     let c = pattern[start + 1]
     if c == 'R' {
         return 3
+    }
+    // A lookaround is one term: `\b` and `\B` are two pairs, `\<` and `\>` one pair.
+    if isAnchor(c) {
+        let a = substring(pattern, start + 1, end)
+        return if a == "b" || a == "B" { 4 } else if a == "<" || a == ">" || a == "b{start}" || a == "b{end}" { 2 } else { 1 }
     }
     if c == 'Q' {
         let to = quoteEnd(pattern, start, end)
@@ -893,6 +1092,12 @@ fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
         }
         RegexAtomRegexLiteral(l) => {
             return fragChar(bd, charAt(pattern, l.start))
+        }
+        RegexAtomRegexLookaround(l) => {
+            return fragLookaround(bd, pattern, l)
+        }
+        RegexAtomRegexAnchor(a) => {
+            return fragAnchor(bd, substring(pattern, a.start, a.start + 1))
         }
     }
 }
@@ -962,6 +1167,8 @@ fn pieceSize(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Int64
         }
         RegexAtomRegexClassDot(d) => {}
         RegexAtomRegexLiteral(l) => {}
+        RegexAtomRegexLookaround(l) => {}
+        RegexAtomRegexAnchor(a) => {}
     }
     if let Some(c) = piece.count {
         let copies = copiesOf(boundsOf(pattern, c))
@@ -999,6 +1206,8 @@ fn termSize(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Int64 {
         RegexAtomRegexEscape(e) => escapeSize(pattern, e.start, e.end),
         RegexAtomRegexClassDot(d) => charsSize(dotChars(bd)),
         RegexAtomRegexLiteral(l) => l.end - l.start,
+        RegexAtomRegexLookaround(l) => 1,
+        RegexAtomRegexAnchor(a) => 1,
     }
 }
 
@@ -1074,6 +1283,8 @@ fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag 
         }
         RegexAtomRegexClassDot(d) => {}
         RegexAtomRegexLiteral(l) => {}
+        RegexAtomRegexLookaround(l) => {}
+        RegexAtomRegexAnchor(a) => {}
     }
     let mut f = fragRepeat(bd, pattern, piece)
     let mut i = to - 1
@@ -1149,8 +1360,13 @@ export fn compile(pattern: String) -> Result<Regex, String> {
     }
 }
 
+/// A builder with nothing emitted.
+fn newBuilder() -> Builder {
+    return Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, lines: false, groupAt: [], names: [], lookDepth: 0, lookKeys: [], lookBehind: [], lookStart: [], lookEnd: [] }
+}
+
 fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
-    let mut bd = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, groupAt: [], names: [] }
+    let mut bd = newBuilder()
     let f = fragAlt(bd, pattern, tree)
     if let Some(row) = bd.err {
         return Err(regexSay(row))
@@ -1159,7 +1375,15 @@ fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
     patch(bd, f.holes, m)
     let classOf = byteClasses(bd)
     let classCount = Int64(classOf[255]) + 1
-    let rev = reverse(bd, f.start, m, classOf.copy(), classCount)
+    // The reverse starts at each match: the pattern's, then each body's.
+    let mut starts = joinHoles([m], bd.lookEnd)
+    let rev = reverse(bd, f.start, bd.lookStart, starts, classOf.copy(), classCount)
+    let mut looks: Array<Look> = []
+    let mut k = 0
+    while k < bd.lookKeys.length && k + 1 < starts.length {
+        looks.push(Look { behind: bd.lookBehind[k], fwd: bd.lookStart[k], rev: starts[k + 1] })
+        k = k + 1
+    }
     // The loop is the split's second operand, so a match that starts earlier wins.
     // Its class holds every byte, so it cuts no class.
     let start = emit(bd, opSplit, f.start, 0, noBytes())
@@ -1172,8 +1396,9 @@ fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
         start: start,
         classCount: classCount,
         classOf: classOf,
+        looks: looks.length,
     }
-    return Ok(Regex { fwd: fwd, rev: rev, names: consume bd.names })
+    return Ok(Regex { fwd: fwd, rev: rev, names: consume bd.names, looks: consume looks })
 }
 
 fn allBytes() -> ByteSet {
@@ -1181,13 +1406,15 @@ fn allBytes() -> ByteSet {
     return ByteSet { w0: all, w1: all, w2: all, w3: all }
 }
 
-/// The reverse of the program in `p`, whose start is `first` and whose match is `m`.
-/// Each pc `r` of `p` is a state that leads to every pc that leads to `r` in `p`: a
-/// class pc of `p` is a class test on that edge, a split pc an empty edge, and
-/// `first` the match. A state is a chain of splits, one per edge, each operand `a` an
-/// edge; its class tests follow the chain. Two passes: the first lays out each
-/// state's pcs. The tests are `p`'s classes, so the reverse keeps `classOf`.
-fn reverse(p: Builder, first: Int64, m: Int64, classOf: consume Array<UInt8>, classCount: Int64) -> Program {
+/// The reverse of the program in `p`, whose starts are `first`, the pattern's, and
+/// `bodies`, each lookaround body's. Each pc `r` of `p` is a state that leads to every pc that
+/// leads to `r` in `p`: a class pc or an assertion of `p` is that test on that edge,
+/// a split pc an empty edge, and each start the match. A state is a chain of splits,
+/// one per edge, each operand `a` an edge; its tests follow the chain. Two passes:
+/// the first lays out each state's pcs. The tests are `p`'s, so the reverse keeps
+/// `classOf`. Each pc of `p` in `ends` becomes the state it is in the reverse, and
+/// the first is the reverse's start.
+fn reverse(p: Builder, first: Int64, bodies: Array<Int64>, ends: modify Array<Int64>, classOf: consume Array<UInt8>, classCount: Int64) -> Program {
     let n = p.op.length
     // The pcs of `p` that lead to each pc, as lists through `nextFrom`.
     let mut firstFrom: Array<Int64> = []
@@ -1217,11 +1444,11 @@ fn reverse(p: Builder, first: Int64, m: Int64, classOf: consume Array<UInt8>, cl
     while r < n {
         entry.push(size)
         let mut e = firstFrom[r]
-        let mut links = if r == first { 1 } else { 0 }
+        let mut links = if r == first || bodies.length > 0 && holdsPc(bodies, r) { 1 } else { 0 }
         let mut tests = 0
         while e >= 0 {
             links = links + 1
-            if p.op[from[e]] == opClass {
+            if p.op[from[e]] == opClass || p.op[from[e]] == opAssert {
                 tests = tests + 1
             }
             e = nextFrom[e]
@@ -1229,12 +1456,13 @@ fn reverse(p: Builder, first: Int64, m: Int64, classOf: consume Array<UInt8>, cl
         size = size + tests + if links == 0 { 1 } else { links }
         r = r + 1
     }
-    let mut out = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, groupAt: [], names: [] }
+    let mut out = newBuilder()
     emit(out, opClass, 0 - 1, 0, noBytes())
     emit(out, opMatch, 0, 0, noBytes())
     let mut s = 0
     while s < n {
-        let mut links = if s == first { 1 } else { 0 }
+        let start = s == first || bodies.length > 0 && holdsPc(bodies, s)
+        let mut links = if start { 1 } else { 0 }
         let mut f = firstFrom[s]
         while f >= 0 {
             links = links + 1
@@ -1243,14 +1471,14 @@ fn reverse(p: Builder, first: Int64, m: Int64, classOf: consume Array<UInt8>, cl
         let test = entry[s] + if links == 0 { 1 } else { links }
         // The chain's operands: the match, then each edge in list order.
         let mut targets: Array<Int64> = []
-        if s == first {
+        if start {
             targets.push(1)
         }
         let mut e = firstFrom[s]
         let mut tests: Array<Int64> = []
         while e >= 0 {
             let q = from[e]
-            if p.op[q] == opClass {
+            if p.op[q] == opClass || p.op[q] == opAssert {
                 targets.push(test + tests.length)
                 tests.push(q)
             } else {
@@ -1269,20 +1497,43 @@ fn reverse(p: Builder, first: Int64, m: Int64, classOf: consume Array<UInt8>, cl
         }
         let mut j = 0
         while j < tests.length {
-            emit(out, opClass, 0 - 1, entry[tests[j]], p.cls[tests[j]])
+            let q = tests[j]
+            if p.op[q] == opAssert {
+                emit(out, opAssert, p.a[q], entry[q], noBytes())
+            } else {
+                emit(out, opClass, 0 - 1, entry[q], p.cls[q])
+            }
             j = j + 1
         }
         s = s + 1
+    }
+    let mut i = 0
+    while i < ends.length {
+        ends[i] = entry[ends[i]]
+        i = i + 1
     }
     return Program {
         op: consume out.op,
         a: consume out.a,
         b: consume out.b,
         cls: consume out.cls,
-        start: entry[m],
+        start: ends[0],
         classCount: classCount,
         classOf: classOf,
+        looks: p.lookKeys.length,
     }
+}
+
+/// Whether `pcs` holds `pc`.
+fn holdsPc(pcs: Array<Int64>, pc: Int64) -> Bool {
+    let mut i = 0
+    while i < pcs.length {
+        if pcs[i] == pc {
+            return true
+        }
+        i = i + 1
+    }
+    return false
 }
 
 // A Thompson simulation: one list of live pcs in the order a search prefers them,
@@ -1298,8 +1549,15 @@ fn follow(re: Program, pc: Int64, c: Int64) -> Int64 {
     return re.b[pc]
 }
 
-/// Adds `pc` and everything reachable from it without consuming, marking each
-/// with `sc.gen`.
+/// Whether the assertion at `pc` holds at offset `at`: bit `a / 2` of the offset in
+/// `bits`, or its negation for an odd `a` ([`lookBits`]).
+fn holds(re: Program, pc: Int64, bits: Array<Bool>, at: Int64) -> Bool {
+    let k = re.a[pc]
+    return bits[at * re.looks + k / 2] != (k % 2 == 1)
+}
+
+/// Adds `pc` and everything reachable from it without consuming at offset `sc.at`,
+/// marking each with `sc.gen`.
 fn addThread(re: Program, list: modify Array<Int64>, sc: modify Scan, pc: Int64) {
     let mut stack: Array<Int64> = [pc]
     while stack.length > 0 {
@@ -1312,20 +1570,23 @@ fn addThread(re: Program, list: modify Array<Int64>, sc: modify Scan, pc: Int64)
             continue
         }
         sc.mark[p] = sc.gen
+        // A class or a match pc takes two tests, a save three and an assertion four.
         if re.op[p] == opSplit {
             // `b` first so `a` pops first: `a` is the operand a search prefers.
             stack.push(re.b[p])
             stack.push(re.a[p])
+        } else if re.op[p] < opSave {
+            list.push(p)
         } else if re.op[p] == opSave {
             stack.push(re.b[p])
-        } else {
-            list.push(p)
+        } else if holds(re, p, sc.bits, sc.at) {
+            stack.push(re.b[p])
         }
     }
 }
 
-/// The class and match pcs after the pcs `list` take byte `c`, in order; a
-/// leftmost-first scan drops each pc after the first match.
+/// The class and match pcs after the pcs `list` take byte `c` into offset `sc.at`,
+/// in order; a leftmost-first scan drops each pc after the first match.
 fn stepList(re: Program, list: Array<Int64>, c: Int64, sc: modify Scan) -> Array<Int64> {
     let mut next: Array<Int64> = []
     sc.gen = sc.gen + 1
@@ -1335,15 +1596,20 @@ fn stepList(re: Program, list: Array<Int64>, c: Int64, sc: modify Scan) -> Array
         j = j + 1
     }
     if sc.first {
-        let mut k = 0
-        while k < next.length && re.op[next[k]] != opMatch {
-            k = k + 1
-        }
-        while next.length > k + 1 {
-            next.pop()
-        }
+        dropAfterMatch(re, next)
     }
     return next
+}
+
+/// Drops each pc of `list` after its first match: the leftmost-first rule.
+fn dropAfterMatch(re: Program, list: modify Array<Int64>) {
+    let mut k = 0
+    while k < list.length && re.op[list[k]] != opMatch {
+        k = k + 1
+    }
+    while list.length > k + 1 {
+        list.pop()
+    }
 }
 
 /// Whether the pcs `list` hold a match.
@@ -1386,6 +1652,11 @@ type Scan = {
     // Whether a state drops each pc after its first match, the forward pass's
     // leftmost-first rule. The backward pass keeps them all, to reach the start.
     first: Bool,
+    // Each lookaround body's bit at each offset ([`lookBits`]), and the offset a
+    // closure adds pcs at. A pattern with no lookaround has no bits and builds
+    // states, whose closures read none.
+    bits: Array<Bool>,
+    at: Int64,
 }
 
 /// The state of the class and match pcs `list`, added if it is new, or -1 when a new
@@ -1423,15 +1694,15 @@ fn intern(re: Program, list: Array<Int64>, sc: modify Scan) -> Int64 {
 }
 
 /// A search with no edges built, which may add `cap` table entries, under the
-/// leftmost-first rule when `first`.
-fn newScan(re: Program, cap: Int64, first: Bool) -> Scan {
+/// leftmost-first rule when `first`, its assertions reading `bits`.
+fn newScan(re: Program, cap: Int64, first: Bool, bits: consume Array<Bool>) -> Scan {
     let mut mark: Array<Int64> = []
     let mut i = 0
     while i < re.op.length {
         mark.push(0)
         i = i + 1
     }
-    let mut sc = Scan { sets: [], ids: [:], next: [], accepts: [], dead: 0, cap: 256 + 2 * re.classCount + cap, mark: mark, gen: 1, first: first }
+    let mut sc = Scan { sets: [], ids: [:], next: [], accepts: [], dead: 0, cap: 256 + 2 * re.classCount + cap, mark: mark, gen: 1, first: first, bits: bits, at: 0 }
     // The 256 entries past the start state's row, which `intern` makes first.
     while sc.next.length < 256 {
         sc.next.push(0 - 256)
@@ -1484,15 +1755,7 @@ fn matchEnd(re: Program, hay: Array<UInt8>, from: Int64 where value >= 0, sc: mo
             t = stepState(re, s, c, sc)
             if t < 0 || t > sc.next.length - 256 {
                 // The table is full: step the state's pcs from here on.
-                let mut list = joinHoles(sc.sets[s / re.classCount], [])
-                while i < hay.length && list.length > 0 {
-                    list = stepList(re, list, Int64(hay[i]), sc)
-                    i = i + 1
-                    if listAccepts(re, list) {
-                        end = i
-                    }
-                }
-                return end
+                return listEnd(re, hay, i, joinHoles(sc.sets[s / re.classCount], []), sc, end)
             }
         }
         if t == dead {
@@ -1521,15 +1784,7 @@ fn matchStart(rev: Program, hay: Array<UInt8>, from: Int64 where value >= 0, end
         if t < 0 {
             t = stepState(rev, s, c, sc)
             if t < 0 || t > sc.next.length - 256 {
-                let mut list = joinHoles(sc.sets[s / rev.classCount], [])
-                while i > from && i <= hay.length && list.length > 0 {
-                    list = stepList(rev, list, Int64(hay[i - 1]), sc)
-                    i = i - 1
-                    if listAccepts(rev, list) {
-                        at = i
-                    }
-                }
-                return at
+                return listStart(rev, hay, from, i, joinHoles(sc.sets[s / rev.classCount], []), sc, at)
             }
         }
         if t == dead {
@@ -1544,16 +1799,134 @@ fn matchStart(rev: Program, hay: Array<UInt8>, from: Int64 where value >= 0, end
     return at
 }
 
+/// The end of the match the pcs `list` at offset `from` reach, stepping them to the
+/// end of `hay` or until none is left: the latest offset a pc matches at, or `end`.
+fn listEnd(re: Program, hay: Array<UInt8>, from: Int64, list: consume Array<Int64>, sc: modify Scan, end: Int64) -> Int64 {
+    let mut pcs = list
+    let mut last = end
+    let mut i = from
+    while i >= 0 && i < hay.length && pcs.length > 0 {
+        sc.at = i + 1
+        pcs = stepList(re, pcs, Int64(hay[i]), sc)
+        i = i + 1
+        if listAccepts(re, pcs) {
+            last = i
+        }
+    }
+    return last
+}
+
+/// The start of the match the reverse pcs `list` at offset `from` reach, stepping them
+/// back down to `to` or until none is left: the least offset a pc matches at, or `at`.
+fn listStart(rev: Program, hay: Array<UInt8>, to: Int64, from: Int64, list: consume Array<Int64>, sc: modify Scan, at: Int64) -> Int64 {
+    let mut pcs = list
+    let mut least = at
+    let mut i = from
+    while i > to && i <= hay.length && pcs.length > 0 {
+        sc.at = i - 1
+        pcs = stepList(rev, pcs, Int64(hay[i - 1]), sc)
+        i = i - 1
+        if listAccepts(rev, pcs) {
+            least = i
+        }
+    }
+    return least
+}
+
+/// The pcs `list` after byte `c`, or none before the first byte when `c` is -1, and
+/// a thread from `start` at offset `at`: one step of a pass that starts a body at
+/// every offset.
+fn passStep(re: Program, list: Array<Int64>, c: Int64, start: Int64, sc: modify Scan, at: Int64) -> Array<Int64> {
+    let mut next: Array<Int64> = []
+    sc.at = at
+    if c < 0 {
+        sc.gen = sc.gen + 1
+    } else {
+        next = stepList(re, list, c, sc)
+    }
+    addThread(re, next, sc, start)
+    return next
+}
+
+/// Each lookaround body's bit at each offset of `hay`, at `i * looks + k`: whether
+/// body `k` matches a span that ends at offset `i` for a lookbehind, or one that
+/// starts there for a lookahead. A lookbehind's pass runs forward and a lookahead's
+/// backward over its reverse, each a body from every offset. A body's assertions are
+/// of bodies before it, whose bits are set when its pass reads them.
+fn lookBits(re: Regex, hay: Array<UInt8>) -> Array<Bool> {
+    let n = re.looks.length
+    let mut bits: Array<Bool> = []
+    while bits.length < n * (hay.length + 1) {
+        bits.push(false)
+    }
+    if n == 0 {
+        return bits
+    }
+    // Each pass's scan holds the bits it reads, and each bit goes to both.
+    let mut sf = newScan(re.fwd, 0, false, bits.copy())
+    let mut sr = newScan(re.rev, 0, false, consume bits)
+    let mut k = 0
+    while k < n {
+        let look = re.looks[k]
+        let mut list: Array<Int64> = []
+        let mut j = 0
+        while j <= hay.length {
+            let i = if look.behind { j } else { hay.length - j }
+            let mut found = false
+            if look.behind {
+                list = passStep(re.fwd, list, if j == 0 { 0 - 1 } else { Int64(hay[j - 1]) }, look.fwd, sf, i)
+                found = listAccepts(re.fwd, list)
+            } else {
+                list = passStep(re.rev, list, if j == 0 { 0 - 1 } else { Int64(hay[i]) }, look.rev, sr, i)
+                found = listAccepts(re.rev, list)
+            }
+            sf.bits[i * n + k] = found
+            sr.bits[i * n + k] = found
+            j = j + 1
+        }
+        k = k + 1
+    }
+    return consume sr.bits
+}
+
+/// [`nextMatch`] for a pattern with a lookaround: both passes step pcs, not states,
+/// and each closure reads the bits at its offset.
+fn lookMatch(re: Regex, hay: Array<UInt8>, from: Int64, se: modify Search) -> Option<Match> {
+    if from > hay.length {
+        return None
+    }
+    let mut list: Array<Int64> = []
+    se.fwd.gen = se.fwd.gen + 1
+    se.fwd.at = from
+    addThread(re.fwd, list, se.fwd, re.fwd.start)
+    dropAfterMatch(re.fwd, list)
+    let first = if listAccepts(re.fwd, list) { from } else { 0 - 1 }
+    let end = listEnd(re.fwd, hay, from, list, se.fwd, first)
+    if end < 0 {
+        return None
+    }
+    let mut back: Array<Int64> = []
+    se.rev.gen = se.rev.gen + 1
+    se.rev.at = end
+    addThread(re.rev, back, se.rev, re.rev.start)
+    return Some(Match { at: listStart(re.rev, hay, from, end, back, se.rev, end), end: end })
+}
+
 /// One search over one haystack: the forward and the backward lazy DFA.
 type Search = { fwd: Scan, rev: Scan }
 
-fn newSearch(re: Regex, cap: Int64) -> Search {
-    return Search { fwd: newScan(re.fwd, cap, true), rev: newScan(re.rev, cap, false) }
+/// A search of `hay`, whose lookaround bits it reads first.
+fn newSearch(re: Regex, hay: Array<UInt8>, cap: Int64) -> Search {
+    let bits = lookBits(re, hay)
+    return Search { fwd: newScan(re.fwd, cap, true, bits.copy()), rev: newScan(re.rev, cap, false, consume bits) }
 }
 
 /// The leftmost-first match that starts at or after `from`, or `None`. A forward
 /// pass finds its end and a backward pass its start.
 fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64 where value >= 0, se: modify Search) -> Option<Match> {
+    if re.fwd.looks > 0 {
+        return lookMatch(re, hay, from, se)
+    }
     let end = if from > hay.length { 0 - 1 } else { matchEnd(re.fwd, hay, from, se.fwd) }
     if end < 0 {
         return None
@@ -1565,14 +1938,14 @@ fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64 where value >= 0, se: mod
 /// match's end, and back to its start.
 export fn find(re: Regex, hay: String, from: Int64) -> Option<Match> {
     let raw = bytes(hay)
-    let mut se = newSearch(re, dfaCap)
+    let mut se = newSearch(re, raw, dfaCap)
     return nextMatch(re, raw, from, se)
 }
 /// How many non-overlapping matches `re` has in `hay`: `aa` in `aaa` is one. An
 /// empty match advances by one byte.
 export fn countMatches(re: Regex, hay: String) -> Int64 {
     let raw = bytes(hay)
-    let mut se = newSearch(re, dfaCap)
+    let mut se = newSearch(re, raw, dfaCap)
     let mut n = 0
     let mut i = 0
     while let Some(m) = nextMatch(re, raw, i, se) {
@@ -1586,7 +1959,7 @@ export fn countMatches(re: Regex, hay: String) -> Int64 {
 /// `$1` is two characters, not a group.
 export fn replaceAll(re: Regex, hay: String, with: String) -> String {
     let raw = bytes(hay)
-    let mut se = newSearch(re, dfaCap)
+    let mut se = newSearch(re, raw, dfaCap)
     let mut out = ""
     let mut kept = 0
     let mut i = 0
@@ -1610,9 +1983,9 @@ export type Captures = {
 /// Thompson simulation over the match alone.
 export fn captures(re: Regex, hay: String, from: Int64) -> Option<Captures> {
     let raw = bytes(hay)
-    let mut se = newSearch(re, dfaCap)
+    let mut se = newSearch(re, raw, dfaCap)
     if let Some(m) = nextMatch(re, raw, from, se) {
-        return Some(Captures { whole: m, spans: spansOf(re, raw, m) })
+        return Some(Captures { whole: m, spans: spansOf(re, raw, m, se.fwd.bits) })
     }
     return None
 }
@@ -1655,7 +2028,7 @@ fn patternStart(re: Regex) -> Int64 {
 /// The group spans of the match `m` of `re`: a Thompson simulation from its start
 /// to its end whose threads carry their spans, in the order a search prefers them.
 /// A thread that matches drops every thread after it.
-fn spansOf(re: Regex, hay: Array<UInt8>, m: Match) -> Array<Int64> {
+fn spansOf(re: Regex, hay: Array<UInt8>, m: Match, bits: Array<Bool>) -> Array<Int64> {
     let p = re.fwd
     let mut none: Array<Int64> = []
     while none.length < 2 * re.names.length {
@@ -1668,7 +2041,7 @@ fn spansOf(re: Regex, hay: Array<UInt8>, m: Match) -> Array<Int64> {
     let mut gen = 1
     let mut pcs: Array<Int64> = []
     let mut spans: Array<Array<Int64>> = []
-    addSpans(p, pcs, spans, mark, gen, patternStart(re), none, m.at)
+    addSpans(p, pcs, spans, mark, gen, patternStart(re), none, m.at, bits)
     let mut best = joinHoles(none, [])
     let mut i = m.at
     while pcs.length > 0 {
@@ -1693,7 +2066,7 @@ fn spansOf(re: Regex, hay: Array<UInt8>, m: Match) -> Array<Int64> {
         while j < pcs.length {
             let t = follow(p, pcs[j], Int64(hay[i]))
             if t >= 0 {
-                addSpans(p, nextPcs, nextSpans, mark, gen, t, spans[j], i + 1)
+                addSpans(p, nextPcs, nextSpans, mark, gen, t, spans[j], i + 1, bits)
             }
             j = j + 1
         }
@@ -1706,7 +2079,7 @@ fn spansOf(re: Regex, hay: Array<UInt8>, m: Match) -> Array<Int64> {
 
 /// Adds `pc` at offset `i` and everything reachable from it without consuming, each
 /// class or match pc with the spans `held` and the saves on its way.
-fn addSpans(p: Program, pcs: modify Array<Int64>, spans: modify Array<Array<Int64>>, mark: modify Array<Int64>, gen: Int64, pc: Int64, held: Array<Int64>, i: Int64) {
+fn addSpans(p: Program, pcs: modify Array<Int64>, spans: modify Array<Array<Int64>>, mark: modify Array<Int64>, gen: Int64, pc: Int64, held: Array<Int64>, i: Int64, bits: Array<Bool>) {
     let mut todo: Array<Int64> = [pc]
     let mut with: Array<Array<Int64>> = [joinHoles(held, [])]
     while todo.length > 0 && with.length > 0 {
@@ -1730,6 +2103,11 @@ fn addSpans(p: Program, pcs: modify Array<Int64>, spans: modify Array<Array<Int6
             }
             todo.push(p.b[q])
             with.push(sp)
+        } else if p.op[q] == opAssert {
+            if holds(p, q, bits, i) {
+                todo.push(p.b[q])
+                with.push(sp)
+            }
         } else {
             pcs.push(q)
             spans.push(sp)
@@ -1895,9 +2273,13 @@ test "an escape with no meaning is refused" {
         Ok(r) => panic("an unknown escape compiled"),
         Err(w) => assert(w == "the escape `\\y` means nothing: a backslash makes only ASCII punctuation literal"),
     }
-    match compile("\\b") {
-        Ok(r) => panic("a boundary compiled"),
-        Err(w) => assert(w == "an assertion (`\\b`) is not supported"),
+    match compile("\\b*") {
+        Ok(r) => panic("a repeated boundary compiled"),
+        Err(w) => assert(w == "a repeat after an assertion, which matches no character"),
+    }
+    match compile("(?=(a))") {
+        Ok(r) => panic("a capture in a lookaround compiled"),
+        Err(w) => assert(w == "a capturing group inside a lookaround: write `(?:..)`"),
     }
     match compile("\\x{110000}") {
         Ok(r) => panic("a code point past 10FFFF compiled"),
@@ -2027,11 +2409,7 @@ test "a count repeats its term" {
     assertEq(countMatches(pair, "abyy"), 0)
 }
 
-test "an anchor is refused and the empty pattern matches the empty string" {
-    match compile("^a") {
-        Ok(r) => panic("an anchor compiled"),
-        Err(w) => assert(w == "an assertion (`^`) is not supported"),
-    }
+test "an escaped anchor is literal and the empty pattern matches the empty string" {
     let escaped = match compile("\\^a\\$") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
@@ -2076,6 +2454,83 @@ test "what it refuses, it refuses by name" {
     match compile("[z-a]") {
         Ok(r) => panic("a backwards range compiled"),
         Err(w) => assert(w == "a character range that runs backwards"),
+    }
+}
+
+test "an anchor holds at the text's ends, or a line's under m" {
+    let ends = match compile("^a|a$") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(ends, "aba\na", "_"), "_ba\n_")
+    let lines = match compile("(?m)^a|a$") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(lines, "aba\na", "_"), "_b_\n_")
+    let last = match compile("a\\Z") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(last, "a\na\n"), 1)
+    // `^` is the text's start, so a search from an offset past it finds none.
+    assertEq(spanText(find(ends, "ba", 1)), "1..2")
+    let start = match compile("^b") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(spanText(find(start, "ab", 1)), "none")
+}
+
+test "a word boundary holds between a word character and another" {
+    let word = match compile("\\bfoo\\b") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(word, "foo foobar (foo)"), 2)
+    let inside = match compile("\\Bo") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(inside, "oo o", "0"), "o0 o")
+    let starts = match compile("\\<\\w") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(starts, "ab cd-ef"), 3)
+}
+
+test "a lookaround tests the text beside a position and sees before from" {
+    let behind = match compile("(?<=a)b") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(behind, "abcb", "x"), "axcb")
+    assertEq(spanText(find(behind, "ab", 1)), "1..2")
+    let ahead = match compile("\\w+(?=;)") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(spanText(find(ahead, "ab cd;", 0)), "3..5")
+    let not = match compile("(?<!\\.)\\b[a-z]+(?!\\()") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(not, "a.b c(", "_"), "_.b c(")
+    // A lookbehind whose body grows and holds a lookahead.
+    let nested = match compile("(?<=^a+(?=b))b") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(spanText(find(nested, "aab", 0)), "2..3")
+    assertEq(spanText(find(nested, "acb", 0)), "none")
+    let group = match compile("(a)(?=b)") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    match captures(group, "ab", 0) {
+        Some(c) => assertEq(spanText(capture(c, 1)), "0..1"),
+        None => panic("no match"),
     }
 }
 
@@ -2141,9 +2596,12 @@ fn draw(seed: modify Int64, n: Int64) -> Int64 {
     return (seed / 65536) % n
 }
 
-/// A pattern `compile` accepts, over the atoms the engines treat differently.
-fn genPattern(seed: modify Int64, depth: Int64) -> String {
-    let atoms = ["a", "b", "c", ".", "[ab]", "[^a]", "[a-c]", "(\u{e9})", "\\|", "(\u{20ac})"]
+/// A pattern `compile` accepts, over the atoms the engines treat differently and the
+/// assertions. Inside a lookaround, `look`, a group does not capture.
+fn genPattern(seed: modify Int64, depth: Int64, look: Bool) -> String {
+    let atoms = ["a", "b", "c", ".", "[ab]", "[^a]", "[a-c]", "\\|", "(\u{e9})", "(\u{20ac})"]
+    let asserts = ["^", "$", "\\b", "\\B", "(?m)^", "(?m)$", "\\Z"]
+    let opens = ["(?=", "(?!", "(?<=", "(?<!"]
     let suffixes = ["", "", "*", "+", "?", "*?", "+?", "??"]
     let mut out = ""
     let branches = 1 + draw(seed, 2)
@@ -2155,13 +2613,16 @@ fn genPattern(seed: modify Int64, depth: Int64) -> String {
         let terms = 1 + draw(seed, 3)
         let mut t = 0
         while t < terms {
-            let pick = draw(seed, atoms.length + 1)
+            let pick = draw(seed, atoms.length + 3)
             if pick == atoms.length && depth > 0 {
-                out = out + "(" + genPattern(seed, depth - 1) + ")"
+                out = out + (if look { "(?:" } else { "(" }) + genPattern(seed, depth - 1, look) + ")" + suffixes[draw(seed, suffixes.length)]
+            } else if pick == atoms.length + 1 && depth > 0 {
+                out = out + opens[draw(seed, opens.length)] + genPattern(seed, depth - 1, true) + ")"
+            } else if pick > atoms.length {
+                out = out + asserts[draw(seed, asserts.length)]
             } else {
-                out = out + atoms[pick % atoms.length]
+                out = out + atoms[pick % (if look { 8 } else { atoms.length })] + suffixes[draw(seed, suffixes.length)]
             }
-            out = out + suffixes[draw(seed, suffixes.length)]
             t = t + 1
         }
         b = b + 1
@@ -2169,10 +2630,73 @@ fn genPattern(seed: modify Int64, depth: Int64) -> String {
     return out
 }
 
+/// Whether a walk of `re.fwd` from `pc` at `at` reaches a match, at `stop` unless it
+/// is -1, deciding each assertion by [`lookAt`]: the oracle's own lookaround.
+fn reaches(re: Regex, pc: Int64, hay: Array<UInt8>, at: Int64, stop: Int64) -> Bool {
+    let p = re.fwd
+    let width = hay.length + 1
+    let mut seen: Array<Bool> = []
+    while seen.length < p.op.length * width {
+        seen.push(false)
+    }
+    let mut pcs: Array<Int64> = [pc]
+    let mut ats: Array<Int64> = [at]
+    while pcs.length > 0 {
+        let q = pcs[pcs.length - 1]
+        let i = ats[ats.length - 1]
+        pcs.pop()
+        ats.pop()
+        if q < 0 || q >= p.op.length || i < 0 || i > hay.length || seen[q * width + i] {
+            continue
+        }
+        seen[q * width + i] = true
+        if p.op[q] == opMatch {
+            if stop < 0 || i == stop {
+                return true
+            }
+        } else if p.op[q] == opSplit {
+            pcs.push(p.b[q])
+            ats.push(i)
+            pcs.push(p.a[q])
+            ats.push(i)
+        } else if p.op[q] == opSave {
+            pcs.push(p.b[q])
+            ats.push(i)
+        } else if p.op[q] == opAssert {
+            if lookAt(re, p.a[q] / 2, hay, i) != (p.a[q] % 2 == 1) {
+                pcs.push(p.b[q])
+                ats.push(i)
+            }
+        } else if i < hay.length && hasByte(p.cls[q], Int64(hay[i])) {
+            pcs.push(p.b[q])
+            ats.push(i + 1)
+        }
+    }
+    return false
+}
+
+/// Whether lookaround body `k` of `re` holds at `at`: it matches from `at` on, or
+/// for a lookbehind it matches a span from some offset up to `at`.
+fn lookAt(re: Regex, k: Int64, hay: Array<UInt8>, at: Int64) -> Bool {
+    let look = re.looks[k]
+    if !look.behind {
+        return reaches(re, look.fwd, hay, at, 0 - 1)
+    }
+    let mut j = 0
+    while j <= at {
+        if reaches(re, look.fwd, hay, j, at) {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
 /// The end of the match a backtracking search of `p` from the pc `pc` at `at`
 /// prefers, or -1: operand `a` of a split before `b`. A pc it left at an offset
 /// failed there, so it never returns to one.
-fn backtrackAt(p: Program, pc: Int64, hay: Array<UInt8>, at: Int64) -> Int64 {
+fn backtrackAt(re: Regex, pc: Int64, hay: Array<UInt8>, at: Int64) -> Int64 {
+    let p = re.fwd
     let width = hay.length + 1
     let mut seen: Array<Bool> = []
     while seen.length < p.op.length * width {
@@ -2200,6 +2724,11 @@ fn backtrackAt(p: Program, pc: Int64, hay: Array<UInt8>, at: Int64) -> Int64 {
         } else if p.op[q] == opSave {
             pcs.push(p.b[q])
             ats.push(i)
+        } else if p.op[q] == opAssert {
+            if lookAt(re, p.a[q] / 2, hay, i) != (p.a[q] % 2 == 1) {
+                pcs.push(p.b[q])
+                ats.push(i)
+            }
         } else if i < hay.length && hasByte(p.cls[q], Int64(hay[i])) {
             pcs.push(p.b[q])
             ats.push(i + 1)
@@ -2208,12 +2737,12 @@ fn backtrackAt(p: Program, pc: Int64, hay: Array<UInt8>, at: Int64) -> Int64 {
     return 0 - 1
 }
 
-test "the two lazy DFAs find the match a backtracking search finds from each offset" {
+test "a search finds the match a backtracking search finds from each offset" {
     let pieces = ["a", "b", "c", "\u{e9}", "\u{e8}", "\u{20ac}", "|", "\n"]
     let mut seed = 7
     let mut round = 0
     while round < 300 {
-        let pattern = genPattern(seed, 2)
+        let pattern = genPattern(seed, 2, false)
         let re = match compile(pattern) {
             Ok(r) => r,
             Err(w) => panic("`\{pattern}`: \{w}"),
@@ -2228,7 +2757,7 @@ test "the two lazy DFAs find the match a backtracking search finds from each off
         let mut ends: Array<Int64> = []
         let mut i = 0
         while i <= raw.length {
-            ends.push(backtrackAt(re.fwd, first, raw, i))
+            ends.push(backtrackAt(re, first, raw, i))
             i = i + 1
         }
         // The whole table, the two fixed states alone, and one state more: the
@@ -2236,7 +2765,7 @@ test "the two lazy DFAs find the match a backtracking search finds from each off
         let caps = [dfaCap, 0, re.fwd.classCount]
         let mut k = 0
         while k < caps.length {
-            let mut sc = newSearch(re, caps[k])
+            let mut sc = newSearch(re, raw, caps[k])
             let mut from = 0
             while from <= raw.length {
                 let mut at = from
