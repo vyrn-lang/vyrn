@@ -887,10 +887,10 @@ examples/projection_shadows_param.vyrn	main	yes	no, its effect set is alloc, wri
 examples/projectionfree.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/protocol.vyrn	label	yes	no, its effect set is alloc
 examples/protocol.vyrn	main	yes	no, its effect set is alloc, write-output
-examples/protocol.vyrn	Show$Int64$show	yes	no, its effect set is alloc
-examples/protocol.vyrn	Show$Bool$show	yes	no, the result is String, not an integer, Bool or a read array of one
-examples/protocol.vyrn	Show$String$show	yes	no, its effect set is alloc
-examples/protocol.vyrn	Show$Option$show	yes	no, its effect set is alloc
+examples/protocol.vyrn	Pretty$Int64$pretty	yes	no, its effect set is alloc
+examples/protocol.vyrn	Pretty$Bool$pretty	yes	no, the result is String, not an integer, Bool or a read array of one
+examples/protocol.vyrn	Pretty$String$pretty	yes	no, its effect set is alloc
+examples/protocol.vyrn	Pretty$Option$pretty	yes	no, its effect set is alloc
 examples/protocol.vyrn	describe	yes	no, its effect set is alloc
 examples/protocol_conformance.vyrn		does not check	does not check
 examples/protocol_extra.vyrn		does not check	does not check
@@ -1148,7 +1148,6 @@ examples/show.vyrn	tag	no, it keeps an index check	no, its effect set is alloc
 examples/show.vyrn	showValue	yes	no, its effect set is alloc
 examples/show.vyrn	main	no, it calls `tag`, which is not trap-free	no, its effect set is alloc, write-output
 examples/show.vyrn	Show$Point$show	yes	no, its effect set is alloc
-examples/show.vyrn	Show$Int64$show	yes	no, its effect set is alloc
 examples/show.vyrn	label	yes	no, its effect set is alloc
 examples/simd.vyrn	lanes	yes	no, its effect set is write-output
 examples/simd.vyrn	main	yes	no, its effect set is write-output
@@ -1899,8 +1898,8 @@ site/guide/options.vyrn	quadrupled	yes	no, its effect set is alloc
 site/guide/options.vyrn	showResult	yes	no, its effect set is alloc
 site/guide/options.vyrn	demo	yes	no, its effect set is alloc
 site/guide/protocols.vyrn	demo	yes	no, its effect set is alloc
-site/guide/protocols.vyrn	Show$Int64$show	yes	no, its effect set is alloc
-site/guide/protocols.vyrn	Show$Bool$show	yes	no, the result is String, not an integer, Bool or a read array of one
+site/guide/protocols.vyrn	Pretty$Int64$pretty	yes	no, its effect set is alloc
+site/guide/protocols.vyrn	Pretty$Bool$pretty	yes	no, the result is String, not an integer, Bool or a read array of one
 site/guide/protocols.vyrn	label	yes	no, its effect set is alloc
 site/guide/records.vyrn	greet	yes	no, its effect set is alloc
 site/guide/records.vyrn	demo	yes	no, its effect set is alloc

@@ -662,12 +662,20 @@ fn build_from<'a>(
     seeded(program, own, proto, fns, names, source, &seed)
 }
 
+/// Whether the program reads the pattern of `=~` as an island, which needs the
+/// std root's `regex.syntax`.
+fn islanded(program: &Program) -> bool {
+    let regex = vyrn_frontend::gen::REGEX_ISLAND;
+    program.islands.iter().any(|i| i.ty == regex)
+}
+
 /// The refusals the typed judgment states over the checker's answers at the
 /// expressions of `facts`: a literal that does not fit, a shift by a constant out of
 /// range, and at a node the checker typed `Err` whose operands it typed, the
 /// rule the node breaks (an operator, a field, a construction, a variant, a
 /// record literal, or a call's arity, type arguments and arguments).
-fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<Said> {
+/// `islanded` says whether the island check reads the pattern of `=~`.
+fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech, islanded: bool) -> Vec<Said> {
     let decls = own.proto.types();
     let recorded = |e: &Expr| facts.types.get(&e.id()).filter(|t| **t != Type::Err);
     let resolved = |e: &Expr| recorded(e).map(|t| vyrn_frontend::types::resolve(t, decls));
@@ -697,12 +705,14 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<Said> {
                 rhs,
                 ..
             } => Some(match &**rhs {
-                // The island check states a row of the grammar.
+                // The island check states a row of the grammar, when the std root
+                // holds the grammar.
                 Expr::Str(pat, _) => match vyrn_frontend::regex::compile(pat).err()? {
-                    vyrn_frontend::regex::Refusal::Builder(err) => {
+                    vyrn_frontend::regex::Refusal::Grammar(_) if islanded => return None,
+                    vyrn_frontend::regex::Refusal::Builder(err)
+                    | vyrn_frontend::regex::Refusal::Grammar(err) => {
                         rule!(InvalidRegex, pat, err).render()
                     }
-                    vyrn_frontend::regex::Refusal::Grammar(_) => return None,
                 },
                 _ => rule!(MatchNeedsPattern).render(),
             }),
@@ -1574,7 +1584,7 @@ impl<'a> Builder<'a> {
         let none = HashMap::new();
         let (refused, mistyped) = (
             unbound(facts, own, &program.impls, bounds.unwrap_or(&none), &sp),
-            judged(facts, own, &sp),
+            judged(facts, own, &sp, islanded(program)),
         );
         Builder {
             program,
@@ -9687,27 +9697,30 @@ fn report(
         };
         let row = match (&info.not_owned, took) {
             (Some(NotOwned::NoRelease { heap: false }), _) => leaked(
-                format!("NOT reclaimed — the type {} owns no heap", sp.ty(&info.ty)),
+                format!(
+                    "NOT reclaimed \u{2014} the type {} owns no heap",
+                    sp.ty(&info.ty)
+                ),
                 "the type owns no heap",
                 false,
             ),
             (Some(NotOwned::NoRelease { heap: true }), _) => leaked(
                 format!(
-                    "NOT reclaimed — nothing releases the type {} yet",
+                    "NOT reclaimed \u{2014} nothing releases the type {} yet",
                     sp.ty(&info.ty)
                 ),
                 "the type has no release rule",
                 true,
             ),
             (Some(NotOwned::Borrow(what)), _) => leaked(
-                format!("NOT reclaimed — it is {what}"),
+                format!("NOT reclaimed \u{2014} it is {what}"),
                 "it names somebody else's value",
                 true,
             ),
             (Some(NotOwned::Static), _) => MemoryRow {
                 name,
                 line,
-                text: "static data — nothing reclaims it, and nothing needs to".to_string(),
+                text: "static data \u{2014} nothing reclaims it, and nothing needs to".to_string(),
                 last_use: None,
                 moved_into: None,
                 bucket: Bucket::Static,
@@ -9771,7 +9784,7 @@ fn report(
                 },
                 // Owned, and no release placed; the core states no reason.
                 _ => leaked(
-                    "NOT reclaimed — nothing in this frame releases it".to_string(),
+                    "NOT reclaimed \u{2014} nothing in this frame releases it".to_string(),
                     "nothing releases it here",
                     info.heap,
                 ),
@@ -9787,7 +9800,7 @@ fn report(
 /// out of the value, which the release walks around.
 fn reclaimed(kind: &DropKind, holes: &[String], sp: &Speech) -> String {
     if holes.is_empty() {
-        return format!("reclaimed at block exit — {}", kind.words(sp));
+        return format!("reclaimed at block exit \u{2014} {}", kind.words(sp));
     }
     let places = holes
         .iter()
@@ -9795,7 +9808,7 @@ fn reclaimed(kind: &DropKind, holes: &[String], sp: &Speech) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "reclaimed at block exit — {}, except {places}, which a `consume` took",
+        "reclaimed at block exit \u{2014} {}, except {places}, which a `consume` took",
         kind.words(sp)
     )
 }
@@ -9804,11 +9817,13 @@ fn reclaimed(kind: &DropKind, holes: &[String], sp: &Speech) -> String {
 /// which lowering frees it.
 fn discharged(l: &Linear, sp: &Speech) -> String {
     match l {
-        Linear::Stream => "discharged, not leaked — a stream is consumed, forwarded or closed \
+        Linear::Stream => {
+            "discharged, not leaked \u{2014} a stream is consumed, forwarded or closed \
              on every path, and that lowering frees it"
-            .to_string(),
+                .to_string()
+        }
         Linear::Declared(by) => format!(
-            "discharged, not leaked — `{}` declares `impl MustUse`, so it is handed on or \
+            "discharged, not leaked \u{2014} `{}` declares `impl MustUse`, so it is handed on or \
              dropped on every path",
             sp.name(by)
         ),

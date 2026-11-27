@@ -131,7 +131,7 @@ pub const NO_STREAM: &str = "no stream in this box";
 pub const BAD_FN_VALUE: &str = "internal: invalid function value";
 /// `serveStream` in a compiled build.
 pub const SERVE_STREAM: &str =
-    "serveStream: a compiled build has no accept loop — a live route needs `vyrn serve`";
+    "serveStream: a compiled build has no accept loop \u{2014} a live route needs `vyrn serve`";
 
 /// `array index {i} out of bounds`, as the two halves around the index. The
 /// pair is the primitive: the direct wasm backend concatenates
@@ -276,7 +276,7 @@ pub const IO: &[(&str, &str)] = &[
     // map's key must be a `String`, and `stringFromBytes` gives the reason.
     (
         "tbytes",
-        "tallyBytes: the bytes are not a String — `stringFromBytes` names why",
+        "tallyBytes: the bytes are not a String \u{2014} `stringFromBytes` names why",
     ),
     ("butf8", "bytes are not valid UTF-8"),
 ];

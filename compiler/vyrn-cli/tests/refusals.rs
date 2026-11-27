@@ -3158,3 +3158,45 @@ fn a_statement_after_a_refused_one_is_judged() {
          main.vyrn:4:5: cannot assign to `x` (declared without `mut`)\n"
     );
 }
+
+#[test]
+fn a_parse_refusal_spells_the_token_it_found() {
+    let src = "fn main() {\n    let = 1\n    f(1 \"a\\{x + 1}b\\n\")\n}\n";
+    assert_eq!(
+        refused_src("parse-found", src),
+        "main.vyrn:2:9: expected identifier, found `=`\n\
+         main.vyrn:3:9: expected RParen, found `\"a\\{x + 1}b\\n\"`\n"
+    );
+}
+
+#[test]
+fn an_impl_of_what_the_language_defines_is_refused() {
+    let src = "impl Show for Int64 {\n    fn show(self) -> String { return \"\" }\n}\n\n\
+               impl Index for String {\n    fn at(read self, i: Int64) -> String { return \"\" }\n}\n\n\
+               impl Iterate for Array<Int64> {\n    fn size(read self) -> Int64 { return 0 }\n}\n\n\
+               impl Hashable for String {\n    fn hash(self) -> UInt64 { return 0 }\n}\n\n\
+               fn main() -> Int64 {\n    return 0\n}\n";
+    assert_eq!(
+        refused_src("language-defines", src),
+        "main.vyrn:1:1: `impl Show for Int64` is refused: the language already defines `Show` for `Int64`\n\
+         main.vyrn:5:1: `impl Index for String` is refused: the language already defines `Index` for `String`\n\
+         main.vyrn:9:1: `impl Iterate for Array<Int64>` is refused: the language already defines `Iterate` for `Array<Int64>`\n"
+    );
+}
+
+/// Without a std root no island reads the pattern of `=~`, so the core states the
+/// grammar's row.
+#[test]
+fn a_pattern_the_grammar_refuses_is_refused_without_a_std_root() {
+    let src = "fn main() -> Int64 {\n    if \"abc\" =~ \"a(b\" {\n        print(\"y\")\n    }\n    return 0\n}\n";
+    let opts = vyrn_frontend::loader::LoadOptions::default();
+    let resolver = vyrn_frontend::loader::DiskResolver;
+    let said: Vec<String> = match vyrn_lower::load(src, "main.vyrn", &opts, &resolver, None) {
+        Ok(_) => Vec::new(),
+        Err(ds) => ds.iter().map(|d| d.render()).collect(),
+    };
+    assert_eq!(
+        said,
+        ["line 2: invalid regex `a(b`: a group with no closing `)`"]
+    );
+}

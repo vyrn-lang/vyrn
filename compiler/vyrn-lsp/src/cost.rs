@@ -25,7 +25,7 @@ const KEPT: &str = "check kept";
 const PROOFS: [&str; 2] = ["check proved", "call erased"];
 
 /// The glyph of [`PROOFS`].
-const PROVED: &str = "⇒";
+const PROVED: &str = "\u{21d2}";
 
 /// Whether a run counts blocks for a row of `verb`.
 fn blocks(verb: &str) -> bool {
@@ -78,23 +78,26 @@ fn tooltip(f: &FnCost, row: &CostLine, run: Option<&Sites>) -> String {
 /// Each verb's compact glyph and hover title, keyed by [`CostLine::verb`]: the one table of
 /// the editor's cost glyphs. [`LAST_RUN`] marks the blocks of the last profile.
 const GLYPHS: [(&str, &str, &str); 9] = [
-    ("copies", "⧉", "copies"),
-    ("allocates", "⊞", "allocates"),
-    ("enters", "↘", "enters an allocating function"),
-    ("grows", "↗", "may grow"),
+    ("copies", "\u{29c9}", "copies"),
+    ("allocates", "\u{229e}", "allocates"),
+    ("enters", "\u{2198}", "enters an allocating function"),
+    ("grows", "\u{2197}", "may grow"),
     (KEPT, "?", "check kept"),
-    ("check refused", "✗", "check refused"),
-    ("call kept", "↺", "call kept"),
+    ("check refused", "\u{2717}", "check refused"),
+    ("call kept", "\u{21ba}", "call kept"),
     (PROOFS[0], PROVED, "check proved"),
     (PROOFS[1], PROVED, "call erased"),
 ];
 
 /// The glyph of the blocks the last run made on a line.
-const LAST_RUN: &str = "×";
+const LAST_RUN: &str = "\u{d7}";
 
 /// `n` in superscript digits; empty for 1, as a noun of one fact has no `x1`.
 fn superscript(n: usize) -> String {
-    const DIGITS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+    const DIGITS: [char; 10] = [
+        '\u{2070}', '\u{b9}', '\u{b2}', '\u{b3}', '\u{2074}', '\u{2075}', '\u{2076}', '\u{2077}',
+        '\u{2078}', '\u{2079}',
+    ];
     match n {
         1 => String::new(),
         n => (n.to_string().bytes())

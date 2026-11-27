@@ -61,7 +61,7 @@ pub fn target_at(
                 .any(|s| s.name == foreign.text && s.file.is_none())
         {
             return Err(format!(
-                "`{}` is not declared in this file — rename the declaration it stands for, and \
+                "`{}` is not declared in this file \u{2014} rename the declaration it stands for, and \
                  this use follows",
                 foreign.text
             ));
@@ -74,7 +74,7 @@ pub fn target_at(
             s.file.is_none() && s.line == line && s.col > 0 && col >= s.col && col <= s.end_col
         })
         .ok_or_else(|| {
-            "there is no declaration here to rename — put the cursor on a top-level \
+            "there is no declaration here to rename \u{2014} put the cursor on a top-level \
              declaration's own name"
                 .to_string()
         })?;
@@ -194,7 +194,7 @@ fn wanted(target: &Target, new: &str, maps: &[MappedSymbol]) -> Result<Vec<Wante
         }
         let derived = derive_generated(&m.name, &target.name, new).ok_or_else(|| {
             format!(
-                "`{}` is generated as `{}`, whose new name this rename cannot derive — \
+                "`{}` is generated as `{}`, whose new name this rename cannot derive \u{2014} \
                  rename it by hand, or the generated call sites would break silently",
                 target.name, m.name
             )
@@ -583,7 +583,7 @@ fn candidates(
     }
     if files.len() > MAX_RENAME_FILES {
         return Err(format!(
-            "more than {MAX_RENAME_FILES} source files under {} mention `{}` — \
+            "more than {MAX_RENAME_FILES} source files under {} mention `{}` \u{2014} \
              rename cannot promise to reach every call site, so it has changed nothing",
             root.display(),
             names[0].old

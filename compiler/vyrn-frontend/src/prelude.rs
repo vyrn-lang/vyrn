@@ -537,7 +537,7 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Logs)
             .effect(WriteOutput)
             .hover(&format!(
-                "{method}(logger, message) -> Unit — log at {method} level"
+                "{method}(logger, message) -> Unit \u{2014} log at {method} level"
             ))
     };
     let mut rows = vec![
@@ -553,7 +553,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("push", &[Array, SmallArray])
             .spec(Spec::Rebuilds)
-            .hover("array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver")
+            .hover("array.push(value) -> Array<T> \u{2014} append to a growable array; a statement writes the result back through the receiver")
             .resizes(ShapeMap::Pushes(1)),
         // The builtin containers' `place at` / `place atSet`. The body names no
         // type, so one pair serves every container and each backend types
@@ -568,7 +568,7 @@ fn table() -> Vec<Builtin> {
                 &["self", "i"],
             ))
             .method("at", lists)
-            .hover("array.at(index) -> T — read an element by index; `array[index]` is the same call"),
+            .hover("array.at(index) -> T \u{2014} read an element by index; `array[index]` is the same call"),
         b("atSet").sig(row(
             "atSet",
             &[],
@@ -581,7 +581,7 @@ fn table() -> Vec<Builtin> {
             .sig(row("@pop", &["T"], &[("self", Modify, arr(t()))], opt(t()), &[]))
             .method("pop", &[Array, SmallArray])
             .spec(Spec::Removes)
-            .hover("array.pop() -> Option<T> — remove and return the last element (None if empty)")
+            .hover("array.pop() -> Option<T> \u{2014} remove and return the last element (None if empty)")
             .resizes(ShapeMap::DropsLast),
         b("@swapRemove")
             .takes(&[2], |_, _, got| rule!(SwapRemoveArity, got = got.saturating_sub(1)))
@@ -594,7 +594,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("swapRemove", &[Array, SmallArray])
             .spec(Spec::Removes)
-            .hover("array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot")
+            .hover("array.swapRemove(index) -> T \u{2014} O(1) unordered remove: move the last element into the slot")
             .resizes(ShapeMap::SwapsOut(1))
             .indexes(Indexes::Element),
         b("@replace")
@@ -608,7 +608,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("replace", &[Array])
             .spec(Spec::Removes)
-            .hover("array.replace(index, value) -> T — store value at index and return the element it held")
+            .hover("array.replace(index, value) -> T \u{2014} store value at index and return the element it held")
             .resizes(ShapeMap::Writes(2))
             .indexes(Indexes::Element),
         // Rebuilds like `push`: the result carries the possibly reallocated
@@ -624,7 +624,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("reserve", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation")
+            .hover("array.reserve(n) -> Array<T> \u{2014} make room for n more elements ahead of time, so a known-size build is one allocation")
             .resizes(ShapeMap::Same),
         // `clear` releases each element and keeps the buffer for the next fill.
         // `append` moves its argument's elements in, and `copyFrom` overwrites
@@ -633,7 +633,7 @@ fn table() -> Vec<Builtin> {
             .sig(row("@clear", &["T"], &[("self", Read, arr(t()))], arr(t()), &[]))
             .method("clear", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.clear() -> Array<T> — release every element and set the length to zero, keeping the buffer for the next fill")
+            .hover("array.clear() -> Array<T> \u{2014} release every element and set the length to zero, keeping the buffer for the next fill")
             .resizes(ShapeMap::Empties),
         b("@append")
             .sig(row(
@@ -645,7 +645,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("append", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.append(other) -> Array<T> — move every element of `other` on, in order; `other.copy()` keeps the original")
+            .hover("array.append(other) -> Array<T> \u{2014} move every element of `other` on, in order; `other.copy()` keeps the original")
             .resizes(ShapeMap::Appends(1)),
         b("@copyFrom")
             .sig(row(
@@ -657,17 +657,17 @@ fn table() -> Vec<Builtin> {
             ))
             .method("copyFrom", &[Array])
             .spec(Spec::Rebuilds)
-            .hover("array.copyFrom(src) -> Array<T> — release the elements and refill the buffer with copies of `src`'s")
+            .hover("array.copyFrom(src) -> Array<T> \u{2014} release the elements and refill the buffer with copies of `src`'s")
             .resizes(ShapeMap::CopiesFrom(1)),
         b("@toArray")
             .takes(&[1], takes_none)
             .method("toArray", &[SmallArray])
             .spec(Spec::Builds(arr(t())))
-            .hover("smallArray.toArray() -> Array<T> — copy a SmallArray's elements out to a growable Array"),
+            .hover("smallArray.toArray() -> Array<T> \u{2014} copy a SmallArray's elements out to a growable Array"),
         b("@has")
             .method("has", &[Map])
             .spec(Spec::Finds)
-            .hover("map.has(key) -> Bool — whether the map contains the key"),
+            .hover("map.has(key) -> Bool \u{2014} whether the map contains the key"),
         // Shrinks the map in place, as `@pop` does an array.
         b("@remove")
             .sig(row(
@@ -686,7 +686,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("remove", &[Map])
             .spec(Spec::Removes)
-            .hover("map.remove(key) -> Bool — remove the entry (order-preserving); was it present?"),
+            .hover("map.remove(key) -> Bool \u{2014} remove the entry (order-preserving); was it present?"),
         // Copies the keys into a new buffer. `Array<K>`, not `Array<String>`,
         // so an Int64-keyed snapshot does not release its keys as Strings. `K`
         // is the row's own parameter name, which the core's result names too.
@@ -704,7 +704,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("keys", &[Map])
             .spec(Spec::Builds(arr(k())))
-            .hover("map.keys() -> Array<String> — a snapshot of the keys, in insertion order"),
+            .hover("map.keys() -> Array<String> \u{2014} a snapshot of the keys, in insertion order"),
         // `Show` holds for a type the language renders and a type that declares
         // how it renders (`Checker::type_satisfies`). Both read and keep
         // nothing, so a temporary argument is the caller's to release.
@@ -717,19 +717,19 @@ fn table() -> Vec<Builtin> {
             .method("toString", &[Shape::Str, Scalar])
             .spec(Spec::Renders(Str))
             .fresh()
-            .hover("x.toString() -> String — render a number, Bool, or String"),
+            .hover("x.toString() -> String \u{2014} render a number, Bool, or String"),
         // The number of Unicode scalar values, O(n). Method-only, so it has no
         // free spelling to import; it stays routed.
         b("@charCount")
             .sig(row("@charCount", &[], &[("s", Read, Str)], Int, &[]))
             .method("charCount", &[Shape::Str])
             .route("text$charCountV")
-            .hover("s.charCount() -> Int64 — number of Unicode scalar values (O(n); counts non-continuation bytes)"),
+            .hover("s.charCount() -> Int64 \u{2014} number of Unicode scalar values (O(n); counts non-continuation bytes)"),
         b("close")
             .sig(row("close", &["T"], &[("s", Consume, stm(t()))], Unit, &[]))
             .spec(Spec::Effect(Unit))
             .method_on(&[Stream])
-            .hover("close(stream) -> Unit — discharge a stream's disposal obligation without consuming it"),
+            .hover("close(stream) -> Unit \u{2014} discharge a stream's disposal obligation without consuming it"),
     ];
     // A seeded row is matched by name, so the unlexable `@info` keeps a user
     // `fn info(..)` from inheriting the log contract.
@@ -743,7 +743,7 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::OwnType)
             .fresh()
             .resizes(ShapeMap::Same)
-            .hover("x.copy() -> T — a value of the receiver's type that shares no heap with it; deep and structural. A handle copies as the value it is, so the copy names the same thing"),
+            .hover("x.copy() -> T \u{2014} a value of the receiver's type that shares no heap with it; deep and structural. A handle copies as the value it is, so the copy names the same thing"),
         // Insert-or-add in one probe. The key is read: a miss copies it in.
         b("@tally")
             .sig(row(
@@ -759,7 +759,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("tally", &[])
             .spec(Spec::Rebuilds)
-            .hover("map.tally(key, n) -> Map<String, Int64> — insert-or-add on a count map, one probe"),
+            .hover("map.tally(key, n) -> Map<String, Int64> \u{2014} insert-or-add on a count map, one probe"),
         // A hit compares the bytes in place; a miss builds the String key once
         // and traps on invalid UTF-8.
         b("@tallyBytes")
@@ -776,7 +776,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("tallyBytes", &[])
             .spec(Spec::Rebuilds)
-            .hover("map.tallyBytes(bytes, n) -> Map<String, Int64> — tally keyed by raw bytes; the String is built and validated only on a miss"),
+            .hover("map.tallyBytes(bytes, n) -> Map<String, Int64> \u{2014} tally keyed by raw bytes; the String is built and validated only on a miss"),
         // Value methods, not `F32x4.lane(v, k)`: a value-receiver method name is
         // a global default, and `min`/`max`/`abs` are `std/math` exports, so the
         // rest of the vector surface is on the type name. `anyTrue` and
@@ -786,22 +786,22 @@ fn table() -> Vec<Builtin> {
             .takes(&[2], |_, _, got| rule!(LaneArity, got))
             .method("lane", &[])
             .spec(Spec::Lanes)
-            .hover("vector.lane(k) -> T — read lane `k` of an `F32x4`, `I32x4`, `F64x2` or mask; `k` is a compile-time constant inside the width"),
+            .hover("vector.lane(k) -> T \u{2014} read lane `k` of an `F32x4`, `I32x4`, `F64x2` or mask; `k` is a compile-time constant inside the width"),
         b("@replaceLane")
             .takes(&[3], |_, _, got| rule!(ReplaceLaneArity, got = got.saturating_sub(1)))
             .method("replaceLane", &[])
             .spec(Spec::Lanes)
-            .hover("vector.replaceLane(k, x) -> Vector — the same vector with lane `k` set to `x`; `k` is a compile-time constant inside the width"),
+            .hover("vector.replaceLane(k, x) -> Vector \u{2014} the same vector with lane `k` set to `x`; `k` is a compile-time constant inside the width"),
         b("@anyTrue")
             .takes(&[1], |n, _, got| rule!(MaskArity, what = &n[1..], got = got.saturating_sub(1)))
             .method("anyTrue", &[])
             .spec(Spec::Lanes)
-            .hover("mask.anyTrue() -> Bool — whether any lane of a comparison mask is set"),
+            .hover("mask.anyTrue() -> Bool \u{2014} whether any lane of a comparison mask is set"),
         b("@allTrue")
             .takes(&[1], |n, _, got| rule!(MaskArity, what = &n[1..], got = got.saturating_sub(1)))
             .method("allTrue", &[])
             .spec(Spec::Lanes)
-            .hover("mask.allTrue() -> Bool — whether every lane of a comparison mask is set"),
+            .hover("mask.allTrue() -> Bool \u{2014} whether every lane of a comparison mask is set"),
         ctor("F32x4", Type::Float32, f4.clone(), 4),
         ctor("I32x4", i32_.clone(), Type::I32x4, 4),
         ctor("F64x2", Float, d2.clone(), 2),
@@ -835,13 +835,13 @@ fn table() -> Vec<Builtin> {
         view("float64Bits", "x", Float, u64_()),
         view("float64FromBits", "b", u64_(), Float),
         unary("@clz", "clz", ints.clone())
-            .hover("x.clz() -> T — the count of zero bits above the highest set bit of an Int32, UInt32, Int64 or UInt64; the width when `x` is 0"),
+            .hover("x.clz() -> T \u{2014} the count of zero bits above the highest set bit of an Int32, UInt32, Int64 or UInt64; the width when `x` is 0"),
         unary("@ctz", "ctz", ints.clone())
-            .hover("x.ctz() -> T — the count of zero bits below the lowest set bit of an Int32, UInt32, Int64 or UInt64; the width when `x` is 0"),
+            .hover("x.ctz() -> T \u{2014} the count of zero bits below the lowest set bit of an Int32, UInt32, Int64 or UInt64; the width when `x` is 0"),
         unary("@popcount", "popcount", ints)
-            .hover("x.popcount() -> T — the count of set bits of an Int32, UInt32, Int64 or UInt64"),
+            .hover("x.popcount() -> T \u{2014} the count of set bits of an Int32, UInt32, Int64 or UInt64"),
         unary("@sqrt", "sqrt", vec![Float, Type::Float32])
-            .hover("x.sqrt() -> T — the correctly rounded square root of a Float64 or Float32; NaN below zero, and -0.0 at -0.0"),
+            .hover("x.sqrt() -> T \u{2014} the correctly rounded square root of a Float64 or Float32; NaN below zero, and -0.0 at -0.0"),
         // `bytes` copies (`__vyrn_str_bytes_range` allocates), so it does not
         // lend and its result is owned. One row serves both arities: the
         // offsets change nothing about ownership.
@@ -886,7 +886,7 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Builds(opt(Str)))
             .indexes(Indexes::Bytes)
             .home("std/strpred")
-            .hover("stringOf(s, start, end) -> Option<String> — the bytes of `s` from `start` to `end` as a String, `None` where either falls on a continuation byte; only `std/strpred` may call it, and `slice` is the one to call"),
+            .hover("stringOf(s, start, end) -> Option<String> \u{2014} the bytes of `s` from `start` to `end` as a String, `None` where either falls on a continuation byte; only `std/strpred` may call it, and `slice` is the one to call"),
         b("logger")
             .sig(row("logger", &[], &[("name", Read, Str)], Type::Logger, &[]))
             .spec(Spec::Logs),
@@ -954,7 +954,7 @@ fn table() -> Vec<Builtin> {
                 &[],
             ))
             .spec(Spec::Builds(stm(t())))
-            .hover("fromArray(array) -> Stream<T> — move an array's elements into a linear stream"),
+            .hover("fromArray(array) -> Stream<T> \u{2014} move an array's elements into a linear stream"),
         // The pull producer: the stream carries a cursor (`slot`, `gen`) into a
         // slab in `std/stream`, and every `next` hands it to `step`. The runtime
         // dispatches by the step's signature, so it must depend on the element
@@ -973,14 +973,14 @@ fn table() -> Vec<Builtin> {
                 &[],
             ))
             .spec(Spec::Builds(stm(t())))
-            .hover("fromStep(slot, generation, step) -> Stream<T> — a stream that pulls from `step: fn(Int64, Int64, Bool) -> Option<T>` over a cursor its caller minted; `std/stream`'s `unfold` is the one to call"),
+            .hover("fromStep(slot, generation, step) -> Stream<T> \u{2014} a stream that pulls from `step: fn(Int64, Int64, Bool) -> Option<T>` over a cursor its caller minted; `std/stream`'s `unfold` is the one to call"),
         // The box's address is an `Int64` and says nothing of `T`, so a call
         // anywhere but `std/stream` could read the stream at any type.
         b("boxStream")
             .sig(row("boxStream", &["T"], &[("s", Consume, stm(t()))], Int, &[]))
             .spec(Spec::Effect(Int))
             .home("std/stream")
-            .hover("boxStream(s) -> Int64 — move a stream into one heap box and answer its address; only `std/stream` may call it, to keep a wrapper's source"),
+            .hover("boxStream(s) -> Int64 \u{2014} move a stream into one heap box and answer its address; only `std/stream` may call it, to keep a wrapper's source"),
         // `std/order`'s `before` is the one caller: the core lowers each call
         // into the order's key reads and compares (`vyrn_lower::core`), so no
         // engine sees it.
@@ -993,7 +993,7 @@ fn table() -> Vec<Builtin> {
                 &[],
             ))
             .home(crate::order::SPEC)
-            .hover("orderBefore(a, b) -> Bool — whether `a` is strictly before `b` under the order `O`; `std/order`'s `before` is the one to call"),
+            .hover("orderBefore(a, b) -> Bool \u{2014} whether `a` is strictly before `b` under the order `O`; `std/order`'s `before` is the one to call"),
         // Hands the stream to the host, which pulls and writes one encoded
         // frame at a time and `close`s it when a write fails. It is a builtin
         // because the stream escapes the call that made it.
@@ -1001,28 +1001,28 @@ fn table() -> Vec<Builtin> {
             .sig(row("serveStream", &[], &[("s", Consume, stm(Str))], Unit, &[]))
             .spec(Spec::Effect(Unit))
             .effect(Serve)
-            .hover("serveStream(stream) -> Unit — hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails; `std/http`'s `sse` is the one to call"),
+            .hover("serveStream(stream) -> Unit \u{2014} hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails; `std/http`'s `sse` is the one to call"),
         // The host waits: `std/task`'s `sleep` and `std/fetch`'s `fetch` are the callers.
         b("hostSleep")
             .sig(row("hostSleep", &[], &[("ms", Read, Int)], Unit, &[]))
             .spec(Spec::HostWait(Unit))
             .effect(Waits)
             .home("std/task")
-            .hover("hostSleep(ms) -> Unit — wait `ms` milliseconds while the host runs other tasks; only `std/task` may call it, and `sleep` is the one to call"),
+            .hover("hostSleep(ms) -> Unit \u{2014} wait `ms` milliseconds while the host runs other tasks; only `std/task` may call it, and `sleep` is the one to call"),
         b("hostFetch")
             .sig(row("hostFetch", &[], &[("request", Read, Str)], Str, &[]))
             .spec(Spec::HostWait(Str))
             .effect(Net)
             .fresh()
             .home("std/fetch")
-            .hover("hostFetch(request) -> String — send a packed request and wait for the packed reply while the host runs other tasks; only `std/fetch` may call it, and `fetch` is the one to call"),
+            .hover("hostFetch(request) -> String \u{2014} send a packed request and wait for the packed reply while the host runs other tasks; only `std/fetch` may call it, and `fetch` is the one to call"),
         // The host drops the operation of a cancelled wait:
         // `std/task`'s run queue is the one caller.
         b("hostCancel")
             .sig(row("hostCancel", &[], &[("id", Read, Int)], Unit, &[]))
             .spec(Spec::Effect(Unit))
             .home("std/task")
-            .hover("hostCancel(id) -> Unit — tell the host to drop operation `id`, whose wait was cancelled; only `std/task`'s run queue calls it"),
+            .hover("hostCancel(id) -> Unit \u{2014} tell the host to drop operation `id`, whose wait was cancelled; only `std/task`'s run queue calls it"),
         // The host learns that a task it started ended:
         // `std/task`'s run queue is the one caller.
         b("hostDone")
@@ -1035,20 +1035,20 @@ fn table() -> Vec<Builtin> {
             ))
             .spec(Spec::Effect(Unit))
             .home("std/task")
-            .hover("hostDone(task, status, result) -> Unit — tell the host that the task it started as `task` ended: 0 with `result`, or 1 cancelled; only `std/task`'s run queue calls it"),
+            .hover("hostDone(task, status, result) -> Unit \u{2014} tell the host that the task it started as `task` ended: 0 with `result`, or 1 cancelled; only `std/task`'s run queue calls it"),
         // A task's block, which `fork` allocates: `std/task` is the one caller, and reads
         // the task's state before it takes or frees one.
         b("taskId")
             .sig(row("taskId", &["T"], &[("t", Read, task(t()))], Int, &[]))
             .spec(Spec::Tasks)
             .home("std/task")
-            .hover("taskId(t) -> Int64 — the run queue's id of the task `t`; only `std/task` calls it"),
+            .hover("taskId(t) -> Int64 \u{2014} the run queue's id of the task `t`; only `std/task` calls it"),
         b("taskTake")
             .sig(row("taskTake", &["T"], &[("t", Consume, task(t()))], t(), &[]))
             .spec(Spec::Tasks)
             .fresh()
             .home("std/task")
-            .hover("taskTake(t) -> T — the result of the task `t`, which returned, and its block freed; only `std/task` calls it"),
+            .hover("taskTake(t) -> T \u{2014} the result of the task `t`, which returned, and its block freed; only `std/task` calls it"),
         b("taskFree")
             .sig(row(
                 "taskFree",
@@ -1059,19 +1059,19 @@ fn table() -> Vec<Builtin> {
             ))
             .spec(Spec::Tasks)
             .home("std/task")
-            .hover("taskFree(t, returned) -> Unit — free the block of the task `t`, which ended, and its result when it returned; only `std/task` calls it"),
+            .hover("taskFree(t, returned) -> Unit \u{2014} free the block of the task `t`, which ended, and its result when it returned; only `std/task` calls it"),
         b("taskLeave")
             .sig(row("taskLeave", &["T"], &[("t", Consume, task(t()))], Unit, &[]))
             .spec(Spec::Tasks)
             .home("std/task")
-            .hover("taskLeave(t) -> Unit — give the block of the task `t`, which runs, to its root, which frees it when the task ends; only `std/task` calls it"),
+            .hover("taskLeave(t) -> Unit \u{2014} give the block of the task `t`, which runs, to its root, which frees it when the task ends; only `std/task` calls it"),
         // A wait on one of the run queue's own operations, which no host starts.
         b("taskWait")
             .sig(row("taskWait", &[], &[("op", Read, Int)], Unit, &[]))
             .spec(Spec::HostWait(Unit))
             .effect(Waits)
             .home("std/task")
-            .hover("taskWait(op) -> Unit — wait until the run queue delivers its operation `op`; only `std/task` calls it"),
+            .hover("taskWait(op) -> Unit \u{2014} wait until the run queue delivers its operation `op`; only `std/task` calls it"),
         // A step of a task the host started: `std/task`'s run queue is the one caller.
         // It runs the task's code, which may trap.
         b("hostResume")
@@ -1085,19 +1085,19 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Resumes)
             .effect(Trap)
             .home("std/task")
-            .hover("hostResume(root, frame) -> Int32 — one more step of the task `root` started, whose frame is at `frame`: 0 when it ended, 1 when it was cancelled, else its frame; only `std/task`'s run queue calls it"),
+            .hover("hostResume(root, frame) -> Int32 \u{2014} one more step of the task `root` started, whose frame is at `frame`: 0 when it ended, 1 when it was cancelled, else its frame; only `std/task`'s run queue calls it"),
         // The argument is an address, so nothing is consumed; the result's
         // stream type carries the disposal obligation.
         b("unboxStream").takes(&[1], takes_one)
             .sig(row("unboxStream", &["T"], &[("a", Read, Int)], stm(t()), &[]))
             .spec(Spec::Builds(stm(t())))
             .home("std/stream")
-            .hover("unboxStream(address) -> Stream<T> — take a boxed stream back out at the annotated type; only `std/stream` may call it"),
+            .hover("unboxStream(address) -> Stream<T> \u{2014} take a boxed stream back out at the annotated type; only `std/stream` may call it"),
         b("pullAt")
             .takes(&[1], takes_one)
             .spec(Spec::Builds(opt(t())))
             .home("std/stream")
-            .hover("pullAt(address) -> Option<T> — one element from the stream in that box, at the annotated type; only `std/stream` may call it"),
+            .hover("pullAt(address) -> Option<T> \u{2014} one element from the stream in that box, at the annotated type; only `std/stream` may call it"),
         b("@pull").spec(Spec::Pulls),
         // The parts' lengths add up to the growth, which no one operand states.
         b("@strAppend")

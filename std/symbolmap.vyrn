@@ -121,8 +121,8 @@ export gen fn symbolMapFn(module: String, symbols: Array<Symbol>) -> Code {
 
 test "a slug distinguishes paths that differ only outside ASCII" {
     // The two paths share every ASCII byte.
-    let a = mapSlug("http(./påster)")
-    let b = mapSlug("http(./pa̋ster)")
+    let a = mapSlug("http(./p\u{e5}ster)")
+    let b = mapSlug("http(./pa\u{30b}ster)")
     assert(a != b)
 }
 

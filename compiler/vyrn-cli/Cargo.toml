@@ -18,7 +18,7 @@ vyrn-frontend = { path = "../vyrn-frontend" }
 vyrn-lower = { path = "../vyrn-lower" }
 vyrn-codegen = { path = "../vyrn-codegen" }
 # The embedded wasm engine that runs generators. An EXCLUDED crate, because
-# nothing needs its own test suite to build or test the language — but not an
+# nothing needs its own test suite to build or test the language - but not an
 # optional DEPENDENCY: it is the one generation engine, and the same crate also
 # serves the `vyrn_gen` imports a `test` block's generator is compiled against,
 # so a driver without it cannot run a generator at all. What the workspace

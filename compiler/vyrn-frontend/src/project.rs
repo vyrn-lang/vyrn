@@ -383,7 +383,7 @@ impl Expansions {
         let Some((_, root, path)) = crate::parser::place_steps(&p.place) else {
             return Err(format!(
                 "line {line}: `{name}[..] = v` goes through an `atSet` projection whose \
-                  result has no address — a call result or a temporary. A projection \
+                  result has no address \u{2014} a call result or a temporary. A projection \
                   returns a place: a binding, a field of one, or an element of one"
             ));
         };
@@ -536,7 +536,7 @@ pub fn inline(
     }) = stmts.last()
     else {
         return Err(format!(
-            "line {line}: projection `{}` has no exit — a projection ends by \
+            "line {line}: projection `{}` has no exit \u{2014} a projection ends by \
              returning the place it names",
             f.name
         ));

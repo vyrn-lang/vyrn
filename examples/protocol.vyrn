@@ -1,37 +1,37 @@
-protocol Show {
-    fn show(self) -> String
+protocol Pretty {
+    fn pretty(self) -> String
 }
 
-impl Show for Int64 {
-    fn show(self) -> String { return self.toString() }
+impl Pretty for Int64 {
+    fn pretty(self) -> String { return self.toString() }
 }
 
-impl Show for Bool {
-    fn show(self) -> String {
+impl Pretty for Bool {
+    fn pretty(self) -> String {
         if self { return "yes" }
         return "no"
     }
 }
 
-impl Show for String {
-    fn show(self) -> String { return self.copy() }
+impl Pretty for String {
+    fn pretty(self) -> String { return self.copy() }
 }
 
-impl<T: Show> Show for Option<T> {
-    fn show(self) -> String {
+impl<T: Pretty> Pretty for Option<T> {
+    fn pretty(self) -> String {
         return match self {
-            Some(v) => "Some(" + v.show() + ")",
+            Some(v) => "Some(" + v.pretty() + ")",
             None => "None",
         }
     }
 }
 
 fn label(x: Int64, flag: Bool) -> String {
-    return "x=" + show(x) + " flag=" + show(flag)
+    return "x=" + pretty(x) + " flag=" + pretty(flag)
 }
 
-fn describe<T: Show>(x: T) -> String {
-    return "= " + x.show()
+fn describe<T: Pretty>(x: T) -> String {
+    return "= " + x.pretty()
 }
 
 fn main() -> Int64 {
@@ -41,9 +41,9 @@ fn main() -> Int64 {
     let n: Option<Int64> = Some(7)
     let s: Option<String> = Some("hi")
     let nothing: Option<Int64> = None
-    print(n.show()) // Some(7)
-    print(s.show()) // Some(hi)
-    print(nothing.show()) // None
-    print(describe(n)) // = Some(7)   (a generic bounded by Show, T = Option<Int64>)
+    print(n.pretty()) // Some(7)
+    print(s.pretty()) // Some(hi)
+    print(nothing.pretty()) // None
+    print(describe(n)) // = Some(7)   (a generic bounded by Pretty, T = Option<Int64>)
     return 0
 }

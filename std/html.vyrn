@@ -172,7 +172,7 @@ fn nameOk(n: String) -> Bool {
 /// `kind` is `tag`, `attribute` or `event`, for the message.
 fn requireName(kind: String, n: String) {
     if !nameOk(n) {
-        panic("html: `" + n + "` is not a usable " + kind + " name — a name holds only letters, digits, `-`, `_` and `:`; untrusted text belongs in a VALUE, which is escaped")
+        panic("html: `" + n + "` is not a usable " + kind + " name \u{2014} a name holds only letters, digits, `-`, `_` and `:`; untrusted text belongs in a VALUE, which is escaped")
     }
 }
 
@@ -232,7 +232,7 @@ fn renderEl(tag: String, attrs: Array<Attr>, kids: Array<Html>) -> String {
     requireName("tag", tag)
     if isVoid(tag) {
         if kids.length > 0 {
-            panic("html: <" + tag + "> is a void element and takes no children — " + kids.length.toString() + " given; a void element has no content model, so those nodes can never render")
+            panic("html: <" + tag + "> is a void element and takes no children \u{2014} " + kids.length.toString() + " given; a void element has no content model, so those nodes can never render")
         }
         return "<" + tag + renderAttrs(attrs) + ">"
     }

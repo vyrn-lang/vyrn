@@ -86,14 +86,14 @@ gen fn connectValidateContract(iface: ModuleInterface) -> Option<Code> {
         if f.params.length > 1 {
             return Some(reportHere(
                 Error,
-                "procedure `\{f.name}` takes \{f.params.length.toString()} parameters — a Connect procedure takes at most one; gather them into one exported record type",
+                "procedure `\{f.name}` takes \{f.params.length.toString()} parameters \u{2014} a Connect procedure takes at most one; gather them into one exported record type",
             ))
         }
         if f.params.length == 1 {
             if connectIsNamedType(f.params[0].spelling, iface) == false {
                 return Some(reportHere(
                     Error,
-                    "procedure `\{f.name}` takes `\{f.params[0].spelling}`, which this contract does not export as a named type — a Connect parameter must be an exported named type so the generated module can decode it",
+                    "procedure `\{f.name}` takes `\{f.params[0].spelling}`, which this contract does not export as a named type \u{2014} a Connect parameter must be an exported named type so the generated module can decode it",
                 ))
             }
         }

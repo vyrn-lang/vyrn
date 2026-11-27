@@ -286,7 +286,7 @@ fn readNumber(p: modify VonP, sign: String) -> Result<Von, String> {
     // `0xff`, `1e9` and `1_000` lex as a number with a word attached. VON, like
     // Vyrn, has no such literal, so name the word.
     if kindAt(p) == "ident" && tokLine(p) == nline && tokCol(p) == ncol + raw.byteLength {
-        return Err("line " + nline.toString() + ", col " + ncol.toString() + ": `" + raw + textAt(p) + "` is not a VON number — VON writes decimal digits and nothing else: no hex, no exponent, no digit separator")
+        return Err("line " + nline.toString() + ", col " + ncol.toString() + ": `" + raw + textAt(p) + "` is not a VON number \u{2014} VON writes decimal digits and nothing else: no hex, no exponent, no digit separator")
     }
     if isFloat {
         return Ok(VFloat(sign + raw))
@@ -341,7 +341,7 @@ fn readRecord(p: modify VonP, name: String, depth: Int64) -> Result<Von, String>
             return Ok(VRecord(name.copy(), fs))
         }
         if kindAt(p) == "keyword" {
-            return Err(errAt(p, "`" + textAt(p) + "` is a Vyrn keyword, so it is not a field name here — VON is Vyrn's own grammar, and the same words are spoken for"))
+            return Err(errAt(p, "`" + textAt(p) + "` is a Vyrn keyword, so it is not a field name here \u{2014} VON is Vyrn's own grammar, and the same words are spoken for"))
         }
         if kindAt(p) != "ident" {
             return Err(errAt(p, "expected a field name, found " + showTok(p)))
@@ -384,10 +384,10 @@ fn readVariantArgs(p: modify VonP, name: String, depth: Int64) -> Result<Von, St
         if atPunct(p, ",") {
             bump(p)
         } else if atPunct(p, ")") == false {
-            return Err(errAt(p, "expected `,` or `)` in `" + name + "(…)`, found " + showTok(p)))
+            return Err(errAt(p, "expected `,` or `)` in `" + name + "(\u{2026})`, found " + showTok(p)))
         }
     }
-    return Err(errAt(p, "unterminated `" + name + "(…)`"))
+    return Err(errAt(p, "unterminated `" + name + "(\u{2026})`"))
 }
 
 /// Reads an array's elements, the cursor just past `[`.
@@ -491,7 +491,7 @@ fn readValue(p: modify VonP, depth: Int64) -> Result<Von, String> {
         return Ok(VStr(s))
     }
     if k == "template" {
-        return Err(errAt(p, "a VON string cannot interpolate: `\\{` needs a scope, and a VON document has none — escape the backslash to mean it literally"))
+        return Err(errAt(p, "a VON string cannot interpolate: `\\{` needs a scope, and a VON document has none \u{2014} escape the backslash to mean it literally"))
     }
     if k == "int" || k == "float" {
         return readNumber(p, "")
@@ -516,7 +516,7 @@ fn readValue(p: modify VonP, depth: Int64) -> Result<Von, String> {
     if k == "" {
         return Err(errAt(p, "expected a value, found the end of the file"))
     }
-    return Err(errAt(p, showTok(p) + " is not a VON value — a VON document is pure data: no operators, no calls, no bindings"))
+    return Err(errAt(p, showTok(p) + " is not a VON value \u{2014} a VON document is pure data: no operators, no calls, no bindings"))
 }
 
 /// Reads `-` followed by a number. The sign must touch its digits: `- 5` is
@@ -539,7 +539,7 @@ fn readSigned(p: modify VonP) -> Result<Von, String> {
 fn readImport(p: modify VonP) -> Result<VonImport, String> {
     bump(p) // import
     if atKeyword(p, "type") == false {
-        return Err(errAt(p, "a VON header imports a TYPE: write `import type { … } from \"…\"`"))
+        return Err(errAt(p, "a VON header imports a TYPE: write `import type { \u{2026} } from \"\u{2026}\"`"))
     }
     bump(p)
     if atPunct(p, "{") == false {
@@ -618,7 +618,7 @@ fn layoutError(src: Array<UInt8>) -> String {
     }
     let tab = tabIndentLine(src)
     if tab >= 0 {
-        return "line " + tab.toString() + ", col 1: indent with spaces — a tab is not indentation in VON, and indentation carries no meaning here anyway"
+        return "line " + tab.toString() + ", col 1: indent with spaces \u{2014} a tab is not indentation in VON, and indentation carries no meaning here anyway"
     }
     return ""
 }
@@ -659,7 +659,7 @@ fn walkVon(toks: consume Array<VonTok>, src: String) -> Result<VonDoc, String> {
         skipDocs(p)
     }
     if imports.length == 0 {
-        return Err(errAt(p, "a VON document starts with its schema: `import type { T } from \"…\"`"))
+        return Err(errAt(p, "a VON document starts with its schema: `import type { T } from \"\u{2026}\"`"))
     }
     let v = readValue(p, 0)?
     skipDocs(p)
@@ -758,7 +758,7 @@ fn pushUnicodeEscape(out: modify Array<UInt8>, b: UInt8) -> Unit {
 /// it does for the JSON conversion.
 fn requireName(kind: String, n: String) {
     if isIdent(n) == false {
-        panic("von: `" + n + "` is not a usable " + kind + " name — a name is a Vyrn identifier (a letter or `_`, then letters, digits or `_`) and not a keyword; text that is not one belongs in a VALUE, which is quoted and escaped")
+        panic("von: `" + n + "` is not a usable " + kind + " name \u{2014} a name is a Vyrn identifier (a letter or `_`, then letters, digits or `_`) and not a keyword; text that is not one belongs in a VALUE, which is quoted and escaped")
     }
 }
 
@@ -802,7 +802,7 @@ fn numberOk(raw: String, kind: String) -> Bool {
 /// emits.
 fn emitNumber(kind: String, raw: String) -> String {
     if numberOk(raw, kind) == false {
-        panic("von: `" + raw + "` is not a usable " + kind + " — a `VInt`/`VFloat` holds the RAW text of a decimal literal (an optional `-`, then digits with no leading zero, and for a float a `.` and more digits); VON has no hex, no exponent and no digit separator")
+        panic("von: `" + raw + "` is not a usable " + kind + " \u{2014} a `VInt`/`VFloat` holds the RAW text of a decimal literal (an optional `-`, then digits with no leading zero, and for a float a `.` and more digits); VON has no hex, no exponent and no digit separator")
     }
     return raw.copy()
 }
@@ -1052,7 +1052,7 @@ fn hasPoint(raw: String) -> Bool {
 /// One JSON value as VON; `path` is a dotted trail for errors.
 fn jsonValueToVon(j: Json, path: String) -> Result<Von, String> {
     return match j {
-        JNull => Err(path + ": VON has no null — a value that may be absent is an `Option` field, and an absent field is `None`"),
+        JNull => Err(path + ": VON has no null \u{2014} a value that may be absent is an `Option` field, and an absent field is `None`"),
         JBool(b) => Ok(VBool(b)),
         JNum(raw) => jsonNumberToVon(raw, path),
         JStr(s) => Ok(VStr(s.copy())),
@@ -1064,7 +1064,7 @@ fn jsonValueToVon(j: Json, path: String) -> Result<Von, String> {
 /// One JSON number as VON; an exponent is refused.
 fn jsonNumberToVon(raw: String, path: String) -> Result<Von, String> {
     if hasExponent(raw) {
-        return Err(path + ": `" + raw + "` is written with an exponent, and VON has no exponent form — write the digits out")
+        return Err(path + ": `" + raw + "` is written with an exponent, and VON has no exponent form \u{2014} write the digits out")
     }
     if hasPoint(raw) {
         return Ok(VFloat(raw.copy()))
@@ -1100,7 +1100,7 @@ fn jsonTopToVon(fields: Array<JsonField>, typeName: String) -> Result<Von, Strin
     let mut fs: Array<VonField> = []
     for f in fields {
         if isIdent(f.key) == false {
-            return Err("`" + f.key + "` is not a Vyrn identifier, so it cannot be a field of `" + typeName + "` — hold those members in a `Map<String, V>` field instead")
+            return Err("`" + f.key + "` is not a Vyrn identifier, so it cannot be a field of `" + typeName + "` \u{2014} hold those members in a `Map<String, V>` field instead")
         }
         let v = jsonValueToVon(f.value, f.key)?
         fs.push(VonField { name: f.key.copy(), value: v, line: 0 })
@@ -1206,12 +1206,12 @@ N { mode: 0777 }
 }
 
 test "a number is decimal digits and nothing else" {
-    let want = " is not a VON number — VON writes decimal digits and nothing else: no hex, no exponent, no digit separator"
+    let want = " is not a VON number \u{2014} VON writes decimal digits and nothing else: no hex, no exponent, no digit separator"
     assertEq(parseErr("import type { N } from \"./n\"\n\nN { a: 0xff }\n"), "line 3, col 8: `0xff`" + want)
     assertEq(parseErr("import type { N } from \"./n\"\n\nN { a: 1e9 }\n"), "line 3, col 8: `1e9`" + want)
     assertEq(parseErr("import type { N } from \"./n\"\n\nN { a: 1_000 }\n"), "line 3, col 8: `1_000`" + want)
     // `+1` applies an operator, and VON has none.
-    assertEq(parseErr("import type { N } from \"./n\"\n\nN { a: +1 }\n"), "line 3, col 8: `+` is not a VON value — a VON document is pure data: no operators, no calls, no bindings")
+    assertEq(parseErr("import type { N } from \"./n\"\n\nN { a: +1 }\n"), "line 3, col 8: `+` is not a VON value \u{2014} a VON document is pure data: no operators, no calls, no bindings")
 }
 
 test "duplicates name both lines" {
@@ -1234,7 +1234,7 @@ R {
 }
 
 test "interpolation and expressions are refused" {
-    assertEq(parseErr("import type { R } from \"./r\"\n\nR { s: \"a\\{1}b\" }\n"), "line 3, col 8: a VON string cannot interpolate: `\\{` needs a scope, and a VON document has none — escape the backslash to mean it literally")
+    assertEq(parseErr("import type { R } from \"./r\"\n\nR { s: \"a\\{1}b\" }\n"), "line 3, col 8: a VON string cannot interpolate: `\\{` needs a scope, and a VON document has none \u{2014} escape the backslash to mean it literally")
     assertEq(parseErr("""import type { R } from "./r"
 
 R { n: 1 + 2 }
@@ -1245,11 +1245,11 @@ test "a Vyrn keyword is not a field name, and the error says which word" {
     assertEq(parseErr("""import type { R } from "./r"
 
 R { region: "eu" }
-"""), "line 3, col 5: `region` is a Vyrn keyword, so it is not a field name here — VON is Vyrn's own grammar, and the same words are spoken for")
+"""), "line 3, col 5: `region` is a Vyrn keyword, so it is not a field name here \u{2014} VON is Vyrn's own grammar, and the same words are spoken for")
 }
 
 test "the header is required and the document holds one value" {
-    assertEq(parseErr("R { a: 1 }\n"), "line 1, col 1: a VON document starts with its schema: `import type { T } from \"…\"`")
+    assertEq(parseErr("R { a: 1 }\n"), "line 1, col 1: a VON document starts with its schema: `import type { T } from \"\u{2026}\"`")
     assertEq(parseErr("""import type { R } from "./r"
 
 R { a: 1 }
@@ -1258,7 +1258,7 @@ R { b: 2 }
 }
 
 test "a tab in indentation is an error" {
-    assertEq(parseErr("import type { R } from \"./r\"\n\nR {\n\ta: 1,\n}\n"), "line 4, col 1: indent with spaces — a tab is not indentation in VON, and indentation carries no meaning here anyway")
+    assertEq(parseErr("import type { R } from \"./r\"\n\nR {\n\ta: 1,\n}\n"), "line 4, col 1: indent with spaces \u{2014} a tab is not indentation in VON, and indentation carries no meaning here anyway")
 }
 
 test "a container breaks a line only where a part is not flat" {
@@ -1336,9 +1336,9 @@ Manifest {
 }
 
 test "the conversion refuses what VON has no spelling for" {
-    assertEq(converted(JObj([JsonField { key: "main", value: JNull }])), "ERR: main: VON has no null — a value that may be absent is an `Option` field, and an absent field is `None`")
-    assertEq(converted(JObj([JsonField { key: "size", value: JNum("1e9") }])), "ERR: size: `1e9` is written with an exponent, and VON has no exponent form — write the digits out")
-    assertEq(converted(JObj([JsonField { key: "a-b", value: JNum("1") }])), "ERR: `a-b` is not a Vyrn identifier, so it cannot be a field of `Manifest` — hold those members in a `Map<String, V>` field instead")
+    assertEq(converted(JObj([JsonField { key: "main", value: JNull }])), "ERR: main: VON has no null \u{2014} a value that may be absent is an `Option` field, and an absent field is `None`")
+    assertEq(converted(JObj([JsonField { key: "size", value: JNum("1e9") }])), "ERR: size: `1e9` is written with an exponent, and VON has no exponent form \u{2014} write the digits out")
+    assertEq(converted(JObj([JsonField { key: "a-b", value: JNum("1") }])), "ERR: `a-b` is not a Vyrn identifier, so it cannot be a field of `Manifest` \u{2014} hold those members in a `Map<String, V>` field instead")
     assertEq(converted(JArr([])), "ERR: a VON document's top value is a named record, and this JSON document is not an object")
 }
 

@@ -1307,7 +1307,7 @@ impl GenState {
     fn drained(&self) -> wasmtime::Result<()> {
         if self.cursor != self.atoms.len() {
             return Err(wasmtime::Error::msg(format!(
-                "generator decoder left {} atoms unread — the host and guest walks of the \
+                "generator decoder left {} atoms unread \u{2014} the host and guest walks of the \
                  reflected type disagree",
                 self.atoms.len() - self.cursor
             )));
@@ -1318,7 +1318,7 @@ impl GenState {
     fn next_atom(&mut self) -> wasmtime::Result<&Atom> {
         let a = self.atoms.get(self.cursor).ok_or_else(|| {
             wasmtime::Error::msg(
-                "generator decoder read past the end of a reflected value — the host and guest \
+                "generator decoder read past the end of a reflected value \u{2014} the host and guest \
                  walks of the reflected type disagree",
             )
         })?;

@@ -1082,7 +1082,10 @@ impl<'t> Recognizer<'t> {
 
     /// What the token here prints as in a refusal.
     fn found(&self) -> String {
-        format!("{:?}", self.peek())
+        match self.peek() {
+            Tok::Eof => "end of file".to_string(),
+            tok => format!("`{}`", lexer::spelling(tok)),
+        }
     }
 
     /// Refuses with `rule` at `at`, a line and a column.

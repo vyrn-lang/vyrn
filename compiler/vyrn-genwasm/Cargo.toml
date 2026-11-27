@@ -20,7 +20,7 @@ wasmtime = { version = "51", optional = true, default-features = false, features
     "std",
     # Cranelift compiles a module's functions on a thread pool. It is a wasmtime
     # DEFAULT feature, so `default-features = false` silently turned it off and
-    # every artifact was compiled single-threaded — measured at 1,055 ms across a
+    # every artifact was compiled single-threaded - measured at 1,055 ms across a
     # cold open's five artifacts against 250 ms with it on.
     "parallel-compilation",
 ] }

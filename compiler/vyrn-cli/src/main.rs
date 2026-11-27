@@ -839,7 +839,10 @@ impl Project {
             let text = print_diagnostics(&warnings, &root_key, &self.opts, "warning: ");
             if self.flags.deny_warnings {
                 let n = warnings.len();
-                return Err(text + &said(format!("{n} warning(s) — refused by --deny-warnings")));
+                return Err(text
+                    + &said(format!(
+                        "{n} warning(s) \u{2014} refused by --deny-warnings"
+                    )));
             }
         }
         Ok(t)
@@ -986,7 +989,7 @@ fn scaffold(call: &Call) -> Outcome {
             return Err(ExitCode::FAILURE);
         }
     }
-    println!("created {name}/ (vyrn.json, src/main.vyrn) — try: cd {name} && vyrn run");
+    println!("created {name}/ (vyrn.json, src/main.vyrn) \u{2014} try: cd {name} && vyrn run");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1169,18 +1172,21 @@ fn why_cmd(call: &Call) -> Outcome {
             .map_or(-1, |(_, i)| *i);
         let line = if shape >= 0 {
             format!(
-                "ok        {}: shape {} of {} — {want}",
+                "ok        {}: shape {} of {} \u{2014} {want}",
                 m.name,
                 shape + 1,
                 m.shapes.len()
             )
         } else if synthesized.contains(&m.name) && !exports.contains(&m.name.as_str()) {
             // The file's form writes it, as a template writes a view.
-            format!("ok        {}: the file's form writes it — {want}", m.name)
+            format!(
+                "ok        {}: the file's form writes it \u{2014} {want}",
+                m.name
+            )
         } else if let Some(line) = objection(&m.name) {
             line
         } else {
-            format!("default   {}: absent, optional — {want}", m.name)
+            format!("default   {}: absent, optional \u{2014} {want}", m.name)
         };
         println!("  {line}");
     }
@@ -1191,7 +1197,7 @@ fn why_cmd(call: &Call) -> Outcome {
         let line = match (objection(name), &view.open_rule) {
             (Some(line), _) => line,
             (None, Some(rule)) => format!(
-                "ok        {name}: matches the open rule — {}",
+                "ok        {name}: matches the open rule \u{2014} {}",
                 rule.spelling
             ),
             (None, None) => format!("ok        {name}: std/contract raises no issue"),
@@ -1202,7 +1208,7 @@ fn why_cmd(call: &Call) -> Outcome {
         // Not a gate: the generator that consumes the module runs the same
         // check at load time.
         println!(
-            "  — {objections} objection(s); the generator that consumes this module is the gate"
+            "  \u{2014} {objections} objection(s); the generator that consumes this module is the gate"
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -1373,7 +1379,7 @@ fn routes_cmd(call: &Call) -> Outcome {
             }
         }
         Err(e) => eprintln!(
-            "note: only derived routes are listed — the mounted router could not be read: {e}"
+            "note: only derived routes are listed \u{2014} the mounted router could not be read: {e}"
         ),
     }
     // A projection puts two methods on one path.
@@ -1850,11 +1856,15 @@ fn why_audience(flags: GlobalFlags, file: &str) -> Outcome {
         (Some(who), _) => println!("  audience: {who}"),
         (None, Some(map)) => {
             let v = vyrn_frontend::audience::audience_of(&path, map, &mut |p| map.real(p));
-            println!("  audience: {} — {}", v.audience.phrase(), v.because());
+            println!(
+                "  audience: {} \u{2014} {}",
+                v.audience.phrase(),
+                v.because()
+            );
         }
         (None, None) => {
             println!(
-                "  audience: universal — this project declares no `audience` in vyrn.json, \
+                "  audience: universal \u{2014} this project declares no `audience` in vyrn.json, \
                  so every module is universal and no import is rejected"
             );
         }
@@ -1927,7 +1937,7 @@ fn why_capability(flags: GlobalFlags, cap: &str, name: &str) -> Outcome {
     println!("{}", artifact.entry);
     let has = floor::capabilities(artifact.target).contains(&cap);
     println!(
-        "  artifact: `{}` ({}) — target `{}` {}",
+        "  artifact: `{}` ({}) \u{2014} target `{}` {}",
         artifact.name,
         artifact.target,
         artifact.target,
@@ -1982,7 +1992,7 @@ fn why_capability(flags: GlobalFlags, cap: &str, name: &str) -> Outcome {
             seen.push(key);
             found = true;
             println!(
-                "  `{}` needs `{}` — {}:{}",
+                "  `{}` needs `{}` \u{2014} {}:{}",
                 c.carrier,
                 cap.name(),
                 map.display_path(module),
@@ -2392,7 +2402,7 @@ fn deps(call: &Call) -> Outcome {
                 println!();
             }
             println!(
-                "artifact `{}` ({}) — {}",
+                "artifact `{}` ({}) \u{2014} {}",
                 artifact.name,
                 artifact.target,
                 artifacts.map_or_else(
@@ -2783,7 +2793,7 @@ fn render_doc_index(modules: &[DocModule]) -> String {
             .map(str::trim)
             .filter(|s| !s.is_empty());
         match summary {
-            Some(s) => lines.push(format!("- [{}]({}.md) — {}", m.name, m.name, s)),
+            Some(s) => lines.push(format!("- [{}]({}.md) \u{2014} {}", m.name, m.name, s)),
             None => lines.push(format!("- [{}]({}.md)", m.name, m.name)),
         }
     }
@@ -2869,7 +2879,9 @@ fn verify_doc_dir(out_dir: &str, files: &[(String, String)]) -> ExitCode {
     let mut extra: Vec<String> = existing.difference(&wanted).cloned().collect();
     extra.sort();
     if let Some(f) = extra.first() {
-        eprintln!("doc drift: {out_dir}/{f} is not generated (stale) — run `vyrn doc` to update");
+        eprintln!(
+            "doc drift: {out_dir}/{f} is not generated (stale) \u{2014} run `vyrn doc` to update"
+        );
         return ExitCode::FAILURE;
     }
     for (rel, content) in files {
@@ -2878,11 +2890,15 @@ fn verify_doc_dir(out_dir: &str, files: &[(String, String)]) -> ExitCode {
             // LF, so a CRLF checkout of a generated doc is not drift.
             Ok(on_disk) if on_disk.replace("\r\n", "\n") == *content => {}
             Ok(_) => {
-                eprintln!("doc drift: {out_dir}/{rel} is out of date — run `vyrn doc` to update");
+                eprintln!(
+                    "doc drift: {out_dir}/{rel} is out of date \u{2014} run `vyrn doc` to update"
+                );
                 return ExitCode::FAILURE;
             }
             Err(_) => {
-                eprintln!("doc drift: {out_dir}/{rel} is missing — run `vyrn doc` to update");
+                eprintln!(
+                    "doc drift: {out_dir}/{rel} is missing \u{2014} run `vyrn doc` to update"
+                );
                 return ExitCode::FAILURE;
             }
         }
@@ -2960,7 +2976,7 @@ fn fix_cmd(call: &Call) -> Outcome {
         // A round that does not reduce the count is discarded whole.
         if fix_diagnostics(&p, &root_key, &next).len() >= diags.len() {
             refused.push(format!(
-                "{root_key}: {} edit(s) rolled back — they did not reduce the diagnostics",
+                "{root_key}: {} edit(s) rolled back \u{2014} they did not reduce the diagnostics",
                 edits.len()
             ));
             break;
@@ -3121,7 +3137,7 @@ fn add(call: &Call) -> Outcome {
 
     let p = Project::of(None, call.flags)?;
     let Some(manifest) = &p.manifest else {
-        eprintln!("error: no vyrn.json found — run `vyrn new` or create one first");
+        eprintln!("error: no vyrn.json found \u{2014} run `vyrn new` or create one first");
         return Err(ExitCode::FAILURE);
     };
 
@@ -3205,7 +3221,7 @@ fn update_tool(
     }
     if pinned == 0 {
         return Err(format!(
-            "{name} {version} has no published artifact for any of {} — check the version",
+            "{name} {version} has no published artifact for any of {} \u{2014} check the version",
             toolpin::tool_platforms(name).join(", ")
         ));
     }
@@ -3246,7 +3262,7 @@ fn verify_tool(
         // The resolver's refusal for a locked miss.
         return Err(format!(
             "`{spec}` is locked (sha256 {sha}) but not cached, and this is an \
-             offline build — run once online, `vyrn vendor`, or drop any copy \
+             offline build \u{2014} run once online, `vyrn vendor`, or drop any copy \
              of the file with that hash into the cache"
         ));
     }
@@ -3308,7 +3324,7 @@ fn update(call: &Call) -> Outcome {
         // would read as "up to date".
         if let Some(a) = alias.filter(|a| vyrn_frontend::toolpin::KNOWN_TOOLS.contains(a)) {
             eprintln!(
-                "error: vyrn.json declares no `toolchain.{a}` — add it, then run \
+                "error: vyrn.json declares no `toolchain.{a}` \u{2014} add it, then run \
                  `vyrn update {a}` to pin it"
             );
             return Err(ExitCode::FAILURE);
@@ -3336,7 +3352,7 @@ fn update(call: &Call) -> Outcome {
         } else if !lock.entries.contains_key(spec) {
             // An unpinned spec would reach the resolver and be fetched.
             eprintln!(
-                "error: `{name}` ({spec}) is not pinned in vyrn.lock — run \
+                "error: `{name}` ({spec}) is not pinned in vyrn.lock \u{2014} run \
                  `vyrn update {name}` once online to pin it"
             );
             return Err(ExitCode::FAILURE);
@@ -3396,7 +3412,7 @@ fn vendor(call: &Call) -> Outcome {
             }
             _ => {
                 eprintln!(
-                    "cannot vendor `{spec}`: not in the cache — run the build once \
+                    "cannot vendor `{spec}`: not in the cache \u{2014} run the build once \
                       (online) first"
                 );
                 missing += 1;
@@ -3897,7 +3913,7 @@ fn bench_compare(
     };
 
     if placeholder {
-        eprintln!("note: {baseline_path} is a placeholder baseline — every bench reports `new` (refresh it from a CI --json artifact)");
+        eprintln!("note: {baseline_path} is a placeholder baseline \u{2014} every bench reports `new` (refresh it from a CI --json artifact)");
     }
 
     // Its own file: a reseed replaces `bench/baseline.json` verbatim.
@@ -3951,7 +3967,7 @@ impl Verdict {
         match self {
             Verdict::Ok => "ok".to_string(),
             Verdict::Regressed(f) => format!("REGRESSED x{f:.2}"),
-            Verdict::Ungated(f) => format!("x{f:.2} — not gated on this fleet"),
+            Verdict::Ungated(f) => format!("x{f:.2} \u{2014} not gated on this fleet"),
             Verdict::New => "new".to_string(),
             Verdict::MissingFromRun => "missing-from-run".to_string(),
         }
@@ -4206,7 +4222,7 @@ export extern fn vyrnServeHandle() -> String {
 /// One frame off the parked producer. `false` is the end of the stream, and the
 /// host answers it by closing. The box comes out of module state for the pull
 /// and goes back after it, because the step is ordinary Vyrn and may reach
-/// `serveStream` itself — the newest producer wins.
+/// `serveStream` itself - the newest producer wins.
 export extern fn vyrnServeNext() -> Bool {
     vyrnServeFrame = ""
     if vyrnServeLive == 0 {
@@ -4245,7 +4261,7 @@ export extern fn vyrnServeClose() {
 
 /// The entry point a served file need not have. The CLI renames this
 /// to `main` when the program declares none, because the direct backend has no
-/// `_start` without one — and `_start` is what initializes module state.
+/// `_start` without one - and `_start` is what initializes module state.
 fn vyrnServeMain() -> Int64 {
     return 0
 }
@@ -4795,7 +4811,7 @@ fn refuse_workers_if_stateful(
     let global = global.map_or(String::new(), |g| format!(" `{}`", written(g)));
     Some(format!(
         "`--workers` needs a module-state-free `handle`: {path} reads or writes \
-         module state{global} (shared by definition) — run without `--workers` for \
+         module state{global} (shared by definition) \u{2014} run without `--workers` for \
          the sequential loop"
     ))
 }
@@ -6845,12 +6861,12 @@ another bench   # trailing reason
 
     #[test]
     fn apply_edits_counts_columns_in_characters_and_runs_from_the_end() {
-        let text = "let δata = read()\nprint(δata) print(δata)\n";
+        let text = "let \u{3b4}ata = read()\nprint(\u{3b4}ata) print(\u{3b4}ata)\n";
         let copy = |line, col| Fix::Copy { line, col };
         let fixed = apply_edits(text, &[copy(2, 11), copy(2, 23)]).unwrap();
         assert_eq!(
             fixed,
-            "let δata = read()\nprint(δata.copy()) print(δata.copy())\n"
+            "let \u{3b4}ata = read()\nprint(\u{3b4}ata.copy()) print(\u{3b4}ata.copy())\n"
         );
     }
 

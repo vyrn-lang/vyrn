@@ -249,9 +249,9 @@ test "hex is two lowercase digits a byte, and reads either case back" {
     assertEq(hexEncode(""), "")
     assertEq(hexEncode("Hi"), "4869")
     // A multi-byte character is encoded as its UTF-8 bytes, not its code point.
-    assertEq(hexEncode("é"), "c3a9")
+    assertEq(hexEncode("\u{e9}"), "c3a9")
     assertEq(match hexDecode("4869") { Some(s) => s, None => "None" }, "Hi")
-    assertEq(match hexDecode("C3A9") { Some(s) => s, None => "None" }, "é")
+    assertEq(match hexDecode("C3A9") { Some(s) => s, None => "None" }, "\u{e9}")
     assertEq(match hexDecode("") { Some(s) => s, None => "None" }, "")
     // Odd length, a non-hex digit, and bytes that are not text.
     assertEq(match hexDecode("486") { Some(s) => s, None => "None" }, "None")
@@ -267,7 +267,7 @@ test "base64 pads at all three residues, and refuses misplaced padding" {
     assertEq(base64Encode("Hello, Vyrn!"), "SGVsbG8sIFZ5cm4h")
     // The two alphabet entries above 61, which a naive table gets wrong.
     assertEq(base64Encode("~~~"), "fn5+")
-    assertEq(base64Encode("ÿÿ"), "w7/Dvw==")
+    assertEq(base64Encode("\u{ff}\u{ff}"), "w7/Dvw==")
     assertEq(match base64Decode("SGVsbG8=") { Some(s) => s, None => "None" }, "Hello")
     assertEq(match base64Decode("") { Some(s) => s, None => "None" }, "")
     // Length not a multiple of four, a digit outside the alphabet, `=X`, padding
@@ -284,9 +284,9 @@ test "percent-encoding keeps the unreserved set and nothing else" {
     assertEq(urlEncode("name=a b&x"), "name%3Da%20b%26x")
     // `+` is a reserved character here, not a space.
     assertEq(urlEncode("a+b"), "a%2Bb")
-    assertEq(urlEncode("é"), "%C3%A9")
-    assertEq(match urlDecode("%C3%A9") { Some(s) => s, None => "None" }, "é")
-    assertEq(match urlDecode("%c3%a9") { Some(s) => s, None => "None" }, "é")
+    assertEq(urlEncode("\u{e9}"), "%C3%A9")
+    assertEq(match urlDecode("%C3%A9") { Some(s) => s, None => "None" }, "\u{e9}")
+    assertEq(match urlDecode("%c3%a9") { Some(s) => s, None => "None" }, "\u{e9}")
     assertEq(match urlDecode("a+b") { Some(s) => s, None => "None" }, "a+b")
     assertEq(match urlDecode("%") { Some(s) => s, None => "None" }, "None")
     assertEq(match urlDecode("%4") { Some(s) => s, None => "None" }, "None")

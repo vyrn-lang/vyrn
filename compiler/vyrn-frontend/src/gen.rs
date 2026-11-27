@@ -454,7 +454,7 @@ fn splice_float(digits: String) -> String {
 
 /// Escapes a `String` into a Vyrn string literal, quotes included, with the
 /// escapes the lexer decodes (`\n \t \r \" \\`).
-fn escape_string_literal(s: &str) -> String {
+pub(crate) fn escape_string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -717,7 +717,7 @@ pub fn gen_scoped_path(
         .any(|root| resolved == *root || resolved.starts_with(&format!("{root}/")));
     if !ok {
         return Err(format!(
-            "generator read `{arg}` escapes its declared inputs ({}) — a generator may only \
+            "generator read `{arg}` escapes its declared inputs ({}) \u{2014} a generator may only \
              read under its constant path arguments",
             allowed.join(", ")
         ));

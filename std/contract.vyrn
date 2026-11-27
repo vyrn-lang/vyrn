@@ -415,7 +415,7 @@ export fn checkContract(iface: ModuleInterface, c: ContractInfo) -> Array<Issue>
                     issues.push(issue(
                         "contract.unknown.didYouMean",
                         e.name,
-                        "unknown export `\{e.name}` — did you mean `\{near}`? (\{site})",
+                        "unknown export `\{e.name}` \u{2014} did you mean `\{near}`? (\{site})",
                     ))
                 } else {
                     issues.push(issue(

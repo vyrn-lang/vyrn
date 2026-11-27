@@ -1019,10 +1019,10 @@ export to "./vyx.editor" gen fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64
     let mut blockLine = 0
     if blocks.length > 0 {
         if blocks[0].open < 0 {
-            return vyxScriptErr(vyxErr(srcFile, 0, "the `\{kw}` block is not closed — write `\{kw} { name: Type, … }`"))
+            return vyxScriptErr(vyxErr(srcFile, 0, "the `\{kw}` block is not closed \u{2014} write `\{kw} { name: Type, \u{2026} }`"))
         }
         if blocks.length > 1 {
-            return vyxScriptErr(vyxErr(srcFile, 0, "this component declares `\{kw}` more than once — one component has one `\{kw}` block"))
+            return vyxScriptErr(vyxErr(srcFile, 0, "this component declares `\{kw}` more than once \u{2014} one component has one `\{kw}` block"))
         }
         let parsed = vyxParseProps(ba, sStart + blocks[0].open, sStart + blocks[0].stop, kw, srcFile)
         if parsed.errs.length > 0 {
@@ -1314,7 +1314,7 @@ gen fn vyxCompileAt(source: String, compName: String, srcPath: String, kw: Strin
     if vyxIsIdentifier(fnName) == false {
         // `My-Widget.vyx` or `404.vyx` would emit an invalid fn name, a lexer
         // error far from the cause.
-        return vyxCompErr(compName, fnName, srcPath, [vyxErr(srcPath, 0, "`\{compName}.vyx` does not spell a legal view-function name — a component file's stem is one identifier (letters, digits or `_`, not digit-first), so rename the file")])
+        return vyxCompErr(compName, fnName, srcPath, [vyxErr(srcPath, 0, "`\{compName}.vyx` does not spell a legal view-function name \u{2014} a component file's stem is one identifier (letters, digits or `_`, not digit-first), so rename the file")])
     }
 
     let outline = vyxOutlineOf(source)
@@ -1328,7 +1328,7 @@ gen fn vyxCompileAt(source: String, compName: String, srcPath: String, kw: Strin
         script = vyxParseScriptAt(ba, part.body.start, part.body.end, kw, skip, srcPath)
         let bad = vyxImportsFirstViolation(script)
         if bad > 0 {
-            return vyxCompErr(compName, fnName, srcPath, [vyxErr(srcPath, bad, "an `import` sits after the `\{kw}` block — every import goes at the top of `<script>`")])
+            return vyxCompErr(compName, fnName, srcPath, [vyxErr(srcPath, bad, "an `import` sits after the `\{kw}` block \u{2014} every import goes at the top of `<script>`")])
         }
         if script.errs.length > 0 {
             return vyxCompErr(compName, fnName, srcPath, script.errs)
@@ -1824,7 +1824,7 @@ gen fn vyxEmitComp(tag: String, attrs: Array<vx.VyxAttr>, kids: Array<VyxFlow>, 
         if includes(reg.imported, tag) {
             return vyxEmitProvider(tag, attrs, kids, line, acc, path, src, errs, imports)
         }
-        errs.push(vyxErr(src.path, line, "`<\{tag}>` names no component — a component is a `.vyx` file in the same directory, or a generation-time provider a `<script>` imports"))
+        errs.push(vyxErr(src.path, line, "`<\{tag}>` names no component \u{2014} a component is a `.vyx` file in the same directory, or a generation-time provider a `<script>` imports"))
         return vyrn"\{name(acc)}.push(empty())"
     }
     let comp = reg.comps[idx]
@@ -1833,7 +1833,7 @@ gen fn vyxEmitComp(tag: String, attrs: Array<vx.VyxAttr>, kids: Array<VyxFlow>, 
         let pn = p.name.text.copy()
         let av = vyxDir(src.bytes, attrs, pn)
         if av.found == false {
-            errs.push(vyxErr(src.path, line, "`<\{tag}>` is given no `\{pn}`, which its `props` block declares — every prop is required"))
+            errs.push(vyxErr(src.path, line, "`<\{tag}>` is given no `\{pn}`, which its `props` block declares \u{2014} every prop is required"))
             args.push(vyrn"empty()")
         } else if av.dyn {
             args.push(at(codeAt(src.path, av.line, av.col, av.value), src.path, av.line, av.col))
@@ -1845,9 +1845,9 @@ gen fn vyxEmitComp(tag: String, attrs: Array<vx.VyxAttr>, kids: Array<VyxFlow>, 
         let line = vyxAttrValue(src.bytes, a).line
         let n = a.name.text
         if vyxEvt(a) {
-            errs.push(vyxErr(src.path, line, "`<\{tag}>` is given the event `@\{n}` — a component takes props, and an event binds on a plain element"))
+            errs.push(vyxErr(src.path, line, "`<\{tag}>` is given the event `@\{n}` \u{2014} a component takes props, and an event binds on a plain element"))
         } else if vyxHasProp(comp.script.props, n) == false {
-            errs.push(vyxErr(src.path, line, "`<\{tag}>` has no prop `\{n}` — its `props` block decides what it takes"))
+            errs.push(vyxErr(src.path, line, "`<\{tag}>` has no prop `\{n}` \u{2014} its `props` block decides what it takes"))
         }
     }
     let hasKids = trim(vyxChildText(kids)).byteLength > 0 || kids.length > 0
@@ -1913,13 +1913,13 @@ gen fn vyxEmitProvider(tag: String, attrs: Array<vx.VyxAttr>, kids: Array<VyxFlo
         let at = vyxAttrValue(src.bytes, a).line
         let n = a.name.text
         if vyxEvt(a) {
-            errs.push(vyxErr(src.path, at, "`<\{tag}>` is a generation-time provider, and `@\{n}` binds a handler — a provider's attributes become constant arguments to a generator, so a provider tag takes static attributes only"))
+            errs.push(vyxErr(src.path, at, "`<\{tag}>` is a generation-time provider, and `@\{n}` binds a handler \u{2014} a provider's attributes become constant arguments to a generator, so a provider tag takes static attributes only"))
         } else if vyxDyn(a) {
-            errs.push(vyxErr(src.path, at, "`<\{tag}>` is a generation-time provider, and `:\{n}` binds an expression — a provider's attributes become constant arguments to a generator, so write `\{n}=\"…\"` as a static attribute, or wrap `<\{tag}>` in a sibling `.vyx` component that computes it"))
+            errs.push(vyxErr(src.path, at, "`<\{tag}>` is a generation-time provider, and `:\{n}` binds an expression \u{2014} a provider's attributes become constant arguments to a generator, so write `\{n}=\"\u{2026}\"` as a static attribute, or wrap `<\{tag}>` in a sibling `.vyx` component that computes it"))
         }
     }
     if kids.length > 0 {
-        errs.push(vyxErr(src.path, line, "`<\{tag}>` is given children, and it is a generation-time provider — a provider's tree comes from its attributes alone, so it takes none"))
+        errs.push(vyxErr(src.path, line, "`<\{tag}>` is given children, and it is a generation-time provider \u{2014} a provider's tree comes from its attributes alone, so it takes none"))
     }
     if errs.length > before {
         return vyrn"\{name(acc)}.push(empty())"
@@ -2087,20 +2087,20 @@ gen fn vyxEmitEvent(a: vx.VyxAttr, src: VyxSource, slot: Name, pre: modify Array
     let paren = vyxFind(sb, bytes("("), 0)
     if paren < 0 {
         if vyxIsIdentifier(spec) == false {
-            errs.push(vyxErr(src.path, value.line, "`@\{n}` names no handler — write `@\{n}=\"handler\"` or `@\{n}=\"handler(arg)\"`"))
+            errs.push(vyxErr(src.path, value.line, "`@\{n}` names no handler \u{2014} write `@\{n}=\"handler\"` or `@\{n}=\"handler(arg)\"`"))
             return vyrn"On(\{n}, \"\", \"\")"
         }
         return vyrn"On(\{n}, \{spec}, \"\")"
     }
     let handler = trim(vyxSlice(sb, 0, paren))
     if vyxIsIdentifier(handler) == false {
-        errs.push(vyxErr(src.path, value.line, "`@\{n}` names no handler — the text before `(` must be one identifier"))
+        errs.push(vyxErr(src.path, value.line, "`@\{n}` names no handler \u{2014} the text before `(` must be one identifier"))
         return vyrn"On(\{n}, \"\", \"\")"
     }
     let closeParen = vyxFindLast(sb, bytes(")"), paren)
     if closeParen < 0 {
         // A missing `)` would slice to "" and compile a zero-argument handler.
-        errs.push(vyxErr(src.path, value.line, "`@\{n}` has an unterminated `(` — write `@\{n}=\"handler\"` or `@\{n}=\"handler(arg)\"`"))
+        errs.push(vyxErr(src.path, value.line, "`@\{n}` has an unterminated `(` \u{2014} write `@\{n}=\"handler\"` or `@\{n}=\"handler(arg)\"`"))
         return vyrn"On(\{n}, \"\", \"\")"
     }
     let argExpr = trim(vyxSlice(sb, paren + 1, closeParen))
@@ -2108,7 +2108,7 @@ gen fn vyxEmitEvent(a: vx.VyxAttr, src: VyxSource, slot: Name, pre: modify Array
         return vyrn"On(\{n}, \{handler}, \"\")"
     }
     if vyxHasTopComma(bytes(argExpr)) {
-        errs.push(vyxErr(src.path, value.line, "`@\{n}` passes more than one argument — a handler crosses to the host, and it takes at most one scalar"))
+        errs.push(vyxErr(src.path, value.line, "`@\{n}` passes more than one argument \u{2014} a handler crosses to the host, and it takes at most one scalar"))
         return vyrn"On(\{n}, \{handler}, \"\")"
     }
     let arg = vyxSpanIn(spec, value.line, value.col, vyxSkipWs(sb, paren + 1, sb.length), argExpr)
@@ -2180,7 +2180,7 @@ fn vyxImportConflicts(comps: Array<VyxComp>) -> Array<VyxErr> {
                     nsSpec.push(imp.spec.copy())
                 } else if nsSpec[k] != imp.spec {
                     errs.push(vyxErrHere(
-                        "`\{c.src.path}` imports `\{imp.alias}` from `\{imp.spec}`, and a sibling component already binds that name to `\{nsSpec[k]}` — one namespace alias reaches one module across the whole set, so rename one of them",
+                        "`\{c.src.path}` imports `\{imp.alias}` from `\{imp.spec}`, and a sibling component already binds that name to `\{nsSpec[k]}` \u{2014} one namespace alias reaches one module across the whole set, so rename one of them",
                     ))
                 }
             } else {
@@ -2192,7 +2192,7 @@ fn vyxImportConflicts(comps: Array<VyxComp>) -> Array<VyxErr> {
                         cFile.push(c.src.path.copy())
                     } else if cSpec[k] != imp.spec {
                         errs.push(vyxErrHere(
-                            "`\{cFile[k]}` and `\{c.src.path}` both import `\{nm}`, from `\{cSpec[k]}` and `\{imp.spec}` — the components share one flat namespace, so one name comes from one module",
+                            "`\{cFile[k]}` and `\{c.src.path}` both import `\{nm}`, from `\{cSpec[k]}` and `\{imp.spec}` \u{2014} the components share one flat namespace, so one name comes from one module",
                         ))
                     }
                 }
@@ -2607,7 +2607,7 @@ gen fn vyxFinish(comps: consume Array<VyxComp>, errs: Array<VyxErr>, dir: String
     if comps.length == 0 {
         return reportHere(
             Error,
-            "no `.vyx` files under `\{dir}` — a component is a `.vyx` file in that directory",
+            "no `.vyx` files under `\{dir}` \u{2014} a component is a `.vyx` file in that directory",
         )
     }
     // An issue against the `Component` contract is a load diagnostic.
@@ -2841,7 +2841,7 @@ gen fn vyxDataShapeOf(sc: VyxScript) -> VyxDataShape {
     if form < 0 {
         // Any other return type is named here, not emitted as a `load()` that
         // calls a runner that does not exist.
-        err = "this page's `data` returns `\{declared}` — a page's `data` returns `Query<T>`, `ParamQuery<T>`, `Lazy<T>` or `ParamLazy<T>`"
+        err = "this page's `data` returns `\{declared}` \u{2014} a page's `data` returns `Query<T>`, `ParamQuery<T>`, `Lazy<T>` or `ParamLazy<T>`"
     }
     return VyxDataShape {
         hasData: true,
@@ -2882,12 +2882,12 @@ fn vyxShapeErr(err: String) -> VyxPageShape {
 export to "./ui", "./ui.editor" gen fn vyxPageShape(source: String) -> VyxPageShape {
     let outline = vyxOutlineOf(source)
     if vyxScriptUnclosed(outline) {
-        return vyxShapeErr("the `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`, so the page's params and loader are unknown")
+        return vyxShapeErr("the `<script>` section is never closed \u{2014} an unterminated string or `/* \u{2026} */` comment swallows the closing `</script>`, so the page's params and loader are unknown")
     }
     let ba = bytes(source)
     let sc = vyxParseScriptAt(ba, vyxScriptFrom(outline), vyxScriptTo(outline), "params", "", "")
     if vyxImportsFirstViolation(sc) > 0 {
-        return vyxShapeErr("an `import` sits after the `params` block — every import goes at the top of `<script>`")
+        return vyxShapeErr("an `import` sits after the `params` block \u{2014} every import goes at the top of `<script>`")
     }
     if sc.errs.length > 0 {
         return vyxShapeErr(sc.errs[0].message)
@@ -2987,7 +2987,7 @@ gen fn vyxParseHead(ba: Array<UInt8>, start: Int64, end: Int64, srcFile: String)
         } else if t.startsWith("script ") {
             items.push(vyxHeadEntry(ba, "script", at + 7, le))
         } else {
-            return VyxHead { found: true, items: items, errs: [vyxErr(srcFile, 0, "`\{t}` is not a `head` entry — a head entry is `title:`, `stylesheet`, `module` or `script`")] }
+            return VyxHead { found: true, items: items, errs: [vyxErr(srcFile, 0, "`\{t}` is not a `head` entry \u{2014} a head entry is `title:`, `stylesheet`, `module` or `script`")] }
         }
         ls = le + 1
     }
@@ -3455,19 +3455,19 @@ gen fn vyxBuildPageModule(source: String, srcPath: String, themed: Bool, theme: 
     let ba = bytes(source)
     let outline = vyxOutlineOf(source)
     if vyxScriptUnclosed(outline) {
-        return reportHere(Error, "this page's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`")
+        return reportHere(Error, "this page's `<script>` section is never closed \u{2014} an unterminated string or `/* \u{2026} */` comment swallows the closing `</script>`")
     }
     if vyxTemplateUnclosed(outline) {
-        return reportHere(Error, "this page's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`")
+        return reportHere(Error, "this page's `<template>` section is never closed \u{2014} an unterminated comment or unclosed element swallows the closing `</template>`")
     }
     if vyxHasTemplatePart(outline) == false {
-        return reportHere(Error, "this page has no `<template>` section — a page's view is the one element inside it")
+        return reportHere(Error, "this page has no `<template>` section \u{2014} a page's view is the one element inside it")
     }
     let templateBody = vyxTemplateText(outline)
     let sc = vyxParseScriptAt(ba, vyxScriptFrom(outline), vyxScriptTo(outline), "params", "", srcPath)
     let bad = vyxImportsFirstViolation(sc)
     if bad > 0 {
-        return vyxReports([vyxErr(srcPath, bad, "an `import` sits after the `params` block — every import goes at the top of `<script>`")])
+        return vyxReports([vyxErr(srcPath, bad, "an `import` sits after the `params` block \u{2014} every import goes at the top of `<script>`")])
     }
 
     // A page has no `head { ... }` block: its head is the `head()` accessor. A
@@ -3517,7 +3517,7 @@ gen fn vyxBuildPageModule(source: String, srcPath: String, themed: Bool, theme: 
         if viol.byteLength > 0 {
             return reportHere(
                 Error,
-                "this page's view calls `\{viol}`, an app-module helper, and the view runs in the browser — move that call into `data`, which runs on the server",
+                "this page's view calls `\{viol}`, an app-module helper, and the view runs in the browser \u{2014} move that call into `data`, which runs on the server",
             )
         }
     }
@@ -3696,13 +3696,13 @@ gen fn vyxBuildLayoutModule(source: String, srcPath: String, themed: Bool, theme
     let ba = bytes(source)
     let outline = vyxOutlineOf(source)
     if vyxScriptUnclosed(outline) {
-        return reportHere(Error, "this layout's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`")
+        return reportHere(Error, "this layout's `<script>` section is never closed \u{2014} an unterminated string or `/* \u{2026} */` comment swallows the closing `</script>`")
     }
     if vyxTemplateUnclosed(outline) {
-        return reportHere(Error, "this layout's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`")
+        return reportHere(Error, "this layout's `<template>` section is never closed \u{2014} an unterminated comment or unclosed element swallows the closing `</template>`")
     }
     if vyxHasTemplatePart(outline) == false {
-        return reportHere(Error, "this layout has no `<template>` section — a layout's view is the one element inside it")
+        return reportHere(Error, "this layout has no `<template>` section \u{2014} a layout's view is the one element inside it")
     }
     let head = vyxHeadOf(ba, vyxScriptFrom(outline), vyxScriptTo(outline), "vyx_layout")
     if head.errs.length > 0 {
@@ -3715,7 +3715,7 @@ gen fn vyxBuildLayoutModule(source: String, srcPath: String, themed: Bool, theme
     if comp.takesChildren == false {
         return reportHere(
             Error,
-            "the layout in `\{vyxDirOf(srcPath)}` has no `<slot/>` — a layout wraps its page, so it must say where the page goes",
+            "the layout in `\{vyxDirOf(srcPath)}` has no `<slot/>` \u{2014} a layout wraps its page, so it must say where the page goes",
         )
     }
     let mut errs: Array<VyxErr> = []
@@ -3763,13 +3763,13 @@ gen fn vyxBuildErrorModule(source: String, srcPath: String, themed: Bool, theme:
     let ba = bytes(source)
     let outline = vyxOutlineOf(source)
     if vyxScriptUnclosed(outline) {
-        return reportHere(Error, "this error page's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`")
+        return reportHere(Error, "this error page's `<script>` section is never closed \u{2014} an unterminated string or `/* \u{2026} */` comment swallows the closing `</script>`")
     }
     if vyxTemplateUnclosed(outline) {
-        return reportHere(Error, "this error page's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`")
+        return reportHere(Error, "this error page's `<template>` section is never closed \u{2014} an unterminated comment or unclosed element swallows the closing `</template>`")
     }
     if vyxHasTemplatePart(outline) == false {
-        return reportHere(Error, "this error page has no `<template>` section — its view is the one element inside it")
+        return reportHere(Error, "this error page has no `<template>` section \u{2014} its view is the one element inside it")
     }
     // Error pages render inside the layout, which owns the head.
     let head = vyxHeadOf(ba, vyxScriptFrom(outline), vyxScriptTo(outline), "vyx_error")
@@ -3782,7 +3782,7 @@ gen fn vyxBuildErrorModule(source: String, srcPath: String, themed: Bool, theme:
     }
     // The view's one parameter is the injected `error` prop.
     if comp.script.props.length > 0 {
-        return vyxReports([vyxErr(srcPath, 0, "this component declares `props` more than once — one component has one `props` block")])
+        return vyxReports([vyxErr(srcPath, 0, "this component declares `props` more than once \u{2014} one component has one `props` block")])
     }
     let mut errs: Array<VyxErr> = []
     let module = vyxBuildModule([comp], themed, theme, [vyrn"error: PageError"], false, ["PageError"], errs)

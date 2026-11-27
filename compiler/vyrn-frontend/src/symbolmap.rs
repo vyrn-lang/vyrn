@@ -46,7 +46,7 @@ impl MappedSymbol {
         let path = self.derived("path")?;
         let method = self.derived("method").unwrap_or("POST");
         match self.derived("source") {
-            Some(src) => Some(format!("`{method} {path}` · {src}")),
+            Some(src) => Some(format!("`{method} {path}` \u{b7} {src}")),
             None => Some(format!("`{method} {path}`")),
         }
     }
@@ -161,7 +161,7 @@ export fn symbolMapClientApi() -> String {\n    return \"{\\\"module\\\":\\\"cli
         assert_eq!(syms[0].file, "server/api/pastes.vyrn");
         assert_eq!(
             syms[0].route_line().as_deref(),
-            Some("`POST /_/pastes/create` · convention")
+            Some("`POST /_/pastes/create` \u{b7} convention")
         );
         // A re-emitted type keeps its origin and derives nothing.
         assert_eq!(syms[1].decl, "PasteList");

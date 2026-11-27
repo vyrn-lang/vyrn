@@ -391,7 +391,7 @@ pub fn check_inst_depth<'a>(
             "instantiating `{name}` needs a type {MONO_LIMIT_NEEDLE}: it {what}\n  \
              note: `{name}` is declared on line {line}, and the type is `{shown}`\n  \
              note: a generic function that calls itself with a BIGGER type has no \
-             finite set of instances — the recursion has to shrink the type, not \
+             finite set of instances \u{2014} the recursion has to shrink the type, not \
              only the count"
         ));
     }
@@ -1175,7 +1175,7 @@ mod tests {
         for (what, src) in cases {
             assert!(
                 check(src).is_err(),
-                "{what}: the checker accepted this, so `solve_param` now faces it — \
+                "{what}: the checker accepted this, so `solve_param` now faces it \u{2014} \
                  see the arms above"
             );
         }

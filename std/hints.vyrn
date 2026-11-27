@@ -89,7 +89,7 @@ export fn policyOf(configText: String, key: String) -> Result<HintPolicy, String
             levels.push(word.copy())
         } else {
             return Err(
-                "`\{key}.\{r.key}` is \{emit(r.value)} — a level is `off`, `warning` or `error`",
+                "`\{key}.\{r.key}` is \{emit(r.value)} \u{2014} a level is `off`, `warning` or `error`",
             )
         }
     }
@@ -245,7 +245,7 @@ export fn unusedWaivers(p: HintPolicy, src: String, findings: Array<Finding>) ->
                     dflt: Warning,
                     line: lineNo,
                     col: 0,
-                    message: "`vyrn-ignore \{code}` waives nothing here — the finding it covered is gone, so the marker now misleads; delete it",
+                    message: "`vyrn-ignore \{code}` waives nothing here \u{2014} the finding it covered is gone, so the marker now misleads; delete it",
                 })
             }
             lineNo = lineNo + 1
@@ -419,7 +419,7 @@ test "a waiver on the line, or the line above, drops that one report" {
     assert(reportText(noPolicy(), src, "a/b", 4, 1) != "")
 }
 
-test "a waiver names its code exactly — prefixes do not leak" {
+test "a waiver names its code exactly \u{2014} prefixes do not leak" {
     // lint/x's marker is a prefix of lint/x/y's; only the full code waives.
     let deep = "<!-- vyrn-ignore lint/x/y -->\n<img>\n"
     assert(waived(deep, 2, "lint/x") == false)

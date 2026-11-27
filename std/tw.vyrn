@@ -304,7 +304,7 @@ fn twUnknownKeyErrors(theme: TwTheme, out: modify Array<String>) {
     for e in theme.entries {
         let head = twHeadOf(e.key)
         if includes(known, head) == false && includes(seen, head) == false {
-            out.push("the theme has a top-level key `\{head}`, which names no utility family — the families are \{joinWith(twKnownTopLevel(), ", ")}")
+            out.push("the theme has a top-level key `\{head}`, which names no utility family \u{2014} the families are \{joinWith(twKnownTopLevel(), ", ")}")
             seen.push(head)
         }
     }
@@ -463,7 +463,7 @@ fn twSafelist(theme: TwTheme) -> Array<String> {
 fn twUnsafeSafelistErrors(safelist: Array<String>, out: modify Array<String>) {
     for name in safelist {
         if twClassSafe(name) == false {
-            out.push("safelisted class `\{name}` is not a CSS-safe class name — a class name must match `[a-z][a-z0-9-]*`")
+            out.push("safelisted class `\{name}` is not a CSS-safe class name \u{2014} a class name must match `[a-z][a-z0-9-]*`")
         }
     }
 }
@@ -471,7 +471,7 @@ fn twUnsafeSafelistErrors(safelist: Array<String>, out: modify Array<String>) {
 fn twUnsafeNameErrors(vocab: Array<TwClassDef>, out: modify Array<String>) {
     for c in vocab {
         if twClassSafe(c.name) == false {
-            out.push("the theme derives the class `\{c.name}`, which is not a CSS-safe class name — a class name must match `[a-z][a-z0-9-]*`, so rename the theme key it came from")
+            out.push("the theme derives the class `\{c.name}`, which is not a CSS-safe class name \u{2014} a class name must match `[a-z][a-z0-9-]*`, so rename the theme key it came from")
         }
     }
 }
@@ -481,7 +481,7 @@ fn twUnsafeNameErrors(vocab: Array<TwClassDef>, out: modify Array<String>) {
 fn twUnsafeBreakpointErrors(breakpoints: Array<TwPair>, out: modify Array<String>) {
     for bp in breakpoints {
         if twClassSafe(bp.token) == false {
-            out.push("breakpoint `\{bp.token}` is not a CSS-safe class name — a breakpoint key becomes both a `\{bp.token}:` class prefix and a CSS selector prefix, so it must match `[a-z][a-z0-9-]*`")
+            out.push("breakpoint `\{bp.token}` is not a CSS-safe class name \u{2014} a breakpoint key becomes both a `\{bp.token}:` class prefix and a CSS selector prefix, so it must match `[a-z][a-z0-9-]*`")
         }
     }
 }
@@ -492,7 +492,7 @@ fn twUnsafeValueErrors(theme: TwTheme, out: modify Array<String>) {
     for e in theme.entries {
         if includes(families, twHeadOf(e.key)) {
             if twCssValueSafe(e.value) == false {
-                out.push("theme key `\{e.key}` has the value `\{e.value}`, which is not safe to bake into CSS — a value is written into a rule body or a `@media` query, so it may not carry `{`, `}`, `;` or a comment")
+                out.push("theme key `\{e.key}` has the value `\{e.value}`, which is not safe to bake into CSS \u{2014} a value is written into a rule body or a `@media` query, so it may not carry `{`, `}`, `;` or a comment")
             }
         }
     }
@@ -622,7 +622,7 @@ gen fn twBuildModule(theme: TwTheme, vocab: Array<TwClassDef>, breakpoints: Arra
         import { Attr } from "std/html"
         export type TwClass = String where value =~ \{one}
         export type Tw = String where value =~ \{many}
-        /// A checked `class="…"` attribute: `c` is validated against the theme's
+        /// A checked `class="\u{2026}"` attribute: `c` is validated against the theme's
         /// utility vocabulary at compile time (for a literal) or the boundary (dynamic).
         export fn cls(c: Tw) -> Attr {
             return Cls(c.copy())
@@ -660,7 +660,7 @@ gen fn twLoaded(theme: String, read: Result<String, String>) -> Code {
     }
     let parsed = twParseTheme(got.data)
     if parsed.ok == false {
-        return reportHere(Error, "`\{theme}` is not a usable theme — \{parsed.error}")
+        return reportHere(Error, "`\{theme}` is not a usable theme \u{2014} \{parsed.error}")
     }
     let mut unknown: Array<String> = []
     twUnknownKeyErrors(parsed, unknown)
@@ -671,7 +671,7 @@ gen fn twLoaded(theme: String, read: Result<String, String>) -> Code {
     if vocab.length == 0 {
         return reportHere(
             Error,
-            "`\{theme}` yields no utility classes — give it at least one entry under \{joinWith(twKnownFamilies(), ", ")}",
+            "`\{theme}` yields no utility classes \u{2014} give it at least one entry under \{joinWith(twKnownFamilies(), ", ")}",
         )
     }
     return twBuildModule(parsed, vocab, twAxisOf(parsed, "breakpoints"), twSafelist(parsed))
@@ -680,7 +680,7 @@ gen fn twLoaded(theme: String, read: Result<String, String>) -> Code {
 /// Why a theme that cannot be read is refused: before parsing, so the parser
 /// never mislabels a failed read as a theme fault.
 fn cannotReadTheme(theme: String, why: String) -> String {
-    return "std/tw cannot read the theme `\{theme}`: \{why} — a theme is a flat theme.json of design tokens"
+    return "std/tw cannot read the theme `\{theme}`: \{why} \u{2014} a theme is a flat theme.json of design tokens"
 }
 
 test "twParseTheme flattens nested keys with dots" {

@@ -10,10 +10,6 @@ impl Show for Point {
     fn show(self) -> String { return "(\{self.x}, \{self.y})" }
 }
 
-impl Show for Int64 {
-    fn show(self) -> String { return "the number " + self.toString() }
-}
-
 fn tag(parts: Array<String>, values: Array<Value>) -> String {
     let mut out: String = parts[0].copy()
     let mut i = 0
@@ -51,7 +47,6 @@ fn main() -> Int64 {
     let n = 7
     print(n) // 7
     print("\{n}") // 7
-    print(n.show()) // the number 7
 
     print(label(p)) // [(3, 4)]
     print(label(n)) // [7]

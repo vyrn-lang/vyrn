@@ -1400,7 +1400,7 @@ pub fn lint(l: &Lowered) -> Vec<String> {
         for a in &i.type_args {
             if mentions_param(a) {
                 bad.push(format!(
-                    "{}: type argument `{a}` still names a type parameter — an \
+                    "{}: type argument `{a}` still names a type parameter \u{2014} an \
                      instance is concrete or it is not an instance",
                     i.spelling()
                 ));

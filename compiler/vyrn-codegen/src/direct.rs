@@ -264,7 +264,7 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, GenError> {
 fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec<u8>, String> {
     let _cg = vyrn_frontend::prof::phase("codegen");
     let mut m = Module::new();
-    // Imports first — they share the function index space with definitions, so
+    // Imports first - they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
     let wasi = Wasi::declare(&mut m);
     let gen = program.host.gen.then(|| gen_imports(&mut m));
@@ -1098,9 +1098,9 @@ fn abi_kind(ty: &Type) -> &'static str {
 /// ```text
 /// u8            version = 4
 /// uleb          export count
-///   per entry:  name:str  ret:kind  uleb param count  param:kind …  waits:u8
+///   per entry:  name:str  ret:kind  uleb param count  param:kind ...  waits:u8
 /// uleb          import count  (the `vyrn.*` namespace)
-///   per entry:  name:str  ret:kind  uleb param count  param:kind …
+///   per entry:  name:str  ret:kind  uleb param count  param:kind ...
 /// ```
 ///
 /// `str` is a uleb length then UTF-8 bytes; `kind` is a `str` from [`abi_kind`]'s closed set.
@@ -1828,8 +1828,8 @@ struct Base<'a> {
     /// The `vyrn_gen` host imports on the generator path. `None` in an ordinary build, where those
     /// builtins are refused by name.
     gen: Option<Gen>,
-    /// Generic functions by name. They have no index and no body of their own —
-    /// only specializations do — so a call to one is a discovery.
+    /// Generic functions by name. They have no index and no body of their own -
+    /// only specializations do - so a call to one is a discovery.
     generics: HashMap<String, &'a Function>,
     /// Functions with a `fn`-typed parameter. Like a generic, a call to one is a
     /// discovery.
@@ -2510,7 +2510,7 @@ enum Place {
     Words(u32),
 }
 
-/// The chain a switch is being written as — see [`Fn_::chain_open`].
+/// The chain a switch is being written as - see [`Fn_::chain_open`].
 struct Chain {
     /// The arm the two-way collapse tests, and its tag; `None` for the chain.
     two: Option<(usize, usize)>,
@@ -2549,7 +2549,7 @@ enum Rel {
     /// A `Stream<T>`: its buffer, or its cursor slot if it is a producer. Releasing a producer
     /// calls its step, which is dispatched by element type.
     Stream(Type),
-    /// A `String` — the place holds the buffer pointer itself.
+    /// A `String` - the place holds the buffer pointer itself.
     Str,
     /// An aggregate owning heap buffers at these byte offsets: an `Array`'s data,
     /// a `Map`'s keys and values, a `SmallArray`'s `data` (null while inline,
@@ -2800,7 +2800,7 @@ fn shell_of(f: &Function) -> Function {
 /// One function being lowered.
 struct Fn_<'a, 'p> {
     cx: &'a Cx<'p>,
-    /// Name → where it lives and what it is. A scope stack rather than a map per
+    /// Name -> where it lives and what it is. A scope stack rather than a map per
     /// block: shadowing pushes, and leaving a block truncates.
     scope: Vec<(String, Place, Type)>,
     /// wasm blocks open between here and the function's outermost one. A
@@ -2847,7 +2847,7 @@ struct Fn_<'a, 'p> {
     /// Inside a specialization, each `fn`-typed parameter's direct-call target. Empty in
     /// an ordinary function, so no function table exists.
     fn_binds: HashMap<String, FnBinding>,
-    /// wasm local holding the accumulator's pointer → the frame slot holding its
+    /// wasm local holding the accumulator's pointer -> the frame slot holding its
     /// ownership flag. Keyed by local index rather than by name because the
     /// local IS the binding: two `let out`s in one body are two accumulators, and
     /// a global (a `Place::Static`) never gets an entry at all.
@@ -2865,7 +2865,7 @@ struct Fn_<'a, 'p> {
     /// This frame's own core body, which [`Fn_::core_body`] walks. `None` for
     /// a frame the core states no body for, which [`lower_body`] refuses.
     core: Option<&'a vyrn_frontend::core::Body>,
-    /// The release rows held back for the read an exit hands back — see
+    /// The release rows held back for the read an exit hands back - see
     /// [`Fn_::core_releases`].
     core_rows: Vec<(Name, Vec<String>)>,
     /// Where the core's names live, and what the operand stack is holding.
@@ -3402,7 +3402,7 @@ fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
         "`{name}` needs {} bytes of stack for one call, {} of {limit}\n  \
          note: `{name}` is declared on line {line}\n  \
          note: the size is the sum of this function's aggregate locals; a big one belongs on \
-         the heap — an `Array<T>` rather than a fixed `Array<T, N>` or a record of records",
+         the heap \u{2014} an `Array<T>` rather than a fixed `Array<T, N>` or a record of records",
         b.bytes(),
         crate::FRAME_LIMIT_NEEDLE,
     ))
@@ -6764,7 +6764,7 @@ impl<'p> Fn_<'_, 'p> {
     fn extent(&self, elem: &Type, n: usize, line: usize) -> Result<u32, String> {
         let bytes = self.stride(elem, line)? as u64 * n as u64;
         if bytes > u64::from(vyrn_frontend::trap::LENGTH_LIMIT) {
-            return Err(too_big(&format!("{n} × `{elem}`"), bytes, line));
+            return Err(too_big(&format!("{n} \u{d7} `{elem}`"), bytes, line));
         }
         Ok(bytes as u32)
     }
@@ -9990,7 +9990,7 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported("an `Option` that is not an aggregate", line);
         };
         let off = b.alloc(ol.size, ol.align);
-        // `None` first, then overwritten on a hit — one destination, no join, and
+        // `None` first, then overwritten on a hit - one destination, no join, and
         // the miss case is exactly the zero header.
         b.slot(off);
         b.ins(&Instruction::I32Const(0));

@@ -740,7 +740,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     if hasPage == false && hasRespond == false {
         let neither = uiPageErrAt(
             srcPath,
-            "this page exports neither `page` nor `respond` — a page renders through `fn page(…) -> Html`, or takes over the whole reply with `fn respond(…) -> Response`",
+            "this page exports neither `page` nor `respond` \u{2014} a page renders through `fn page(\u{2026}) -> Html`, or takes over the whole reply with `fn respond(\u{2026}) -> Response`",
         )
         return uiPageErr(modPath, segs, dirPrefix, dyns, [neither])
     }
@@ -758,7 +758,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     if hasData && vyxDataFormIsLazy(dataForm) {
         errs.push(uiPageErrAt(
             srcPath,
-            "this page declares a lazy `data`, and a `.vyrn` page's view is a plain `fn page(…) -> Html` with no `Loading` arm to render — write the page as `.vyx`, or drop `lazy`",
+            "this page declares a lazy `data`, and a `.vyrn` page's view is a plain `fn page(\u{2026}) -> Html` with no `Loading` arm to render \u{2014} write the page as `.vyx`, or drop `lazy`",
         ))
     }
     // A `Param*` query on a static route has no segment to build `Params`
@@ -766,7 +766,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     if hasData && loadHasParams && dyns.length == 0 {
         errs.push(uiPageErrAt(
             srcPath,
-            "route `\{uiUrlPatternOf(segs)}` is static, and this page's `data` takes params — there is no dynamic segment to build `Params` from, so declare `data` without params",
+            "route `\{uiUrlPatternOf(segs)}` is static, and this page's `data` takes params \u{2014} there is no dynamic segment to build `Params` from, so declare `data` without params",
         ))
     }
     let needParams = dyns.length > 0 || loadHasParams
@@ -780,7 +780,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         if uiHasType(iface, "Params") == false {
             errs.push(uiPageErrAt(
                 srcPath,
-                "route `\{uiUrlPatternOf(segs)}` binds parameters, and this page declares no `Params` type — declare `type Params = { … }` with one field per dynamic segment",
+                "route `\{uiUrlPatternOf(segs)}` binds parameters, and this page declares no `Params` type \u{2014} declare `type Params = { \u{2026} }` with one field per dynamic segment",
             ))
         } else {
             let f = uiFieldsOf(iface, "Params")
@@ -788,7 +788,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
                 if includes(f.names, d) == false {
                     errs.push(uiPageErrAt(
                         srcPath,
-                        "route segment `[\{d}]` has no field `\{d}` in `Params` — every dynamic segment binds to a field of the same name",
+                        "route segment `[\{d}]` has no field `\{d}` in `Params` \u{2014} every dynamic segment binds to a field of the same name",
                     ))
                 }
             }
@@ -807,13 +807,13 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
                 if includes(dyns, fn2) == false {
                     errs.push(uiPageErrAt(
                         srcPath,
-                        "`Params` declares `\{fn2}`, and route `\{uiUrlPatternOf(segs)}` has no `[\{fn2}]` segment — a `Params` field binds a dynamic segment, so add the segment or drop the field",
+                        "`Params` declares `\{fn2}`, and route `\{uiUrlPatternOf(segs)}` has no `[\{fn2}]` segment \u{2014} a `Params` field binds a dynamic segment, so add the segment or drop the field",
                     ))
                 }
                 if uiSupportedParamType(f.types[i]) == false {
                     errs.push(uiPageErrAt(
                         srcPath,
-                        "`Params` field `\{fn2}` is `\{f.types[i]}`, which a URL segment cannot carry — a route parameter is `Int64` or `String`",
+                        "`Params` field `\{fn2}` is `\{f.types[i]}`, which a URL segment cannot carry \u{2014} a route parameter is `Int64` or `String`",
                     ))
                 }
                 i = i + 1
@@ -825,7 +825,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         if hasLoad {
             errs.push(uiPageErrAt(
                 srcPath,
-                "this page exports both `respond` and `data` — a `respond` page owns the whole reply, so it loads whatever it needs itself; drop one of the two",
+                "this page exports both `respond` and `data` \u{2014} a `respond` page owns the whole reply, so it loads whatever it needs itself; drop one of the two",
             ))
         }
         if dyns.length > 0 && arity != 1 {
@@ -843,7 +843,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         if uiFnRet(iface, "respond") != "Response" {
             errs.push(uiPageErrAt(
                 srcPath,
-                "`respond` returns `\{uiFnRet(iface, "respond")}` — a `respond` page owns the whole reply, so it must return `Response`",
+                "`respond` returns `\{uiFnRet(iface, "respond")}` \u{2014} a `respond` page owns the whole reply, so it must return `Response`",
             ))
         }
     } else if hasLoad {
@@ -864,7 +864,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
             if dyns.length > 0 {
                 errs.push(uiPageErrAt(
                     srcPath,
-                    "route `\{uiUrlPatternOf(segs)}` is dynamic, and this page's `data` takes no params — its segments would have nowhere to bind, so declare `data` over `Params`",
+                    "route `\{uiUrlPatternOf(segs)}` is dynamic, and this page's `data` takes no params \u{2014} its segments would have nowhere to bind, so declare `data` over `Params`",
                 ))
             }
         }
@@ -977,7 +977,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     if hasLoad && loadHasParams == false && dyns.length > 0 {
         errs.push(uiPageErrAt(
             srcPath,
-            "route `\{uiUrlPatternOf(segs)}` is dynamic, and this page's `data` takes no params — its segments would have nowhere to bind, so declare `data` over `params`",
+            "route `\{uiUrlPatternOf(segs)}` is dynamic, and this page's `data` takes no params \u{2014} its segments would have nowhere to bind, so declare `data` over `params`",
         ))
     }
     let needParams = dyns.length > 0 || loadHasParams
@@ -986,7 +986,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
             if includes(shape.paramNames, d) == false {
                 errs.push(uiPageErrAt(
                     srcPath,
-                    "route segment `[\{d}]` has no field `\{d}` in this page's `params` — every dynamic segment binds to a field of the same name",
+                    "route segment `[\{d}]` has no field `\{d}` in this page's `params` \u{2014} every dynamic segment binds to a field of the same name",
                 ))
             }
         }
@@ -1007,13 +1007,13 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
             if includes(dyns, nm) == false {
                 errs.push(uiPageErrAt(
                     srcPath,
-                    "`params` declares `\{nm}`, and route `\{uiUrlPatternOf(segs)}` has no `[\{nm}]` segment — a `params` field binds a dynamic segment, so add the segment or drop the field",
+                    "`params` declares `\{nm}`, and route `\{uiUrlPatternOf(segs)}` has no `[\{nm}]` segment \u{2014} a `params` field binds a dynamic segment, so add the segment or drop the field",
                 ))
             }
             if uiSupportedParamType(shape.paramTypes[i]) == false {
                 errs.push(uiPageErrAt(
                     srcPath,
-                    "`params` field `\{nm}` is `\{shape.paramTypes[i]}`, which a URL segment cannot carry — a route parameter is `Int64` or `String`",
+                    "`params` field `\{nm}` is `\{shape.paramTypes[i]}`, which a URL segment cannot carry \u{2014} a route parameter is `Int64` or `String`",
                 ))
             }
             i = i + 1
@@ -1023,7 +1023,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     if hasLoad && loadHasParams && dyns.length == 0 {
         errs.push(uiPageErrAt(
             srcPath,
-            "route `\{uiUrlPatternOf(segs)}` is static, and this page's `data` takes params — there is no dynamic segment to build `Params` from, so declare `data` without params",
+            "route `\{uiUrlPatternOf(segs)}` is static, and this page's `data` takes params \u{2014} there is no dynamic segment to build `Params` from, so declare `data` without params",
         ))
     }
 
@@ -1203,7 +1203,7 @@ gen fn uiCollisionErrors(pages: Array<UiPageInfo>) -> Array<UiErr> {
         while j < pages.length {
             if uiCollisionKey(pages[i].segs) == uiCollisionKey(pages[j].segs) {
                 errs.push(uiErrHere(
-                    "pages `\{pages[i].modPath}` and `\{pages[j].modPath}` both claim route `\{uiUrlPatternOf(pages[i].segs)}` — one URL reaches one page, so move or rename one of them",
+                    "pages `\{pages[i].modPath}` and `\{pages[j].modPath}` both claim route `\{uiUrlPatternOf(pages[i].segs)}` \u{2014} one URL reaches one page, so move or rename one of them",
                 ))
             }
             j = j + 1
@@ -1230,7 +1230,7 @@ gen fn uiHelperCollisions(pages: Array<UiPageInfo>) -> Array<UiErr> {
             let sameRoute = uiCollisionKey(pages[i].segs) == uiCollisionKey(pages[j].segs)
             if sameName && sameRoute == false {
                 out.push(uiErrHere(
-                    "routes `\{uiUrlPatternOf(pages[i].segs)}` and `\{uiUrlPatternOf(pages[j].segs)}` both name the typed-URL helper `\{uiHelperNameOf(pages[i])}` — a URL slug and a Vyrn identifier are different alphabets, and these two slugs convert to one identifier; rename one route",
+                    "routes `\{uiUrlPatternOf(pages[i].segs)}` and `\{uiUrlPatternOf(pages[j].segs)}` both name the typed-URL helper `\{uiHelperNameOf(pages[i])}` \u{2014} a URL slug and a Vyrn identifier are different alphabets, and these two slugs convert to one identifier; rename one route",
                 ))
             }
             j = j + 1
@@ -1294,7 +1294,7 @@ fn uiRouteNone(o: Option<Response>) -> Bool {
     }
 }
 fn uiRouteNotFound() -> Response {
-    return Response { status: 404, contentType: "text/html", body: document("Not Found", [], el("main", [], [el("h1", [], [text("404 — Not Found")])])), vary: "", headers: [:] }
+    return Response { status: 404, contentType: "text/html", body: document("Not Found", [], el("main", [], [el("h1", [], [text("404 \u{2014} Not Found")])])), vary: "", headers: [:] }
 }
 fn uiRouteIssue(iss: Issue) -> Html {
     return el("li", [], [text(iss.path + ": " + iss.message)])
@@ -1334,7 +1334,7 @@ fn uiHeadJoin2(a: consume Array<Html>, b: consume Array<Html>) -> Array<Html> {
 /// Emitted only when some page dispatches a `PageError`.
 gen fn uiErrorRuntime() -> Code {
     return vyrn"""fn uiRoutePageError(e: PageError) -> Html {
-    return el("main", [], [el("h1", [], [text(e.status.toString() + " — " + e.message)])])
+    return el("main", [], [el("h1", [], [text(e.status.toString() + " \u{2014} " + e.message)])])
 }
 fn uiIssuesToError(issues: Array<Issue>) -> PageError {
     let mut msg = ""
@@ -2165,7 +2165,7 @@ fn uiDispatchOrder(pages: Array<UiPageInfo>) -> Array<Int64> {
 /// empty when the tree builds.
 gen fn uiFindings(dir: String, scan: UiScan) -> Array<UiErr> {
     if scan.pages.length == 0 && scan.errs.length == 0 {
-        return [uiErrHere("no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route")]
+        return [uiErrHere("no page modules under `\{dir}` \u{2014} a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route")]
     }
     let mut errs = scan.errs.copy()
     for p in scan.pages {
@@ -2539,7 +2539,7 @@ test "an awkward slug still makes a legal helper name" {
     assertEq(uiDynHelperName(["sign-in", "[token]"]), "hrefSignIn")
 }
 
-test "two slugs may reach one helper name — that is the collision to report" {
+test "two slugs may reach one helper name \u{2014} that is the collision to report" {
     assertEq(uiStaticHelperName(["about-us"]), uiStaticHelperName(["aboutUs"]))
 }
 
@@ -2572,7 +2572,7 @@ test "a static segment with reserved bytes is matched decoded, a plain one raw" 
     assert(uiSegNeedsDecode("about") == false)
     assert(uiSegNeedsDecode("my-page") == false)
     assert(uiSegNeedsDecode("my page"))
-    assert(uiSegNeedsDecode("café"))
+    assert(uiSegNeedsDecode("caf\u{e9}"))
     let p = UiPageInfo { modPath: "routes/my page", segs: ["about", "my page"], urlPattern: "/about/my page", dynNames: [], dynTypes: [], hasLoad: false, hasData: false, dataRunner: "", loadHasParams: false, loadLazy: false, hasRespond: false, isVyx: false, pageArity: 0, paramsModule: "", dirPrefix: [], loadKind: "", layoutNone: false, errs: [] }
     let out = uiTryFnText(p)
     assert(match indexOf(out, "if segs[0] != ") { Some(_) => true, None => false })

@@ -11,7 +11,7 @@ description = "Vyrn front end: lexer, parser, AST and type checker."
 vyrn-syntax = { path = "../vyrn-syntax" }
 
 # The front end is what every other crate reads, so it reads no other part of the
-# compiler. Tests are the exception — the `library-run` tests run
+# compiler. Tests are the exception - the `library-run` tests run
 # a linked program on the compiled route, which is the direct backend
 # plus the driver's WASI host, so the two are DEV-dependencies. Cargo allows the
 # cycle back to `vyrn-cli` for a dev-dependency.

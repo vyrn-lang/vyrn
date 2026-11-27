@@ -83,7 +83,7 @@ fn escape_hatch(name: &str) -> String {
 /// Returns the refusal for a tool name the table does not know.
 pub fn unknown_tool(name: &str) -> String {
     format!(
-        "unknown tool `{name}` in vyrn.json's `toolchain` — the tools vyrn can pin are {}",
+        "unknown tool `{name}` in vyrn.json's `toolchain` \u{2014} the tools vyrn can pin are {}",
         KNOWN_TOOLS.join(", ")
     )
 }
@@ -197,7 +197,7 @@ fn verified(dir: &Path, sha: &str) -> bool {
 fn unpack_tool(sha: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     if !is_sha256(sha) {
         return Err(format!(
-            "`{sha}` is not a sha256 digest — the tools directory is keyed by content hash"
+            "`{sha}` is not a sha256 digest \u{2014} the tools directory is keyed by content hash"
         ));
     }
     let out = tools_dir().join(sha);
@@ -322,7 +322,7 @@ pub fn pinned_tool(
     // The sha joins into a path below, so a bad one refuses before any join.
     if !is_sha256(sha) {
         return Err(format!(
-            "{name} {version} is pinned with sha `{sha}`, which is not a sha256 digest — \
+            "{name} {version} is pinned with sha `{sha}`, which is not a sha256 digest \u{2014} \
              vyrn.lock is corrupt or hand-edited."
         ));
     }
@@ -336,7 +336,7 @@ pub fn pinned_tool(
         Some(Ok(bytes)) => unpack_tool(sha, &bytes),
         Some(Err(e)) => Err(e),
         None => Err(format!(
-            "{name} {version} is pinned for {platform} (sha256 {sha}) but not cached — \
+            "{name} {version} is pinned for {platform} (sha256 {sha}) but not cached \u{2014} \
              run `vyrn update {name}` online, `vyrn vendor`, or drop any copy of the \
              archive with that hash into {}{}",
             slash(&cache_dir()),
@@ -436,7 +436,7 @@ mod tests {
         let e = tool_url("wasm2js", "1", "x86_64-linux").unwrap_err();
         assert_eq!(
             e,
-            "unknown tool `wasm2js` in vyrn.json's `toolchain` — the tools vyrn can pin \
+            "unknown tool `wasm2js` in vyrn.json's `toolchain` \u{2014} the tools vyrn can pin \
              are wasmtime, cargo-nextest, wabt, simde, binaryen"
         );
 

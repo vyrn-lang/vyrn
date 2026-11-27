@@ -262,13 +262,13 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "`{resolved}` is not pinned in vyrn.lock — run `vyrn check` once to fetch it"
+                    "`{resolved}` is not pinned in vyrn.lock \u{2014} run `vyrn check` once to fetch it"
                 )
             })?;
         // Vendor, then the user cache, hash-verified as the build reads it.
         pinned_blob(Some(dir), &sha).unwrap_or_else(|| {
             Err(format!(
-                "`{resolved}` is pinned but not cached — run `vyrn check` once to fetch it"
+                "`{resolved}` is pinned but not cached \u{2014} run `vyrn check` once to fetch it"
             ))
         })
     }
@@ -3315,7 +3315,7 @@ fn rename_target(
     let (line, col) = to_frontend(&text, &pos.position);
     let path = uri_path(uri).ok_or_else(|| "this document has no file path".to_string())?;
     let (analysis, _) = lookup(server, uri).ok_or_else(|| {
-        "this document has not been analyzed yet — save it once and try again".to_string()
+        "this document has not been analyzed yet \u{2014} save it once and try again".to_string()
     })?;
     let target = rename::target_at(analysis, &path, line, col)?;
     Ok((target, uri.clone()))
@@ -3917,7 +3917,7 @@ fn class_items(
         }
         let file = r.file.file_name().unwrap_or_default().to_string_lossy();
         out.push(vyrn_frontend::Completion {
-            detail: format!("{} — {file}:{}", r.source.label(), r.line),
+            detail: format!("{} \u{2014} {file}:{}", r.source.label(), r.line),
             doc: Some(format!("```css\n{}\n```", r.text.trim())),
             label: r.class,
             kind: vyrn_frontend::SymbolKind::Variant,
@@ -3987,7 +3987,7 @@ fn class_rule_blocks(server: &Server, uri: &Url, class: &str) -> String {
         let rel = relative_to(&r.file, &root);
         let text = r.text.trim();
         out.push_str(&format!(
-            "\n\n```css\n{text}\n```\n— {} {rel}:{}",
+            "\n\n```css\n{text}\n```\n\u{2014} {} {rel}:{}",
             r.source.label(),
             r.line
         ));
@@ -4139,7 +4139,7 @@ mod tests {
 
     /// The emoji is 1 char and 2 UTF-16 units, so every column past it differs
     /// by one.
-    const EMOJI_LINE: &str = "show(\"🎉 done\", here)";
+    const EMOJI_LINE: &str = "show(\"\u{1f389} done\", here)";
 
     #[test]
     fn utf16_and_char_columns_round_trip_through_an_astral_char() {
@@ -4171,7 +4171,7 @@ mod tests {
     #[test]
     fn an_outbound_range_leaves_in_utf16_units() {
         // The string literal spans chars 9..11, units 9..12.
-        let text = "let s = \"🎉\"";
+        let text = "let s = \"\u{1f389}\"";
         let r = lsp_range(text, 1, 10, 12);
         assert_eq!(r.start.character, 9);
         assert_eq!(r.end.character, 12, "the emoji counts as two units");
@@ -4179,7 +4179,7 @@ mod tests {
 
     #[test]
     fn whole_document_range_ends_at_the_utf16_end_of_the_last_line() {
-        let text = "let a = 1\nshow(\"🎉\")";
+        let text = "let a = 1\nshow(\"\u{1f389}\")";
         let r = whole_document_range(text);
         assert_eq!(r.end.line, 1);
         // The last line is 9 chars, 10 UTF-16 units.
@@ -4189,7 +4189,7 @@ mod tests {
     #[test]
     fn semantic_token_lengths_are_utf16_units() {
         // One token of 4 chars, 5 units.
-        let text = "let s = \"🎉x\"";
+        let text = "let s = \"\u{1f389}x\"";
         let toks = vec![vyrn_frontend::SemToken {
             line: 1,
             col: 9,
