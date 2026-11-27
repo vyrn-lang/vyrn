@@ -1598,6 +1598,13 @@ mod tests {
     }
 
     #[test]
+    fn a_lazy_repeat_matches_the_strings_its_greedy_one_does() {
+        assert!(m("a+?b*?c??", "aaab"));
+        assert!(m("a{2,3}?", "aaa"));
+        assert!(!m("a+?", ""));
+    }
+
+    #[test]
     fn every_second_char_is_a() {
         // Even length, and every odd-index char is 'a'.
         let p = "(.a)*";

@@ -13,17 +13,21 @@ are shorthands, their capitals negate them, and `\N` is any character but `\n`. 
 `\x{H..}`, `\uHHHH`, `\u{H..}` and `\o{O..}` are code points. `\R` is a line
 break, `\Q` quotes the text up to `\E` or the end, and a backslash before ASCII
 punctuation makes it literal. Every other escape is refused. `{m,n}` repeats a
-term `m` to `n` times, each count at most 255. `(?:..)` groups without a name,
-`(?<n>..)`, `(?P<n>..)` and `(?'n'..)` name a group, and `(?#..)` is a comment.
+term `m` to `n` times, each count at most 255, and a `?` after a repeat or a
+count makes it lazy. `(?:..)` groups without a name, `(?<n>..)`, `(?P<n>..)`
+and `(?'n'..)` name a group, and `(?#..)` is a comment.
 The flags `i` (ASCII case folding), `s` (`.` takes `\n` and `\r`) and `m` hold
 for the rest of a group after `(?ims-ims)`, or inside `(?ims-ims:..)`. `^`, `$`
 and every other assertion are refused, and the empty pattern matches the empty
 string. A Thompson NFA with no backtracking, so the time is linear in the pattern
-size times the input for every pattern. A search runs it as a lazy DFA: one table
-read per byte. It has no backreferences or lookaround.
+size times the input for every pattern. A search runs it as two lazy DFAs, one
+forward to a match's end and one back to its start: one table read per byte. It
+has no backreferences or lookaround.
 
-Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
-backtracking engine answers `a`.
+Leftmost-first, as Perl, PCRE and RE2 match: of the matches that start
+leftmost, the one the pattern prefers, so an earlier alternative wins, a greedy
+repeat takes as much as it can and a lazy one as little. `a|ab` against `ab`
+matches `a`.
 
 A class is a set of code points: it unites its members, ranges, POSIX classes
 such as `[:alpha:]` and nested classes, and `&&`, `--` and `~~` intersect,
@@ -37,8 +41,9 @@ match starts and ends on a character boundary.
 type Regex = { fwd: Program, rev: Program }
 ```
 
-A compiled pattern: `fwd` matches it, and `rev`, its reverse, reads it backward
-after a loop over any byte, so a backward pass finds where matches start.
+A compiled pattern: `fwd` is the pattern after a loop over any byte, so a forward
+pass finds where the leftmost match ends, and `rev`, its reverse, reads that match
+back to its start.
 
 ## Match
 
@@ -63,9 +68,8 @@ often: the whole cost of a pattern is paid here.
 fn find(re: Regex, hay: String, from: Int64) -> Option<Match>
 ```
 
-The first match at or after `from`, or `None`. It reads `hay` from `from` to its
-end once, so a loop of finds over one haystack is quadratic; `countMatches` and
-`replaceAll` read it once in all.
+The first match at or after `from`, or `None`. It reads `hay` from `from` to the
+match's end, and back to its start.
 
 ## countMatches
 

@@ -25,7 +25,6 @@ pub enum Rule {
     HexDigits { e: String },
     NoCountTerm {  },
     NoTerm {  },
-    NonGreedy { op: String },
     NulEscape {  },
     OctalEscape {  },
     PatternBackslash {  },
@@ -60,7 +59,6 @@ impl Rule {
             Rule::HexDigits { e } => ("HexDigits", vec![("e", e.as_str())]),
             Rule::NoCountTerm {  } => ("NoCountTerm", vec![]),
             Rule::NoTerm {  } => ("NoTerm", vec![]),
-            Rule::NonGreedy { op } => ("NonGreedy", vec![("op", op.as_str())]),
             Rule::NulEscape {  } => ("NulEscape", vec![]),
             Rule::OctalEscape {  } => ("OctalEscape", vec![]),
             Rule::PatternBackslash {  } => ("PatternBackslash", vec![]),
@@ -193,6 +191,9 @@ pub(super) trait Hooks {
         Ok(())
     }
     fn regex_quantifier(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_quantifier_lazy(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn regex_shorthand(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -346,7 +347,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
             ({ let atom = self.pos; self._regex_atom()? && { let _ = (
                 self.regex_quantifier()?
                 || self._regex_quantifier_count()?
-            ); true } })
+            ); true } && { let _ = self.regex_quantifier_lazy()?; true } })
             || { self.pos = p0; false }
         };
         if !hit {
@@ -890,29 +891,21 @@ impl<'s, H: Hooks> Scanner<'s, H> {
 
     fn regex_quantifier(&mut self) -> Result<bool, String> {
         let start = self.pos;
-        let hit = (matches!(self.peek_byte(), Some(b'*')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'*') && { let _ = {
-                    let p0 = self.pos;
-                    ({ let p = self.pos; let m = self.eat_byte(b'?'); self.pos = p; m } && { let rule = rule!(NonGreedy, op = "*"); return Err(self.hooks.refuse(self.pos, rule)); })
-                    || { self.pos = p0; false }
-                }; true })
-                || { self.pos = p0; false }
-            })
-            || (matches!(self.peek_byte(), Some(b'+')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'+') && { let _ = {
-                    let p0 = self.pos;
-                    ({ let p = self.pos; let m = self.eat_byte(b'?'); self.pos = p; m } && { let rule = rule!(NonGreedy, op = "+"); return Err(self.hooks.refuse(self.pos, rule)); })
-                    || { self.pos = p0; false }
-                }; true })
-                || { self.pos = p0; false }
-            })
-            || (matches!(self.peek_byte(), Some(b'?')) && self.eat_byte(b'?'));
+        let hit = self.eat_one(|c| c == '*' || c == '+' || c == '?');
         if !hit {
             return Ok(false);
         }
         self.hooks.regex_quantifier(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn regex_quantifier_lazy(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = self.eat_byte(b'?');
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_quantifier_lazy(start, self.pos)?;
         Ok(true)
     }
 

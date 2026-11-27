@@ -21,7 +21,7 @@ RegexPattern = RegexAlt (eof / ^StrayParen)
 
 nest RegexAlt = branches:RegexBranch (regexAlternation branches:RegexBranch)*
 RegexBranch = (!('|' / ')' / eof) pieces:RegexPiece)*
-RegexPiece = atom:RegexAtom (op:regexQuantifier / count:RegexQuantifierCount)?
+RegexPiece = atom:RegexAtom (op:regexQuantifier / count:RegexQuantifierCount)? lazy:regexQuantifierLazy?
 RegexQuantifierCount = '{' (regexNumber / ^CountNumber)
                        ('}' / ',' ('}' / (regexNumber / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
 
@@ -83,7 +83,9 @@ regexGroupForm = ':' / 'P<' regexName ('>' / ^GroupName) / '\'' regexName ('\'' 
                  / regexFlag* ('-' regexFlag+)? (':' / ^GroupForm)
 regexFlag = [ims] / &[A-Za-z] ^FlagUnknown(f=.)
 regexName = [A-Za-z_] [A-Za-z0-9_]* / ^GroupName
-regexQuantifier = '*' (&'?' ^NonGreedy(op='*'))? / '+' (&'?' ^NonGreedy(op='+'))? / '?'
+regexQuantifier = '*' / '+' / '?'
+// After a repeat or a count, `?` makes it lazy: no atom takes a `?`.
+regexQuantifierLazy = '?'
 
 // An escape is meaningful or refused. In and out of a class it is a shorthand, a
 // control, a code point or ASCII punctuation, which stands for itself.

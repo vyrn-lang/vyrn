@@ -586,8 +586,9 @@ impl Lower<'_> {
         o.push_str(&enter);
         if fallible {
             let mut body = self.bool_expr(&rule.body, 2);
-            // A rule's alternatives need no parentheses of their own.
-            if let E::Alt(_) = rule.body {
+            // A rule's alternatives need no parentheses of their own. Alternatives
+            // of single characters are one `eat_one`, with none to strip.
+            if let (E::Alt(_), true) = (&rule.body, body.starts_with('(')) {
                 body = body[1..body.len() - 1].trim().to_string();
             }
             let _ = writeln!(o, "        let hit = {body};\n{leave}        if !hit {{\n            return Ok(false);\n        }}");

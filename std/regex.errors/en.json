@@ -23,7 +23,6 @@
   "nameTwice": "a group name that names two groups",
   "noCountTerm": "a counted repetition (`\\{m,n\\}`) with no term before it",
   "noTerm": "a repeat (`*`, `+` or `?`) with no term before it",
-  "nonGreedy": "non-greedy repetition (`{$op}?`) is not supported",
   "nulEscape": "a NUL escape, which no `String` holds",
   "octalEscape": "an octal escape (`\\\\0` and a digit), which PCRE reads as a backreference: write `\\\\x` and two hex digits",
   "patternBackslash": "a backslash at the end of the pattern",
