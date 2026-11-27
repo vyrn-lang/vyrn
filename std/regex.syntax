@@ -8,38 +8,107 @@ nest 250 ^TooDeep
 
 // What each builder raises from the tree, because a grammar compares no numbers: a
 // range that runs backwards, a count above 255, a count whose maximum is below its
-// minimum, and counts that expand the pattern past 16384 terms.
+// minimum, counts that expand the pattern past 16384 terms, a code point above
+// 10FFFF or in the surrogates, and a group name used twice.
 row Backwards
 row CountLarge
 row CountOrder
 row CountBudget
+row CodepointRange
+row NameTwice
 
 RegexPattern = RegexAlt (eof / ^StrayParen)
 
-nest RegexAlt = branches:RegexBranch ('|' branches:RegexBranch)*
+nest RegexAlt = branches:RegexBranch (regexAlternation branches:RegexBranch)*
 RegexBranch = (!('|' / ')' / eof) pieces:RegexPiece)*
-RegexPiece = atom:RegexAtom (op:regexOp / count:RegexCount)?
-RegexCount = '{' (regexInt / ^CountNumber)
-             ('}' / ',' ('}' / (regexInt / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
+RegexPiece = atom:RegexAtom (op:regexQuantifier / count:RegexQuantifierCount)? lazy:regexQuantifierLazy?
+RegexQuantifierCount = '{' (regexNumber / ^CountNumber)
+                       ('}' / ',' ('}' / (regexNumber / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
 
 // The order states the language: a literal is what no other alternative takes.
-RegexAtom = RegexGroup / RegexClass / RegexEscape / RegexDot
+RegexAtom = RegexFlags / RegexComment / RegexSubpattern / RegexClass / RegexEscape / RegexClassDot
             / &('*' / '+' / '?') ^NoTerm / &'{' ^NoCountTerm / &'}' ^StrayBrace
-            / RegexLiteral
-RegexGroup = '(' alt:RegexAlt (')' / ^GroupUnclosed)
-RegexEscape = '\\' (regexChar / ^PatternBackslash)
-RegexDot = '.'
+            / '^' ^AnchorPending(a='^') / '$' ^AnchorPending(a='$') / RegexLiteral
+// `(?i)` sets flags for the rest of its group, `(?i:..)` for its own; `(?#..)` is a
+// comment. Each matches the empty string.
+RegexFlags = regexGroupFlags
+RegexComment = regexComment
+RegexSubpattern = open:regexGroupOpen alt:RegexAlt (regexGroupEnd / ^GroupUnclosed)
+RegexEscape = '\\' (regexQuote / regexShorthand / regexAnchor / regexSense / regexForeign
+                    / ^PatternBackslash)
+RegexClassDot = '.'
 RegexLiteral = regexChar
 
-// A class holds a member, so a `]` first is a refusal; a `-` before the `]` is a member.
-RegexClass = '[' negate:regexNegate? (&']' ^EmptyClass)? (!(']' / eof) items:RegexItem)*
-             (']' / ^ClassUnclosed)
-RegexItem = RegexItemEscape / RegexMember
-RegexItemEscape = '\\' (regexChar / ^ClassBackslash)
-RegexMember = regexChar hi:regexHi?
+// A class is a union of items, and `&&` (in both), `--` (in the left, not the right)
+// and `~~` (in one, not both) combine the unions beside them, left to right. A `[`
+// in a class opens a nested class and `[:` a POSIX class. A class holds a member, so a
+// `]` first is a refusal; a `-` before the `]` is a member.
+nest RegexClass = '[' negate:regexNegate? (&']' ^EmptyClass)?
+                  (sets:RegexSet / &eof ^ClassUnclosed / ^SetOperand)
+                  (ops:regexSetOp (sets:RegexSet / &eof ^ClassUnclosed / ^SetOperand))*
+                  (']' / ^ClassUnclosed)
+RegexSet = (!(']' / eof / '&&' / '--' / '~~') items:RegexItem)+
+RegexItem = RegexClassPosix / RegexClass / RegexMember
+RegexClassPosix = '[:' negate:regexPosixNegate? (name:regexPosixName (':]' / ^PosixName) / ^PosixName) regexNoRange?
+RegexMember = lo:RegexBound range:RegexRange?
+RegexRange = regexDash (regexRangeEnd / hi:RegexBound / ^ClassUnclosed)
+RegexBound = RegexEscapeInClass / RegexSingle
+RegexEscapeInClass = '\\' (regexItemShorthand / regexItemAnchor / regexSense / regexForeign / ^ClassBackslash)
+RegexSingle = regexChar
 
 regexChar = .
-regexHi = '-' !']' .
 regexNegate = '^'
-regexInt = [0-9]+
-regexOp = '*' (&'?' ^NonGreedy(op='*'))? / '+' (&'?' ^NonGreedy(op='+'))? / '?'
+regexPosixNegate = '^'
+regexSetOp = '&&' / '--' / '~~'
+regexPosixName = 'alnum' / 'alpha' / 'blank' / 'cntrl' / 'digit' / 'graph' / 'lower' / 'print'
+                 / 'punct' / 'space' / 'upper' / 'xdigit'
+regexNumber = [0-9]+
+regexGroupFlags = '(?' [ims]* ('-' [ims]+)? ')'
+regexComment = '(?#' (!')' .)* (')' / ^GroupUnclosed)
+
+// A group captures, or holds a form after `(?`: `:` does not capture, a name captures
+// by it, and flags apply inside. Every other form is refused.
+regexGroupEnd = ')'
+regexAlternation = '|'
+regexGroupOpen = '(' ('*' ^PcreControl(form='(*..)') / '?' regexGroupForm)?
+regexGroupForm = ':' / 'P<' regexName ('>' / ^GroupName) / '\'' regexName ('\'' / ^GroupName)
+                 / '=' ^AnchorPending(a='(?=') / '!' ^AnchorPending(a='(?!')
+                 / '<=' ^AnchorPending(a='(?<=') / '<!' ^AnchorPending(a='(?<!')
+                 / '<' regexName ('>' / ^GroupName)
+                 / '>' ^PcreControl(form='(?>') / 'R' ^PcreControl(form='(?R)')
+                 / [0-9+] ^PcreControl(form='(?N)') / '-' [0-9] ^PcreControl(form='(?N)')
+                 / '&' ^PcreControl(form='(?&') / '(' ^PcreControl(form='(?(')
+                 / 'C' ^PcreControl(form='(?C') / '|' ^PcreControl(form='(?|')
+                 / 'P' ^PcreControl(form='(?P')
+                 / regexFlag* ('-' regexFlag+)? (':' / ^GroupForm)
+regexFlag = [ims] / &[A-Za-z] ^FlagUnknown(f=.)
+regexName = [A-Za-z_] [A-Za-z0-9_]* / ^GroupName
+regexQuantifier = '*' / '+' / '?'
+// After a repeat or a count, `?` makes it lazy: no atom takes a `?`.
+regexQuantifierLazy = '?'
+
+// An escape is meaningful or refused. In and out of a class it is a shorthand, a
+// control, a code point or ASCII punctuation, which stands for itself.
+regexShorthand = [dDwWsShHNR]
+regexItemShorthand = [dDwWsShH] regexNoRange?
+// A range runs between two characters: a shorthand or a class at either end is refused.
+regexDash = '-' !(']' / '-')
+regexNoRange = &('-' !(']' / '-')) ^ClassRange
+regexRangeEnd = &('[' / '\\' [dDwWsShH]) ^ClassRange
+regexItemAnchor = &[BAzZG1-9] ^ClassAnchor(c=.)
+regexSense = [tnrfvaeb] / 'c' ([A-Za-z] / ^ControlLetter) / regexCode / [!-/:-@[-`{-~]
+regexCode = 'x' (&('00' / '{' '0'+ '}') ^NulEscape / hex hex / '{' hex+ '}' / ^HexDigits(e='x'))
+            / 'u' (&('0000' / '{' '0'+ '}') ^NulEscape / hex hex hex hex / '{' hex+ '}'
+                   / ^HexDigits(e='u'))
+            / 'o' (&('{' '0'+ '}') ^NulEscape / '{' [0-7]+ '}' / ^HexDigits(e='o'))
+            / '0' (&[0-9] ^OctalEscape / ^NulEscape)
+regexAnchor = 'b' ^AnchorPending(a='\\b') / 'B' ^AnchorPending(a='\\B')
+              / 'A' ^AnchorPending(a='\\A') / 'z' ^AnchorPending(a='\\z')
+              / 'Z' ^AnchorPending(a='\\Z') / '<' ^AnchorPending(a='\\<')
+              / '>' ^AnchorPending(a='\\>')
+// The forms another engine gives a meaning this one refuses, and every other escape.
+regexForeign = 'p' ^PropertyClass(form='\\p') / 'P' ^PropertyClass(form='\\P')
+               / 'X' ^PcreControl(form='\\X') / 'C' ^PcreControl(form='\\C')
+               / 'K' ^PcreControl(form='\\K') / 'G' ^PcreControl(form='\\G')
+               / &. ^UnknownEscape(c=.)
+regexQuote = 'Q' (!'\\E' .)* '\\E'?

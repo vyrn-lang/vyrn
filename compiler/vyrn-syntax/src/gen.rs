@@ -426,7 +426,21 @@ impl Lower<'_> {
             let fields: Vec<String> = holes.iter().map(|h| format!("{h}: String")).collect();
             let _ = writeln!(o, "    {row} {{ {} }},", fields.join(", "));
         }
-        o.push_str("}\n\nmacro_rules! rule {\n    ($row:ident $(, $hole:ident = $text:expr)*) => {\n        Rule::$row { $($hole: $text.to_string()),* }\n    };\n}\n\n");
+        o.push_str("}\n\nimpl Rule {\n    /// The row's name and the text of each of its holes, as a catalogue keys them.\n    pub fn row(&self) -> (&'static str, Vec<(&'static str, &str)>) {\n        match self {\n");
+        for (row, holes) in &rows {
+            let names: Vec<&str> = holes.iter().map(|h| &**h).collect();
+            let pairs: Vec<String> = names
+                .iter()
+                .map(|h| format!("(\"{h}\", {h}.as_str())"))
+                .collect();
+            let _ = writeln!(
+                o,
+                "            Rule::{row} {{ {} }} => (\"{row}\", vec![{}]),",
+                names.join(", "),
+                pairs.join(", ")
+            );
+        }
+        o.push_str("        }\n    }\n}\n\nmacro_rules! rule {\n    ($row:ident $(, $hole:ident = $text:expr)*) => {\n        Rule::$row { $($hole: $text.to_string()),* }\n    };\n}\n\n");
         o.push_str("/// What the host does when a rule matches `start..end`, a byte range of the\n/// source, and the refusal it answers with for a row.\n#[allow(unused_variables)]\npub(super) trait Hooks {\n    fn refuse(&mut self, at: usize, rule: Rule) -> String;\n");
         self.hook_trait(&mut o, rules);
         o.push_str(SCANNER);
@@ -572,8 +586,9 @@ impl Lower<'_> {
         o.push_str(&enter);
         if fallible {
             let mut body = self.bool_expr(&rule.body, 2);
-            // A rule's alternatives need no parentheses of their own.
-            if let E::Alt(_) = rule.body {
+            // A rule's alternatives need no parentheses of their own. Alternatives
+            // of single characters are one `eat_one`, with none to strip.
+            if let (E::Alt(_), true) = (&rule.body, body.starts_with('(')) {
                 body = body[1..body.len() - 1].trim().to_string();
             }
             let _ = writeln!(o, "        let hit = {body};\n{leave}        if !hit {{\n            return Ok(false);\n        }}");

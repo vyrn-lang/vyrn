@@ -1,0 +1,7 @@
+fn f(s: String) -> Bool {
+    return s =~ "\\p{L}"
+}
+
+fn main() -> Int64 {
+    return 0
+}

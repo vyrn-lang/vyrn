@@ -8,10 +8,10 @@
 //! tree from its matches. Groups have no backreferences, and counted repetition
 //! expands structurally with bounds capped at 255. Every construct means what
 //! ECMA-262 means on ASCII (`.` excludes `\n` and `\r`), so a pattern round-trips
-//! to a JSON Schema `pattern`. The engine is byte-wise: on multi-byte UTF-8 input,
-//! `.` and negated classes count bytes, not code points.
+//! to a JSON Schema `pattern`. A literal, a class member, `.` and a negated class
+//! are code points, and the DFA reads their UTF-8 bytes.
 
-/// A character class: one bit per byte value.
+/// A set of bytes: one bit per byte value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct ByteClass([u64; 4]);
 
@@ -30,9 +30,134 @@ impl ByteClass {
     fn contains(&self, b: u8) -> bool {
         self.0[(b >> 6) as usize] & (1u64 << (b & 63)) != 0
     }
-    fn negated(self) -> Self {
-        ByteClass([!self.0[0], !self.0[1], !self.0[2], !self.0[3]])
+    fn range(lo: u8, hi: u8) -> Self {
+        let mut cl = ByteClass::empty();
+        cl.add_range(lo, hi);
+        cl
     }
+}
+
+/// The last scalar value.
+const MAX_CHAR: u32 = 0x10_FFFF;
+
+/// A set of code points: sorted inclusive ranges of scalar values, apart and not
+/// adjacent, so no range holds a surrogate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Chars(Vec<(u32, u32)>);
+
+impl Chars {
+    /// The set of the code points `ranges` hold, less the surrogates.
+    fn new(mut ranges: Vec<(u32, u32)>) -> Chars {
+        ranges.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::new();
+        for (lo, hi) in ranges {
+            match merged.last_mut() {
+                Some(last) if lo <= last.1.saturating_add(1) => last.1 = last.1.max(hi),
+                _ => merged.push((lo, hi)),
+            }
+        }
+        let mut out = Vec::new();
+        for (lo, hi) in merged {
+            out.extend([(lo, hi.min(0xD7FF)), (lo.max(0xE000), hi)]);
+        }
+        out.retain(|r| r.0 <= r.1);
+        Chars(out)
+    }
+    fn of(ranges: &[(u32, u32)]) -> Chars {
+        Chars::new(ranges.to_vec())
+    }
+    fn complement(&self) -> Chars {
+        let mut out = Vec::new();
+        let mut next = 0;
+        for &(lo, hi) in &self.0 {
+            if lo > next {
+                out.push((next, lo - 1));
+            }
+            next = hi + 1;
+        }
+        if next <= MAX_CHAR {
+            out.push((next, MAX_CHAR));
+        }
+        Chars::new(out)
+    }
+    fn union(&self, o: &Chars) -> Chars {
+        Chars::new([&self.0[..], &o.0[..]].concat())
+    }
+    fn intersect(&self, o: &Chars) -> Chars {
+        self.complement().union(&o.complement()).complement()
+    }
+    fn minus(&self, o: &Chars) -> Chars {
+        self.intersect(&o.complement())
+    }
+
+    /// The set's UTF-8 bytes as a term: one class of its ASCII members, then one
+    /// sequence of byte ranges for each run of code points that one prefix shape
+    /// encodes, as Rust regex-syntax's `Utf8Sequences` splits them. `std/regex`
+    /// `fragChars` builds the same terms.
+    fn re(&self) -> Re {
+        let mut alts = Vec::new();
+        let ascii: Vec<(u32, u32)> = (self.0.iter())
+            .filter(|r| r.0 < 0x80)
+            .map(|&(lo, hi)| (lo, hi.min(0x7F)))
+            .collect();
+        if !ascii.is_empty() || self.0.is_empty() {
+            let mut cl = ByteClass::empty();
+            for (lo, hi) in ascii {
+                cl.add_range(lo as u8, hi as u8);
+            }
+            alts.push(Re::Class(cl));
+        }
+        for seq in utf8_sequences(&self.0) {
+            alts.push(concat(
+                seq.into_iter()
+                    .map(|(a, b)| Re::Class(ByteClass::range(a, b)))
+                    .collect(),
+            ));
+        }
+        match alts.len() {
+            1 => alts.pop().expect("one alternative"),
+            _ => Re::Alt(alts),
+        }
+    }
+}
+
+/// The byte ranges of the members of `set` from 0x80 up: a sequence of one range per
+/// byte for each run that encodes with one prefix shape.
+fn utf8_sequences(set: &[(u32, u32)]) -> Vec<Vec<(u8, u8)>> {
+    let mut out = Vec::new();
+    let mut todo: Vec<(u32, u32)> = (set.iter().rev())
+        .filter(|r| r.1 >= 0x80)
+        .map(|&(lo, hi)| (lo.max(0x80), hi))
+        .collect();
+    // Each split leaves a shorter `(s, e)` and pushes the rest, so the loop ends.
+    while let Some((s, mut e)) = todo.pop() {
+        if let Some(&cut) = [0x7FF, 0xFFFF].iter().find(|&&c| s <= c && c < e) {
+            todo.push((cut + 1, e));
+            todo.push((s, cut));
+            continue;
+        }
+        let split = (1..4).find_map(|i| {
+            let m = (1u32 << (6 * i)) - 1;
+            if s & !m == e & !m {
+                None
+            } else if s & m != 0 {
+                Some(s | m)
+            } else if e & m != m {
+                Some((e & !m) - 1)
+            } else {
+                None
+            }
+        });
+        if let Some(mid) = split {
+            todo.push((mid + 1, e));
+            e = mid;
+            todo.push((s, e));
+            continue;
+        }
+        let (a, b) = (utf8(s), utf8(e));
+        out.push(a.into_iter().zip(b).collect());
+    }
+    out
 }
 
 #[derive(Clone)]
@@ -74,38 +199,71 @@ struct Build<'a> {
     b: &'a [u8],
     /// Each term with the byte its match starts at, in source order.
     terms: Vec<(usize, Re)>,
-    /// The members of the class being read.
-    class: ByteClass,
-    negate: bool,
-    /// The offset of the `-` of the member being read.
-    hi: Option<usize>,
+    /// Each set of a class being read with the byte its match starts at: a member,
+    /// a range, a POSIX class, a union, or a nested class.
+    sets: Vec<(usize, Chars)>,
+    /// The first byte of each `&&`, `--` or `~~` of a class being read, at its offset.
+    ops: Vec<(usize, u8)>,
     /// The counts of the counted repetition being read.
     counts: Vec<u32>,
     /// Nodes copied by counted repetition so far.
     expanded: usize,
     /// Whether the scan stopped at a row of the grammar.
     in_grammar: bool,
+    /// The flags of each group being read, the pattern's first.
+    flags: Vec<Flags>,
+    /// The names of the named groups read so far.
+    names: Vec<Vec<u8>>,
+}
+
+/// The flags that change what an atom means: `i` folds ASCII case and `s` lets `.`
+/// take `\n` and `\r`. `m` changes only `^` and `$`, which `AnchorPending` refuses.
+#[derive(Clone, Copy, Default)]
+struct Flags {
+    fold: bool,
+    dot_all: bool,
+}
+
+impl Flags {
+    /// The flags after the letters `t` of `(?ims-ims` up to `:` or `)`.
+    fn with(mut self, t: &[u8]) -> Flags {
+        let mut on = true;
+        for &c in t {
+            match c {
+                b'-' => on = false,
+                b'i' => self.fold = on,
+                b's' => self.dot_all = on,
+                _ => {}
+            }
+        }
+        self
+    }
+}
+
+/// `set` with the other case of each ASCII letter it holds.
+fn fold(set: &Chars) -> Chars {
+    let shift = |lo: u32, hi: u32, by: i32| -> Vec<(u32, u32)> {
+        let part = set.intersect(&Chars::of(&[(lo, hi)]));
+        let moved = |c: u32| c.wrapping_add_signed(by);
+        part.0.iter().map(|&(a, b)| (moved(a), moved(b))).collect()
+    };
+    let mut all = set.0.clone();
+    all.extend(shift(0x61, 0x7a, -32));
+    all.extend(shift(0x41, 0x5a, 32));
+    Chars::new(all)
+}
+
+/// The entries of `stack` that start at `start` or later, taken off it.
+fn since<T>(stack: &mut Vec<(usize, T)>, start: usize) -> Vec<T> {
+    let k = stack.partition_point(|t| t.0 < start);
+    stack.drain(k..).map(|t| t.1).collect()
 }
 
 impl Build<'_> {
-    fn bytes(&mut self, at: usize, from: usize, to: usize) {
-        for &c in &self.b[from..to] {
-            let mut cl = ByteClass::empty();
-            cl.set(c);
-            self.terms.push((at, Re::Class(cl)));
-        }
-    }
-
-    fn members(&mut self, from: usize, to: usize) {
-        for &c in &self.b[from..to] {
-            self.class.set(c);
-        }
-    }
-
-    /// The terms that start at `start` or later, taken off the stack.
-    fn since(&mut self, start: usize) -> Vec<Re> {
-        let k = self.terms.partition_point(|t| t.0 < start);
-        self.terms.drain(k..).map(|t| t.1).collect()
+    /// The code point the UTF-8 text from `at` starts with.
+    fn char_at(&self, at: usize) -> u32 {
+        let text = std::str::from_utf8(&self.b[at..]).expect("a pattern is UTF-8");
+        u32::from(text.chars().next().expect("a character"))
     }
 
     /// The last term, which a repeat applies to. A repeat follows an atom, and
@@ -113,101 +271,212 @@ impl Build<'_> {
     fn last(&mut self) -> (usize, Re) {
         self.terms.pop().expect("a repeat follows an atom")
     }
+
+    /// The one set a class's rule pushed since `start`: a bound pushes one.
+    fn one_set(&mut self) -> Chars {
+        self.sets.pop().expect("a bound pushes its set").1
+    }
+
+    fn flags(&self) -> Flags {
+        *self.flags.last().expect("the pattern's flags stay")
+    }
+
+    /// The code point `c` as a term, both cases of an ASCII letter under `i`.
+    fn char_term(&self, c: u32) -> Re {
+        match self.flags().fold && char::from_u32(c).is_some_and(|c| c.is_ascii_alphabetic()) {
+            true => fold(&Chars::of(&[(c, c)])).re(),
+            false => char_re(c),
+        }
+    }
 }
 
 impl Hooks for Build<'_> {
     fn refuse(&mut self, _at: usize, rule: Rule) -> String {
         self.in_grammar = true;
-        match rule {
-            Rule::ClassBackslash {} => "dangling `\\` in character class",
-            Rule::ClassUnclosed {} => "unterminated character class `[`",
-            Rule::CountForm {} => "malformed counted repetition (expected `}` or `,`)",
-            Rule::CountNumber {} => "counted repetition needs a number (`{m}`, `{m,}`, `{m,n}`)",
-            Rule::CountUnclosed {} => "unclosed counted repetition `{`",
-            Rule::EmptyClass {} => "empty character class `[]`",
-            Rule::GroupUnclosed {} => "unclosed group `(`",
-            Rule::NoCountTerm {} => "nothing to repeat before counted repetition `{..}`",
-            Rule::NoTerm {} | Rule::NonGreedy { .. } => "nothing to repeat before quantifier",
-            Rule::PatternBackslash {} => "dangling `\\` in pattern",
-            Rule::StrayBrace {} => "unmatched `}` (a literal brace is `\\}`)",
-            Rule::StrayParen {} => "unmatched `)` in pattern",
-            Rule::TooDeep {} => "pattern nests more than 250 levels deep",
-        }
-        .to_string()
+        let (row, holes) = rule.row();
+        say(row, &holes)
     }
 
-    fn _regex_literal(&mut self, start: usize, end: usize) -> Result<(), String> {
-        self.bytes(start, start, end);
-        Ok(())
-    }
-
-    fn _regex_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn _regex_literal(&mut self, start: usize, _end: usize) -> Result<(), String> {
         self.terms
-            .push((start, Re::Class(escape_class(self.b[start + 1]))));
-        self.bytes(start, start + 2, end);
+            .push((start, self.char_term(self.char_at(start))));
         Ok(())
     }
 
-    // `.` excludes LF and CR, as in ECMA-262. U+2028 and U+2029 are multi-byte in
-    // UTF-8, so a single `.` never matches them.
-    fn _regex_dot(&mut self, start: usize, _end: usize) -> Result<(), String> {
-        let mut nl = ByteClass::empty();
-        nl.set(b'\n');
-        nl.set(b'\r');
-        self.terms.push((start, Re::Class(nl.negated())));
-        Ok(())
-    }
-
-    fn regex_negate(&mut self, _start: usize, _end: usize) -> Result<(), String> {
-        self.negate = true;
-        Ok(())
-    }
-
-    fn _regex_item_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
-        let ec = escape_class(self.b[start + 1]);
-        for (w, e) in self.class.0.iter_mut().zip(ec.0) {
-            *w |= e;
-        }
-        self.members(start + 2, end);
-        Ok(())
-    }
-
-    fn regex_hi(&mut self, start: usize, _end: usize) -> Result<(), String> {
-        self.hi = Some(start);
-        Ok(())
-    }
-
-    /// A member's range runs between the bytes that touch its `-`.
-    fn _regex_member(&mut self, start: usize, end: usize) -> Result<(), String> {
-        let Some(dash) = self.hi.take() else {
-            self.members(start, end);
-            return Ok(());
+    /// A group's flags hold until its `)`; a name names one group.
+    fn regex_group_open(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let t = &self.b[start..end];
+        let name = match t.get(2) {
+            Some(b'P') => Some(&t[4..t.len() - 1]),
+            Some(b'<' | b'\'') => Some(&t[3..t.len() - 1]),
+            _ => None,
         };
-        let (lo, hi) = (self.b[dash - 1], self.b[dash + 1]);
+        let flags = match (name, t.len()) {
+            (None, 3..) => self.flags().with(&t[2..t.len() - 1]),
+            _ => self.flags(),
+        };
+        if let Some(name) = name {
+            if self.names.iter().any(|n| n == name) {
+                return Err(say("NameTwice", &[]));
+            }
+            self.names.push(name.to_vec());
+        }
+        self.flags.push(flags);
+        Ok(())
+    }
+
+    fn _regex_subpattern(&mut self, _start: usize, _end: usize) -> Result<(), String> {
+        self.flags.pop();
+        Ok(())
+    }
+
+    /// `(?i)` sets the flags for the rest of its group and matches the empty string.
+    fn _regex_flags(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let flags = self.flags().with(&self.b[start + 2..end - 1]);
+        *self.flags.last_mut().expect("the pattern's flags stay") = flags;
+        self.terms.push((start, Re::Empty));
+        Ok(())
+    }
+
+    fn _regex_comment(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        self.terms.push((start, Re::Empty));
+        Ok(())
+    }
+
+    /// A quote's characters are terms of their own, so a repeat takes the last, as
+    /// in PCRE.
+    fn _regex_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let t = &self.b[start + 1..end];
+        let re = match t[0] {
+            b'Q' => {
+                let q = &t[1..];
+                let q = q.strip_suffix(b"\\E").unwrap_or(q);
+                if q.is_empty() {
+                    Re::Empty
+                } else {
+                    let text = std::str::from_utf8(q).expect("a pattern is UTF-8");
+                    for c in text.chars() {
+                        self.terms.push((start, self.char_term(u32::from(c))));
+                    }
+                    return Ok(());
+                }
+            }
+            // `\R` is a line break: CR LF, or one of LF, VT, FF and CR.
+            b'R' => Re::Alt(vec![
+                concat(vec![char_re(13), char_re(10)]),
+                Chars::of(&[(0x0a, 0x0d)]).re(),
+            ]),
+            c if SHORTHANDS.contains(&c) => shorthand(c).re(),
+            _ => self.char_term(escape_char(t)?),
+        };
+        self.terms.push((start, re));
+        Ok(())
+    }
+
+    // `.` excludes LF and CR, as in ECMA-262, but under `s`.
+    fn _regex_class_dot(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let breaks = match self.flags().dot_all {
+            true => Chars(Vec::new()),
+            false => Chars::of(&[(0x0a, 0x0a), (0x0d, 0x0d)]),
+        };
+        let dot = breaks.complement();
+        self.terms.push((start, dot.re()));
+        Ok(())
+    }
+
+    fn _regex_single(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let c = self.char_at(start);
+        self.sets.push((start, Chars::of(&[(c, c)])));
+        Ok(())
+    }
+
+    fn _regex_escape_in_class(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let t = &self.b[start + 1..end];
+        let set = match SHORTHANDS.contains(&t[0]) {
+            true => shorthand(t[0]),
+            false => {
+                let c = escape_char(t)?;
+                Chars::of(&[(c, c)])
+            }
+        };
+        self.sets.push((start, set));
+        Ok(())
+    }
+
+    /// A range runs between the code points of its two bounds, which the grammar
+    /// admits only as one character each.
+    fn _regex_range(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let hi = self.one_set();
+        let lo = self.one_set();
+        let (lo, hi) = (lo.0[0].0, hi.0[0].0);
         if lo > hi {
-            return Err(format!(
-                "reversed range `{}-{}` in character class",
-                lo as char, hi as char
-            ));
+            return Err(say("Backwards", &[]));
         }
-        self.members(start, dash - 1);
-        self.class.add_range(lo, hi);
-        self.members(dash + 2, end);
+        self.sets.push((start, Chars::of(&[(lo, hi)])));
         Ok(())
     }
 
+    fn _regex_member(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let set = self.one_set();
+        self.sets.push((start, set));
+        Ok(())
+    }
+
+    fn _regex_class_posix(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let negated = self.b[start + 2] == b'^';
+        let name = &self.b[start + 2 + usize::from(negated)..end - 2];
+        let set = posix(name);
+        self.sets
+            .push((start, if negated { set.complement() } else { set }));
+        Ok(())
+    }
+
+    fn _regex_set(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        let union = since(&mut self.sets, start)
+            .iter()
+            .fold(Chars(Vec::new()), |a, b| a.union(b));
+        self.sets.push((start, union));
+        Ok(())
+    }
+
+    fn regex_set_op(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        self.ops.push((start, self.b[start]));
+        Ok(())
+    }
+
+    /// The operators combine the unions left to right; `i` folds before `^` negates.
     fn _regex_class(&mut self, start: usize, _end: usize) -> Result<(), String> {
-        let cl = std::mem::replace(&mut self.class, ByteClass::empty());
-        let cl = if std::mem::take(&mut self.negate) {
-            cl.negated()
+        let ops = since(&mut self.ops, start);
+        let mut sets = since(&mut self.sets, start).into_iter();
+        let first = sets.next().expect("a class holds a union");
+        let set = ops
+            .into_iter()
+            .zip(sets)
+            .fold(first, |a, (op, b)| match op {
+                b'&' => a.intersect(&b),
+                b'-' => a.minus(&b),
+                _ => a.minus(&b).union(&b.minus(&a)),
+            });
+        let set = if self.flags().fold { fold(&set) } else { set };
+        let set = if self.b[start + 1] == b'^' {
+            set.complement()
         } else {
-            cl
+            set
         };
-        self.terms.push((start, Re::Class(cl)));
+        self.sets.push((start, set));
         Ok(())
     }
 
-    fn regex_op(&mut self, start: usize, _end: usize) -> Result<(), String> {
+    /// A class that is an atom, not an item of another class, becomes a term.
+    fn _regex_atom(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        if self.b[start] == b'[' {
+            let set = self.one_set();
+            self.terms.push((start, set.re()));
+        }
+        Ok(())
+    }
+
+    fn regex_quantifier(&mut self, start: usize, _end: usize) -> Result<(), String> {
         let (at, re) = self.last();
         let re = Box::new(re);
         let re = match self.b[start] {
@@ -220,21 +489,19 @@ impl Hooks for Build<'_> {
     }
 
     /// A count, at most 255.
-    fn regex_int(&mut self, start: usize, end: usize) -> Result<(), String> {
-        let text = String::from_utf8_lossy(&self.b[start..end]);
-        let v: u32 = text
-            .parse()
-            .map_err(|_| format!("repetition count `{text}` too large"))?;
-        if v > 255 {
-            return Err(format!("repetition count {v} exceeds the maximum (255)"));
-        }
+    fn regex_number(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let v = String::from_utf8_lossy(&self.b[start..end])
+            .parse::<u32>()
+            .ok()
+            .filter(|&v| v <= 255)
+            .ok_or_else(|| say("CountLarge", &[]))?;
         self.counts.push(v);
         Ok(())
     }
 
     /// Expands `{m}`, `{m,}` or `{m,n}`: `m` copies of the atom, then `n - m`
     /// optional copies, or one `*` for an open bound.
-    fn _regex_count(&mut self, _start: usize, end: usize) -> Result<(), String> {
+    fn _regex_quantifier_count(&mut self, _start: usize, end: usize) -> Result<(), String> {
         let counts = std::mem::take(&mut self.counts);
         let m = counts[0];
         let n = match counts.get(1) {
@@ -244,7 +511,7 @@ impl Hooks for Build<'_> {
         };
         if let Some(n) = n {
             if n < m {
-                return Err(format!("counted repetition `{{{m},{n}}}` has max < min"));
+                return Err(say("CountOrder", &[]));
             }
         }
         let (at, atom) = self.last();
@@ -256,9 +523,7 @@ impl Hooks for Build<'_> {
             };
         let cost = copies.saturating_mul(re_size(&atom));
         if self.expanded + cost > EXPANSION_BUDGET {
-            return Err(format!(
-                "counted repetition expands the pattern past the maximum ({EXPANSION_BUDGET} nodes)"
-            ));
+            return Err(say("CountBudget", &[]));
         }
         self.expanded += cost;
         let mut parts: Vec<Re> = std::iter::repeat_with(|| atom.clone())
@@ -277,13 +542,13 @@ impl Hooks for Build<'_> {
     }
 
     fn _regex_branch(&mut self, start: usize, _end: usize) -> Result<(), String> {
-        let parts = self.since(start);
+        let parts = since(&mut self.terms, start);
         self.terms.push((start, concat(parts)));
         Ok(())
     }
 
     fn _regex_alt(&mut self, start: usize, _end: usize) -> Result<(), String> {
-        let mut branches = self.since(start);
+        let mut branches = since(&mut self.terms, start);
         let re = match branches.len() {
             1 => branches.pop().expect("one branch"),
             _ => Re::Alt(branches),
@@ -301,9 +566,32 @@ fn concat(mut parts: Vec<Re>) -> Re {
     }
 }
 
-/// Why a pattern does not compile: a row of `std/regex.syntax`, which the
-/// island check of a `=~` literal states in the grammar's sentence, or a limit
-/// of this builder, which only the builder states.
+/// The sentence of `row` in `std/regex.errors/en.json`, which `std/regex` states too,
+/// with each `{$hole}` filled from `holes`. A backslash takes the character after it.
+fn say(row: &str, holes: &[(&str, &str)]) -> String {
+    let catalogue = crate::schema::parse_json(include_str!("../../../std/regex.errors/en.json"))
+        .expect("std/regex.errors/en.json is JSON");
+    let key = row[..1].to_ascii_lowercase() + &row[1..];
+    let text = catalogue.get(&key).and_then(crate::schema::Json::as_str);
+    let mut chars = text.expect("every row has a sentence").chars();
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.extend(chars.next()),
+            '{' => {
+                let hole: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                let name = hole.trim_start_matches('$');
+                out.extend(holes.iter().filter(|h| h.0 == name).map(|h| h.1));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Why a pattern does not compile, in the catalogue's sentence: a row the grammar
+/// refuses with, which the island check of a `=~` literal states, or one the builder
+/// raises from the tree. The builder alone states its DFA state limit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     Grammar(String),
@@ -322,12 +610,13 @@ fn parse(pattern: &str) -> Result<Re, Refusal> {
     let build = Build {
         b: pattern.as_bytes(),
         terms: Vec::new(),
-        class: ByteClass::empty(),
-        negate: false,
-        hi: None,
+        sets: Vec::new(),
+        ops: Vec::new(),
         counts: Vec::new(),
         expanded: 0,
         in_grammar: false,
+        flags: vec![Flags::default()],
+        names: Vec::new(),
     };
     let mut scanner = grammar::Scanner::new(pattern, build);
     if let Err(why) = scanner._regex_pattern() {
@@ -340,49 +629,90 @@ fn parse(pattern: &str) -> Result<Re, Refusal> {
     Ok(scanner.hooks.terms.pop().map_or(Re::Empty, |t| t.1))
 }
 
-/// Returns the class of an escape: a shorthand (`\d \w \s` and negations), a
-/// control character (`\t \n \v \f \r`, never the bare letter in ECMA-262), or
-/// the escaped byte itself.
-fn escape_class(e: u8) -> ByteClass {
-    let mut cl = ByteClass::empty();
-    match e {
-        b'd' => cl.add_range(b'0', b'9'),
-        b'D' => {
-            cl.add_range(b'0', b'9');
-            return cl.negated();
-        }
-        b'w' => {
-            cl.add_range(b'a', b'z');
-            cl.add_range(b'A', b'Z');
-            cl.add_range(b'0', b'9');
-            cl.set(b'_');
-        }
-        b'W' => {
-            cl.add_range(b'a', b'z');
-            cl.add_range(b'A', b'Z');
-            cl.add_range(b'0', b'9');
-            cl.set(b'_');
-            return cl.negated();
-        }
-        b's' => {
-            for &w in &[b' ', b'\t', b'\n', b'\r', 0x0b, 0x0c] {
-                cl.set(w);
-            }
-        }
-        b'S' => {
-            for &w in &[b' ', b'\t', b'\n', b'\r', 0x0b, 0x0c] {
-                cl.set(w);
-            }
-            return cl.negated();
-        }
-        b'n' => cl.set(b'\n'),
-        b'r' => cl.set(b'\r'),
-        b't' => cl.set(b'\t'),
-        b'f' => cl.set(0x0c),
-        b'v' => cl.set(0x0b),
-        other => cl.set(other),
+/// The escapes that stand for a set: `\d`, `\w`, `\s`, `\h`, their capitals, which
+/// negate, and `\N`, any character but LF, which the grammar admits outside a class.
+const SHORTHANDS: &[u8] = b"dDwWsShHN";
+
+/// The set of the shorthand `\c`.
+fn shorthand(c: u8) -> Chars {
+    let set = Chars::of(match c.to_ascii_lowercase() {
+        b'd' => &[(0x30, 0x39)],
+        b'w' => &[(0x30, 0x39), (0x41, 0x5a), (0x5f, 0x5f), (0x61, 0x7a)],
+        b's' => &[(0x09, 0x0d), (0x20, 0x20)],
+        b'h' => &[(0x09, 0x09), (0x20, 0x20)],
+        _ => &[(0x0a, 0x0a)],
+    });
+    match c.is_ascii_uppercase() {
+        true => set.complement(),
+        false => set,
     }
-    cl
+}
+
+/// The set of the POSIX class `name`, which the grammar admits.
+fn posix(name: &[u8]) -> Chars {
+    Chars::of(match name {
+        b"alnum" => &[(0x30, 0x39), (0x41, 0x5a), (0x61, 0x7a)],
+        b"alpha" => &[(0x41, 0x5a), (0x61, 0x7a)],
+        b"blank" => &[(0x09, 0x09), (0x20, 0x20)],
+        b"cntrl" => &[(0x00, 0x1f), (0x7f, 0x7f)],
+        b"digit" => &[(0x30, 0x39)],
+        b"graph" => &[(0x21, 0x7e)],
+        b"lower" => &[(0x61, 0x7a)],
+        b"print" => &[(0x20, 0x7e)],
+        b"punct" => &[(0x21, 0x2f), (0x3a, 0x40), (0x5b, 0x60), (0x7b, 0x7e)],
+        b"space" => &[(0x09, 0x0d), (0x20, 0x20)],
+        b"upper" => &[(0x41, 0x5a)],
+        _ => &[(0x30, 0x39), (0x41, 0x46), (0x61, 0x66)],
+    })
+}
+
+/// The code point of the escape `t`, the text after its backslash, which the grammar
+/// admits as one character: a control, a code point or ASCII punctuation. `\b` reaches
+/// here only from a class, where it is backspace.
+fn escape_char(t: &[u8]) -> Result<u32, String> {
+    Ok(match t[0] {
+        b'x' | b'u' | b'o' => code_point(t)?,
+        b'c' => u32::from(t[1] & 31),
+        b't' => 9,
+        b'n' => 10,
+        b'v' => 11,
+        b'f' => 12,
+        b'r' => 13,
+        b'a' => 7,
+        b'e' => 0x1b,
+        b'b' => 8,
+        c => u32::from(c),
+    })
+}
+
+/// The code point of `\xHH`, `\x{H..}`, `\uHHHH`, `\u{H..}` or `\o{O..}`, refused
+/// above 10FFFF or in the surrogates. The grammar refuses NUL.
+fn code_point(t: &[u8]) -> Result<u32, String> {
+    let digits = t[1..]
+        .strip_prefix(b"{")
+        .map_or(&t[1..], |d| &d[..d.len() - 1]);
+    let radix = if t[0] == b'o' { 8 } else { 16 };
+    let digits = std::str::from_utf8(digits).expect("the grammar admits ASCII digits");
+    u32::from_str_radix(digits, radix)
+        .ok()
+        .filter(|&c| char::from_u32(c).is_some())
+        .ok_or_else(|| say("CodepointRange", &[]))
+}
+
+/// The UTF-8 bytes of the code point `c`, which [`code_point`] or the grammar bounds.
+fn utf8(c: u32) -> Vec<u8> {
+    let c = char::from_u32(c).expect("a scalar value");
+    c.encode_utf8(&mut [0; 4]).as_bytes().to_vec()
+}
+
+/// The code point `c` as one term: the concatenation of its bytes.
+fn char_re(c: u32) -> Re {
+    let byte = |b: &u8| {
+        let mut cl = ByteClass::empty();
+        cl.set(*b);
+        Re::Class(cl)
+    };
+    concat(utf8(c).iter().map(byte).collect())
 }
 
 struct NfaState {
@@ -1106,6 +1436,20 @@ fn compile_uncached(pattern: &str) -> Result<Dfa, Refusal> {
     let start_set = nfa.eps_closure(&[nfa.start]);
     let start = intern(start_set, &mut index, &mut sets);
 
+    // Two bytes that every edge's class holds alike take one step from every set:
+    // `class_of[b]` numbers that run of bytes, and `firsts[k]` is run `k`'s first byte.
+    let mut class_of = [0u8; 256];
+    let mut firsts: Vec<u8> = vec![0];
+    for b in 1..=255u8 {
+        let cut = (nfa.states.iter())
+            .filter_map(|s| s.edge.as_ref())
+            .any(|(class, _)| class.contains(b) != class.contains(b - 1));
+        if cut {
+            firsts.push(b);
+        }
+        class_of[usize::from(b)] = (firsts.len() - 1) as u8;
+    }
+
     let mut processed = 0usize;
     while processed < sets.len() {
         if processed >= DFA_STATE_BUDGET {
@@ -1123,18 +1467,20 @@ fn compile_uncached(pattern: &str) -> Result<Dfa, Refusal> {
             accepting.resize(dfa_state as usize + 1, false);
         }
         accepting[dfa_state as usize] = cur.contains(&nfa.accept);
-        for byte in 0..256u32 {
-            let mut moved: Vec<usize> = Vec::new();
-            for &s in &cur {
-                if let Some((class, to)) = &nfa.states[s].edge {
-                    if class.contains(byte as u8) {
-                        moved.push(*to);
-                    }
-                }
-            }
+        // A class's first byte steps first, so states are interned in byte order,
+        // as a walk of all 256 bytes interns them.
+        let row = dfa_state as usize * 256;
+        for &first in &firsts {
+            let moved: Vec<usize> = (cur.iter())
+                .filter_map(|&s| nfa.states[s].edge.as_ref())
+                .filter(|(class, _)| class.contains(first))
+                .map(|&(_, to)| to)
+                .collect();
             let closure = nfa.eps_closure(&moved); // the empty set is the dead state
-            let next = intern(closure, &mut index, &mut sets);
-            table[dfa_state as usize * 256 + byte as usize] = next;
+            table[row + first as usize] = intern(closure, &mut index, &mut sets);
+        }
+        for byte in 0..256 {
+            table[row + byte] = table[row + firsts[usize::from(class_of[byte])] as usize];
         }
         processed += 1;
     }
@@ -1252,6 +1598,13 @@ mod tests {
     }
 
     #[test]
+    fn a_lazy_repeat_matches_the_strings_its_greedy_one_does() {
+        assert!(m("a+?b*?c??", "aaab"));
+        assert!(m("a{2,3}?", "aaa"));
+        assert!(!m("a+?", ""));
+    }
+
+    #[test]
     fn every_second_char_is_a() {
         // Even length, and every odd-index char is 'a'.
         let p = "(.a)*";
@@ -1286,13 +1639,205 @@ mod tests {
     }
 
     #[test]
+    fn an_escape_is_a_control_a_code_point_a_shorthand_or_punctuation() {
+        assert!(m("\\a\\e\\cJ\\cj", "\u{7}\u{1b}\n\n"));
+        assert!(m("\\x41\\x{42}\\u0043\\u{1F600}\\o{101}", "ABC\u{1F600}A"));
+        assert!(m("\\u{e9}+", "\u{e9}\u{e9}"));
+        assert!(m("\\h\\H", "\tx"));
+        assert!(!m("\\h", "\n"));
+        assert!(m("\\N", "x"));
+        assert!(!m("\\N", "\n"));
+        assert!(m("a\\Rb", "a\r\nb"));
+        assert!(m("a\\Rb", "a\u{0c}b"));
+        assert!(m("\\Q.*\\E", ".*"));
+        assert!(m("\\Qab*", "ab*"));
+        assert!(m("\\Qab\\E*", "abbb"));
+        assert!(m("\\Q\\E", ""));
+        assert!(m("[\\b\\x41]", "\u{8}"));
+        assert!(m("\\-\\.\\\\", "-.\\"));
+        assert!(m("[\\<]", "<"));
+    }
+
+    #[test]
+    fn a_dot_a_negated_class_and_a_literal_are_one_character() {
+        assert!(m(".", "\u{e9}"));
+        assert!(m(".", "\u{1F600}"));
+        assert!(!m(".", "\u{e9}\u{e9}"));
+        assert!(m("[^a]", "\u{20AC}"));
+        assert!(m("\u{e9}+", "\u{e9}\u{e9}"));
+        assert!(!m("[\u{e9}]", "\u{c3}"));
+        assert!(m("[\u{e0}-\u{ff}]{2}", "\u{e9}\u{ff}"));
+        assert!(m("[\\x{100}-\\x{10FFFF}]", "\u{10FFFF}"));
+        assert!(!m("[\\x{100}-\\x{10FFFF}]", "\u{ff}"));
+        assert!(m("\\W", "\u{e9}"));
+    }
+
+    #[test]
+    fn a_class_has_posix_names_nesting_and_set_operations() {
+        assert!(m("[[:alpha:][:digit:]_]+", "a1_Z"));
+        assert!(m("[[:^alpha:]]", "1"));
+        assert!(!m("[[:^alpha:]]", "a"));
+        assert!(m("[a-z&&[^aeiou]]+", "xyz"));
+        assert!(!m("[a-z&&[^aeiou]]", "a"));
+        assert!(m("[\\w--\\d]", "a"));
+        assert!(!m("[\\w--\\d]", "1"));
+        assert!(m("[a-c~~b-d]+", "ad"));
+        assert!(!m("[a-c~~b-d]", "b"));
+        assert!(m("[a[xy]]", "y"));
+        assert!(m("[\\x41-\\x43]", "B"));
+        assert!(m("[a-]", "-"));
+        assert!(m("[a&b]", "&"));
+        assert!(!m("[a&&b]", "a"));
+    }
+
+    #[test]
+    fn a_class_form_with_no_meaning_is_refused() {
+        let says = |p: &str| compile(p).err().map(|e| e.to_string());
+        let says = |p: &str, s: &str| assert_eq!(says(p).as_deref(), Some(s), "{p}");
+        says(
+            "[\\d-z]",
+            "a range (`-`) whose end is a shorthand or a class",
+        );
+        says(
+            "[a-\\w]",
+            "a range (`-`) whose end is a shorthand or a class",
+        );
+        says(
+            "[[:alpha:]-z]",
+            "a range (`-`) whose end is a shorthand or a class",
+        );
+        says("[[:alfa:]]", "a POSIX class (`[:..:]`) whose name is none of alnum, alpha, blank, cntrl, digit, graph, lower, print, punct, space, upper and xdigit");
+        says(
+            "[a&&]",
+            "a class set operation (`&&`, `--` or `~~`) with no members on one side",
+        );
+        says(
+            "[&&a]",
+            "a class set operation (`&&`, `--` or `~~`) with no members on one side",
+        );
+        says("[a-", "a character class with no closing `]`");
+        says("[\u{e9}-a]", "a character range that runs backwards");
+    }
+
+    #[test]
+    fn a_group_form_names_folds_or_comments() {
+        assert!(m("(?:ab)+", "abab"));
+        assert!(m("(?<y>\\d{4})-(?P<m>\\d\\d)-(?'d'\\d\\d)", "2026-11-27"));
+        assert!(m("a(?#note)b", "ab"));
+        assert!(m("(?i)abc", "aBC"));
+        assert!(m("a(?i)b|c", "C"));
+        assert!(!m("(?i:a)b", "AB"));
+        assert!(m("(?i:a)b", "Ab"));
+        assert!(m("(?i)[a-c]+", "ABC"));
+        assert!(!m("(?i)[^a]", "A"));
+        assert!(m("(?i)\\x41", "a"));
+        assert!(!m("(?i)\u{e9}", "\u{c9}"));
+        assert!(m("(?s).", "\n"));
+        assert!(!m(".", "\n"));
+        assert!(m("(?is-i:A)a", "Aa"));
+        assert!(!m("(?is-i:A)a", "aa"));
+        assert!(m("(?m)a", "a"));
+    }
+
+    #[test]
+    fn a_group_form_with_no_meaning_is_refused() {
+        let says = |p: &str| compile(p).err().map(|e| e.to_string());
+        let says = |p: &str, s: &str| assert_eq!(says(p).as_deref(), Some(s), "{p}");
+        says("(?x)a", "a flag (`x`) that is none of `i`, `m` and `s`");
+        says("(?=a)", "an assertion (`(?=`) is not supported");
+        says("a^", "an assertion (`^`) is not supported");
+        says(
+            "(?>a)",
+            "a PCRE control form (`(?>`), which only a backtracking engine has",
+        );
+        says(
+            "(?R)",
+            "a PCRE control form (`(?R)`), which only a backtracking engine has",
+        );
+        says("(?<1a>b)", "a group name that is not a letter or `_` and then letters, digits and `_` up to its closing `>` or `'`");
+        says("(?<a>b)(?<a>c)", "a group name that names two groups");
+        says(
+            "(?~a)",
+            "a group form after `(?` that is none of `:`, a name, flags and `#`",
+        );
+        says("(?#a", "a group with no closing `)`");
+        assert!(compile("(?<a>b){2}").is_ok());
+    }
+
+    #[test]
+    fn an_escape_with_no_meaning_is_refused() {
+        let says = |p: &str| compile(p).err().map(|e| e.to_string());
+        let says = |p: &str, s: &str| assert_eq!(says(p).as_deref(), Some(s), "{p}");
+        says(
+            "\\y",
+            "the escape `\\y` means nothing: a backslash makes only ASCII punctuation literal",
+        );
+        says(
+            "\\1",
+            "the escape `\\1` means nothing: a backslash makes only ASCII punctuation literal",
+        );
+        says("\\b", "an assertion (`\\b`) is not supported");
+        says(
+            "[\\A]",
+            "an anchor or a backreference (`\\A`) cannot stand inside a character class",
+        );
+        says(
+            "\\K",
+            "a PCRE control form (`\\K`), which only a backtracking engine has",
+        );
+        says(
+            "\\p{L}",
+            "a Unicode property class (`\\p{..}`) is not supported",
+        );
+        says("\\0", "a NUL escape, which no `String` holds");
+        says("\\x{000}", "a NUL escape, which no `String` holds");
+        says("\\012", "an octal escape (`\\0` and a digit), which PCRE reads as a backreference: write `\\x` and two hex digits");
+        says(
+            "\\c1",
+            "a control escape (`\\c`) with no ASCII letter after it",
+        );
+        says("\\x4", "a code point escape (`\\x`) with no digits of its form: `\\xHH`, `\\uHHHH`, `\\x{H..}`, `\\u{H..}` or `\\o{O..}`");
+        says(
+            "\\x{110000}",
+            "a code point escape above `10FFFF` or in the surrogates `D800` to `DFFF`",
+        );
+        says(
+            "\\u{D800}",
+            "a code point escape above `10FFFF` or in the surrogates `D800` to `DFFF`",
+        );
+        says(
+            "\\\u{e9}",
+            "the escape `\\\u{e9}` means nothing: a backslash makes only ASCII punctuation literal",
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_the_catalogues_sentence() {
+        assert_eq!(
+            compile("[z-a]").err(),
+            Some(Refusal::Builder(
+                "a character range that runs backwards".to_string()
+            ))
+        );
+        assert_eq!(
+            compile("a}").err(),
+            Some(Refusal::Grammar(
+                "a `}` with no `{` before it (a literal brace is `\\}`)".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn nested_counted_repetition_hits_the_expansion_budget() {
         // Hash-shaped patterns stay fine.
         assert!(compile("[0-9a-f]{40}").is_ok());
         assert!(compile("([0-9a-f]{2}){10}").is_ok());
         // Nesting multiplies the counts: a compile error, not a hang.
         let e = compile("(a{200}){200}").unwrap_err().to_string();
-        assert!(e.contains("past the maximum"), "message: {e}");
+        assert_eq!(
+            e,
+            "counted repetition that expands the pattern past 16384 terms"
+        );
         // Just inside the budget still compiles.
         assert!(compile("(a{200}){40}").is_ok());
     }
@@ -1315,7 +1860,7 @@ mod tests {
         assert_eq!(
             compile(&past).err(),
             Some(Refusal::Grammar(
-                "pattern nests more than 250 levels deep".to_string()
+                "a pattern that nests more than 250 levels deep".to_string()
             ))
         );
     }

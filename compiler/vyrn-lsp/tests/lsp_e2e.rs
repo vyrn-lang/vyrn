@@ -2235,6 +2235,10 @@ const SEM_TYPES: &[&str] = &[
     "operator",
     "regexp",
     "decorator",
+    "escapeSequence",
+    "regexpGroup",
+    "regexpQuantifier",
+    "regexpAlternation",
 ];
 
 /// One decoded semantic token at an absolute 0-based position; `mods` is the
@@ -7079,8 +7083,17 @@ fn a_match_pattern_is_coloured_by_the_regex_grammar() {
         .filter(|t| t.line == 1 && t.ch >= 23 && t.ch < 32)
         .map(|t| (t.ch, t.len, t.ty.clone()))
         .collect();
-    // The grammar names one part of this pattern: the `-` of a range.
-    assert_eq!(inside, vec![(25, 1, "operator".to_string())], "{toks:?}");
+    // A class, a count's braces and its number each have a scope of the grammar.
+    let want = [
+        (23, 5, "regexp"),
+        (28, 1, "regexpQuantifier"),
+        (29, 1, "number"),
+        (30, 1, "regexpQuantifier"),
+    ];
+    let want: Vec<_> = (want.iter())
+        .map(|&(c, l, t)| (c, l, t.to_string()))
+        .collect();
+    assert_eq!(inside, want, "{toks:?}");
     let _ = client.child.kill();
     let _ = std::fs::remove_dir_all(&dir);
 }

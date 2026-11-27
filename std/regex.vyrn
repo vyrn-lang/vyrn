@@ -5,21 +5,36 @@
 /// and counts.
 ///
 /// The language is `std/regex.syntax`, the one `=~` reads, and a pattern means what
-/// it means there: `.` is any character but `\n` and `\r`, `\d`, `\w` and `\s` are
-/// shorthands, `\n`, `\t`, `\r`, `\f` and `\v` are control characters, and any
-/// other escape is the character after it. `{m,n}` repeats a term `m` to `n` times,
-/// each count at most 255. `^` and `$` are the bytes they spell, and the empty
-/// pattern matches the empty string. A Thompson NFA with no backtracking, so the
-/// time is linear in the pattern size times the input for every pattern. A search
-/// runs it as a lazy DFA: one table read per byte. It has no backreferences or
-/// lookaround: `\1` is the byte `1`.
+/// it means there: `.` is any character but `\n` and `\r`. `\d`, `\w`, `\s` and `\h`
+/// are shorthands, their capitals negate them, and `\N` is any character but `\n`. `\t`,
+/// `\n`, `\r`, `\f`, `\v`, `\a`, `\e` and `\cX` are control characters, and `\xHH`,
+/// `\x{H..}`, `\uHHHH`, `\u{H..}` and `\o{O..}` are code points. `\R` is a line
+/// break, `\Q` quotes the text up to `\E` or the end, and a backslash before ASCII
+/// punctuation makes it literal. Every other escape is refused. `{m,n}` repeats a
+/// term `m` to `n` times, each count at most 255, and a `?` after a repeat or a
+/// count makes it lazy. `(?:..)` groups without a name, `(?<n>..)`, `(?P<n>..)`
+/// and `(?'n'..)` name a group, and `(?#..)` is a comment.
+/// The flags `i` (ASCII case folding), `s` (`.` takes `\n` and `\r`) and `m` hold
+/// for the rest of a group after `(?ims-ims)`, or inside `(?ims-ims:..)`. `^`, `$`
+/// and every other assertion are refused, and the empty pattern matches the empty
+/// string. A Thompson NFA with no backtracking, so the time is linear in the pattern
+/// size times the input for every pattern. A search runs it as two lazy DFAs, one
+/// forward to a match's end and one back to its start: one table read per byte. It
+/// has no backreferences or lookaround.
 ///
-/// Leftmost-longest (POSIX): `a|ab` against `ab` matches `ab`, where a
-/// backtracking engine answers `a`.
+/// `captures` gives a match's groups, numbered from 1 in the order of their `(`;
+/// `(?:..)` and `(?i:..)` do not count. `capture` and `named` read one.
 ///
-/// Offsets are bytes, and every match starts and ends on a character boundary:
-/// `.` and a negated class match one whole UTF-8 character. A class that lists
-/// a non-ASCII character is a set of its bytes.
+/// Leftmost-first, as Perl, PCRE and RE2 match: of the matches that start
+/// leftmost, the one the pattern prefers, so an earlier alternative wins, a greedy
+/// repeat takes as much as it can and a lazy one as little. `a|ab` against `ab`
+/// matches `a`.
+///
+/// A class is a set of code points: it unites its members, ranges, POSIX classes
+/// such as `[:alpha:]` and nested classes, and `&&`, `--` and `~~` intersect,
+/// subtract and take the symmetric difference of the unions beside them. A literal,
+/// a class and `.` each match one whole character, so offsets are bytes and every
+/// match starts and ends on a character boundary.
 
 import { substring } from "std/strings"
 import { catalogue } from "std/i18n"
@@ -32,8 +47,6 @@ import * as say from catalogue("./regex.errors")
 // `op`/`a`/`b`/`cls`.
 
 /// `op[i]` is a byte-class test: `cls[i]` is the class, `b[i]` the next pc.
-/// `a[i]` is the next pc after a UTF-8 lead byte (0xC0 and up), or -1 when a
-/// lead byte goes to `b[i]` too.
 let opClass = 0
 
 /// `op[i]` is a fork: `a[i]` and `b[i]` are both next pcs, tried as one set.
@@ -42,6 +55,10 @@ let opSplit = 1
 /// `op[i]` accepts.
 let opMatch = 2
 
+/// `op[i]` notes the offset in slot `a[i]` of a thread's group spans, and goes on
+/// to `b[i]`. Every other walk passes it as an empty edge.
+let opSave = 3
+
 /// A set of bytes: byte `c` is in it when bit `c % 64` of word `c / 64` is set.
 ///
 /// Four words and not an array, so a membership test reads no array and has no
@@ -49,7 +66,17 @@ let opMatch = 2
 /// is `cls[pc]`, in bounds wherever `op[pc]` is.
 type ByteSet = { w0: UInt64, w1: UInt64, w2: UInt64, w3: UInt64 }
 
+/// A compiled pattern: `fwd` is the pattern after a loop over any byte, so a forward
+/// pass finds where the leftmost match ends, and `rev`, its reverse, reads that match
+/// back to its start.
 export type Regex = {
+    fwd: Program,
+    rev: Program,
+    // The name of group `k` at `k - 1`, or "" for a group with none.
+    names: Array<String>,
+}
+
+type Program = {
     op: Array<Int64>,
     a: Array<Int64>,
     b: Array<Int64>,
@@ -103,6 +130,16 @@ type Builder = {
     err: Option<rx.Row>,
     // The terms counted repetition has copied, against `countBudget`.
     expanded: Int64,
+    // The flags of the group being walked: `fold` is `i`, which folds ASCII case,
+    // and `dotAll` is `s`, which lets `.` take `\n` and `\r`. `m` changes only `^`
+    // and `$`, which `AnchorPending` refuses.
+    fold: Bool,
+    dotAll: Bool,
+    // The offset of each capturing group's `(`, by number from 1, and its name or
+    // "" in `names`: a count walks a group once per copy, and a name names one
+    // group.
+    groupAt: Array<Int64>,
+    names: Array<String>,
 }
 
 /// The terms counted repetition may copy in one pattern. Nested counts multiply,
@@ -126,11 +163,27 @@ fn regexSay(row: rx.Row) -> String {
         GroupUnclosed => say.tGroupUnclosed__En(),
         NoCountTerm => say.tNoCountTerm__En(),
         NoTerm => say.tNoTerm__En(),
-        NonGreedy(op) => say.tNonGreedy__En(op),
         PatternBackslash => say.tPatternBackslash__En(),
         StrayBrace => say.tStrayBrace__En(),
         StrayParen => say.tStrayParen__En(),
         TooDeep => say.tTooDeep__En(),
+        AnchorPending(a) => say.tAnchorPending__En(a),
+        ClassAnchor(c) => say.tClassAnchor__En(c),
+        ClassRange => say.tClassRange__En(),
+        CodepointRange => say.tCodepointRange__En(),
+        ControlLetter => say.tControlLetter__En(),
+        HexDigits(e) => say.tHexDigits__En(e),
+        NulEscape => say.tNulEscape__En(),
+        OctalEscape => say.tOctalEscape__En(),
+        PcreControl(form) => say.tPcreControl__En(form),
+        PosixName => say.tPosixName__En(),
+        PropertyClass(form) => say.tPropertyClass__En(form),
+        SetOperand => say.tSetOperand__En(),
+        UnknownEscape(c) => say.tUnknownEscape__En(c),
+        FlagUnknown(f) => say.tFlagUnknown__En(f),
+        GroupForm => say.tGroupForm__En(),
+        GroupName => say.tGroupName__En(),
+        NameTwice => say.tNameTwice__En(),
     }
 }
 
@@ -190,15 +243,6 @@ fn joinHoles(x: Array<Int64>, y: Array<Int64>) -> Array<Int64> {
     return out
 }
 
-/// Adds the bytes of `pattern` from `from` up to `to`.
-fn addBytes(k: modify ByteSet, pattern: String, from: Int64, to: Int64) {
-    let mut i = from
-    while i < to {
-        addByte(k, Int64(pattern[i]))
-        i = i + 1
-    }
-}
-
 /// Adds the bytes from `lo` to `hi`.
 fn addRange(k: modify ByteSet, lo: Int64, hi: Int64) {
     let mut x = lo
@@ -208,100 +252,601 @@ fn addRange(k: modify ByteSet, lo: Int64, hi: Int64) {
     }
 }
 
-/// The bytes the escape `\c` stands for: a shorthand (`\d`, `\w`, `\s` and their
-/// capitals, which negate), a control character (`\t`, `\n`, `\v`, `\f`, `\r`), or
-/// `c` itself.
-fn escapeBytes(c: UInt8) -> ByteSet {
-    let mut k = noBytes()
-    if c == 'd' || c == 'D' || c == 'w' || c == 'W' {
-        addRange(k, '0', '9')
+// A set of code points is `[lo, hi, lo, hi, ..]`: sorted inclusive ranges of scalar
+// values, apart and not adjacent, so no range holds a surrogate. The compiler's
+// builder states the same sets, `regex::Chars`.
+
+/// The last scalar value.
+let maxChar = 1114111
+
+/// The set of the code points the pairs `ranges` hold, less the surrogates.
+fn charsOf(ranges: Array<Int64>) -> Array<Int64> {
+    // An insertion sort by `lo`: a class holds few ranges.
+    let mut v: Array<Int64> = []
+    let mut i = 0
+    while i + 1 < ranges.length {
+        let lo = ranges[i]
+        let hi = ranges[i + 1]
+        v.push(lo)
+        v.push(hi)
+        let mut j = v.length - 2
+        while j >= 2 && v[j - 2] > lo {
+            v[j] = v[j - 2]
+            v[j + 1] = v[j - 1]
+            j = j - 2
+        }
+        v[j] = lo
+        v[j + 1] = hi
+        i = i + 2
     }
-    if c == 'w' || c == 'W' {
-        addRange(k, 'a', 'z')
-        addRange(k, 'A', 'Z')
-        addByte(k, '_')
+    let mut merged: Array<Int64> = []
+    let mut k = 0
+    while k + 1 < v.length {
+        let n = merged.length
+        if n >= 2 && v[k] <= merged[n - 1] + 1 {
+            if v[k + 1] > merged[n - 1] {
+                merged[n - 1] = v[k + 1]
+            }
+        } else {
+            merged.push(v[k])
+            merged.push(v[k + 1])
+        }
+        k = k + 2
     }
-    if c == 's' || c == 'S' {
-        addByte(k, ' ')
-        addRange(k, 9, 13)
+    let mut out: Array<Int64> = []
+    let mut m = 0
+    while m + 1 < merged.length {
+        let lo = merged[m]
+        let hi = merged[m + 1]
+        let below = if hi < 55295 { hi } else { 55295 }
+        if lo <= below {
+            out.push(lo)
+            out.push(below)
+        }
+        let above = if lo > 57344 { lo } else { 57344 }
+        if above <= hi {
+            out.push(above)
+            out.push(hi)
+        }
+        m = m + 2
     }
-    if c == 'D' || c == 'W' || c == 'S' {
-        return ByteSet { w0: ~k.w0, w1: ~k.w1, w2: ~k.w2, w3: ~k.w3 }
-    }
-    if c == 'n' || c == 'r' || c == 't' || c == 'f' || c == 'v' {
-        addByte(k, if c == 'n' { 10 } else if c == 'r' { 13 } else if c == 't' { 9 } else if c == 'f' { 12 } else { 11 })
-    } else if c != 'd' && c != 'w' && c != 's' {
-        addByte(k, Int64(c))
-    }
-    return k
+    return out
 }
 
-/// The set a class states. An escape stands for its bytes, and a member's range runs
-/// between the two bytes that touch its `-`.
-fn classBytes(bd: modify Builder, pattern: String, c: rx.RegexClass) -> ByteSet {
-    let mut k = noBytes()
+fn charsNot(set: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut next = 0
     let mut i = 0
-    while i < c.items.length {
-        match c.items[i] {
-            RegexItemRegexItemEscape(e) => {
-                let x = escapeBytes(pattern[e.start + 1])
-                k = ByteSet { w0: k.w0 | x.w0, w1: k.w1 | x.w1, w2: k.w2 | x.w2, w3: k.w3 | x.w3 }
-                addBytes(k, pattern, e.start + 2, e.end)
-            }
-            RegexItemRegexMember(m) => {
-                if let Some(h) = m.hi {
-                    addBytes(k, pattern, m.start, h.start - 1)
-                    let lo = Int64(pattern[h.start - 1])
-                    let hi = Int64(pattern[h.start + 1])
-                    if hi < lo {
-                        refuse(bd, Backwards)
-                    }
-                    addRange(k, lo, hi)
-                    addBytes(k, pattern, h.start + 2, h.end)
-                } else {
-                    addBytes(k, pattern, m.start, m.end)
+    while i + 1 < set.length {
+        if set[i] > next {
+            out.push(next)
+            out.push(set[i] - 1)
+        }
+        next = set[i + 1] + 1
+        i = i + 2
+    }
+    if next <= maxChar {
+        out.push(next)
+        out.push(maxChar)
+    }
+    return charsOf(out)
+}
+
+fn charsOr(x: Array<Int64>, y: Array<Int64>) -> Array<Int64> {
+    return charsOf(joinHoles(x, y))
+}
+
+fn charsAnd(x: Array<Int64>, y: Array<Int64>) -> Array<Int64> {
+    return charsNot(charsOr(charsNot(x), charsNot(y)))
+}
+
+fn charsLess(x: Array<Int64>, y: Array<Int64>) -> Array<Int64> {
+    return charsAnd(x, charsNot(y))
+}
+
+/// The byte ranges of the members of `set` from 0x80 up, as `[lo, hi, ..]`, one
+/// pair per byte: a sequence for each run of code points that encode with one prefix
+/// shape, split as Rust regex-syntax's `Utf8Sequences` splits them.
+fn utf8Seqs(set: Array<Int64>) -> Array<Array<Int64>> {
+    let mut out: Array<Array<Int64>> = []
+    // Pairs `s, e` still to split, the next on top.
+    let mut todo: Array<Int64> = []
+    let mut i = set.length - 2
+    while i >= 0 {
+        if set[i + 1] >= 128 {
+            todo.push(if set[i] < 128 { 128 } else { set[i] })
+            todo.push(set[i + 1])
+        }
+        i = i - 2
+    }
+    // Each split leaves a shorter `s, e` and pushes the rest, so the walk ends.
+    while todo.length >= 2 {
+        let e = todo[todo.length - 1]
+        let s = todo[todo.length - 2]
+        todo.pop()
+        todo.pop()
+        let mut mid = 0 - 1
+        if s <= 2047 && 2047 < e {
+            mid = 2047
+        } else if s <= 65535 && 65535 < e {
+            mid = 65535
+        }
+        let mut k = 1
+        while mid < 0 && k < 4 {
+            let m = (1 << (6 * k)) - 1
+            if s - (s & m) != e - (e & m) {
+                if (s & m) != 0 {
+                    mid = s | m
+                } else if (e & m) != m {
+                    mid = e - (e & m) - 1
                 }
             }
+            k = k + 1
+        }
+        if mid >= 0 {
+            todo.push(mid + 1)
+            todo.push(e)
+            todo.push(s)
+            todo.push(mid)
+        } else {
+            let a = utf8(s)
+            let b = utf8(e)
+            let mut seq: Array<Int64> = []
+            let mut j = 0
+            while j < a.length && j < b.length {
+                seq.push(a[j])
+                seq.push(b[j])
+                j = j + 1
+            }
+            out.push(seq)
+        }
+    }
+    return out
+}
+
+/// The terms of `set`'s fragment, as the compiler's builder counts them: one for
+/// its ASCII class, one per byte range of each sequence from 0x80 up.
+fn charsSize(set: Array<Int64>) -> Int64 {
+    let mut n = if set.length == 0 || set[0] < 128 { 1 } else { 0 }
+    let seqs = utf8Seqs(set)
+    let mut i = 0
+    while i < seqs.length {
+        n = n + seqs[i].length / 2
+        i = i + 1
+    }
+    return n
+}
+
+/// The fragment of one character of `set`: a class test of its ASCII members, then
+/// for each sequence a test per byte, each an alternative.
+fn fragChars(bd: modify Builder, set: Array<Int64>) -> Frag {
+    let mut f = Frag { start: 0 - 1, holes: [] }
+    if set.length == 0 || set[0] < 128 {
+        let mut k = noBytes()
+        let mut i = 0
+        while i + 1 < set.length && set[i] < 128 {
+            addRange(k, set[i], if set[i + 1] < 127 { set[i + 1] } else { 127 })
+            i = i + 2
+        }
+        f = fragSet(bd, k)
+    }
+    let seqs = utf8Seqs(set)
+    let mut s = 0
+    while s < seqs.length {
+        let mut g = fragRange(bd, seqs[s][0], seqs[s][1])
+        let mut j = 2
+        while j + 1 < seqs[s].length {
+            let h = fragRange(bd, seqs[s][j], seqs[s][j + 1])
+            patch(bd, g.holes, h.start)
+            g = Frag { start: g.start, holes: consume h.holes }
+            j = j + 2
+        }
+        if f.start < 0 {
+            f = g
+        } else {
+            let sp = emit(bd, opSplit, f.start, g.start, noBytes())
+            f = Frag { start: sp, holes: joinHoles(f.holes, g.holes) }
+        }
+        s = s + 1
+    }
+    return f
+}
+
+/// Whether the escape `\c` is a shorthand: `\d`, `\w`, `\s`, `\h`, their capitals,
+/// which negate, and `\N`, any character but `\n`.
+fn isShorthand(c: UInt8) -> Bool {
+    return c == 'd' || c == 'D' || c == 'w' || c == 'W' || c == 's' || c == 'S' || c == 'h' || c == 'H' || c == 'N'
+}
+
+/// The set of the shorthand `\c`.
+fn shorthandChars(c: UInt8) -> Array<Int64> {
+    if c >= 'A' && c <= 'Z' && c != 'N' {
+        return charsNot(shorthandChars(c + 32))
+    }
+    if c == 'd' {
+        return [48, 57]
+    }
+    if c == 'w' {
+        return [48, 57, 65, 90, 95, 95, 97, 122]
+    }
+    if c == 's' {
+        return [9, 13, 32, 32]
+    }
+    if c == 'h' {
+        return [9, 9, 32, 32]
+    }
+    return charsNot([10, 10])
+}
+
+/// Whether `pattern` holds `word` at `at`.
+fn holdsAt(pattern: String, at: Int64, word: String) -> Bool {
+    let mut i = 0
+    while i < word.byteLength {
+        if at + i >= pattern.byteLength || pattern[at + i] != word[i] {
+            return false
         }
         i = i + 1
     }
-    if let Some(n) = c.negate {
-        return ByteSet { w0: ~k.w0, w1: ~k.w1, w2: ~k.w2, w3: ~k.w3 }
+    return true
+}
+
+/// The set of the POSIX class named at `at`, a name the grammar admits.
+fn posixNamed(pattern: String, at: Int64) -> Array<Int64> {
+    if holdsAt(pattern, at, "alnum") {
+        return [48, 57, 65, 90, 97, 122]
     }
-    return k
+    if holdsAt(pattern, at, "alpha") {
+        return [65, 90, 97, 122]
+    }
+    if holdsAt(pattern, at, "blank") {
+        return [9, 9, 32, 32]
+    }
+    if holdsAt(pattern, at, "cntrl") {
+        return [0, 31, 127, 127]
+    }
+    if holdsAt(pattern, at, "digit") {
+        return [48, 57]
+    }
+    if holdsAt(pattern, at, "graph") {
+        return [33, 126]
+    }
+    if holdsAt(pattern, at, "lower") {
+        return [97, 122]
+    }
+    if holdsAt(pattern, at, "print") {
+        return [32, 126]
+    }
+    if holdsAt(pattern, at, "punct") {
+        return [33, 47, 58, 64, 91, 96, 123, 126]
+    }
+    if holdsAt(pattern, at, "space") {
+        return [9, 13, 32, 32]
+    }
+    if holdsAt(pattern, at, "upper") {
+        return [65, 90]
+    }
+    return [48, 57, 65, 70, 97, 102]
+}
+
+/// The set of the POSIX class at `start`, `[:name:]` or `[:^name:]`.
+fn posixChars(pattern: String, start: Int64) -> Array<Int64> {
+    if pattern[start + 2] == '^' {
+        return charsNot(posixNamed(pattern, start + 3))
+    }
+    return posixNamed(pattern, start + 2)
+}
+
+/// The code point of the UTF-8 text of `pattern` at `at`.
+fn charAt(pattern: String, at: Int64) -> Int64 {
+    let b = Int64(pattern[at])
+    if b < 128 {
+        return b
+    }
+    let n = if b >= 240 { 3 } else if b >= 224 { 2 } else { 1 }
+    let mut c = b & (63 >> n)
+    let mut i = 1
+    while i <= n {
+        c = (c << 6) | (Int64(pattern[at + i]) & 63)
+        i = i + 1
+    }
+    return c
+}
+
+/// The code point of the escape from `from`, the byte after its backslash, up to
+/// `to`: a control, a code point escape or ASCII punctuation, or -1 for a code point
+/// above 10FFFF or in the surrogates. `\b` reaches here only from a class, where it
+/// is backspace.
+fn codeOf(pattern: String, from: Int64, to: Int64) -> Int64 {
+    let c = pattern[from]
+    if c == 'c' {
+        return Int64(pattern[from + 1]) & 31
+    }
+    if c != 'x' && c != 'u' && c != 'o' {
+        return if c == 't' { 9 } else if c == 'n' { 10 } else if c == 'v' { 11 } else if c == 'f' { 12 } else if c == 'r' { 13 } else if c == 'a' { 7 } else if c == 'e' { 27 } else if c == 'b' { 8 } else { Int64(c) }
+    }
+    let radix = if c == 'o' { 8 } else { 16 }
+    let mut i = from + 1
+    let mut end = to
+    if pattern[i] == '{' {
+        i = i + 1
+        end = to - 1
+    }
+    let mut v = 0
+    while i < end {
+        let d = Int64(pattern[i])
+        v = v * radix + if d <= '9' { d - '0' } else if d <= 'F' { d - 'A' + 10 } else { d - 'a' + 10 }
+        if v > maxChar {
+            return 0 - 1
+        }
+        i = i + 1
+    }
+    return if v >= 55296 && v <= 57343 { 0 - 1 } else { v }
+}
+
+/// The code point of the escape from `from` up to `to`, as `codeOf` states it; one
+/// out of range is refused and stands as 0.
+fn escapeChar(bd: modify Builder, pattern: String, from: Int64, to: Int64) -> Int64 {
+    let c = codeOf(pattern, from, to)
+    if c < 0 {
+        refuse(bd, CodepointRange)
+        return 0
+    }
+    return c
+}
+
+/// The UTF-8 bytes of the code point `c`.
+fn utf8(c: Int64) -> Array<Int64> {
+    if c < 128 {
+        return [c]
+    }
+    if c < 2048 {
+        return [192 | (c >> 6), 128 | (c & 63)]
+    }
+    if c < 65536 {
+        return [224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63)]
+    }
+    return [240 | (c >> 18), 128 | ((c >> 12) & 63), 128 | ((c >> 6) & 63), 128 | (c & 63)]
+}
+
+/// The offset after the text of the quote `\Q..\E` at `start`, which ends at `end`:
+/// `end` less its `\E`, or `end` when the pattern ends first.
+fn quoteEnd(pattern: String, start: Int64, end: Int64) -> Int64 {
+    if end - start >= 4 && pattern[end - 2] == '\\' && pattern[end - 1] == 'E' {
+        return end - 2
+    }
+    return end
+}
+
+/// The offset of the last character of the text of `pattern` before `end`.
+fn lastChar(pattern: String, end: Int64) -> Int64 {
+    let mut i = end - 1
+    while i > 0 && pattern[i] >= 128 && pattern[i] < 192 {
+        i = i - 1
+    }
+    return i
+}
+
+/// The code point of the class bound `b`.
+fn boundChar(bd: modify Builder, pattern: String, b: rx.RegexBound) -> Int64 {
+    return match b {
+        RegexBoundRegexEscapeInClass(e) => escapeChar(bd, pattern, e.start + 1, e.end),
+        RegexBoundRegexSingle(s) => charAt(pattern, s.start),
+    }
+}
+
+/// The set of the class item `item`. A range runs between the code points of its
+/// bounds.
+fn itemChars(bd: modify Builder, pattern: String, item: rx.RegexItem) -> Array<Int64> {
+    return match item {
+        RegexItemRegexClassPosix(p) => posixChars(pattern, p.start),
+        RegexItemRegexClass(c) => classChars(bd, pattern, c),
+        RegexItemRegexMember(m) => memberChars(bd, pattern, m),
+    }
+}
+
+fn memberChars(bd: modify Builder, pattern: String, m: rx.RegexMember) -> Array<Int64> {
+    match m.lo {
+        RegexBoundRegexEscapeInClass(e) => {
+            if isShorthand(pattern[e.start + 1]) {
+                return shorthandChars(pattern[e.start + 1])
+            }
+        }
+        RegexBoundRegexSingle(s) => {}
+    }
+    let lo = boundChar(bd, pattern, m.lo)
+    if let Some(r) = m.range {
+        if let Some(h) = r.hi {
+            let hi = boundChar(bd, pattern, h)
+            if hi < lo {
+                refuse(bd, Backwards)
+            }
+            return charsOf([lo, hi])
+        }
+    }
+    return [lo, lo]
+}
+
+/// The set a class states: each union of items, combined left to right by the
+/// operators between them, and negated after.
+fn classChars(bd: modify Builder, pattern: String, c: rx.RegexClass) -> Array<Int64> {
+    let mut acc: Array<Int64> = []
+    let mut i = 0
+    while i < c.sets.length {
+        let mut u: Array<Int64> = []
+        let mut j = 0
+        while j < c.sets[i].items.length {
+            u = charsOr(u, itemChars(bd, pattern, c.sets[i].items[j]))
+            j = j + 1
+        }
+        if i == 0 {
+            acc = u
+        } else {
+            let op = c.ops[i - 1].text
+            acc = if op == "&&" { charsAnd(acc, u) } else if op == "--" { charsLess(acc, u) } else { charsOr(charsLess(acc, u), charsLess(u, acc)) }
+        }
+        i = i + 1
+    }
+    let folded = if bd.fold { foldChars(acc) } else { acc }
+    if let Some(n) = c.negate {
+        return charsNot(folded)
+    }
+    return folded
+}
+
+/// The set of `.`: every character but `\n` and `\r`, or every one under `s`.
+fn dotChars(bd: Builder) -> Array<Int64> {
+    return if bd.dotAll { charsNot([]) } else { charsNot([10, 10, 13, 13]) }
+}
+
+/// `set` with the members from `lo` to `hi` moved by `by`.
+fn charsMoved(set: Array<Int64>, lo: Int64, hi: Int64, by: Int64) -> Array<Int64> {
+    let part = charsAnd(set, [lo, hi])
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < part.length {
+        out.push(part[i] + by)
+        i = i + 1
+    }
+    return out
+}
+
+/// `set` with the other case of each ASCII letter it holds.
+fn foldChars(set: Array<Int64>) -> Array<Int64> {
+    return charsOr(set, charsOr(charsMoved(set, 97, 122, 0 - 32), charsMoved(set, 65, 90, 32)))
+}
+
+/// The fragment of the code point `c`, both cases of an ASCII letter under `i`.
+fn fragChar(bd: modify Builder, c: Int64) -> Frag {
+    if bd.fold && ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+        return fragChars(bd, foldChars([c, c]))
+    }
+    return fragBytes(bd, utf8(c))
+}
+
+/// Sets `bd`'s flags by the letters of `pattern` from `from` up to `to`, a flag
+/// list of `(?ims-ims`.
+fn setFlags(bd: modify Builder, pattern: String, from: Int64, to: Int64) {
+    let mut on = true
+    let mut i = from
+    while i < to {
+        if pattern[i] == '-' {
+            on = false
+        } else if pattern[i] == 'i' {
+            bd.fold = on
+        } else if pattern[i] == 's' {
+            bd.dotAll = on
+        }
+        i = i + 1
+    }
+}
+
+/// The group `g` under its own flags, which end at its `)`. A name names one group.
+fn fragGroup(bd: modify Builder, pattern: String, g: rx.RegexSubpattern) -> Frag {
+    let fold = bd.fold
+    let dotAll = bd.dotAll
+    let open = g.open.text
+    let named = open.byteLength > 2 && (open[2] == 'P' || open[2] == '<' || open[2] == '\'')
+    if !named && open.byteLength > 2 {
+        setFlags(bd, open, 2, open.byteLength - 1)
+        let f = fragAlt(bd, pattern, g.alt)
+        bd.fold = fold
+        bd.dotAll = dotAll
+        return f
+    }
+    let name = if named { substring(open, if open[2] == 'P' { 4 } else { 3 }, open.byteLength - 1) } else { "" }
+    let k = groupNumber(bd, g.start, name)
+    let first = emit(bd, opSave, 2 * k - 2, 0, noBytes())
+    let f = fragAlt(bd, pattern, g.alt)
+    let last = emit(bd, opSave, 2 * k - 1, 0, noBytes())
+    patch(bd, [first * 2 + 1], f.start)
+    patch(bd, f.holes, last)
+    bd.fold = fold
+    bd.dotAll = dotAll
+    return Frag { start: first, holes: [last * 2 + 1] }
+}
+
+/// The number of the capturing group whose `(` is at `at`, from 1, numbered on its
+/// first walk. A name names one group.
+fn groupNumber(bd: modify Builder, at: Int64, name: String) -> Int64 {
+    let mut i = 0
+    while i < bd.groupAt.length {
+        if bd.groupAt[i] == at {
+            return i + 1
+        }
+        if name != "" && bd.names[i] == name {
+            refuse(bd, NameTwice)
+        }
+        i = i + 1
+    }
+    bd.groupAt.push(at)
+    bd.names.push(name.copy())
+    return bd.groupAt.length
 }
 
 /// One class test, as a fragment.
 fn fragSet(bd: modify Builder, k: ByteSet) -> Frag {
-    let all: UInt64 = 18446744073709551615
     let pc = emit(bd, opClass, 0 - 1, 0, k)
-    // `.` and a negated class hold every byte from 0x80 up, and they match a
-    // whole character: a byte of the class below 0x80, or a lead byte and then
-    // every continuation byte after it. A `String` is valid UTF-8, so the
-    // longest match takes exactly the character's bytes. A byte alone would
-    // let a match end inside a character, and cutting there traps.
-    if k.w2 != all || k.w3 != all {
-        return Frag { start: pc, holes: [pc * 2 + 1] }
-    }
-    let mut lead = ByteSet { w0: k.w0, w1: k.w1, w2: 0, w3: 0 }
-    let mut x = 194
-    while x <= 244 {
-        addByte(lead, x)
-        x = x + 1
-    }
-    bd.cls[pc] = lead
-    let cont = emit(bd, opClass, 0 - 1, 0, ByteSet { w0: 0, w1: 0, w2: all, w3: 0 })
-    let sp = emit(bd, opSplit, cont, 0, noBytes())
-    bd.a[pc] = cont
-    bd.b[cont] = sp
-    return Frag { start: pc, holes: [pc * 2 + 1, sp * 2 + 1] }
+    return Frag { start: pc, holes: [pc * 2 + 1] }
 }
 
-/// The fragment of byte `c`.
-fn fragByte(bd: modify Builder, c: UInt8) -> Frag {
+/// The fragment of the bytes from `lo` to `hi`.
+fn fragRange(bd: modify Builder, lo: Int64, hi: Int64) -> Frag {
     let mut k = noBytes()
-    addByte(k, Int64(c))
+    addRange(k, lo, hi)
     return fragSet(bd, k)
+}
+
+/// The fragment of the bytes `bs`, one after another.
+fn fragBytes(bd: modify Builder, bs: Array<Int64>) -> Frag {
+    let mut f = fragRange(bd, bs[0], bs[0])
+    let mut i = 1
+    while i < bs.length {
+        let g = fragRange(bd, bs[i], bs[i])
+        patch(bd, f.holes, g.start)
+        f = Frag { start: f.start, holes: consume g.holes }
+        i = i + 1
+    }
+    return f
+}
+
+/// The term of the escape from `start`, its backslash, up to `end`. A quote's last
+/// character is its term, as in PCRE, and `fragPiece` emits the bytes before it.
+/// `\R` is a line break: CR LF, or one of LF, VT, FF and CR.
+fn fragEscape(bd: modify Builder, pattern: String, start: Int64, end: Int64) -> Frag {
+    let c = pattern[start + 1]
+    if c == 'Q' {
+        let to = quoteEnd(pattern, start, end)
+        return if to == start + 2 { fragEmpty(bd) } else { fragChar(bd, charAt(pattern, lastChar(pattern, to))) }
+    }
+    if c == 'R' {
+        let crlf = fragBytes(bd, [13, 10])
+        let one = fragChars(bd, [10, 13])
+        let sp = emit(bd, opSplit, crlf.start, one.start, noBytes())
+        return Frag { start: sp, holes: joinHoles(crlf.holes, one.holes) }
+    }
+    if isShorthand(c) {
+        return fragChars(bd, shorthandChars(c))
+    }
+    return fragChar(bd, escapeChar(bd, pattern, start + 1, end))
+}
+
+/// The terms of the escape from `start` up to `end`, as the compiler's builder
+/// counts them: a set's, a byte each for a code point or a quote's last character,
+/// three for `\R` and one for an empty quote.
+fn escapeSize(pattern: String, start: Int64, end: Int64) -> Int64 {
+    let c = pattern[start + 1]
+    if c == 'R' {
+        return 3
+    }
+    if c == 'Q' {
+        let to = quoteEnd(pattern, start, end)
+        return if to == start + 2 { 1 } else { to - lastChar(pattern, to) }
+    }
+    if isShorthand(c) {
+        return charsSize(shorthandChars(c))
+    }
+    let code = codeOf(pattern, start + 1, end)
+    return utf8(if code < 0 { 0 } else { code }).length
 }
 
 /// The empty string: a split with both edges dangling.
@@ -310,42 +855,44 @@ fn fragEmpty(bd: modify Builder) -> Frag {
     return Frag { start: sp, holes: [sp * 2, sp * 2 + 1] }
 }
 
-/// `f` under the repeat `op`: `*`, `+` or `?`.
-fn fragOp(bd: modify Builder, f: consume Frag, op: String) -> Frag {
-    let sp = emit(bd, opSplit, f.start, 0, noBytes())
+/// `f` under the repeat `op`: `*`, `+` or `?`, greedy or `lazy`.
+fn fragOp(bd: modify Builder, f: consume Frag, op: String, lazy: Bool) -> Frag {
+    // The split's first operand is the one a search prefers: the body for a greedy
+    // repeat, the way out for a lazy one. The body loops back to the split.
+    let sp = if lazy { emit(bd, opSplit, 0, f.start, noBytes()) } else { emit(bd, opSplit, f.start, 0, noBytes()) }
+    let out = if lazy { sp * 2 } else { sp * 2 + 1 }
     if op == "?" {
-        return Frag { start: sp, holes: joinHoles(f.holes, [sp * 2 + 1]) }
+        return Frag { start: sp, holes: joinHoles(f.holes, [out]) }
     }
-    // Greedy: the split's first operand enters the body, which loops back to the
-    // split.
     patch(bd, f.holes, sp)
-    return Frag { start: if op == "*" { sp } else { f.start }, holes: [sp * 2 + 1] }
+    return Frag { start: if op == "*" { sp } else { f.start }, holes: [out] }
 }
 
-/// The term of `atom` a repeat applies to: the whole atom, or the last byte of a
-/// character outside ASCII, whose other bytes `fragPiece` emits before it.
+/// The term of `atom` a repeat applies to: the whole atom, or a quote's last
+/// character, whose other bytes `fragPiece` emits before it.
 fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
     match atom {
-        RegexAtomRegexGroup(g) => {
-            return fragAlt(bd, pattern, g.alt)
+        RegexAtomRegexFlags(f) => {
+            setFlags(bd, pattern, f.start + 2, f.end - 1)
+            return fragEmpty(bd)
+        }
+        RegexAtomRegexComment(c) => {
+            return fragEmpty(bd)
+        }
+        RegexAtomRegexSubpattern(g) => {
+            return fragGroup(bd, pattern, g)
         }
         RegexAtomRegexClass(c) => {
-            return fragSet(bd, classBytes(bd, pattern, c))
+            return fragChars(bd, classChars(bd, pattern, c))
         }
         RegexAtomRegexEscape(e) => {
-            if e.end > e.start + 2 {
-                return fragByte(bd, pattern[e.end - 1])
-            }
-            return fragSet(bd, escapeBytes(pattern[e.start + 1]))
+            return fragEscape(bd, pattern, e.start, e.end)
         }
-        RegexAtomRegexDot(d) => {
-            // Every byte but `\n` and `\r`.
-            let all: UInt64 = 18446744073709551615
-            let k = ByteSet { w0: ~((UInt64(1) << 10) | (UInt64(1) << 13)), w1: all, w2: all, w3: all }
-            return fragSet(bd, k)
+        RegexAtomRegexClassDot(d) => {
+            return fragChars(bd, dotChars(bd))
         }
         RegexAtomRegexLiteral(l) => {
-            return fragByte(bd, pattern[l.end - 1])
+            return fragChar(bd, charAt(pattern, l.start))
         }
     }
 }
@@ -380,7 +927,7 @@ type Bounds = { min: Int64, max: Int64, open: Bool }
 
 /// The bounds of `c`, whose text the grammar states: `{`, digits, then `}`, `,}` or
 /// `,`, digits and `}`.
-fn boundsOf(pattern: String, c: rx.RegexCount) -> Bounds {
+fn boundsOf(pattern: String, c: rx.RegexQuantifierCount) -> Bounds {
     let comma = digitsEnd(pattern, c.start + 1)
     let min = countValue(pattern, c.start + 1, comma)
     if pattern[comma] != ',' {
@@ -397,21 +944,24 @@ fn copiesOf(n: Bounds) -> Int64 {
     return if n.open { n.min + 1 } else { n.max }
 }
 
-/// The terms of `piece` once its counts are expanded: a byte, a class, a dot and
-/// the empty string are one term each, as the compiler's builder counts them.
-fn pieceSize(pattern: String, piece: rx.RegexPiece) -> Int64 {
-    let term = termSize(pattern, piece.atom)
+/// The terms of `piece` once its counts are expanded, as the compiler's builder
+/// counts them: a byte range and the empty string are one term each.
+fn pieceSize(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Int64 {
+    let term = termSize(bd, pattern, piece.atom)
     let mut prefix = 0
     match piece.atom {
-        RegexAtomRegexGroup(g) => {}
+        RegexAtomRegexFlags(f) => {}
+        RegexAtomRegexComment(c) => {}
+        RegexAtomRegexSubpattern(g) => {}
         RegexAtomRegexClass(c) => {}
         RegexAtomRegexEscape(e) => {
-            prefix = if e.end > e.start + 2 { e.end - e.start - 2 } else { 0 }
+            let q = quoteEnd(pattern, e.start, e.end)
+            if pattern[e.start + 1] == 'Q' && q > e.start + 2 {
+                prefix = lastChar(pattern, q) - e.start - 2
+            }
         }
-        RegexAtomRegexDot(d) => {}
-        RegexAtomRegexLiteral(l) => {
-            prefix = l.end - l.start - 1
-        }
+        RegexAtomRegexClassDot(d) => {}
+        RegexAtomRegexLiteral(l) => {}
     }
     if let Some(c) = piece.count {
         let copies = copiesOf(boundsOf(pattern, c))
@@ -421,7 +971,7 @@ fn pieceSize(pattern: String, piece: rx.RegexPiece) -> Int64 {
 }
 
 /// The terms of `alt` once its counts are expanded.
-fn altSize(pattern: String, alt: rx.RegexAlt) -> Int64 {
+fn altSize(bd: modify Builder, pattern: String, alt: rx.RegexAlt) -> Int64 {
     let mut n = 0
     let mut i = 0
     while i < alt.branches.length {
@@ -430,7 +980,7 @@ fn altSize(pattern: String, alt: rx.RegexAlt) -> Int64 {
         }
         let mut j = 0
         while j < alt.branches[i].pieces.length {
-            n = n + pieceSize(pattern, alt.branches[i].pieces[j])
+            n = n + pieceSize(bd, pattern, alt.branches[i].pieces[j])
             j = j + 1
         }
         i = i + 1
@@ -438,34 +988,41 @@ fn altSize(pattern: String, alt: rx.RegexAlt) -> Int64 {
     return n
 }
 
-/// The terms of `atom`, the term a repeat applies to.
-fn termSize(pattern: String, atom: rx.RegexAtom) -> Int64 {
+/// The terms of `atom`, the term a repeat applies to. A refusal it finds is one the
+/// walk would raise building the atom.
+fn termSize(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Int64 {
     return match atom {
-        RegexAtomRegexGroup(g) => altSize(pattern, g.alt),
-        RegexAtomRegexClass(c) => 1,
-        RegexAtomRegexEscape(e) => 1,
-        RegexAtomRegexDot(d) => 1,
-        RegexAtomRegexLiteral(l) => 1,
+        RegexAtomRegexFlags(f) => 1,
+        RegexAtomRegexComment(c) => 1,
+        RegexAtomRegexSubpattern(g) => altSize(bd, pattern, g.alt),
+        RegexAtomRegexClass(c) => charsSize(classChars(bd, pattern, c)),
+        RegexAtomRegexEscape(e) => escapeSize(pattern, e.start, e.end),
+        RegexAtomRegexClassDot(d) => charsSize(dotChars(bd)),
+        RegexAtomRegexLiteral(l) => l.end - l.start,
     }
 }
 
 /// One copy of the term of `atom` a count makes: as it is, or else under `*` for
 /// an open count and under `?` for a closed one.
-fn fragCopy(bd: modify Builder, pattern: String, atom: rx.RegexAtom, optional: Bool, open: Bool) -> Frag {
+fn fragCopy(bd: modify Builder, pattern: String, atom: rx.RegexAtom, optional: Bool, n: Bounds, lazy: Bool) -> Frag {
     let f = fragTerm(bd, pattern, atom)
     if !optional {
         return f
     }
-    return fragOp(bd, f, if open { "*" } else { "?" })
+    return fragOp(bd, f, if n.open { "*" } else { "?" }, lazy)
 }
 
 /// The term of `piece` under its repeat or its count.
 fn fragRepeat(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag {
+    let lazy = match piece.lazy {
+        Some(l) => true,
+        None => false,
+    }
     if let Some(op) = piece.op {
-        return fragOp(bd, fragTerm(bd, pattern, piece.atom), op.text)
+        return fragOp(bd, fragTerm(bd, pattern, piece.atom), op.text, lazy)
     }
     if let Some(c) = piece.count {
-        return fragCount(bd, pattern, piece.atom, boundsOf(pattern, c))
+        return fragCount(bd, pattern, piece.atom, boundsOf(pattern, c), lazy)
     }
     return fragTerm(bd, pattern, piece.atom)
 }
@@ -473,9 +1030,9 @@ fn fragRepeat(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag
 /// The term of `atom` under a count of bounds `n`: `{m,n}` is `m` copies of the
 /// term and then `n - m` optional copies, and `{m,}` is `m` copies and a starred
 /// one.
-fn fragCount(bd: modify Builder, pattern: String, atom: rx.RegexAtom, n: Bounds) -> Frag {
+fn fragCount(bd: modify Builder, pattern: String, atom: rx.RegexAtom, n: Bounds, lazy: Bool) -> Frag {
     let copies = copiesOf(n)
-    let cost = copies * termSize(pattern, atom)
+    let cost = copies * termSize(bd, pattern, atom)
     if n.min > 255 || n.max > 255 {
         refuse(bd, CountLarge)
     } else if n.max < n.min {
@@ -487,10 +1044,10 @@ fn fragCount(bd: modify Builder, pattern: String, atom: rx.RegexAtom, n: Bounds)
         return fragEmpty(bd)
     }
     bd.expanded = bd.expanded + cost
-    let mut f = fragCopy(bd, pattern, atom, n.min == 0, n.open)
+    let mut f = fragCopy(bd, pattern, atom, n.min == 0, n, lazy)
     let mut i = 1
     while i < copies {
-        let g = fragCopy(bd, pattern, atom, i >= n.min, n.open)
+        let g = fragCopy(bd, pattern, atom, i >= n.min, n, lazy)
         patch(bd, f.holes, g.start)
         f = Frag { start: f.start, holes: consume g.holes }
         i = i + 1
@@ -499,28 +1056,30 @@ fn fragCount(bd: modify Builder, pattern: String, atom: rx.RegexAtom, n: Bounds)
 }
 
 fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag {
-    // A character outside ASCII stands for its bytes, and a repeat takes the last.
+    // A quote's characters before its last are terms of their own: a repeat takes
+    // the last.
     let mut from = 0
     let mut to = 0
     match piece.atom {
-        RegexAtomRegexGroup(g) => {}
+        RegexAtomRegexFlags(f) => {}
+        RegexAtomRegexComment(c) => {}
+        RegexAtomRegexSubpattern(g) => {}
         RegexAtomRegexClass(c) => {}
         RegexAtomRegexEscape(e) => {
-            if e.end > e.start + 2 {
-                from = e.start + 1
-                to = e.end - 1
+            let q = quoteEnd(pattern, e.start, e.end)
+            if pattern[e.start + 1] == 'Q' && q > e.start + 2 {
+                from = e.start + 2
+                to = lastChar(pattern, q)
             }
         }
-        RegexAtomRegexDot(d) => {}
-        RegexAtomRegexLiteral(l) => {
-            from = l.start
-            to = l.end - 1
-        }
+        RegexAtomRegexClassDot(d) => {}
+        RegexAtomRegexLiteral(l) => {}
     }
     let mut f = fragRepeat(bd, pattern, piece)
     let mut i = to - 1
     while i >= from {
-        let g = fragByte(bd, pattern[i])
+        let b = Int64(pattern[i])
+        let g = if b < 128 { fragChar(bd, b) } else { fragRange(bd, b, b) }
         patch(bd, g.holes, f.start)
         f = Frag { start: g.start, holes: consume f.holes }
         i = i - 1
@@ -557,20 +1116,25 @@ fn fragAlt(bd: modify Builder, pattern: String, alt: rx.RegexAlt) -> Frag {
 }
 
 /// Each byte's class: a class is a run of bytes that no instruction's class cuts.
-///
-/// A lead-byte edge needs no cut of its own at 192: its class holds only bytes
-/// below 0x80 and 194 to 244, so every run it holds lies on one side of 192.
+/// Byte `c` is cut when it and `c - 1` differ in some class, a bit of `s ^ (s << 1)`
+/// with the shift carried across the words.
 fn byteClasses(bd: Builder) -> Array<UInt8> {
+    let mut cuts = noBytes()
+    let mut pc = 0
+    while pc < bd.cls.length {
+        let s = bd.cls[pc]
+        cuts = ByteSet {
+            w0: cuts.w0 | (s.w0 ^ (s.w0 << 1)),
+            w1: cuts.w1 | (s.w1 ^ ((s.w1 << 1) | (s.w0 >> 63))),
+            w2: cuts.w2 | (s.w2 ^ ((s.w2 << 1) | (s.w1 >> 63))),
+            w3: cuts.w3 | (s.w3 ^ ((s.w3 << 1) | (s.w2 >> 63))),
+        }
+        pc = pc + 1
+    }
     let mut of: Array<UInt8> = [0]
     let mut c = 1
     while c < 256 {
-        let mut cut = false
-        let mut pc = 0
-        while pc < bd.cls.length && !cut {
-            cut = hasByte(bd.cls[pc], c) != hasByte(bd.cls[pc], c - 1)
-            pc = pc + 1
-        }
-        of.push(if cut { of[c - 1] + 1 } else { of[c - 1] })
+        of.push(if hasByte(cuts, c) { of[c - 1] + 1 } else { of[c - 1] })
         c = c + 1
     }
     return of
@@ -586,48 +1150,162 @@ export fn compile(pattern: String) -> Result<Regex, String> {
 }
 
 fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
-    let mut bd = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0 }
+    let mut bd = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, groupAt: [], names: [] }
     let f = fragAlt(bd, pattern, tree)
     if let Some(row) = bd.err {
         return Err(regexSay(row))
     }
     let m = emit(bd, opMatch, 0, 0, noBytes())
     patch(bd, f.holes, m)
-    // Read the classes before the builder gives its arrays up, so nothing is
-    // copied.
     let classOf = byteClasses(bd)
-    return Ok(Regex {
+    let classCount = Int64(classOf[255]) + 1
+    let rev = reverse(bd, f.start, m, classOf.copy(), classCount)
+    // The loop is the split's second operand, so a match that starts earlier wins.
+    // Its class holds every byte, so it cuts no class.
+    let start = emit(bd, opSplit, f.start, 0, noBytes())
+    bd.b[start] = emit(bd, opClass, 0 - 1, start, allBytes())
+    let fwd = Program {
         op: consume bd.op,
         a: consume bd.a,
         b: consume bd.b,
         cls: consume bd.cls,
-        start: f.start,
-        classCount: Int64(classOf[255]) + 1,
+        start: start,
+        classCount: classCount,
         classOf: classOf,
-    })
+    }
+    return Ok(Regex { fwd: fwd, rev: rev, names: consume bd.names })
 }
 
-// A Thompson simulation: one set of live pcs, stepped one input byte at a time.
-// The lazy DFA below caches those sets as states, and falls back to the
-// simulation when its table is full.
+fn allBytes() -> ByteSet {
+    let all: UInt64 = 18446744073709551615
+    return ByteSet { w0: all, w1: all, w2: all, w3: all }
+}
+
+/// The reverse of the program in `p`, whose start is `first` and whose match is `m`.
+/// Each pc `r` of `p` is a state that leads to every pc that leads to `r` in `p`: a
+/// class pc of `p` is a class test on that edge, a split pc an empty edge, and
+/// `first` the match. A state is a chain of splits, one per edge, each operand `a` an
+/// edge; its class tests follow the chain. Two passes: the first lays out each
+/// state's pcs. The tests are `p`'s classes, so the reverse keeps `classOf`.
+fn reverse(p: Builder, first: Int64, m: Int64, classOf: consume Array<UInt8>, classCount: Int64) -> Program {
+    let n = p.op.length
+    // The pcs of `p` that lead to each pc, as lists through `nextFrom`.
+    let mut firstFrom: Array<Int64> = []
+    while firstFrom.length < n {
+        firstFrom.push(0 - 1)
+    }
+    let mut from: Array<Int64> = []
+    let mut nextFrom: Array<Int64> = []
+    let mut q = 0
+    while q < n {
+        let mut k = 0
+        while k < 2 {
+            let to = if k == 0 { p.b[q] } else { p.a[q] }
+            if p.op[q] != opMatch && (k == 0 || p.op[q] == opSplit) && to >= 0 && to < n {
+                from.push(q)
+                nextFrom.push(firstFrom[to])
+                firstFrom[to] = from.length - 1
+            }
+            k = k + 1
+        }
+        q = q + 1
+    }
+    // pc 0 never matches and pc 1 matches; each state's chain then its tests.
+    let mut entry: Array<Int64> = []
+    let mut size = 2
+    let mut r = 0
+    while r < n {
+        entry.push(size)
+        let mut e = firstFrom[r]
+        let mut links = if r == first { 1 } else { 0 }
+        let mut tests = 0
+        while e >= 0 {
+            links = links + 1
+            if p.op[from[e]] == opClass {
+                tests = tests + 1
+            }
+            e = nextFrom[e]
+        }
+        size = size + tests + if links == 0 { 1 } else { links }
+        r = r + 1
+    }
+    let mut out = Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, groupAt: [], names: [] }
+    emit(out, opClass, 0 - 1, 0, noBytes())
+    emit(out, opMatch, 0, 0, noBytes())
+    let mut s = 0
+    while s < n {
+        let mut links = if s == first { 1 } else { 0 }
+        let mut f = firstFrom[s]
+        while f >= 0 {
+            links = links + 1
+            f = nextFrom[f]
+        }
+        let test = entry[s] + if links == 0 { 1 } else { links }
+        // The chain's operands: the match, then each edge in list order.
+        let mut targets: Array<Int64> = []
+        if s == first {
+            targets.push(1)
+        }
+        let mut e = firstFrom[s]
+        let mut tests: Array<Int64> = []
+        while e >= 0 {
+            let q = from[e]
+            if p.op[q] == opClass {
+                targets.push(test + tests.length)
+                tests.push(q)
+            } else {
+                targets.push(entry[q])
+            }
+            e = nextFrom[e]
+        }
+        if targets.length == 0 {
+            emit(out, opSplit, 0, 0, noBytes())
+        }
+        let mut i = 0
+        while i < targets.length {
+            let after = if i + 1 < targets.length { out.op.length + 1 } else { 0 }
+            emit(out, opSplit, targets[i], after, noBytes())
+            i = i + 1
+        }
+        let mut j = 0
+        while j < tests.length {
+            emit(out, opClass, 0 - 1, entry[tests[j]], p.cls[tests[j]])
+            j = j + 1
+        }
+        s = s + 1
+    }
+    return Program {
+        op: consume out.op,
+        a: consume out.a,
+        b: consume out.b,
+        cls: consume out.cls,
+        start: entry[m],
+        classCount: classCount,
+        classOf: classOf,
+    }
+}
+
+// A Thompson simulation: one list of live pcs in the order a search prefers them,
+// stepped one input byte at a time. The lazy DFA below caches those lists as
+// states, and falls back to the simulation when its table is full.
 
 /// The pc after instruction `pc` takes byte `c`, or -1 when it is not a class
 /// that holds `c`.
-fn follow(re: Regex, pc: Int64, c: Int64) -> Int64 {
+fn follow(re: Program, pc: Int64, c: Int64) -> Int64 {
     if re.op[pc] != opClass || !hasByte(re.cls[pc], c) {
         return 0 - 1
     }
-    return if c >= 192 && re.a[pc] >= 0 { re.a[pc] } else { re.b[pc] }
+    return re.b[pc]
 }
 
 /// Adds `pc` and everything reachable from it without consuming, marking each
 /// with `sc.gen`.
-fn addThread(re: Regex, list: modify Array<Int64>, sc: modify Scan, pc: Int64) {
+fn addThread(re: Program, list: modify Array<Int64>, sc: modify Scan, pc: Int64) {
     let mut stack: Array<Int64> = [pc]
     while stack.length > 0 {
         let p = stack[stack.length - 1]
         stack.pop()
-        if p < 0 || p >= re.op.length {
+        if p < 0 || p >= re.op.length || p >= sc.mark.length {
             continue
         }
         if sc.mark[p] == sc.gen {
@@ -635,48 +1313,49 @@ fn addThread(re: Regex, list: modify Array<Int64>, sc: modify Scan, pc: Int64) {
         }
         sc.mark[p] = sc.gen
         if re.op[p] == opSplit {
-            // `b` first so `a` pops first: that makes `*` greedy.
+            // `b` first so `a` pops first: `a` is the operand a search prefers.
             stack.push(re.b[p])
             stack.push(re.a[p])
+        } else if re.op[p] == opSave {
+            stack.push(re.b[p])
         } else {
             list.push(p)
         }
     }
 }
 
-/// The end of the longest match that starts exactly at `at`, or -1 for no match.
-fn nfaMatchAt(re: Regex, hay: Array<UInt8>, at: Int64, sc: modify Scan) -> Int64 {
-    let mut clist: Array<Int64> = []
+/// The class and match pcs after the pcs `list` take byte `c`, in order; a
+/// leftmost-first scan drops each pc after the first match.
+fn stepList(re: Program, list: Array<Int64>, c: Int64, sc: modify Scan) -> Array<Int64> {
+    let mut next: Array<Int64> = []
     sc.gen = sc.gen + 1
-    addThread(re, clist, sc, re.start)
-    let mut best = 0 - 1
-    let mut i = at
-    while clist.length > 0 {
-        // An accept here is a candidate; leftmost-longest keeps looking.
-        let mut k = 0
-        while k < clist.length {
-            if re.op[clist[k]] == opMatch {
-                best = i
-                k = clist.length
-            } else {
-                k = k + 1
-            }
-        }
-        if i >= hay.length {
-            return best
-        }
-        let c = Int64(hay[i])
-        let mut nlist: Array<Int64> = []
-        sc.gen = sc.gen + 1
-        let mut j = 0
-        while j < clist.length {
-            addThread(re, nlist, sc, follow(re, clist[j], c))
-            j = j + 1
-        }
-        clist = nlist
-        i = i + 1
+    let mut j = 0
+    while j < list.length {
+        addThread(re, next, sc, follow(re, list[j], c))
+        j = j + 1
     }
-    return best
+    if sc.first {
+        let mut k = 0
+        while k < next.length && re.op[next[k]] != opMatch {
+            k = k + 1
+        }
+        while next.length > k + 1 {
+            next.pop()
+        }
+    }
+    return next
+}
+
+/// Whether the pcs `list` hold a match.
+fn listAccepts(re: Program, list: Array<Int64>) -> Bool {
+    let mut k = 0
+    while k < list.length {
+        if re.op[list[k]] == opMatch {
+            return true
+        }
+        k = k + 1
+    }
+    return false
 }
 
 /// Table entries one search may add beyond its first two states: 2 MB.
@@ -689,7 +1368,7 @@ let dfaCap = 262144
 /// every row's offset, so a byte's class reads its row with no check.
 type Scan = {
     // `sets[off / classCount]` holds the class and match pcs of the state at
-    // `off`, ascending.
+    // `off`, in the order a search prefers them.
     sets: Array<Array<Int64>>,
     ids: Map<String, Int64>,
     // `next[off + k]` is the state after a byte of class `k`, or -256 until a
@@ -704,22 +1383,24 @@ type Scan = {
     cap: Int64,
     mark: Array<Int64>,
     gen: Int64,
+    // Whether a state drops each pc after its first match, the forward pass's
+    // leftmost-first rule. The backward pass keeps them all, to reach the start.
+    first: Bool,
 }
 
-/// The state of the class and match pcs marked with `sc.gen`, added if it is
-/// new, or -1 when a new state would pass the cap.
-fn intern(re: Regex, sc: modify Scan) -> Int64 {
+/// The state of the class and match pcs `list`, added if it is new, or -1 when a new
+/// state would pass the cap.
+fn intern(re: Program, list: Array<Int64>, sc: modify Scan) -> Int64 {
     let mut set: Array<Int64> = []
     let mut key = ""
     let mut accepts = false
-    let mut pc = 0
-    while pc < sc.mark.length {
-        if sc.mark[pc] == sc.gen && re.op[pc] != opSplit {
-            set.push(pc)
-            key = key + "\{pc},"
-            accepts = accepts || re.op[pc] == opMatch
-        }
-        pc = pc + 1
+    let mut k = 0
+    while k < list.length && !(accepts && sc.first) {
+        let pc = list[k]
+        set.push(pc)
+        key = key + "\{pc},"
+        accepts = accepts || pc >= 0 && pc < re.op.length && re.op[pc] == opMatch
+        k = k + 1
     }
     if let Some(off) = sc.ids[key] {
         return off
@@ -731,100 +1412,170 @@ fn intern(re: Regex, sc: modify Scan) -> Int64 {
     let off = sc.next.length - 256
     sc.ids[key] = off
     sc.sets.push(set)
-    let mut k = 0
-    while k < re.classCount {
+    let mut j = 0
+    while j < re.classCount {
         sc.next.push(0 - 256)
         sc.accepts.push(false)
-        k = k + 1
+        j = j + 1
     }
     sc.accepts[off] = accepts
     return off
 }
 
-/// A search with no edges built, which may add `cap` table entries.
-fn newScan(re: Regex, cap: Int64) -> Scan {
+/// A search with no edges built, which may add `cap` table entries, under the
+/// leftmost-first rule when `first`.
+fn newScan(re: Program, cap: Int64, first: Bool) -> Scan {
     let mut mark: Array<Int64> = []
     let mut i = 0
     while i < re.op.length {
         mark.push(0)
         i = i + 1
     }
-    let mut sc = Scan { sets: [], ids: [:], next: [], accepts: [], dead: 0, cap: 256 + 2 * re.classCount + cap, mark: mark, gen: 1 }
+    let mut sc = Scan { sets: [], ids: [:], next: [], accepts: [], dead: 0, cap: 256 + 2 * re.classCount + cap, mark: mark, gen: 1, first: first }
     // The 256 entries past the start state's row, which `intern` makes first.
     while sc.next.length < 256 {
         sc.next.push(0 - 256)
         sc.accepts.push(false)
     }
-    let mut scratch: Array<Int64> = []
-    addThread(re, scratch, sc, re.start)
-    intern(re, sc)
-    sc.gen = 2
-    sc.dead = intern(re, sc)
+    let mut start: Array<Int64> = []
+    addThread(re, start, sc, re.start)
+    intern(re, start, sc)
+    sc.dead = intern(re, [], sc)
     return sc
 }
 
-/// The leftmost-longest match that starts at or after `from`, or `None`.
-fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64 where value >= 0, sc: modify Scan) -> Option<Match> {
-    let dead = sc.dead
-    let mut at = from
-    while at <= hay.length {
-        let mut s = 0
-        let mut best = if sc.accepts[0] { at } else { 0 - 1 }
-        let mut i = at
-        while i < hay.length {
-            let c = Int64(hay[i])
-            let edge = s + Int64(re.classOf[c])
-            let mut t = sc.next[edge]
-            if t < 0 {
-                sc.gen = sc.gen + 1
-                let mut scratch: Array<Int64> = []
-                let set = s / re.classCount
-                let mut j = 0
-                while j < sc.sets[set].length {
-                    let next = follow(re, sc.sets[set][j], c)
-                    addThread(re, scratch, sc, next)
-                    j = j + 1
-                }
-                t = intern(re, sc)
-                // A state is 256 entries before the table's end; the walk
-                // cannot see that through `ids`, so the test states it.
-                if t < 0 || t > sc.next.length - 256 {
-                    best = nfaMatchAt(re, hay, at, sc)
-                    break
-                }
-                sc.next[edge] = t
-            }
-            if t == dead {
-                break
-            }
-            s = t
-            i = i + 1
-            if sc.accepts[s] {
-                best = i
-            }
-        }
-        if best >= 0 {
-            return Some(Match { at: at, end: best })
-        }
-        at = at + 1
+/// The state after the state `s` takes byte `c`, built on first use, or -1 when the
+/// table is full. A walk reads a built edge itself and calls this on a miss.
+fn stepState(re: Program, s: Int64, c: Int64, sc: modify Scan) -> Int64 {
+    let edge = s + Int64(re.classOf[c])
+    let t = sc.next[edge]
+    if t >= 0 {
+        return t
     }
-    return None
+    sc.gen = sc.gen + 1
+    let mut scratch: Array<Int64> = []
+    let set = s / re.classCount
+    let mut j = 0
+    while j < sc.sets[set].length {
+        addThread(re, scratch, sc, follow(re, sc.sets[set][j], c))
+        j = j + 1
+    }
+    let u = intern(re, scratch, sc)
+    // A state is 256 entries before the table's end; the walk cannot see that
+    // through `ids`, so the test states it.
+    if u < 0 || u > sc.next.length - 256 {
+        return 0 - 1
+    }
+    sc.next[edge] = u
+    return u
 }
 
-/// The first match at or after `from`, or `None`.
+/// The end of the leftmost-first match that starts at or after `from`, or -1 for
+/// none: the pass stops where the match can grow no more.
+fn matchEnd(re: Program, hay: Array<UInt8>, from: Int64 where value >= 0, sc: modify Scan) -> Int64 {
+    let dead = sc.dead
+    let mut s = 0
+    let mut end = if sc.accepts[0] { from } else { 0 - 1 }
+    let mut i = from
+    while i < hay.length {
+        let c = Int64(hay[i])
+        let mut t = sc.next[s + Int64(re.classOf[c])]
+        if t < 0 {
+            t = stepState(re, s, c, sc)
+            if t < 0 || t > sc.next.length - 256 {
+                // The table is full: step the state's pcs from here on.
+                let mut list = joinHoles(sc.sets[s / re.classCount], [])
+                while i < hay.length && list.length > 0 {
+                    list = stepList(re, list, Int64(hay[i]), sc)
+                    i = i + 1
+                    if listAccepts(re, list) {
+                        end = i
+                    }
+                }
+                return end
+            }
+        }
+        if t == dead {
+            return end
+        }
+        s = t
+        i = i + 1
+        if sc.accepts[s] {
+            end = i
+        }
+    }
+    return end
+}
+
+/// The start of the match that ends at `end`: the least offset down to `from` that
+/// a backward pass of `rev` from `end` accepts at. The pass accepts at the start of
+/// that match, so `end` stands only for an empty one.
+fn matchStart(rev: Program, hay: Array<UInt8>, from: Int64 where value >= 0, end: Int64, sc: modify Scan) -> Int64 {
+    let dead = sc.dead
+    let mut s = 0
+    let mut at = end
+    let mut i = end
+    while i > from && i <= hay.length {
+        let c = Int64(hay[i - 1])
+        let mut t = sc.next[s + Int64(rev.classOf[c])]
+        if t < 0 {
+            t = stepState(rev, s, c, sc)
+            if t < 0 || t > sc.next.length - 256 {
+                let mut list = joinHoles(sc.sets[s / rev.classCount], [])
+                while i > from && i <= hay.length && list.length > 0 {
+                    list = stepList(rev, list, Int64(hay[i - 1]), sc)
+                    i = i - 1
+                    if listAccepts(rev, list) {
+                        at = i
+                    }
+                }
+                return at
+            }
+        }
+        if t == dead {
+            return at
+        }
+        s = t
+        i = i - 1
+        if sc.accepts[s] {
+            at = i
+        }
+    }
+    return at
+}
+
+/// One search over one haystack: the forward and the backward lazy DFA.
+type Search = { fwd: Scan, rev: Scan }
+
+fn newSearch(re: Regex, cap: Int64) -> Search {
+    return Search { fwd: newScan(re.fwd, cap, true), rev: newScan(re.rev, cap, false) }
+}
+
+/// The leftmost-first match that starts at or after `from`, or `None`. A forward
+/// pass finds its end and a backward pass its start.
+fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64 where value >= 0, se: modify Search) -> Option<Match> {
+    let end = if from > hay.length { 0 - 1 } else { matchEnd(re.fwd, hay, from, se.fwd) }
+    if end < 0 {
+        return None
+    }
+    return Some(Match { at: matchStart(re.rev, hay, from, end, se.rev), end: end })
+}
+
+/// The first match at or after `from`, or `None`. It reads `hay` from `from` to the
+/// match's end, and back to its start.
 export fn find(re: Regex, hay: String, from: Int64) -> Option<Match> {
-    let mut sc = newScan(re, dfaCap)
-    return nextMatch(re, bytes(hay), from, sc)
+    let raw = bytes(hay)
+    let mut se = newSearch(re, dfaCap)
+    return nextMatch(re, raw, from, se)
 }
-
 /// How many non-overlapping matches `re` has in `hay`: `aa` in `aaa` is one. An
 /// empty match advances by one byte.
 export fn countMatches(re: Regex, hay: String) -> Int64 {
     let raw = bytes(hay)
-    let mut sc = newScan(re, dfaCap)
+    let mut se = newSearch(re, dfaCap)
     let mut n = 0
     let mut i = 0
-    while let Some(m) = nextMatch(re, raw, i, sc) {
+    while let Some(m) = nextMatch(re, raw, i, se) {
         n = n + 1
         i = if m.end > m.at { m.end } else { m.at + 1 }
     }
@@ -832,19 +1583,158 @@ export fn countMatches(re: Regex, hay: String) -> Int64 {
 }
 
 /// `hay` with every non-overlapping match replaced by `with`, taken literally:
-/// there are no captures, so no `$1`.
+/// `$1` is two characters, not a group.
 export fn replaceAll(re: Regex, hay: String, with: String) -> String {
     let raw = bytes(hay)
-    let mut sc = newScan(re, dfaCap)
+    let mut se = newSearch(re, dfaCap)
     let mut out = ""
     let mut kept = 0
     let mut i = 0
-    while let Some(m) = nextMatch(re, raw, i, sc) {
+    while let Some(m) = nextMatch(re, raw, i, se) {
         out = out + substring(hay, kept, m.at) + with
         kept = m.end
         i = if m.end > m.at { m.end } else { m.at + 1 }
     }
     return out + substring(hay, kept, raw.length)
+}
+
+/// A match and the span of each group of its pattern that took part in it.
+export type Captures = {
+    whole: Match,
+    // The offsets group `k` starts and ends at, at `2 * k - 2` and `2 * k - 1`, or
+    // -1 for a group that took no part. A group in a repeat spans its last turn.
+    spans: Array<Int64>,
+}
+
+/// The first match at or after `from` and its groups, or `None`. The groups cost a
+/// Thompson simulation over the match alone.
+export fn captures(re: Regex, hay: String, from: Int64) -> Option<Captures> {
+    let raw = bytes(hay)
+    let mut se = newSearch(re, dfaCap)
+    if let Some(m) = nextMatch(re, raw, from, se) {
+        return Some(Captures { whole: m, spans: spansOf(re, raw, m) })
+    }
+    return None
+}
+
+/// Group `k` of `c`: the whole match for 0, or `None` for a group that took no part
+/// or that the pattern does not have.
+export fn capture(c: Captures, k: Int64) -> Option<Match> {
+    if k == 0 {
+        return Some(c.whole)
+    }
+    if k < 1 || 2 * k > c.spans.length {
+        return None
+    }
+    let at = c.spans[2 * k - 2]
+    let end = c.spans[2 * k - 1]
+    if at < 0 || end < 0 {
+        return None
+    }
+    return Some(Match { at: at, end: end })
+}
+
+/// The group of `c` that `re` names `name`, or `None`.
+export fn named(re: Regex, c: Captures, name: String) -> Option<Match> {
+    let mut k = 0
+    while k < re.names.length {
+        if name != "" && re.names[k] == name {
+            return capture(c, k + 1)
+        }
+        k = k + 1
+    }
+    return None
+}
+
+/// The pattern's own start: operand `a` of the split of the loop `build` puts first.
+fn patternStart(re: Regex) -> Int64 {
+    let p = re.fwd
+    return if p.start >= 0 && p.start < p.a.length { p.a[p.start] } else { 0 - 1 }
+}
+
+/// The group spans of the match `m` of `re`: a Thompson simulation from its start
+/// to its end whose threads carry their spans, in the order a search prefers them.
+/// A thread that matches drops every thread after it.
+fn spansOf(re: Regex, hay: Array<UInt8>, m: Match) -> Array<Int64> {
+    let p = re.fwd
+    let mut none: Array<Int64> = []
+    while none.length < 2 * re.names.length {
+        none.push(0 - 1)
+    }
+    let mut mark: Array<Int64> = []
+    while mark.length < p.op.length {
+        mark.push(0)
+    }
+    let mut gen = 1
+    let mut pcs: Array<Int64> = []
+    let mut spans: Array<Array<Int64>> = []
+    addSpans(p, pcs, spans, mark, gen, patternStart(re), none, m.at)
+    let mut best = joinHoles(none, [])
+    let mut i = m.at
+    while pcs.length > 0 {
+        let mut k = 0
+        while k < pcs.length && p.op[pcs[k]] != opMatch {
+            k = k + 1
+        }
+        if k < pcs.length {
+            best = joinHoles(spans[k], [])
+            while pcs.length > k {
+                pcs.pop()
+                spans.pop()
+            }
+        }
+        if i >= m.end || i >= hay.length {
+            return best
+        }
+        gen = gen + 1
+        let mut nextPcs: Array<Int64> = []
+        let mut nextSpans: Array<Array<Int64>> = []
+        let mut j = 0
+        while j < pcs.length {
+            let t = follow(p, pcs[j], Int64(hay[i]))
+            if t >= 0 {
+                addSpans(p, nextPcs, nextSpans, mark, gen, t, spans[j], i + 1)
+            }
+            j = j + 1
+        }
+        pcs = nextPcs
+        spans = nextSpans
+        i = i + 1
+    }
+    return best
+}
+
+/// Adds `pc` at offset `i` and everything reachable from it without consuming, each
+/// class or match pc with the spans `held` and the saves on its way.
+fn addSpans(p: Program, pcs: modify Array<Int64>, spans: modify Array<Array<Int64>>, mark: modify Array<Int64>, gen: Int64, pc: Int64, held: Array<Int64>, i: Int64) {
+    let mut todo: Array<Int64> = [pc]
+    let mut with: Array<Array<Int64>> = [joinHoles(held, [])]
+    while todo.length > 0 && with.length > 0 {
+        let q = todo[todo.length - 1]
+        let mut sp = joinHoles(with[with.length - 1], [])
+        todo.pop()
+        with.pop()
+        if q < 0 || q >= p.op.length || q >= mark.length || mark[q] == gen {
+            continue
+        }
+        mark[q] = gen
+        if p.op[q] == opSplit {
+            todo.push(p.b[q])
+            with.push(joinHoles(sp, []))
+            todo.push(p.a[q])
+            with.push(sp)
+        } else if p.op[q] == opSave {
+            let slot = p.a[q]
+            if slot >= 0 && slot < sp.length {
+                sp[slot] = i
+            }
+            todo.push(p.b[q])
+            with.push(sp)
+        } else {
+            pcs.push(q)
+            spans.push(sp)
+        }
+    }
 }
 
 test "a literal is found, counted and replaced" {
@@ -859,13 +1749,41 @@ test "a literal is found, counted and replaced" {
     assertEq(replaceAll(re, "abcabc", ""), "")
 }
 
-test "alternation takes the longest branch, which is POSIX's rule" {
+test "alternation takes the first branch that matches" {
     let re = match compile("a|ab") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    // A backtracking engine answers `a` here.
-    assertEq(replaceAll(re, "ab", "<>"), "<>")
+    assertEq(replaceAll(re, "ab", "<>"), "<>b")
+    let later = match compile("b|ab") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    // A match that starts earlier wins over an earlier branch.
+    assertEq(replaceAll(later, "ab", "<>"), "<>")
+}
+
+test "a lazy repeat takes as little as it can" {
+    let tag = match compile("<.*?>") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(tag, "<a><b>", "|"), "||")
+    let plus = match compile("a+?") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(plus, "aaa"), 3)
+    let opt = match compile("a??b") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(opt, "ab", "_"), "_")
+    let count = match compile("a{2,3}?") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(count, "aaaa"), 2)
 }
 
 test "a class matches its members and a negated one everything else" {
@@ -949,6 +1867,98 @@ test "an escape is the byte after it, not the metacharacter" {
     assertEq(replaceAll(re, "x|ab|y", "-"), "x-y")
 }
 
+test "an escape is a control, a code point, a line break or a quote" {
+    let re = match compile("\\x41\\u{e9}\\cJ\\o{102}") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(re, "xAé\nBAé\nB"), 2)
+    let breaks = match compile("\\R") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(breaks, "a\r\nb\nc\rd"), 3)
+    let quote = match compile("\\Q.*\\E+") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(quote, "a.**b.x", "-"), "a-b.x")
+    let cls = match compile("[\\x{e9}\\h\\b]+") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(cls, "aé \tb", "-"), "a-b")
+}
+
+test "an escape with no meaning is refused" {
+    match compile("\\y") {
+        Ok(r) => panic("an unknown escape compiled"),
+        Err(w) => assert(w == "the escape `\\y` means nothing: a backslash makes only ASCII punctuation literal"),
+    }
+    match compile("\\b") {
+        Ok(r) => panic("a boundary compiled"),
+        Err(w) => assert(w == "an assertion (`\\b`) is not supported"),
+    }
+    match compile("\\x{110000}") {
+        Ok(r) => panic("a code point past 10FFFF compiled"),
+        Err(w) => assert(w == "a code point escape above `10FFFF` or in the surrogates `D800` to `DFFF`"),
+    }
+    match compile("[\\1]") {
+        Ok(r) => panic("a backreference in a class compiled"),
+        Err(w) => assert(w == "an anchor or a backreference (`\\1`) cannot stand inside a character class"),
+    }
+}
+
+test "a class is a set of code points" {
+    let vowels = match compile("[a-z&&[^aeiou]]+") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(vowels, "street", "-"), "-ee-")
+    let posix = match compile("[[:upper:][:digit:]]+") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(posix, "aB1cD"), 2)
+    let wide = match compile("[\\u{e0}-\\u{ff}]") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(wide, "café€", "_"), "caf_€")
+    let rest = match compile("[\\w--\\d]+|[a-c~~b-d]") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(rest, "ab12d", "."), ".12.")
+}
+
+test "a group names, folds or comments" {
+    let date = match compile("(?<y>\\d{4})-(?:\\d\\d)(?#day follows)-(?P<d>\\d\\d)") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(date, "on 2026-11-27.", "D"), "on D.")
+    let fold = match compile("a(?i)b|c|(?-i:d)") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(fold, "aB C D d"), 3)
+    let dot = match compile("(?s:a.b)|a.c") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(dot, "a\nb a\nc"), 1)
+    match compile("(?<n>a)(?<n>b)") {
+        Ok(r) => panic("a name twice compiled"),
+        Err(w) => assert(w == "a group name that names two groups"),
+    }
+    let twice = match compile("(?<n>a){2}") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(twice, "aaa"), 1)
+}
+
 test "the patterns regex-redux counts" {
     let dna = "agggtaaacccagggtaaacttttaccctgg"
     let re = match compile("agggtaaa|tttaccct") {
@@ -1017,12 +2027,16 @@ test "a count repeats its term" {
     assertEq(countMatches(pair, "abyy"), 0)
 }
 
-test "an anchor is its byte and the empty pattern matches the empty string" {
-    let caret = match compile("^a$") {
+test "an anchor is refused and the empty pattern matches the empty string" {
+    match compile("^a") {
+        Ok(r) => panic("an anchor compiled"),
+        Err(w) => assert(w == "an assertion (`^`) is not supported"),
+    }
+    let escaped = match compile("\\^a\\$") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(countMatches(caret, "a ^a$"), 1)
+    assertEq(countMatches(escaped, "a ^a$"), 1)
     let empty = match compile("") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
@@ -1055,13 +2069,69 @@ test "what it refuses, it refuses by name" {
         Ok(r) => panic("a count past the budget compiled"),
         Err(w) => assert(w == "counted repetition that expands the pattern past 16384 terms"),
     }
-    match compile("a*?") {
-        Ok(r) => panic("a non-greedy repeat compiled"),
-        Err(w) => assert(w == "non-greedy repetition (`*?`) is not supported"),
+    match compile("a*??") {
+        Ok(r) => panic("a second lazy mark compiled"),
+        Err(w) => assert(w == "a repeat (`*`, `+` or `?`) with no term before it"),
     }
     match compile("[z-a]") {
         Ok(r) => panic("a backwards range compiled"),
         Err(w) => assert(w == "a character range that runs backwards"),
+    }
+}
+
+/// `o` as `at..end`, or `none`.
+fn spanText(o: Option<Match>) -> String {
+    return match o {
+        Some(m) => "\{m.at}..\{m.end}",
+        None => "none",
+    }
+}
+
+test "captures give each group's span, by number or by name" {
+    let re = match compile("(?<key>[a-z]+)=(\\d+)(?:;(x))?") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    match captures(re, " ab=12 ", 0) {
+        Some(c) => {
+            assertEq(spanText(capture(c, 0)), "1..6")
+            assertEq(spanText(capture(c, 1)), "1..3")
+            assertEq(spanText(named(re, c, "key")), "1..3")
+            assertEq(spanText(capture(c, 2)), "4..6")
+            assertEq(spanText(capture(c, 3)), "none")
+            assertEq(spanText(capture(c, 4)), "none")
+            assertEq(spanText(named(re, c, "value")), "none")
+        }
+        None => panic("no match"),
+    }
+    match captures(re, "k=1;x", 0) {
+        Some(c) => assertEq(spanText(capture(c, 3)), "4..5"),
+        None => panic("no match"),
+    }
+}
+
+test "a group in a repeat spans its last turn" {
+    let re = match compile("(a|b)+(c){2}") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    match captures(re, "abcc", 0) {
+        Some(c) => {
+            assertEq(spanText(capture(c, 1)), "1..2")
+            assertEq(spanText(capture(c, 2)), "3..4")
+        }
+        None => panic("no match"),
+    }
+    let lazy = match compile("(a+?)(a*)") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    match captures(lazy, "aaa", 0) {
+        Some(c) => {
+            assertEq(spanText(capture(c, 1)), "0..1")
+            assertEq(spanText(capture(c, 2)), "1..3")
+        }
+        None => panic("no match"),
     }
 }
 
@@ -1074,7 +2144,7 @@ fn draw(seed: modify Int64, n: Int64) -> Int64 {
 /// A pattern `compile` accepts, over the atoms the engines treat differently.
 fn genPattern(seed: modify Int64, depth: Int64) -> String {
     let atoms = ["a", "b", "c", ".", "[ab]", "[^a]", "[a-c]", "(é)", "\\|", "(€)"]
-    let suffixes = ["", "", "*", "+", "?"]
+    let suffixes = ["", "", "*", "+", "?", "*?", "+?", "??"]
     let mut out = ""
     let branches = 1 + draw(seed, 2)
     let mut b = 0
@@ -1099,7 +2169,46 @@ fn genPattern(seed: modify Int64, depth: Int64) -> String {
     return out
 }
 
-test "the lazy DFA finds every match the Thompson simulation finds" {
+/// The end of the match a backtracking search of `p` from the pc `pc` at `at`
+/// prefers, or -1: operand `a` of a split before `b`. A pc it left at an offset
+/// failed there, so it never returns to one.
+fn backtrackAt(p: Program, pc: Int64, hay: Array<UInt8>, at: Int64) -> Int64 {
+    let width = hay.length + 1
+    let mut seen: Array<Bool> = []
+    while seen.length < p.op.length * width {
+        seen.push(false)
+    }
+    let mut pcs: Array<Int64> = [pc]
+    let mut ats: Array<Int64> = [at]
+    while pcs.length > 0 {
+        let q = pcs[pcs.length - 1]
+        let i = ats[ats.length - 1]
+        pcs.pop()
+        ats.pop()
+        if q < 0 || q >= p.op.length || i < 0 || i > hay.length || seen[q * width + i] {
+            continue
+        }
+        seen[q * width + i] = true
+        if p.op[q] == opMatch {
+            return i
+        }
+        if p.op[q] == opSplit {
+            pcs.push(p.b[q])
+            ats.push(i)
+            pcs.push(p.a[q])
+            ats.push(i)
+        } else if p.op[q] == opSave {
+            pcs.push(p.b[q])
+            ats.push(i)
+        } else if i < hay.length && hasByte(p.cls[q], Int64(hay[i])) {
+            pcs.push(p.b[q])
+            ats.push(i + 1)
+        }
+    }
+    return 0 - 1
+}
+
+test "the two lazy DFAs find the match a backtracking search finds from each offset" {
     let pieces = ["a", "b", "c", "é", "è", "€", "|", "\n"]
     let mut seed = 7
     let mut round = 0
@@ -1115,19 +2224,19 @@ test "the lazy DFA finds every match the Thompson simulation finds" {
             hay = hay + pieces[draw(seed, pieces.length)]
         }
         let raw = bytes(hay)
-        let mut oracle = newScan(re, 0)
+        let first = patternStart(re)
         let mut ends: Array<Int64> = []
         let mut i = 0
         while i <= raw.length {
-            ends.push(nfaMatchAt(re, raw, i, oracle))
+            ends.push(backtrackAt(re.fwd, first, raw, i))
             i = i + 1
         }
         // The whole table, the two fixed states alone, and one state more: the
         // last two fall back part way through a walk.
-        let caps = [dfaCap, 0, re.classCount]
+        let caps = [dfaCap, 0, re.fwd.classCount]
         let mut k = 0
         while k < caps.length {
-            let mut sc = newScan(re, caps[k])
+            let mut sc = newSearch(re, caps[k])
             let mut from = 0
             while from <= raw.length {
                 let mut at = from

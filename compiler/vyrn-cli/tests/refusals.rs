@@ -943,6 +943,98 @@ fn the_generation_refusals_are_what_the_engine_says() {
     }
 }
 
+/// One program per refusal of a `=~` pattern, in `refusals/regex`: the grammar's rows
+/// the island verdict states, and the builder's rows the core states.
+#[test]
+fn the_regex_refusals_are_the_catalogues_sentences() {
+    let rows = [
+        (
+            "x01_an_escape_with_no_meaning.vyrn",
+            "the escape `\\y` means nothing: a backslash makes only ASCII punctuation literal",
+        ),
+        (
+            "x02_a_boundary_escape.vyrn",
+            "an assertion (`\\b`) is not supported",
+        ),
+        (
+            "x03_an_anchor_in_a_class.vyrn",
+            "an anchor or a backreference (`\\z`) cannot stand inside a character class",
+        ),
+        (
+            "x04_a_code_point_past_the_last.vyrn",
+            "invalid regex `\\x{110000}`: a code point escape above `10FFFF` or in the surrogates `D800` to `DFFF`",
+        ),
+        (
+            "x05_a_control_escape_with_no_letter.vyrn",
+            "a control escape (`\\c`) with no ASCII letter after it",
+        ),
+        (
+            "x06_a_code_point_escape_with_no_digits.vyrn",
+            "a code point escape (`\\u`) with no digits of its form: `\\xHH`, `\\uHHHH`, `\\x{H..}`, `\\u{H..}` or `\\o{O..}`",
+        ),
+        (
+            "x07_a_nul_escape.vyrn",
+            "a NUL escape, which no `String` holds",
+        ),
+        (
+            "x08_an_octal_escape.vyrn",
+            "an octal escape (`\\0` and a digit), which PCRE reads as a backreference: write `\\x` and two hex digits",
+        ),
+        (
+            "x09_a_pcre_control_form.vyrn",
+            "a PCRE control form (`\\K`), which only a backtracking engine has",
+        ),
+        (
+            "x10_a_property_class.vyrn",
+            "a Unicode property class (`\\p{..}`) is not supported",
+        ),
+        (
+            "x11_a_range_that_ends_in_a_shorthand.vyrn",
+            "a range (`-`) whose end is a shorthand or a class",
+        ),
+        (
+            "x12_a_posix_class_of_no_name.vyrn",
+            "a POSIX class (`[:..:]`) whose name is none of alnum, alpha, blank, cntrl, digit, graph, lower, print, punct, space, upper and xdigit",
+        ),
+        (
+            "x13_a_set_operation_with_one_side.vyrn",
+            "a class set operation (`&&`, `--` or `~~`) with no members on one side",
+        ),
+        (
+            "x14_a_flag_of_no_meaning.vyrn",
+            "a flag (`x`) that is none of `i`, `m` and `s`",
+        ),
+        (
+            "x15_a_group_form_of_no_meaning.vyrn",
+            "a group form after `(?` that is none of `:`, a name, flags and `#`",
+        ),
+        (
+            "x16_a_group_name_that_is_no_name.vyrn",
+            "a group name that is not a letter or `_` and then letters, digits and `_` up to its closing `>` or `'`",
+        ),
+        (
+            "x17_a_group_name_used_twice.vyrn",
+            "invalid regex `(?<a>b)(?<a>c)`: a group name that names two groups",
+        ),
+    ];
+    let dir = dir().join("regex");
+    let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+        .collect();
+    on_disk.sort();
+    let listed: Vec<String> = rows.iter().map(|r| r.0.to_string()).collect();
+    assert_eq!(
+        on_disk, listed,
+        "a program with no row, or a row with no program"
+    );
+    for (file, says) in rows {
+        let (ok, text) = refusal_in(dir.clone(), file, false);
+        assert!(!ok, "{file}: accepted");
+        assert_eq!(split_head(&text).1, says, "{file}");
+    }
+}
+
 #[test]
 fn the_census_covers_the_directory() {
     let mut on_disk: Vec<String> = std::fs::read_dir(dir())
