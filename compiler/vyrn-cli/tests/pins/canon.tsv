@@ -2,7 +2,7 @@ census	count
 roots	454
 roots that do not check	32
 members BoolLambda	5
-members Condition	4342
+members Condition	4434
 members KeyBlockLambda	3
 members KeyLambda	57
 members MoreStatements	23
@@ -10,8 +10,8 @@ members OneReturn	68
 unfit Bool functions Budget	1
 unfit Bool functions Effect	13
 unfit Bool functions Loop	88
-unfit Bool functions Switch	31
-unfit Bool functions Writes	13
+unfit Bool functions Switch	32
+unfit Bool functions Writes	14
 unfit lambdas Effect	1
 predicates as 4.5 counts them, across the corpus: members	73
 predicates as 4.5 counts them, across the corpus: L0 identities	68
@@ -79,16 +79,16 @@ key and other lambdas, across the corpus: L2 pairs	14
 key and other lambdas, across the corpus: most atoms at L2	0
 key and other lambdas, across the corpus: most diagram nodes at L2	0
 key and other lambdas, across the corpus: decided at L2 by step Whole	60
-conditions, within one function: members	4342
-conditions, within one function: L0 identities	4191
-conditions, within one function: L0 pairs	200
-conditions, within one function: L0 complement pairs	2
-conditions, within one function: L1 identities	4191
-conditions, within one function: L1 pairs	200
-conditions, within one function: L1 complement pairs	23
-conditions, within one function: L2 identities	4190
-conditions, within one function: L2 pairs	201
-conditions, within one function: L2 complement pairs	39
+conditions, within one function: members	4434
+conditions, within one function: L0 identities	4281
+conditions, within one function: L0 pairs	202
+conditions, within one function: L0 complement pairs	3
+conditions, within one function: L1 identities	4281
+conditions, within one function: L1 pairs	202
+conditions, within one function: L1 complement pairs	24
+conditions, within one function: L2 identities	4280
+conditions, within one function: L2 pairs	203
+conditions, within one function: L2 complement pairs	40
 conditions, within one function: most atoms at L2	14
 conditions, within one function: most diagram nodes at L2	38
-conditions, within one function: decided at L2 by step Whole	4342
+conditions, within one function: decided at L2 by step Whole	4434

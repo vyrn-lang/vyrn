@@ -106,7 +106,8 @@ fn a_parameter_clause_checks_at_the_call() {
 }
 
 /// Each cause a function that is not trap-free gives, once: a `panic`, a kept check, a call
-/// through a function value, an extern and a callee; and recursion with no cause is trap-free.
+/// through a function value, an extern, a callee and a `=~` that backtracks, whose line says it
+/// backtracks; and recursion with no cause is trap-free.
 #[test]
 fn a_function_that_is_not_trap_free_names_its_first_cause() {
     holds("traps", "compiler/vyrn-cli/tests/cost/traps.vyrn");

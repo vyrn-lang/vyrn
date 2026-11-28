@@ -16,10 +16,25 @@
 /// and `(?'n'..)` name a group, and `(?#..)` is a comment.
 /// The flags `i` (ASCII case folding), `s` (`.` takes `\n` and `\r`) and `m` hold
 /// for the rest of a group after `(?ims-ims)`, or inside `(?ims-ims:..)`, and the
-/// empty pattern matches the empty string. A Thompson NFA with no backtracking, so
-/// the time is linear in the pattern size times the input for every pattern. A
-/// search runs it as two lazy DFAs, one forward to a match's end and one back to its
-/// start: one table read per byte. It has no backreferences.
+/// empty pattern matches the empty string. A pattern with no backreference is a
+/// Thompson NFA with no backtracking, so the time is linear in the pattern size times
+/// the input. A search runs it as two lazy DFAs, one forward to a match's end and one
+/// back to its start: one table read per byte.
+///
+/// `\1` to `\99`, `\gN` and `\g{N}` refer to a group by number, `\g{-N}` to the Nth
+/// group opened before it, and `\k<n>`, `\k'n'`, `\k{n}` and `(?P=n)` by name. A
+/// backreference matches the text its group spans, or the empty string where the
+/// group has not closed or took no part; under `i` it folds ASCII case. A reference
+/// to a group the pattern does not have is refused. `(?>..)` is an atomic group,
+/// which keeps the first way its body matches, and a `+` after a repeat or a count
+/// makes it possessive, an atomic group around it. A search of a pattern with a
+/// backreference, an atomic group or a possessive repeat backtracks from each
+/// offset in turn, which takes time exponential in the pattern in the worst case,
+/// so one call of `find`, `countMatches`, `replaceAll` or `captures` takes at most
+/// 1000000 steps and 1000 more per byte of the haystack, and past them it traps
+/// with `a backtracking pattern ran past its step budget of N steps`. A repeat
+/// that comes back to its loop at the offset it left it ends there, as a thread
+/// the NFA drops.
 ///
 /// `(?=..)`, `(?!..)`, `(?<=..)` and `(?<!..)` look ahead and behind, nested to any
 /// depth, and see the whole text, before `from` too. `^` and `$` are the text's ends,
@@ -72,6 +87,17 @@ let opSave = 3
 /// or where it does not for an odd `a[i]` ([`holds`]).
 let opAssert = 4
 
+/// `op[i]` goes on to `b[i]` past the text group `a[i] / 2` spans, where the text
+/// holds it again, ASCII case folded for an odd `a[i]` ([`refLength`]). Only the
+/// backtracking search reads it.
+let opBackref = 5
+
+/// `op[i]` opens an atomic group whose close is pc `a[i]`, or closes one for an
+/// `a[i]` of -1, and goes on to `b[i]`. At the close the backtracking search drops
+/// every choice the group left, so the group keeps the first way its body matched.
+/// Only the backtracking search reads it.
+let opAtomic = 6
+
 /// A set of bytes: byte `c` is in it when bit `c % 64` of word `c / 64` is set.
 ///
 /// Four words and not an array, so a membership test reads no array and has no
@@ -81,7 +107,8 @@ type ByteSet = { w0: UInt64, w1: UInt64, w2: UInt64, w3: UInt64 }
 
 /// A compiled pattern: `fwd` is the pattern after a loop over any byte, so a forward
 /// pass finds where the leftmost match ends, and `rev`, its reverse, reads that match
-/// back to its start.
+/// back to its start. A pattern with a backreference is searched by backtracking
+/// over `fwd`, and its `rev` serves only its regular lookahead bodies.
 export type Regex = {
     fwd: Program,
     rev: Program,
@@ -89,11 +116,16 @@ export type Regex = {
     names: Array<String>,
     // Each lookaround body, inner ones before the bodies that hold them.
     looks: Array<Look>,
+    // Whether the pattern holds a backreference, an atomic group or a possessive
+    // repeat.
+    backtrack: Bool,
 }
 
 /// A lookaround body: whether it looks `behind`, where its pcs start in `fwd`, and
-/// where its reverse starts in `rev`, which a lookahead's pass reads.
-type Look = { behind: Bool, fwd: Int64, rev: Int64 }
+/// where its reverse starts in `rev`, which a lookahead's pass reads. A body with no
+/// backreference, atomic group or possessive repeat is `regular`, and a pass gives
+/// its bits; the backtracking search runs any other body where it asserts it.
+type Look = { behind: Bool, fwd: Int64, rev: Int64, regular: Bool }
 
 type Program = {
     op: Array<Int64>,
@@ -170,6 +202,14 @@ type Builder = {
     lookBehind: Array<Bool>,
     lookStart: Array<Int64>,
     lookEnd: Array<Int64>,
+    lookRegular: Array<Bool>,
+    // Each backreference's pc, and the name it refers by or "" for a number: the
+    // walk's end resolves them, once every group has its number.
+    refPc: Array<Int64>,
+    refName: Array<String>,
+    // The backreferences, atomic groups and possessive repeats walked, which only
+    // the backtracking search matches.
+    irregular: Int64,
 }
 
 /// The terms counted repetition may copy in one pattern. Nested counts multiply,
@@ -215,6 +255,7 @@ fn regexSay(row: rx.Row) -> String {
         GroupForm => say.tGroupForm__En(),
         GroupName => say.tGroupName__En(),
         NameTwice => say.tNameTwice__En(),
+        BackrefMissing => say.tBackrefMissing__En(),
     }
 }
 
@@ -780,6 +821,13 @@ fn fragGroup(bd: modify Builder, pattern: String, g: rx.RegexSubpattern) -> Frag
     let lines = bd.lines
     let open = g.open.text
     let named = open.byteLength > 2 && (open[2] == 'P' || open[2] == '<' || open[2] == '\'')
+    if open == "(?>" {
+        let f = fragAlt(bd, pattern, g.alt)
+        bd.fold = fold
+        bd.dotAll = dotAll
+        bd.lines = lines
+        return fragAtomic(bd, f)
+    }
     if !named && open.byteLength > 2 {
         setFlags(bd, open, 2, open.byteLength - 1)
         let f = fragAlt(bd, pattern, g.alt)
@@ -823,13 +871,14 @@ fn lookOf(bd: Builder, key: String) -> Int64 {
 }
 
 /// Adds the body `f` of `key` with its own match, and answers its number.
-fn addLook(bd: modify Builder, key: String, behind: Bool, f: consume Frag) -> Int64 {
+fn addLook(bd: modify Builder, key: String, behind: Bool, f: consume Frag, regular: Bool) -> Int64 {
     let m = emit(bd, opMatch, 0, 0, noBytes())
     patch(bd, f.holes, m)
     bd.lookKeys.push(key.copy())
     bd.lookBehind.push(behind)
     bd.lookStart.push(f.start)
     bd.lookEnd.push(m)
+    bd.lookRegular.push(regular)
     return bd.lookKeys.length - 1
 }
 
@@ -850,13 +899,14 @@ fn fragLookaround(bd: modify Builder, pattern: String, l: rx.RegexLook) -> Frag 
         let fold = bd.fold
         let dotAll = bd.dotAll
         let lines = bd.lines
+        let irregular = bd.irregular
         bd.lookDepth = bd.lookDepth + 1
         let f = fragAlt(bd, pattern, l.alt)
         bd.lookDepth = bd.lookDepth - 1
         bd.fold = fold
         bd.dotAll = dotAll
         bd.lines = lines
-        k = addLook(bd, key, behind, f)
+        k = addLook(bd, key, behind, f, bd.irregular == irregular)
     }
     return fragAssert(bd, k, negate)
 }
@@ -867,7 +917,7 @@ fn lookSet(bd: modify Builder, key: String, behind: Bool, set: ByteSet) -> Int64
     if k >= 0 {
         return k
     }
-    return addLook(bd, key, behind, fragSet(bd, set))
+    return addLook(bd, key, behind, fragSet(bd, set), true)
 }
 
 /// `f` then `g`.
@@ -927,7 +977,7 @@ fn fragAnchor(bd: modify Builder, a: String) -> Frag {
         if k < 0 {
             let nl = fragOp(bd, fragRange(bd, 10, 10), "?", false)
             let end = fragAssert(bd, lookSet(bd, ">any", false, allBytes()), true)
-            k = addLook(bd, ">Z", false, fragThen(bd, nl, end))
+            k = addLook(bd, ">Z", false, fragThen(bd, nl, end), true)
         }
         return fragAssert(bd, k, false)
     }
@@ -978,6 +1028,89 @@ fn groupNumber(bd: modify Builder, at: Int64, name: String) -> Int64 {
     bd.groupAt.push(at)
     bd.names.push(name.copy())
     return bd.groupAt.length
+}
+
+/// The groups whose `(` comes before offset `at`.
+fn groupsBefore(bd: Builder, at: Int64) -> Int64 {
+    let mut n = 0
+    let mut i = 0
+    while i < bd.groupAt.length {
+        if bd.groupAt[i] < at {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+/// The number the digits of `pattern` from `from` state, held at 100000 above it.
+fn numberAt(pattern: String, from: Int64) -> Int64 {
+    let mut n = 0
+    let mut i = from
+    while i < pattern.byteLength && pattern[i] >= '0' && pattern[i] <= '9' {
+        if n < 100000 {
+            n = n * 10 + Int64(pattern[i]) - 48
+        }
+        i = i + 1
+    }
+    return n
+}
+
+/// The backreference from `start` up to `end`. A name or a number waits for the
+/// walk's end, which numbers every group; a relative number counts the groups
+/// opened before it.
+fn fragBackref(bd: modify Builder, pattern: String, start: Int64, end: Int64) -> Frag {
+    let c = pattern[start + 1]
+    let braced = c == 'g' && pattern[start + 2] == '{'
+    let mut name = ""
+    let mut k = 0
+    if c == '?' || c == 'k' {
+        name = substring(pattern, if c == '?' { start + 4 } else { start + 3 }, end - 1)
+    } else if braced && pattern[start + 3] == '-' {
+        k = groupsBefore(bd, start) + 1 - numberAt(pattern, start + 4)
+    } else {
+        k = numberAt(pattern, if braced { start + 3 } else if c == 'g' { start + 2 } else { start + 1 })
+    }
+    let pc = emit(bd, opBackref, 2 * k + (if bd.fold { 1 } else { 0 }), 0, noBytes())
+    bd.refPc.push(pc)
+    bd.refName.push(name)
+    bd.irregular = bd.irregular + 1
+    return Frag { start: pc, holes: [pc * 2 + 1] }
+}
+
+/// `f` as an atomic group: its open, its body and its close.
+fn fragAtomic(bd: modify Builder, f: consume Frag) -> Frag {
+    let open = emit(bd, opAtomic, 0, f.start, noBytes())
+    let close = emit(bd, opAtomic, 0 - 1, 0, noBytes())
+    bd.a[open] = close
+    patch(bd, f.holes, close)
+    bd.irregular = bd.irregular + 1
+    return Frag { start: open, holes: [close * 2 + 1] }
+}
+
+/// Gives each backreference the number of its group, or refuses one whose group
+/// the pattern does not have.
+fn resolveRefs(bd: modify Builder) {
+    let mut r = 0
+    while r < bd.refPc.length {
+        let pc = bd.refPc[r]
+        let mut k = bd.a[pc] / 2
+        if bd.refName[r] != "" {
+            k = 0
+            let mut g = 0
+            while g < bd.names.length {
+                if bd.names[g] == bd.refName[r] {
+                    k = g + 1
+                }
+                g = g + 1
+            }
+        }
+        if k < 1 || k > bd.groupAt.length {
+            refuse(bd, BackrefMissing)
+        }
+        bd.a[pc] = 2 * k + bd.a[pc] % 2
+        r = r + 1
+    }
 }
 
 /// One class test, as a fragment.
@@ -1097,6 +1230,9 @@ fn fragTerm(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Frag {
         RegexAtomRegexAnchor(a) => {
             return fragAnchor(bd, anchorText(pattern, a))
         }
+        RegexAtomRegexBackref(r) => {
+            return fragBackref(bd, pattern, r.start, r.end)
+        }
     }
 }
 
@@ -1167,6 +1303,7 @@ fn pieceSize(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Int64
         RegexAtomRegexLiteral(l) => {}
         RegexAtomRegexLook(l) => {}
         RegexAtomRegexAnchor(a) => {}
+        RegexAtomRegexBackref(r) => {}
     }
     if let Some(c) = piece.count {
         let copies = copiesOf(boundsOf(pattern, c))
@@ -1206,6 +1343,7 @@ fn termSize(bd: modify Builder, pattern: String, atom: rx.RegexAtom) -> Int64 {
         RegexAtomRegexLiteral(l) => l.end - l.start,
         RegexAtomRegexLook(l) => 1,
         RegexAtomRegexAnchor(a) => anchorSize(anchorText(pattern, a)),
+        RegexAtomRegexBackref(r) => 1,
     }
 }
 
@@ -1219,12 +1357,21 @@ fn fragCopy(bd: modify Builder, pattern: String, atom: rx.RegexAtom, optional: B
     return fragOp(bd, f, if n.open { "*" } else { "?" }, lazy)
 }
 
-/// The term of `piece` under its repeat or its count.
+/// The term of `piece` under its repeat or its count, as an atomic group when the
+/// repeat is possessive.
 fn fragRepeat(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag {
-    let lazy = match piece.lazy {
-        Some(l) => true,
-        None => false,
+    let mut lazy = false
+    if let Some(m) = piece.mode {
+        if m.text == "+" {
+            return fragAtomic(bd, fragQuantified(bd, pattern, piece, false))
+        }
+        lazy = true
     }
+    return fragQuantified(bd, pattern, piece, lazy)
+}
+
+/// The term of `piece` under its repeat or its count, greedy or `lazy`.
+fn fragQuantified(bd: modify Builder, pattern: String, piece: rx.RegexPiece, lazy: Bool) -> Frag {
     if let Some(op) = piece.op {
         return fragOp(bd, fragTerm(bd, pattern, piece.atom), op.text, lazy)
     }
@@ -1246,6 +1393,11 @@ fn fragCount(bd: modify Builder, pattern: String, atom: rx.RegexAtom, n: Bounds,
         refuse(bd, CountOrder)
     } else if bd.expanded + cost > countBudget {
         refuse(bd, CountBudget)
+    }
+    if copies == 0 && !refused(bd) {
+        // The term is walked once all the same, so its groups have their numbers
+        // and its refusals are raised; nothing reaches its pcs.
+        let _ = fragTerm(bd, pattern, atom)
     }
     if copies == 0 || refused(bd) {
         return fragEmpty(bd)
@@ -1283,6 +1435,7 @@ fn fragPiece(bd: modify Builder, pattern: String, piece: rx.RegexPiece) -> Frag 
         RegexAtomRegexLiteral(l) => {}
         RegexAtomRegexLook(l) => {}
         RegexAtomRegexAnchor(a) => {}
+        RegexAtomRegexBackref(r) => {}
     }
     let mut f = fragRepeat(bd, pattern, piece)
     let mut i = to - 1
@@ -1360,12 +1513,13 @@ export fn compile(pattern: String) -> Result<Regex, String> {
 
 /// A builder with nothing emitted.
 fn newBuilder() -> Builder {
-    return Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, lines: false, groupAt: [], names: [], lookDepth: 0, lookKeys: [], lookBehind: [], lookStart: [], lookEnd: [] }
+    return Builder { op: [], a: [], b: [], cls: [], err: None, expanded: 0, fold: false, dotAll: false, lines: false, groupAt: [], names: [], lookDepth: 0, lookKeys: [], lookBehind: [], lookStart: [], lookEnd: [], lookRegular: [], refPc: [], refName: [], irregular: 0 }
 }
 
 fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
     let mut bd = newBuilder()
     let f = fragAlt(bd, pattern, tree)
+    resolveRefs(bd)
     if let Some(row) = bd.err {
         return Err(regexSay(row))
     }
@@ -1379,13 +1533,14 @@ fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
     let mut looks: Array<Look> = []
     let mut k = 0
     while k < bd.lookKeys.length && k + 1 < starts.length {
-        looks.push(Look { behind: bd.lookBehind[k], fwd: bd.lookStart[k], rev: starts[k + 1] })
+        looks.push(Look { behind: bd.lookBehind[k], fwd: bd.lookStart[k], rev: starts[k + 1], regular: bd.lookRegular[k] })
         k = k + 1
     }
     // The loop is the split's second operand, so a match that starts earlier wins.
     // Its class holds every byte, so it cuts no class.
     let start = emit(bd, opSplit, f.start, 0, noBytes())
     bd.b[start] = emit(bd, opClass, 0 - 1, start, allBytes())
+    let backtrack = bd.irregular > 0
     let fwd = Program {
         op: consume bd.op,
         a: consume bd.a,
@@ -1396,7 +1551,7 @@ fn build(pattern: String, tree: rx.RegexAlt) -> Result<Regex, String> {
         classOf: classOf,
         looks: looks.length,
     }
-    return Ok(Regex { fwd: fwd, rev: rev, names: consume bd.names, looks: consume looks })
+    return Ok(Regex { fwd: fwd, rev: rev, names: consume bd.names, looks: consume looks, backtrack: backtrack })
 }
 
 fn allBytes() -> ByteSet {
@@ -1568,7 +1723,8 @@ fn addThread(re: Program, list: modify Array<Int64>, sc: modify Scan, pc: Int64)
             continue
         }
         sc.mark[p] = sc.gen
-        // A class or a match pc takes two tests, a save three and an assertion four.
+        // A class or a match pc takes two tests, a save three and an assertion four. A
+        // backreference ends the thread: only the backtracking search reads it.
         if re.op[p] == opSplit {
             // `b` first so `a` pops first: `a` is the operand a search prefers.
             stack.push(re.b[p])
@@ -1577,7 +1733,7 @@ fn addThread(re: Program, list: modify Array<Int64>, sc: modify Scan, pc: Int64)
             list.push(p)
         } else if re.op[p] == opSave {
             stack.push(re.b[p])
-        } else if holds(re, p, sc.bits, sc.at) {
+        } else if re.op[p] == opAssert && holds(re, p, sc.bits, sc.at) {
             stack.push(re.b[p])
         }
     }
@@ -1867,7 +2023,7 @@ fn lookBits(re: Regex, hay: Array<UInt8>) -> Array<Bool> {
     while k < n {
         let look = re.looks[k]
         let mut list: Array<Int64> = []
-        let mut j = 0
+        let mut j = if look.regular { 0 } else { hay.length + 1 }
         while j <= hay.length {
             let i = if look.behind { j } else { hay.length - j }
             let mut found = false
@@ -1910,18 +2066,298 @@ fn lookMatch(re: Regex, hay: Array<UInt8>, from: Int64, se: modify Search) -> Op
     return Some(Match { at: listStart(re.rev, hay, from, end, back, se.rev, end), end: end })
 }
 
-/// One search over one haystack: the forward and the backward lazy DFA.
-type Search = { fwd: Scan, rev: Scan }
+/// One search over one haystack: the forward and the backward lazy DFA, and for a
+/// pattern with a backreference the backtracking search, which alone runs.
+type Search = { fwd: Scan, rev: Scan, back: Back }
 
 /// A search of `hay`, whose lookaround bits it reads first.
 fn newSearch(re: Regex, hay: Array<UInt8>, cap: Int64) -> Search {
     let bits = lookBits(re, hay)
-    return Search { fwd: newScan(re.fwd, cap, true, bits.copy()), rev: newScan(re.rev, cap, false, consume bits) }
+    let back = newBack(re, hay, if re.backtrack { bits.copy() } else { [] })
+    return Search { fwd: newScan(re.fwd, cap, true, bits.copy()), rev: newScan(re.rev, cap, false, consume bits), back: back }
+}
+
+/// The steps one call of a backtracking search may take, and the steps it adds per
+/// byte of the haystack.
+let stepBase = 1000000
+let stepPerByte = 1000
+
+/// One backtracking search of a haystack: its steps against its budget, the group
+/// spans and split marks of the path it walks, and the trail that undoes them.
+type Back = {
+    steps: Int64,
+    budget: Int64,
+    // `caps[2 * k - 2]` and `caps[2 * k - 1]` are where group `k` starts and ends on
+    // the path, or -1.
+    caps: Array<Int64>,
+    // `mark[pc]` is the offset split `pc` is on the path at, or -1. A path that meets
+    // a split again at that offset has looped without a byte, and fails, as the NFA
+    // drops a pc it holds.
+    mark: Array<Int64>,
+    // The trail, a stack in three parallel arrays: a choice to resume at pc `x` and
+    // offset `y`, the value `y` that slot `x` of `caps` or of `mark` held before the
+    // path wrote it, or an atomic group's open.
+    kind: Array<Int64>,
+    x: Array<Int64>,
+    y: Array<Int64>,
+    // The bits of the regular lookaround bodies ([`lookBits`]).
+    bits: Array<Bool>,
+}
+
+/// A trail entry: a choice to resume, the old value of a mark or of a span, or the
+/// open of an atomic group, which bounds the choices its close drops.
+let trailChoice = 0
+let trailMark = 1
+let trailCap = 2
+let trailAtom = 3
+
+/// A backtracking search of `hay` with no step taken, its assertions reading `bits`.
+fn newBack(re: Regex, hay: Array<UInt8>, bits: consume Array<Bool>) -> Back {
+    let mut mark: Array<Int64> = []
+    let mut caps: Array<Int64> = []
+    if re.backtrack {
+        while mark.length < re.fwd.op.length {
+            mark.push(0 - 1)
+        }
+        while caps.length < 2 * re.names.length {
+            caps.push(0 - 1)
+        }
+    }
+    return Back { steps: 0, budget: stepBase + stepPerByte * hay.length, caps: caps, mark: mark, kind: [], x: [], y: [], bits: bits }
+}
+
+fn trail(bt: modify Back, kind: Int64, x: Int64, y: Int64) {
+    bt.kind.push(kind)
+    bt.x.push(x)
+    bt.y.push(y)
+}
+
+/// The length of the text group `a / 2` spans on the path, where `hay` holds that
+/// text again from `i`, before `stop` unless it is -1, ASCII case folded for an odd
+/// `a` of the backreference at `pc`; 0 for a group that has not closed or took no
+/// part, and -1 where the text differs.
+fn refLength(p: Program, pc: Int64, hay: Array<UInt8>, i: Int64, stop: Int64, caps: Array<Int64>) -> Int64 {
+    let k = p.a[pc] / 2
+    let fold = p.a[pc] % 2 == 1
+    let s = caps[2 * k - 2]
+    let e = caps[2 * k - 1]
+    if s < 0 || e < s {
+        return 0
+    }
+    let n = e - s
+    if i + n > hay.length || stop >= 0 && i + n > stop {
+        return 0 - 1
+    }
+    let mut j = 0
+    while j < n {
+        let x = Int64(hay[s + j])
+        let y = Int64(hay[i + j])
+        if x != y && !(fold && lowerAscii(x) == lowerAscii(y)) {
+            return 0 - 1
+        }
+        j = j + 1
+    }
+    return n
+}
+
+/// The byte `c`, an ASCII capital as its small letter.
+fn lowerAscii(c: Int64) -> Int64 {
+    return if c >= 65 && c <= 90 { c + 32 } else { c }
+}
+
+/// Whether the assertion at `pc` holds at offset `i`: a regular body's bit, or else a
+/// backtracking run of the body, from `i` for a lookahead and for a lookbehind from
+/// each offset up to `i` that ends at `i`.
+fn backHolds(re: Regex, pc: Int64, hay: Array<UInt8>, i: Int64, bt: modify Back) -> Bool {
+    let k = re.fwd.a[pc]
+    let look = re.looks[k / 2]
+    let negate = k % 2 == 1
+    if look.regular {
+        return holds(re.fwd, pc, bt.bits, i)
+    }
+    if !look.behind {
+        return (backRun(re, look.fwd, hay, i, 0 - 1, bt) >= 0) != negate
+    }
+    let mut j = i
+    while j >= 0 {
+        if backRun(re, look.fwd, hay, j, i, bt) >= 0 {
+            return !negate
+        }
+        j = j - 1
+    }
+    return negate
+}
+
+/// The end of the first path from `pc0` at `at` that reaches a match, at `stop`
+/// unless it is -1, in a backtracking search's order: operand `a` of a split before
+/// `b`. Answers -1 where no path does or the steps pass the budget, which
+/// `bt.steps` tells apart. After a match `bt.caps` holds the path's spans, and
+/// otherwise the spans it had.
+fn backRun(re: Regex, pc0: Int64, hay: Array<UInt8>, at: Int64, stop: Int64, bt: modify Back) -> Int64 {
+    let p = re.fwd
+    let base = bt.kind.length
+    let mut pc = pc0
+    let mut i = at
+    let mut found = 0 - 1
+    while bt.steps <= bt.budget {
+        bt.steps = bt.steps + 1
+        let op = p.op[pc]
+        let mut on = true
+        if op == opClass {
+            on = i < hay.length && (stop < 0 || i < stop) && hasByte(p.cls[pc], Int64(hay[i]))
+            pc = p.b[pc]
+            i = i + 1
+        } else if op == opSplit {
+            on = bt.mark[pc] != i
+            if on {
+                trail(bt, trailMark, pc, bt.mark[pc])
+                bt.mark[pc] = i
+                trail(bt, trailChoice, p.b[pc], i)
+                pc = p.a[pc]
+            }
+        } else if op == opSave {
+            let slot = p.a[pc]
+            trail(bt, trailCap, slot, bt.caps[slot])
+            bt.caps[slot] = i
+            pc = p.b[pc]
+        } else if op == opAssert {
+            on = backHolds(re, pc, hay, i, bt)
+            pc = p.b[pc]
+        } else if op == opBackref {
+            let n = refLength(p, pc, hay, i, stop, bt.caps)
+            on = n >= 0
+            pc = p.b[pc]
+            i = i + n
+        } else if op == opAtomic {
+            if p.a[pc] >= 0 {
+                trail(bt, trailAtom, pc, i)
+            } else {
+                dropChoices(bt)
+            }
+            pc = p.b[pc]
+        } else if stop < 0 || i == stop {
+            found = i
+            break
+        } else {
+            on = false
+        }
+        // A failed path goes back to its last choice, undoing what it wrote since.
+        // `length > 0` repeats what `base >= 0` gives, which the traced walk of
+        // `why --proofs` loses at the loop head: keep it, or whyproofs fails.
+        while !on && bt.kind.length > 0 && bt.kind.length > base {
+            let top = bt.kind.length - 1
+            if bt.kind[top] == trailChoice {
+                pc = bt.x[top]
+                i = bt.y[top]
+                on = true
+            } else if bt.kind[top] == trailMark {
+                bt.mark[bt.x[top]] = bt.y[top]
+            } else if bt.kind[top] == trailCap {
+                bt.caps[bt.x[top]] = bt.y[top]
+            }
+            bt.kind.pop()
+            bt.x.pop()
+            bt.y.pop()
+        }
+        if !on {
+            break
+        }
+    }
+    // The marks go back as they were; the spans of a match stay. `length > 0` as
+    // above.
+    while bt.kind.length > 0 && bt.kind.length > base {
+        let top = bt.kind.length - 1
+        if bt.kind[top] == trailMark {
+            bt.mark[bt.x[top]] = bt.y[top]
+        }
+        bt.kind.pop()
+        bt.x.pop()
+        bt.y.pop()
+    }
+    return found
+}
+
+/// Drops the choices above the open of the innermost atomic group, and the open,
+/// and keeps the marks and spans to undo. The run that reaches a close went through
+/// its open, and backtracking past the open leaves the path through the close, so
+/// the trail holds the open.
+fn dropChoices(bt: modify Back) {
+    let mut j = bt.kind.length - 1
+    while j >= 0 && bt.kind[j] != trailAtom {
+        j = j - 1
+    }
+    let mut to = if j < 0 { bt.kind.length } else { j }
+    let mut k = to + 1
+    while k < bt.kind.length {
+        if bt.kind[k] != trailChoice {
+            bt.kind[to] = bt.kind[k]
+            bt.x[to] = bt.x[k]
+            bt.y[to] = bt.y[k]
+            to = to + 1
+        }
+        k = k + 1
+    }
+    while bt.kind.length > to {
+        bt.kind.pop()
+        bt.x.pop()
+        bt.y.pop()
+    }
+}
+
+/// [`nextMatch`] for a pattern the NFA cannot match: a backtracking run from each
+/// offset in turn, the first that matches. It traps once the search's steps pass
+/// its budget.
+fn backMatch(re: Regex, hay: Array<UInt8>, from: Int64, bt: modify Back) -> Option<Match> {
+    let start = patternStart(re)
+    let mut k = 0
+    while k < bt.caps.length {
+        bt.caps[k] = 0 - 1
+        k = k + 1
+    }
+    let mut at = from
+    while at <= hay.length {
+        let end = backRun(re, start, hay, at, 0 - 1, bt)
+        if end >= 0 {
+            return Some(Match { at: at, end: end })
+        }
+        trapPastBudget(bt)
+        at = at + 1
+    }
+    return None
+}
+
+/// Traps once the steps of `bt` pass its budget.
+fn trapPastBudget(bt: Back) {
+    if bt.steps > bt.budget {
+        panic("a backtracking pattern ran past its step budget of \{bt.budget} steps")
+    }
+}
+
+/// Whether all of `hay` matches `pattern`, which the compiler has checked: `=~`
+/// over a pattern only the backtracking search matches calls it. It traps past the
+/// step budget, as a search does.
+///
+/// ponytail: compiles the pattern on every call. A memo in module state costs
+/// every search of this module 22% more fuel (regexredux, 2026-11-28); a memo the
+/// emitter owns, one slot per pattern, if a program matches often.
+export fn matchesWhole(hay: String, pattern: String) -> Bool {
+    let re = match compile(pattern) {
+        Ok(r) => r,
+        Err(why) => panic("`\{pattern}`: \{why}"),
+    }
+    let raw = bytes(hay)
+    let mut bt = newBack(re, raw, lookBits(re, raw))
+    let end = backRun(re, patternStart(re), raw, 0, raw.length, bt)
+    trapPastBudget(bt)
+    return end == raw.length
 }
 
 /// The leftmost-first match that starts at or after `from`, or `None`. A forward
 /// pass finds its end and a backward pass its start.
 fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64 where value >= 0, se: modify Search) -> Option<Match> {
+    if re.backtrack {
+        return backMatch(re, hay, from, se.back)
+    }
     if re.fwd.looks > 0 {
         return lookMatch(re, hay, from, se)
     }
@@ -1978,12 +2414,13 @@ export type Captures = {
 }
 
 /// The first match at or after `from` and its groups, or `None`. The groups cost a
-/// Thompson simulation over the match alone.
+/// Thompson simulation over the match alone; a backtracking search has them.
 export fn captures(re: Regex, hay: String, from: Int64) -> Option<Captures> {
     let raw = bytes(hay)
     let mut se = newSearch(re, raw, dfaCap)
     if let Some(m) = nextMatch(re, raw, from, se) {
-        return Some(Captures { whole: m, spans: spansOf(re, raw, m, se.fwd.bits) })
+        let spans = if re.backtrack { se.back.caps.copy() } else { spansOf(re, raw, m, se.fwd.bits) }
+        return Some(Captures { whole: m, spans: spans })
     }
     return None
 }
@@ -2782,6 +3219,329 @@ test "a search finds the match a backtracking search finds from each offset" {
                 from = from + 1
             }
             k = k + 1
+        }
+        round = round + 1
+    }
+}
+
+/// The offsets `spans` holds, joined by commas.
+fn spansText(spans: Array<Int64>) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < spans.length {
+        out = out + "\{spans[i]},"
+        i = i + 1
+    }
+    return out
+}
+
+/// The first match of `pattern` in `hay` from 0, as `at..end`, or "none".
+fn firstMatch(pattern: String, hay: String) -> String {
+    return match compile(pattern) {
+        Ok(re) => spanText(find(re, hay, 0)),
+        Err(w) => "refused: \{w}",
+    }
+}
+
+test "a backreference matches its group's text again" {
+    assertEq(firstMatch("(a|b)\\1", "xabbx"), "2..4")
+    assertEq(firstMatch("(\\w+) \\1", "hello hello world"), "0..11")
+    assertEq(firstMatch("(?<q>['\"]).*?\\k<q>", "say \"hi\" 'x'"), "4..8")
+    assertEq(firstMatch("(?<q>a)\\k'q'\\k{q}(?P=q)", "aaaa"), "0..4")
+    assertEq(firstMatch("(a)(b)\\g{-1}\\g1\\g{2}", "abbab"), "0..5")
+    assertEq(firstMatch("(?i)(a)\\1", "aA"), "0..2")
+    assertEq(firstMatch("(a)\\1", "aA"), "none")
+    assertEq(firstMatch("\\2(a)(b)", "ab"), "0..2")
+    assertEq(firstMatch("(a)|\\1b", "b"), "0..1")
+    assertEq(firstMatch("(a\\1)", "a"), "0..1")
+    assertEq(firstMatch("(a)(?=\\1)", "aa"), "0..1")
+    assertEq(firstMatch("(\\w)(?!\\1)", "aab"), "1..2")
+    assertEq(firstMatch("(a)b(?<=\\1b)", "ab"), "0..2")
+    assertEq(firstMatch("(a)\\1", ""), "none")
+    assertEq(firstMatch("(a)\\1", "a"), "none")
+    assertEq(firstMatch("(a?)\\1", "a"), "0..0")
+    assertEq(firstMatch("()\\1", ""), "0..0")
+    assertEq(firstMatch("(a){0}\\1b", "b"), "0..1")
+    assertEq(firstMatch("\\1", "a"), "refused: a backreference to a group the pattern does not have")
+    assertEq(firstMatch("(a)\\k<n>", "a"), "refused: a backreference to a group the pattern does not have")
+    assertEq(firstMatch("(a)\\g{-2}", "a"), "refused: a backreference to a group the pattern does not have")
+    let re = match compile("(.)\\1") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(re, "aabbcd"), 2)
+    assertEq(replaceAll(re, "aabbcd", "-"), "--cd")
+    let groups = match compile("(a+)(b)\\1") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    match captures(groups, "aaba", 0) {
+        Some(c) => {
+            assertEq(spanText(capture(c, 0)), "1..4")
+            assertEq(spanText(capture(c, 1)), "1..2")
+            assertEq(spanText(capture(c, 2)), "2..3")
+        }
+        None => panic("no match"),
+    }
+}
+
+test "a backtracking search runs out of steps, not of time" {
+    let raw = bytes("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    let regular = match compile("(a|a)*b") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assert(!regular.backtrack)
+    assertEq(spanText(find(regular, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0)), "none")
+    let re = match compile("(a|a)*b\\1") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assert(re.backtrack)
+    let mut bt = newBack(re, raw, lookBits(re, raw))
+    assertEq(bt.budget, stepBase + stepPerByte * 30)
+    assertEq(backRun(re, patternStart(re), raw, 0, 0 - 1, bt), 0 - 1)
+    assert(bt.steps > bt.budget)
+}
+
+/// The oracle's backtracking search: the end of the first path from `pc` at `i`
+/// that matches, at `stop` unless it is -1, or that reaches the close `until` of an
+/// atomic group unless it is -1; -1 for none. It recurses, with the spans `caps` and
+/// the splits `path` met at `i` since the last byte, which a path that ends keeps
+/// and a failed one restores. It reads every assertion by a run of its body.
+fn oracleRun(re: Regex, pc: Int64, hay: Array<UInt8>, i: Int64, stop: Int64, until: Int64, caps: modify Array<Int64>, path: modify Array<Int64>) -> Int64 {
+    let p = re.fwd
+    let op = p.op[pc]
+    if pc == until {
+        return i
+    }
+    let caps0 = caps.copy()
+    let path0 = path.copy()
+    let mut r = 0 - 1
+    if op == opClass {
+        if i < hay.length && (stop < 0 || i < stop) && hasByte(p.cls[pc], Int64(hay[i])) {
+            path = []
+            r = oracleRun(re, p.b[pc], hay, i + 1, stop, until, caps, path)
+        }
+    } else if op == opSplit {
+        if !holdsPc(path, pc) {
+            path.push(pc)
+            r = oracleRun(re, p.a[pc], hay, i, stop, until, caps, path)
+            if r < 0 {
+                caps = caps0.copy()
+                path = path0.copy()
+                path.push(pc)
+                r = oracleRun(re, p.b[pc], hay, i, stop, until, caps, path)
+            }
+        }
+    } else if op == opSave {
+        caps[p.a[pc]] = i
+        r = oracleRun(re, p.b[pc], hay, i, stop, until, caps, path)
+    } else if op == opAssert {
+        let look = re.looks[p.a[pc] / 2]
+        let mut found = false
+        let mut j = i
+        while !found && j >= (if look.behind { 0 } else { i }) {
+            let mut c = caps.copy()
+            let mut seen: Array<Int64> = []
+            found = oracleRun(re, look.fwd, hay, j, if look.behind { i } else { 0 - 1 }, 0 - 1, c, seen) >= 0
+            j = j - 1
+        }
+        if found != (p.a[pc] % 2 == 1) {
+            r = oracleRun(re, p.b[pc], hay, i, stop, until, caps, path)
+        }
+    } else if op == opBackref {
+        let k = p.a[pc] / 2
+        let s = caps[2 * k - 2]
+        let e = caps[2 * k - 1]
+        let n = if s < 0 || e < s { 0 } else { e - s }
+        let end = if stop < 0 { hay.length } else { stop }
+        let mut same = i + n <= end
+        let mut j = 0
+        while same && j < n {
+            let x = Int64(hay[s + j])
+            let y = Int64(hay[i + j])
+            let folded = p.a[pc] % 2 == 1 && (x | 32) == (y | 32) && (x | 32) >= 97 && (x | 32) <= 122
+            same = x == y || folded
+            j = j + 1
+        }
+        if same {
+            if n > 0 {
+                path = []
+            }
+            r = oracleRun(re, p.b[pc], hay, i + n, stop, until, caps, path)
+        }
+    } else if op == opAtomic {
+        // The body's first way to its close, and the rest from there with no other.
+        let at = oracleRun(re, p.b[pc], hay, i, stop, p.a[pc], caps, path)
+        if at >= 0 {
+            r = oracleRun(re, p.b[p.a[pc]], hay, at, stop, until, caps, path)
+        }
+    } else if stop < 0 || i == stop {
+        r = i
+    }
+    if r < 0 {
+        caps = caps0
+        path = path0
+    }
+    return r
+}
+
+/// A pattern with a backreference to a group of [`genPattern`], before it, after
+/// it, repeated, folded, relative, or inside a lookaround.
+fn genBackPattern(seed: modify Int64) -> String {
+    let refs = ["\\1", "\\1*", "(?:\\1|b)", "(?=\\1)", "(?!\\1)", "(?<=\\1)", "(?<!\\1.)", "(?i:\\1)", "\\g{-1}", "\\1+?"]
+    let group = "(" + genPattern(seed, 2, false) + ")"
+    let r = refs[draw(seed, refs.length)]
+    let tail = genPattern(seed, 1, false)
+    return if draw(seed, 4) == 0 { refs[draw(seed, 8)] + group + tail } else { group + tail + r }
+}
+
+/// A pattern with an atomic group or a possessive repeat over [`genPattern`]'s
+/// terms, in a lookaround, or around a backreference.
+fn genAtomPattern(seed: modify Int64) -> String {
+    let marks = ["*+", "++", "?+", "{1,2}+", "{2,}+"]
+    let head = genPattern(seed, 1, false)
+    let body = genPattern(seed, 2, false)
+    let tail = genPattern(seed, 1, false)
+    let pick = draw(seed, 4)
+    if pick == 0 {
+        return head + "(?>" + body + ")" + tail
+    }
+    if pick == 1 {
+        return head + "(" + body + ")" + marks[draw(seed, marks.length)] + tail
+    }
+    if pick == 2 {
+        return head + "(?" + (if draw(seed, 2) == 0 { "=" } else { "<!" }) + "(?>" + genPattern(seed, 1, true) + ")a*+)" + tail
+    }
+    return "(" + body + ")" + "(?>\\1|" + tail + ")+"
+}
+
+/// The match of `re` from each offset of `hay` with its groups' spans, as the
+/// oracle finds it and as the backtracking search finds it, in turn.
+fn backVerdicts(re: Regex, hay: String) -> Array<String> {
+    let raw = bytes(hay)
+    let mut bt = newBack(re, raw, lookBits(re, raw))
+    let mut out: Array<String> = []
+    let mut from = 0
+    while from <= raw.length {
+        let mut want = "none"
+        let mut at = from
+        while at <= raw.length && want == "none" {
+            let mut caps: Array<Int64> = []
+            while caps.length < 2 * re.names.length {
+                caps.push(0 - 1)
+            }
+            let mut seen: Array<Int64> = []
+            let end = oracleRun(re, patternStart(re), raw, at, 0 - 1, 0 - 1, caps, seen)
+            if end >= 0 {
+                want = "\{at}..\{end} \{spansText(caps)}"
+            }
+            at = at + 1
+        }
+        let got = match backMatch(re, raw, from, bt) {
+            Some(m) => "\{m.at}..\{m.end} \{spansText(bt.caps)}",
+            None => "none",
+        }
+        out.push(want)
+        out.push(got)
+        from = from + 1
+    }
+    return out
+}
+
+test "a whole match backtracks where the pattern needs it" {
+    assert(matchesWhole("ab-ab", "(\\w+)-\\1"))
+    assert(!matchesWhole("ab-abc", "(\\w+)-\\1"))
+    assert(!matchesWhole("ab", "(?>a|ab)"))
+    assert(matchesWhole("", "(a?)\\1"))
+    assert(matchesWhole("aa", "(a?)\\1"))
+    assert(!matchesWhole("a", "(a)\\1"))
+}
+
+test "an atomic group and a possessive repeat keep what they took" {
+    assertEq(firstMatch("a*+a", "aaa"), "none")
+    assertEq(firstMatch("a*a", "aaa"), "0..3")
+    assertEq(firstMatch("(?>a+)b", "aaab"), "0..4")
+    assertEq(firstMatch("(?>a|ab)c", "abc"), "none")
+    assertEq(firstMatch("(?:a|ab)c", "abc"), "0..3")
+    assertEq(firstMatch("a++b", "aab"), "0..3")
+    assertEq(firstMatch("a?+a", "a"), "none")
+    assertEq(firstMatch("a{1,3}+a", "aaaa"), "0..4")
+    assertEq(firstMatch("a{1,3}+a", "aaa"), "none")
+    assertEq(firstMatch("x(?=a*+b)", "xaab"), "0..1")
+    assertEq(firstMatch("x(?=a*+a)", "xaa"), "none")
+    assertEq(firstMatch("(?>)", ""), "0..0")
+    assertEq(firstMatch("(?>(a))\\1", "aa"), "0..2")
+    let re = match compile("[a-z]++,") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assert(re.backtrack)
+    assertEq(countMatches(re, "ab,c,d"), 2)
+}
+
+test "a backtracking search finds the match a recursive oracle finds" {
+    let pieces = ["a", "b", "ab", "A", "\u{e9}", "|", "\n"]
+    let mut seed = 11
+    let mut round = 0
+    let mut verdicts = 0
+    while round < 600 {
+        let pattern = if round % 2 == 0 { genBackPattern(seed) } else { genAtomPattern(seed) }
+        let re = match compile(pattern) {
+            Ok(r) => r,
+            Err(w) => panic("`\{pattern}`: \{w}"),
+        }
+        assert(re.backtrack)
+        let mut hay = ""
+        let len = draw(seed, 10)
+        while hay.byteLength < len {
+            hay = hay + pieces[draw(seed, pieces.length)]
+        }
+        let v = backVerdicts(re, hay)
+        let mut k = 0
+        while k + 1 < v.length {
+            if v[k] != v[k + 1] {
+                panic("`\{pattern}` on `\{hay}` from \{k / 2}: oracle \{v[k]}, search \{v[k + 1]}")
+            }
+            verdicts = verdicts + 1
+            k = k + 2
+        }
+        round = round + 1
+    }
+    assert(verdicts > 3000)
+}
+
+test "a backtracking search of a regular pattern finds what the NFA finds" {
+    let pieces = ["a", "b", "c", "\u{e9}", "\u{20ac}", "|", "\n"]
+    let mut seed = 5
+    let mut round = 0
+    while round < 300 {
+        let pattern = genPattern(seed, 2, false)
+        let re = match compile(pattern) {
+            Ok(r) => r,
+            Err(w) => panic("`\{pattern}`: \{w}"),
+        }
+        let back = Regex { fwd: re.fwd.copy(), rev: re.rev.copy(), names: re.names.copy(), looks: re.looks.copy(), backtrack: true }
+        let mut hay = ""
+        let len = draw(seed, 14)
+        while hay.byteLength < len {
+            hay = hay + pieces[draw(seed, pieces.length)]
+        }
+        let mut from = 0
+        while from <= hay.byteLength {
+            let want = match captures(re, hay, from) {
+                Some(c) => "\{c.whole.at}..\{c.whole.end} \{spansText(c.spans)}",
+                None => "none",
+            }
+            let got = match captures(back, hay, from) {
+                Some(c) => "\{c.whole.at}..\{c.whole.end} \{spansText(c.spans)}",
+                None => "none",
+            }
+            if want != got {
+                panic("`\{pattern}` on `\{hay}` from \{from}: NFA \{want}, backtracking \{got}")
+            }
+            from = from + 1
         }
         round = round + 1
     }

@@ -5544,9 +5544,24 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Log,
         b: &mut Frame,
+        r: &Val,
         pat: &str,
         line: usize,
     ) -> Result<(), String> {
+        // A pattern no DFA matches is `std/regex`'s backtracking search, which the
+        // loader links for it, over the pattern's text.
+        if vyrn_frontend::regex::backtracks(pat) {
+            let f = vyrn_frontend::regex::BACKTRACK_MATCH;
+            let Some(index) = (self.cx.sigs.get(f))
+                .filter(|s| s.params == [Type::Str, Type::Str] && s.ret_ty == Type::Bool)
+                .map(|s| s.index)
+            else {
+                return unsupported("a backtracking `=~` with no `std/regex` in the link", line);
+            };
+            self.core_val(m, b, r, &Type::Str, line)?;
+            b.ins(&Instruction::Call(index));
+            return Ok(());
+        }
         let (table, accept, start) = self.regex_dfa(m, pat, line)?;
         b.hole(table.0);
         b.ins(&Instruction::I32Const(start as i32));
@@ -15650,7 +15665,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             (Op::Bin(o), [l, r]) if self.core_str_op(*o, l, r) => {
                 self.core_val(m, b, l, &Type::Str, line)?;
                 if let (BinOp::Match, Val::Lit(Lit::Str(pat))) = (o, r) {
-                    self.str_match(m, b, pat, line)?;
+                    self.str_match(m, b, r, pat, line)?;
                     return Ok(Type::Bool);
                 }
                 self.core_val(m, b, r, &Type::Str, line)?;

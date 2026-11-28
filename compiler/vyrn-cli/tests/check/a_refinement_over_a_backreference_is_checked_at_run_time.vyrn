@@ -1,0 +1,35 @@
+type Doubled = String where value =~ "(\\w+)-\\1"
+
+fn main() -> Int64 {
+    let d = Doubled("ab-ab")
+    print(d)
+    return 0
+}
+
+// The check proves no value of `Doubled`, so it refuses no constant: this one
+// traps when it runs.
+fn unproved() -> Doubled {
+    return Doubled("ab-cd")
+}
+
+fn doubled(s: String) -> Option<Doubled> {
+    if s =~ "(\\w+)-\\1" {
+        return Some(Doubled(s.copy()))
+    }
+    return None
+}
+
+test "a backreference matches its group's text, checked when the value is made" {
+    assert("ab-ab" =~ "(\\w+)-\\1")
+    assert(!("ab-abc" =~ "(\\w+)-\\1"))
+    assert("aaab" =~ "a*+b")
+    assert(!("aaa" =~ "a*+a"))
+    match doubled("xy-xy") {
+        Some(d) => assertEq(d.byteLength, 5),
+        None => panic("xy-xy is doubled"),
+    }
+    match doubled("xy-yx") {
+        Some(d) => panic("xy-yx is not doubled"),
+        None => {}
+    }
+}

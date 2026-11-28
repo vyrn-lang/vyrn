@@ -1020,6 +1020,10 @@ fn the_regex_refusals_are_the_catalogues_sentences() {
             "x18_a_capture_in_a_lookaround.vyrn",
             "invalid regex `a(?=(b))`: a capturing group inside a lookaround: write `(?:..)`",
         ),
+        (
+            "x19_a_backreference_to_no_group.vyrn",
+            "invalid regex `(a)\\2`: a backreference to a group the pattern does not have",
+        ),
     ];
     let dir = dir().join("regex");
     let mut on_disk: Vec<String> = std::fs::read_dir(&dir)

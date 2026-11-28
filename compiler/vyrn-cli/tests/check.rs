@@ -107,6 +107,37 @@ fn an_email_pattern_runs_its_tests() {
     assert!(text.contains("1 passed, 0 failed"), "{text}");
 }
 
+/// A refinement type over a pattern with a backreference is never proved: its
+/// tests match on the backtracking search, and a constant that breaks the rule,
+/// which the check accepts, traps when it is made.
+#[test]
+fn a_backreference_refinement_is_checked_at_run_time() {
+    let name = "a_refinement_over_a_backreference_is_checked_at_run_time.vyrn";
+    let out = vyrn()
+        .arg("test")
+        .arg(name)
+        .current_dir(check_dir())
+        .output()
+        .expect("run vyrn test");
+    let text = norm(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("1 passed, 0 failed"), "{text}");
+    let dir = scratch("backref");
+    let src = std::fs::read_to_string(check_dir().join(name)).expect("read the program");
+    let calls = src.replace("print(d)", "print(d)\n    print(unproved())");
+    std::fs::write(dir.join("unproved.vyrn"), calls).expect("write the program");
+    let out = vyrn()
+        .arg("run")
+        .arg("unproved.vyrn")
+        .current_dir(&*dir)
+        .output();
+    let out = out.expect("run vyrn run");
+    let said = norm(&out.stdout) + &norm(&out.stderr);
+    assert!(said.starts_with("ab-ab\n"), "{said}");
+    assert!(said.contains("validation failed for `Doubled`"), "{said}");
+    assert_eq!(out.status.code(), Some(1), "{said}");
+}
+
 /// Prints what `vyrn check` prints for a program the load refuses, checked in this process.
 fn check_here(root: &str) -> String {
     let src = std::fs::read_to_string(root).expect("read the program");

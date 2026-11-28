@@ -69,6 +69,9 @@ pub enum Kind {
     /// A call for its effect the emitter erases ([`crate::verdict::Erased`]):
     /// the callee.
     Erased(String),
+    /// A `=~` over a pattern no DFA matches, which runs `std/regex`'s
+    /// backtracking search ([`crate::verdict::backtracks`]).
+    Backtracks,
 }
 
 /// What a fact does, in the order a reader asks: what is copied, what is
@@ -88,6 +91,8 @@ pub enum Verb {
     Proves,
     /// A call the emitter erases: the editor's proof glyph only.
     Erases,
+    /// A `=~` that backtracks.
+    Backtracks,
 }
 
 impl Verb {
@@ -103,6 +108,7 @@ impl Verb {
             Verb::Stays => "call kept",
             Verb::Proves => "check proved",
             Verb::Erases => "call erased",
+            Verb::Backtracks => "backtracks",
         }
     }
 
@@ -117,7 +123,12 @@ impl Verb {
     pub fn blocks(self) -> bool {
         !matches!(
             self,
-            Verb::Keeps | Verb::Refuses | Verb::Stays | Verb::Proves | Verb::Erases
+            Verb::Keeps
+                | Verb::Refuses
+                | Verb::Stays
+                | Verb::Proves
+                | Verb::Erases
+                | Verb::Backtracks
         )
     }
 }
@@ -132,6 +143,7 @@ impl Kind {
             Kind::Enters(..) => Some(Verb::Enters),
             Kind::Grows(_) => Some(Verb::Grows),
             Kind::Stays(..) => Some(Verb::Stays),
+            Kind::Backtracks => Some(Verb::Backtracks),
             Kind::Check { kept, refused, .. } => match (kept, refused) {
                 (_, true) => Some(Verb::Refuses),
                 (true, false) => Some(Verb::Keeps),
@@ -509,6 +521,7 @@ impl CostRow {
             Verb::Stays => format!("{nouns} call kept"),
             Verb::Proves => format!("{nouns} proved"),
             Verb::Erases => format!("{nouns} erased"),
+            Verb::Backtracks => format!("{nouns} backtracks"),
         }
     }
 
@@ -533,6 +546,7 @@ impl CostRow {
             Verb::Stays => (|n| format!("`{n}(..)`"), ", because "),
             Verb::Proves => (|n| format!("{n} check proved"), ""),
             Verb::Erases => (|n| format!("`{n}(..)` erased"), ""),
+            Verb::Backtracks => (|n| format!("`{n}` backtracks"), ": "),
         };
         (self.whats.iter())
             .map(|(noun, why, at)| CostItem {
@@ -566,9 +580,15 @@ impl CostRow {
             Verb::Keeps | Verb::Refuses => items.join("; "),
             Verb::Stays => format!("call kept: {}", items.join("; ")),
             Verb::Proves | Verb::Erases => items.join("; "),
+            Verb::Backtracks => items.join("; "),
         }
     }
 }
+
+/// Why a `=~` that backtracks costs what it costs.
+const BACKTRACKS: &str = "its pattern has a backreference, an atomic group or a possessive \
+                          repeat, so its time is exponential in the worst case, and it traps \
+                          past the step budget of `std/regex`";
 
 /// The rows of one function, by line and then by verb.
 pub type CostFn = (FnId, BTreeMap<(u32, Verb), CostRow>);
@@ -604,6 +624,7 @@ pub fn table(
                 ),
                 Kind::Stays(c, why) => (None, (c.clone(), why.clone())),
                 Kind::Erased(c) => (None, (c.clone(), String::new())),
+                Kind::Backtracks => (None, ("=~".to_string(), BACKTRACKS.to_string())),
             };
             if let Some(slot) = slot {
                 tally[slot].0 += 1;
@@ -673,6 +694,9 @@ fn row_kind(
     world: &World,
     frame: &Body,
 ) -> Option<Kind> {
+    if crate::verdict::backtracks(rhs) {
+        return Some(Kind::Backtracks);
+    }
     let sp = frame.speech();
     let ty = |made: Made<'_>| match bound {
         Some(n)

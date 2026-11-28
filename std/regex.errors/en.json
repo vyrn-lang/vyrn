@@ -1,5 +1,6 @@
 {
   "assertionRepeat": "a repeat after an assertion, which matches no character",
+  "backrefMissing": "a backreference to a group the pattern does not have",
   "backwards": "a character range that runs backwards",
   "classAnchor": "an anchor or a backreference (`\\\\{$c}`) cannot stand inside a character class",
   "classBackslash": "a backslash at the end of a character class",

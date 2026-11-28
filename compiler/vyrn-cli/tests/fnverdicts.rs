@@ -87,6 +87,7 @@ fn trap_kind(cause: &Option<Cause>) -> &'static str {
         Some(Trap::Extern(_)) => "extern",
         Some(Trap::Unbuilt(_)) => "no body",
         Some(Trap::Callee(_)) => "callee",
+        Some(Trap::Backtracks) => "backtracking match",
     }
 }
 

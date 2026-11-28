@@ -118,6 +118,12 @@ pub(super) trait Hooks {
     fn _regex_anchor(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
+    fn _regex_backref(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
+    fn regex_backref(&mut self, start: usize, end: usize) -> Result<(), String> {
+        Ok(())
+    }
     fn _regex_escape(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
@@ -199,7 +205,7 @@ pub(super) trait Hooks {
     fn regex_quantifier(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
-    fn regex_quantifier_lazy(&mut self, start: usize, end: usize) -> Result<(), String> {
+    fn regex_quantifier_mode(&mut self, start: usize, end: usize) -> Result<(), String> {
         Ok(())
     }
     fn regex_shorthand(&mut self, start: usize, end: usize) -> Result<(), String> {
@@ -362,7 +368,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
             ({ let atom = self.pos; self._regex_atom()? && { let _ = (
                 self.regex_quantifier()?
                 || self._regex_quantifier_count()?
-            ); true } && { let _ = self.regex_quantifier_lazy()?; true } })
+            ); true } && { let _ = self.regex_quantifier_mode()?; true } })
             || { self.pos = p0; false }
         };
         if !hit {
@@ -397,6 +403,14 @@ impl<'s, H: Hooks> Scanner<'s, H> {
             || {
                 let p0 = self.pos;
                 ({ let p = self.pos; let m = self.eat_lit(b"(?"); self.pos = p; m } && self._regex_look()?)
+                || { self.pos = p0; false }
+            }
+            || {
+                let p0 = self.pos;
+                ({ let p = self.pos; let m = (
+                    self.eat_byte(b'\\')
+                    || self.eat_lit(b"(?P=")
+                ); self.pos = p; m } && self._regex_backref()?)
                 || { self.pos = p0; false }
             }
             || self._regex_subpattern()?
@@ -490,6 +504,74 @@ impl<'s, H: Hooks> Scanner<'s, H> {
             return Ok(false);
         }
         self.hooks._regex_anchor(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn _regex_backref(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = self.regex_backref()?;
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks._regex_backref(start, self.pos)?;
+        Ok(true)
+    }
+
+    fn regex_backref(&mut self) -> Result<bool, String> {
+        let start = self.pos;
+        let hit = (matches!(self.peek_byte(), Some(b'\\')) && {
+                let p0 = self.pos;
+                (self.eat_byte(b'\\') && (
+                    (matches!(self.peek_byte(), Some(b'1'..=b'9')) && {
+                        let p0 = self.pos;
+                        (self.eat_one(|c| matches!(c, '1'..='9')) && { let _ = self.eat_one(|c| matches!(c, '0'..='9')); true })
+                        || { self.pos = p0; false }
+                    })
+                    || (matches!(self.peek_byte(), Some(b'g')) && {
+                        let p0 = self.pos;
+                        (self.eat_byte(b'g') && (
+                            (matches!(self.peek_byte(), Some(b'0'..=b'9')) && (self.eat_one(|c| matches!(c, '0'..='9')) && { self.eat_while(|c| matches!(c, '0'..='9')); true }))
+                            || (matches!(self.peek_byte(), Some(b'{')) && {
+                                let p0 = self.pos;
+                                (self.eat_byte(b'{') && { let _ = self.eat_byte(b'-'); true } && (self.eat_one(|c| matches!(c, '0'..='9')) && { self.eat_while(|c| matches!(c, '0'..='9')); true }) && self.eat_byte(b'}'))
+                                || { self.pos = p0; false }
+                            })
+                        ))
+                        || { self.pos = p0; false }
+                    })
+                    || (matches!(self.peek_byte(), Some(b'k')) && {
+                        let p0 = self.pos;
+                        (self.eat_byte(b'k') && (
+                            (matches!(self.peek_byte(), Some(b'<')) && {
+                                let p0 = self.pos;
+                                (self.eat_byte(b'<') && { self.regex_name()?; true } && { if !((matches!(self.peek_byte(), Some(b'>')) && self.eat_byte(b'>'))) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } true })
+                                || { self.pos = p0; false }
+                            })
+                            || (matches!(self.peek_byte(), Some(b'\'')) && {
+                                let p0 = self.pos;
+                                (self.eat_byte(b'\'') && { self.regex_name()?; true } && { if !((matches!(self.peek_byte(), Some(b'\'')) && self.eat_byte(b'\''))) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } true })
+                                || { self.pos = p0; false }
+                            })
+                            || (matches!(self.peek_byte(), Some(b'{')) && {
+                                let p0 = self.pos;
+                                (self.eat_byte(b'{') && { self.regex_name()?; true } && { if !((matches!(self.peek_byte(), Some(b'}')) && self.eat_byte(b'}'))) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } true })
+                                || { self.pos = p0; false }
+                            })
+                        ))
+                        || { self.pos = p0; false }
+                    })
+                ))
+                || { self.pos = p0; false }
+            })
+            || (matches!(self.peek_byte(), Some(b'(')) && {
+                let p0 = self.pos;
+                (self.eat_lit(b"(?P=") && { self.regex_name()?; true } && { if !((matches!(self.peek_byte(), Some(b')')) && self.eat_byte(b')'))) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } true })
+                || { self.pos = p0; false }
+            });
+        if !hit {
+            return Ok(false);
+        }
+        self.hooks.regex_backref(start, self.pos)?;
         Ok(true)
     }
 
@@ -847,11 +929,7 @@ impl<'s, H: Hooks> Scanner<'s, H> {
                 let p0 = self.pos;
                 (self.eat_byte(b'<') && { self.regex_name()?; true } && { if !((matches!(self.peek_byte(), Some(b'>')) && self.eat_byte(b'>'))) { { let rule = rule!(GroupName); return Err(self.hooks.refuse(self.pos, rule)); } } true })
                 || { self.pos = p0; false }
-            }) || (matches!(self.peek_byte(), Some(b'>')) && {
-                let p0 = self.pos;
-                (self.eat_byte(b'>') && { let rule = rule!(PcreControl, form = "(?>"); return Err(self.hooks.refuse(self.pos, rule)); })
-                || { self.pos = p0; false }
-            }) || (matches!(self.peek_byte(), Some(b'R')) && {
+            }) || (matches!(self.peek_byte(), Some(b'>')) && self.eat_byte(b'>')) || (matches!(self.peek_byte(), Some(b'R')) && {
                 let p0 = self.pos;
                 (self.eat_byte(b'R') && { let rule = rule!(PcreControl, form = "(?R)"); return Err(self.hooks.refuse(self.pos, rule)); })
                 || { self.pos = p0; false }
@@ -926,13 +1004,13 @@ impl<'s, H: Hooks> Scanner<'s, H> {
         Ok(true)
     }
 
-    fn regex_quantifier_lazy(&mut self) -> Result<bool, String> {
+    fn regex_quantifier_mode(&mut self) -> Result<bool, String> {
         let start = self.pos;
-        let hit = self.eat_byte(b'?');
+        let hit = self.eat_one(|c| c == '?' || c == '+');
         if !hit {
             return Ok(false);
         }
-        self.hooks.regex_quantifier_lazy(start, self.pos)?;
+        self.hooks.regex_quantifier_mode(start, self.pos)?;
         Ok(true)
     }
 

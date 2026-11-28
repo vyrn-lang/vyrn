@@ -1162,6 +1162,11 @@ pub struct RtModule {
     /// would change the load order and so every emitted index. The direct
     /// backend's sweep drops an unreached function's code and data.
     pub always: bool,
+    /// Whether a hand import takes the reserved spellings when no mention links the
+    /// module, because a consumer's own names must not meet its names. `std/regex`
+    /// is no consumer's runtime until a `=~` mentions it, so until then a hand
+    /// import keeps its own spellings and its program emits as it did.
+    pub global: bool,
     /// The functions the link keeps though no body spells them ([`reached`]).
     pub entries: Entries,
 }
@@ -1362,6 +1367,11 @@ runtime_calls! {
 /// The module of the host's waits and the run queue.
 pub const TASK_SPEC: &str = "std/task";
 
+/// The module whose backtracking search `=~` calls over a pattern no DFA matches
+/// ([`crate::regex::BACKTRACK_MATCH`]). A module that holds such a `=~` mentions
+/// [`crate::gen::REGEX_ISLAND`] ([`backtracking_refs`]).
+pub const REGEX_SPEC: &str = "std/regex";
+
 /// The reserved prefix of every `std/task` declaration.
 pub const TASK_PREFIX: &str = "task$";
 
@@ -1416,6 +1426,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: RT_PREFIX,
         desugared: &["toJson", "fromJson"],
         always: false,
+        global: true,
         entries: Entries::Every,
     },
     // `fromJson`'s decoders: the reader, the path arithmetic, the scalar
@@ -1425,6 +1436,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: JSONDEC_PREFIX,
         desugared: &["fromJson"],
         always: false,
+        global: true,
         entries: Entries::Every,
     },
     // `stringFromBytes` is a desugar: only its check ([`STRING_FAULT`]) lives
@@ -1438,6 +1450,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: "text$",
         desugared: &["stringFromBytes"],
         always: true,
+        global: true,
         entries: Entries::Named(&[STRING_FAULT]),
     },
     // The float formatter. Desugared, because `@str` is type-directed and only
@@ -1450,6 +1463,7 @@ pub const RT_MODULES: &[RtModule] = &[
         // `assertEq` renders a mismatched float the way `@str` does.
         desugared: &["@str", "print", "assertEq"],
         always: false,
+        global: true,
         entries: Entries::Named(&[F64_STR]),
     },
     // The run queue, in every program that waits: such a program imports
@@ -1460,6 +1474,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: TASK_PREFIX,
         desugared: &["hostFetch"],
         always: false,
+        global: true,
         entries: Entries::Named(&[
             "task$taskBegin",
             "task$taskSettle",
@@ -1485,6 +1500,16 @@ pub const RT_MODULES: &[RtModule] = &[
             "task$waitFor",
         ]),
     },
+    // The backtracking search, in every program that holds a `=~` over a pattern no
+    // DFA matches: the emitter calls its whole match by the reserved spelling.
+    RtModule {
+        spec: REGEX_SPEC,
+        prefix: "regex$",
+        desugared: &[crate::gen::REGEX_ISLAND],
+        always: false,
+        global: false,
+        entries: Entries::Named(&[crate::regex::BACKTRACK_MATCH]),
+    },
     // The runtime, in every program. `std/mem` enters as `std/runtime`'s import;
     // its row only names its prefix. The emitter's calls are [`RUNTIME_CALLS`],
     // whose rows carry their signatures.
@@ -1493,6 +1518,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: RUNTIME_PREFIX,
         desugared: &[],
         always: true,
+        global: true,
         entries: Entries::Named(&[]),
     },
     RtModule {
@@ -1500,6 +1526,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: MEM_PREFIX,
         desugared: &[],
         always: false,
+        global: true,
         entries: Entries::Named(&[]),
     },
 ];
@@ -2244,7 +2271,7 @@ fn load_modules(
         // program imports by hand is program-global too, and must take the
         // reserved spellings, or a hand-imported `std/json`'s `JStr` sits beside
         // a consumer's own `JStr`.
-        if !wanted && !w.states.contains_key(&target) {
+        if !wanted && (!rt.global || !w.states.contains_key(&target)) {
             continue;
         }
         // A spec can resolve against a root without that file, and `@str` and
@@ -7100,6 +7127,10 @@ fn mentions_runtime(tokens: &[lexer::Token]) -> bool {
     };
     tokens.iter().enumerate().any(|(at, t)| match &t.tok {
         lexer::Tok::Ident(n) => names.contains(n.as_str()),
+        lexer::Tok::TildeMatch => matches!(
+            tokens.get(at + 1).map(|t| &t.tok),
+            Some(lexer::Tok::Str(p)) if crate::regex::backtracks(p)
+        ),
         lexer::Tok::TemplateStr { exprs, .. } if quote(at) => exprs.iter().any(|h| {
             let word = |c: char| c.is_alphanumeric() || c == '_';
             h.src.contains("\\{") || h.src.split(|c| !word(c)).any(|w| names.contains(w))
@@ -7907,6 +7938,15 @@ impl BodyVisit<'_> for RefNames<'_> {
                     self.out.push((name.clone(), *line, "name"));
                 }
             }
+            Expr::Binary {
+                op: BinOp::Match,
+                rhs,
+                line,
+                ..
+            } if backtracking(rhs) => {
+                let island = crate::gen::REGEX_ISLAND.to_string();
+                self.out.push((island, *line, "operator"));
+            }
             _ => {}
         }
         true
@@ -7920,6 +7960,26 @@ impl BodyVisit<'_> for RefNames<'_> {
                 self.out.push((v.clone(), line, "variant"));
             }
         }
+    }
+}
+
+/// Whether `e` is a pattern literal that [`crate::regex::backtracks`].
+fn backtracking(e: &Expr) -> bool {
+    matches!(e, Expr::Str(p, _) if crate::regex::backtracks(p))
+}
+
+/// Whether the predicate `e` holds a `=~` over a pattern that backtracks: a type
+/// predicate is `&&`, `||` and `!` over its clauses, which no body walk reaches.
+fn backtracking_refs(e: &Expr) -> bool {
+    match e {
+        Expr::Binary {
+            op: BinOp::Match,
+            rhs,
+            ..
+        } => backtracking(rhs),
+        Expr::Binary { lhs, rhs, .. } => backtracking_refs(lhs) || backtracking_refs(rhs),
+        Expr::Unary { expr, .. } => backtracking_refs(expr),
+        _ => false,
     }
 }
 
@@ -8276,6 +8336,9 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
     }
     for t in &p.type_decls {
         add_type(&t.base, &mut out, &mut totals);
+        if t.predicate.as_ref().is_some_and(backtracking_refs) {
+            out.insert(crate::gen::REGEX_ISLAND.to_string());
+        }
     }
     for g in &p.globals {
         if let Some(t) = &g.ty {

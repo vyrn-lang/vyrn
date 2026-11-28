@@ -44,8 +44,13 @@ fn viaFirst(xs: Array<Int64>) -> Int64 {
     return total(xs) + first(xs)
 }
 
+fn doubled(s: String) -> Bool {
+    return s =~ "(\\w+)-\\1"
+}
+
 fn main() -> Int64 {
     let xs: Array<Int64> = [1, 2, 3]
     print(depth(3) + fails(1) + viaFirst(xs) + apply(n -> n + 1, 1) + tick())
+    print(doubled("a-a"))
     return 0
 }
