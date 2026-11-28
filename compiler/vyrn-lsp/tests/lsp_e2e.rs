@@ -7348,6 +7348,70 @@ fn lines(text: String) -> Int64 {
     assert!(col.contains("line: Int64"), "{col}");
 }
 
+/// A type hint's part for a type another file declares carries the range of the type's name
+/// there, and a definition asked at its start answers: an editor's click on the part asks
+/// there.
+#[test]
+fn a_type_hint_part_of_a_foreign_type_lands_on_its_name() {
+    let src = "import { syntax, SyntaxError } from \"std/syntax\"
+import * as parsed from syntax(\"./calc.syntax\")
+
+fn lines(text: String) -> Int64 {
+    let mut n = 0
+    match parsed.parseLedger(text) {
+        Ok(l) => {}
+        Err(errors) => {
+            for e in errors {
+                n = n + e.line
+            }
+        }
+    }
+    return n
+}
+";
+    let (_, uri, mut client) = open_in_dsl("foreign_part", "probe.vyrn", Some(src));
+    let id = serde_json::json!("foreign-part");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/inlayHint",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 99, "character": 0 } }
+        }
+    }));
+    let resp = client.read_response(&id);
+    let parts = (resp["result"].as_array().expect("hints").iter())
+        .filter_map(|h| h["label"].as_array())
+        .flatten();
+    let part = (parts.into_iter())
+        .find(|p| p["value"] == "SyntaxError")
+        .expect("a SyntaxError part")
+        .clone();
+    let at = &part["location"];
+    let target = at["uri"].as_str().expect("a location").to_string();
+    assert!(target.ends_with("std/syntax.vyrn"), "{part}");
+    let path = lsp_types::Url::parse(&target)
+        .unwrap()
+        .to_file_path()
+        .unwrap();
+    let text = std::fs::read_to_string(&path).expect("std/syntax.vyrn");
+    let (line, from, to) = (
+        at["range"]["start"]["line"].as_u64().unwrap() as usize,
+        at["range"]["start"]["character"].as_u64().unwrap() as usize,
+        at["range"]["end"]["character"].as_u64().unwrap() as usize,
+    );
+    let named = text.lines().nth(line).unwrap_or("").get(from..to);
+    assert_eq!(named, Some("SyntaxError"), "{part}");
+    did_open(&mut client, &target, "vyrn", &text);
+    let _ = read_diags_for(&mut client, "syntax.vyrn");
+    let id = serde_json::json!("foreign-def");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/definition",
+        "params": { "textDocument": { "uri": target }, "position": at["range"]["start"] }
+    }));
+    let def = client.read_response(&id)["result"].clone();
+    assert!(!def.is_null(), "{def}");
+}
+
 /// The definition response at the first `needle` of `text`, the cursor `skip` characters in.
 fn definition_at(
     client: &mut LspClient,

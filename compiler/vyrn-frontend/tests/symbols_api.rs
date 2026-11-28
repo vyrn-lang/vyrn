@@ -530,7 +530,11 @@ fn analyze_linked_resolves_imports() {
         .expect("imported symbol indexed");
     assert_eq!(d.file.as_deref(), Some("lib.vyrn"));
     assert_eq!(d.line, 1, "declaration line in the imported file");
-    assert_eq!(d.col, 0, "foreign columns are unknown (whole-line)");
+    assert_eq!(
+        (d.col, d.end_col),
+        (11, 17),
+        "the name in the imported file"
+    );
 
     // Line 4: `    return double(21)`, col 13 is inside `double`.
     let r = resolve(&a, 4, 13).expect("call site resolves");
