@@ -342,6 +342,8 @@ compile, except `--contract`.
   proved check prints nothing. A call into a lemma
   that the emitter keeps reads ``call kept: `down(..)`, because it is
   recursive``, with the first rule the callee fails (language.md, Proofs).
+  A `=~` over a pattern with a backreference, an atomic group or a possessive
+  repeat reads `` `=~` backtracks ``, with why its time has no linear bound.
   A call into a function of
   another file counts that function's allocations at the calling line. A
   function with nothing to report is left out. The LSP's hover keeps the
@@ -571,9 +573,9 @@ check takes the span of the row it guards.
 The client's `hintStyle` initialization option picks how a row reads. In the
 `compact` style, the default, a row is one glyph with its count in superscript;
 a count of one has none. The glyphs are `vyrn-lsp`'s `cost::GLYPHS`, one per
-verb: copies, allocates, enters, grows, check kept, check refused and call
-kept, and the proof glyph for a check the compiler proved and a call the
-emitter erases, which only this style shows; `cost::LAST_RUN` precedes the
+verb: copies, allocates, enters, grows, check kept, check refused, call
+kept and backtracks, and the proof glyph for a check the compiler proved and
+a call the emitter erases, which only this style shows; `cost::LAST_RUN` precedes the
 blocks of the last run. The proof glyph's hover is resolved on demand
 (`inlayHint/resolve`): the server analyzes the document once more with the
 proofs traced (`vyrn_lower::JUDGE_PROOFS`) and adds the proofs of the line as

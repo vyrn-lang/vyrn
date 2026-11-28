@@ -846,7 +846,7 @@ compiler/vyrn-cli/tests/checker-rules.vyrn	0	cbf29ce484222325	20	18	aadec79d88e8
 compiler/vyrn-cli/tests/cost/clauses.vyrn	0	cbf29ce484222325	20	18	209dac0cbc5bad32
 compiler/vyrn-cli/tests/cost/kernels.vyrn	0	cbf29ce484222325	20	17	354be9e60a907907
 compiler/vyrn-cli/tests/cost/reasons.vyrn	0	cbf29ce484222325	20	16	a090ed56af2e44ff
-compiler/vyrn-cli/tests/cost/traps.vyrn	0	cbf29ce484222325	20	17	384a84c259b5740d
+compiler/vyrn-cli/tests/cost/traps.vyrn	0	cbf29ce484222325	20	18	b2b0b5cc01835f72
 compiler/vyrn-cli/tests/fetch/roundtrip.vyrn	0	cbf29ce484222325	20	17	544fe77e29bca689
 compiler/vyrn-cli/tests/fetch/tls.vyrn	0	cbf29ce484222325	20	14	0189cd48d0a17a6c
 compiler/vyrn-cli/tests/proved/core/bad.vyrn	0	cbf29ce484222325	20	16	3e78f102cd75ff56

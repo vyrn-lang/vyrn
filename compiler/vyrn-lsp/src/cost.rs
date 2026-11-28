@@ -29,7 +29,7 @@ const PROVED: &str = "\u{21d2}";
 
 /// Whether a run counts blocks for a row of `verb`.
 fn blocks(verb: &str) -> bool {
-    !matches!(verb, KEPT | "check refused" | "call kept") && !PROOFS.contains(&verb)
+    !matches!(verb, KEPT | "check refused" | "call kept" | "backtracks") && !PROOFS.contains(&verb)
 }
 
 /// The last run of the document at `path`, if its stamp is the buffer's `src` and the modules
@@ -77,7 +77,7 @@ fn tooltip(f: &FnCost, row: &CostLine, run: Option<&Sites>) -> String {
 
 /// Each verb's compact glyph and hover title, keyed by [`CostLine::verb`]: the one table of
 /// the editor's cost glyphs. [`LAST_RUN`] marks the blocks of the last profile.
-const GLYPHS: [(&str, &str, &str); 9] = [
+const GLYPHS: [(&str, &str, &str); 10] = [
     ("copies", "\u{29c9}", "copies"),
     ("allocates", "\u{229e}", "allocates"),
     ("enters", "\u{2198}", "enters an allocating function"),
@@ -87,6 +87,7 @@ const GLYPHS: [(&str, &str, &str); 9] = [
     ("call kept", "\u{21ba}", "call kept"),
     (PROOFS[0], PROVED, "check proved"),
     (PROOFS[1], PROVED, "call erased"),
+    ("backtracks", "\u{21bb}", "backtracks"),
 ];
 
 /// The glyph of the blocks the last run made on a line.

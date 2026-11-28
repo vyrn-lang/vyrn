@@ -6503,6 +6503,26 @@ fn compact_hints(client: &mut LspClient, uri: &str) -> Vec<(u64, String, String)
         .collect()
 }
 
+/// A `=~` over a pattern with a backreference has a glyph of its own, whose hover says it
+/// backtracks.
+#[test]
+fn a_backtracking_match_has_its_glyph() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vyrn-cli/tests/cost/traps.vyrn");
+    let text = std::fs::read_to_string(&path).expect("tests/cost/traps.vyrn");
+    let (mut client, uri) = open_with_style(&plain(&path), &text, "compact");
+    let hints = compact_hints(&mut client, &uri);
+    let line: Vec<&(u64, String, String)> = hints.iter().filter(|h| h.0 == 48).collect();
+    assert_eq!(line.len(), 1, "{hints:?}");
+    assert!(line[0].1.contains('\u{21bb}'), "{line:?}");
+    assert!(
+        line[0]
+            .2
+            .contains("`=~` backtracks: its pattern has a backreference"),
+        "{line:?}"
+    );
+}
+
 /// In the compact style each row is a glyph with its count; the rows are the full style's.
 #[test]
 fn knucleotide_lines_carry_their_cost_as_glyphs() {
