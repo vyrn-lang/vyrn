@@ -97,40 +97,6 @@ export fn intStr(v: Int64, signed: Bool) -> String {
     }
 }
 
-/// `parse_i64`: the generator host's read of an `Int64` argument
-/// (`loader::GEN_HOST`), which links no `std/int64`. It states the rule
-/// `std/int64`'s `parse` states. An optional `-`, then digits, all consumed;
-/// anything else is `None`. `acc * 10 + d` wraps, so `"9223372036854775808"` is
-/// `Int64.min` on every engine (`examples/numbytes.vyrn`). Unlike `strI64`, it
-/// reads no `+` and does not stop early.
-export fn parseV(s: String) -> Option<Int64> {
-    let mut p = addr(s)
-    let mut neg = false
-    if load8(p) == '-' {
-        neg = true
-        p = p + 1
-    }
-    if load8(p) == 0 {
-        return None
-    }
-    let mut acc: Int64 = 0
-    while true {
-        let c = load8(p)
-        if c == 0 {
-            break
-        }
-        if c < '0' || c > '9' {
-            return None
-        }
-        acc = acc * 10 + Int64(c) - 48
-        p = p + 1
-    }
-    if neg {
-        acc = 0 - acc
-    }
-    return Some(acc)
-}
-
 /// `str_i64`: `strtoll(p, 0, 10)` without whitespace skip or clamp: an optional
 /// sign, then digits up to the first non-digit. The only callers read
 /// `VYRN_FIXED_TIME` and `VYRN_FIXED_SEED`.

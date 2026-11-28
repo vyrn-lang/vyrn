@@ -153,7 +153,8 @@ the playground serves an embedded `std/`. The loader:
   calls by name (`loader::RUNTIME_CALLS`, the one table both read) and every
   function a reached builtin routes to. A generator's own load also roots each
   builtin its engine calls in what it adds after the load (`loader::GEN_HOST`,
-  which `vyrn-genwasm` spells its calls by);
+  which `vyrn-genwasm` spells its calls by), and links `std/int64`, whose
+  `parse` reads an `Int64` argument;
 - runs each generator annotation of a module after its imports load
   (`annotate`), on a `TypeCode` and a `ModuleInterface` the module's written
   declarations and its loaded imports give (`schema_reflect::annotated_lit`),

@@ -1209,8 +1209,11 @@ pub struct GenHost {
     pub args: &'static str,
     pub at: &'static str,
     pub print: &'static str,
-    pub parse: &'static str,
     pub push: &'static str,
+    /// The member of a language type's home that reads an `Int64` argument:
+    /// a generator's own load links that home unmentioned, and the engine
+    /// calls the member by its linked name ([`Program::home_member`]).
+    pub parse: (&'static str, &'static str),
 }
 
 /// The one [`GenHost`].
@@ -1218,21 +1221,22 @@ pub const GEN_HOST: GenHost = GenHost {
     args: "args",
     at: "@at",
     print: "print",
-    parse: "runtime$parseV",
     push: "@push",
+    parse: ("Int64", "parse"),
 };
 
 impl GenHost {
-    /// Every call, read by destructuring, so a new field cannot be left out.
-    pub const fn calls(self) -> [&'static str; 5] {
+    /// Every call spelled as linked, read by destructuring, so a new field
+    /// cannot be left out. The home member has no fixed spelling.
+    pub const fn calls(self) -> [&'static str; 4] {
         let GenHost {
             args,
             at,
             print,
-            parse,
             push,
+            parse: _,
         } = self;
-        [args, at, print, parse, push]
+        [args, at, print, push]
     }
 }
 
@@ -2275,7 +2279,16 @@ fn load_modules(
     // A language type's home links on a mention ([`crate::prelude::HOMES`]):
     // a `T.f(..)` head naming the type, or a dot call no loaded module
     // declares, which only a home can answer.
-    let (heads, orphans) = home_mentions(&w.modules[..mentioning]);
+    // A generator's own load links the home its engine reads an `Int64`
+    // argument through ([`GEN_HOST`]), where the root, which no load cuts,
+    // exports a gen fn that takes one.
+    let (mut heads, orphans) = home_mentions(&w.modules[..mentioning]);
+    let takes_int =
+        |f: &Function| f.is_gen && f.exported && f.params.iter().any(|p| p.ty == Type::Int);
+    let root = w.modules.iter().find(|m| m.key == root_key);
+    if opts.nest.gen.is_some() && root.is_some_and(|m| m.program.functions.iter().any(takes_int)) {
+        heads.push(GEN_HOST.parse.0);
+    }
     for (ty, spec) in crate::prelude::HOMES {
         if !heads.contains(ty) && orphans.is_empty() {
             continue;
@@ -7234,6 +7247,7 @@ fn parse_reached(
     // spelling, which the link gives it after this walk.
     if opts.nest.gen.is_some() {
         names.extend(GEN_HOST.calls().map(unprefixed));
+        names.push(GEN_HOST.parse.1);
     }
     let mut work: Vec<(usize, usize)> = Vec::new();
     // Each row reached, by module and row, and the body it takes: parsed here,
@@ -7536,6 +7550,7 @@ fn keep_reached(program: &mut Program, gen: &str, std: bool) {
     }
     roots.extend(calls.iter().map(String::as_str));
     roots.extend(GEN_HOST.calls());
+    roots.extend(program.home_member(GEN_HOST.parse.0, GEN_HOST.parse.1));
     for p in program
         .type_decls
         .iter()

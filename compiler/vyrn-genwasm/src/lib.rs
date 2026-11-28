@@ -483,19 +483,16 @@ fn wrapper_program(program: &Program) -> Option<Program> {
             col: 0,
         },
     ];
+    let (ty, name) = GEN_HOST.parse;
+    let parse = p.home_member(ty, name).map(str::to_string);
     for f in p.functions.iter().filter(|f| dispatchable(f)) {
-        let call = Expr::call(
-            &f.name,
-            f.params
-                .iter()
-                .enumerate()
-                .map(|(i, par)| match i < reflected(f) {
-                    true => Expr::var(format!("@reflected{i}"), 0),
-                    false => at_type(argv(i + 1 - reflected(f)), &par.ty),
-                })
-                .collect(),
-            0,
-        );
+        let args = (f.params.iter().enumerate())
+            .map(|(i, par)| match i < reflected(f) {
+                true => Some(Expr::var(format!("@reflected{i}"), 0)),
+                false => at_type(argv(i + 1 - reflected(f)), &par.ty, parse.as_deref()),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let call = Expr::call(&f.name, args, 0);
         let code = match returns_code(f) {
             true => call,
             false => Expr::call(vyrn_codegen::GEN_CODE, vec![call], 0),
@@ -566,18 +563,20 @@ pub fn prepare(p: &mut Program) -> Option<()> {
 // decoders are ordinary Vyrn, so a change to record lowering cannot make the
 // two walks disagree.
 
-/// One `args()[i]` read back at the parameter's declared type. The `None` arm
-/// of `parse` is unreachable, because [`dispatchable`] admits only what argv
-/// carries; its `0` gives the `match` a type.
-fn at_type(e: Expr, ty: &Type) -> Expr {
+/// One `args()[i]` read back at the parameter's declared type, an `Int64`
+/// by `parse`, the linked name of the [`GEN_HOST`] home member; `None` where
+/// one is needed and the load linked none. The `None` arm of `parse` is
+/// unreachable, because [`dispatchable`] admits only what argv carries; its
+/// `0` gives the `match` a type.
+fn at_type(e: Expr, ty: &Type, parse: Option<&str>) -> Option<Expr> {
     use vyrn_frontend::ast::{ArmBody, Binder, MatchArm, Pattern};
     if *ty == Type::Str {
-        return e;
+        return Some(e);
     }
-    Expr::Match {
+    Some(Expr::Match {
         id: Id::NEW,
         stmt_pos: false,
-        scrutinee: Box::new(Expr::call(GEN_HOST.parse, vec![e], 0)),
+        scrutinee: Box::new(Expr::call(parse?, vec![e], 0)),
         arms: vec![
             MatchArm {
                 pattern: Pattern::Variant("Some".into(), vec![Binder::synthetic("v")], Id::NEW),
@@ -589,7 +588,7 @@ fn at_type(e: Expr, ty: &Type) -> Expr {
             },
         ],
         line: 0,
-    }
+    })
 }
 
 /// Appends an entry point per reachable structured builtin, plus its decoders.
