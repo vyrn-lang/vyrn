@@ -90,6 +90,20 @@ fn compile(pattern: String) -> Result<Regex, String>
 Compiles `pattern`, or says what is wrong with it. Compile once and search
 often: the whole cost of a pattern is paid here.
 
+## matchesWhole
+
+```vyrn
+fn matchesWhole(hay: String, pattern: String) -> Bool
+```
+
+Whether all of `hay` matches `pattern`, which the compiler has checked: `=~`
+over a pattern only the backtracking search matches calls it. It traps past the
+step budget, as a search does.
+
+ponytail: compiles the pattern on every call. A memo in module state costs
+every search of this module 22% more fuel (regexredux, 2026-11-28); a memo the
+emitter owns, one slot per pattern, if a program matches often.
+
 ## find
 
 ```vyrn

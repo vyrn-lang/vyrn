@@ -227,6 +227,7 @@ compiler/vyrn-cli/tests/check/a_record_type_name_is_not_a_value.vyrn	0	cbf29ce48
 compiler/vyrn-cli/tests/check/a_recursive_private_helper_keeps_its_summary.vyrn	0	cbf29ce484222325	20	19	8d81cc48127b4ccb
 compiler/vyrn-cli/tests/check/a_refinement_alias_needs_a_scalar_base.vyrn	0	cbf29ce484222325	20	19	f6d61477d03069e9
 compiler/vyrn-cli/tests/check/a_refinement_no_string_satisfies_is_refused.vyrn	0	cbf29ce484222325	20	19	45bce9bb2016c804
+compiler/vyrn-cli/tests/check/a_refinement_over_a_backreference_is_checked_at_run_time.vyrn	0	cbf29ce484222325	20	15	725ae18ff1bc65a2
 compiler/vyrn-cli/tests/check/a_refinement_predicate_must_be_bool.vyrn	0	cbf29ce484222325	20	18	cd594c3a6504bdfa
 compiler/vyrn-cli/tests/check/a_refusal_in_a_tagged_hole_points_at_the_tag.vyrn	1	d9a5d621f99564b3	20	20	e2ef2e184d78fc17
 compiler/vyrn-cli/tests/check/a_refutable_let_needs_a_named_scrutinee.vyrn	1	90a9de8fd91dad58	20	20	f905190aa7e06262
@@ -1593,7 +1594,7 @@ std/num.vyrn	0	cbf29ce484222325	20	18	1244a8ed3530313c
 std/openapi.vyrn	0	cbf29ce484222325	20	17	34edf93e34b6a193
 std/order.vyrn	0	cbf29ce484222325	20	20	9f8dce88ae707594
 std/random.vyrn	0	cbf29ce484222325	20	16	b5c799d0b8dfb53c
-std/regex.vyrn	0	cbf29ce484222325	20	15	3f830a86e6a252d0
+std/regex.vyrn	0	cbf29ce484222325	20	18	7097b36b610526e0
 std/rpc.editor.vyrn	0	cbf29ce484222325	20	15	575d7f57c01048cb
 std/rpc.vyrn	0	cbf29ce484222325	20	17	90a8a8d7138c91a4
 std/runtime.vyrn	0	cbf29ce484222325	20	15	9b6155202bf58172

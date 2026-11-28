@@ -47,6 +47,9 @@ pub enum Trap {
     Unbuilt(String),
     /// A call into a function that is not trap-free.
     Callee(String),
+    /// A `=~` over a pattern no DFA matches, whose backtracking search traps
+    /// past its step budget.
+    Backtracks,
 }
 
 /// Why a function is not trap-free: a [`Trap`] and its source line.
@@ -68,6 +71,7 @@ impl Cause {
             Trap::Extern(f) => (format!("it calls the extern `{f}`"), ""),
             Trap::Unbuilt(f) => (format!("it calls `{f}`"), ", which has no body to judge"),
             Trap::Callee(f) => (format!("it calls `{f}`"), ", which is not trap-free"),
+            Trap::Backtracks => ("it matches a pattern that backtracks".into(), ""),
         };
         match at && self.line > 0 {
             true => format!("{what} at line {}{then}", self.line),
@@ -318,6 +322,9 @@ impl<'w> Graph<'w> {
                 St::Let(_, rhs) | St::Do { rhs, .. } => rhs,
                 _ => continue,
             };
+            if backtracks(rhs) {
+                cause(Trap::Backtracks, last);
+            }
             let Rhs::Call { callee, .. } = rhs else {
                 continue;
             };
@@ -379,6 +386,18 @@ impl<'w> Graph<'w> {
                 }
             })
             .collect()
+    }
+}
+
+/// Whether `rhs` is a `=~` over a pattern that backtracks
+/// ([`vyrn_frontend::regex::backtracks`]).
+pub fn backtracks(rhs: &Rhs) -> bool {
+    use vyrn_frontend::core::{Lit, Op, Val};
+    match rhs {
+        Rhs::Prim(Op::Bin(vyrn_frontend::ast::BinOp::Match), args, _) => {
+            matches!(args.get(1), Some(Val::Lit(Lit::Str(p))) if vyrn_frontend::regex::backtracks(p))
+        }
+        _ => false,
     }
 }
 

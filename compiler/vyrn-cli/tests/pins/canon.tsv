@@ -10,7 +10,7 @@ members OneReturn	68
 unfit Bool functions Budget	1
 unfit Bool functions Effect	13
 unfit Bool functions Loop	88
-unfit Bool functions Switch	31
+unfit Bool functions Switch	32
 unfit Bool functions Writes	14
 unfit lambdas Effect	1
 predicates as 4.5 counts them, across the corpus: members	73

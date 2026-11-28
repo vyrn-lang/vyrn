@@ -1966,6 +1966,24 @@ impl Dfa {
     }
 }
 
+/// Whether `pattern` parses and is no regular language: `=~` over it calls
+/// [`BACKTRACK_MATCH`] at run time. It builds no DFA, and it parses only a pattern
+/// that holds what each form that backtracks starts with: a backreference's `\`
+/// and a digit, `g` or `k`, `(?P=`, `(?>`, or a `+` after a repeat or a count.
+pub fn backtracks(pattern: &str) -> bool {
+    let b = pattern.as_bytes();
+    let starts = (1..b.len()).any(|i| match (b[i - 1], b[i]) {
+        (b'\\', b'1'..=b'9' | b'g' | b'k') | (b'*' | b'+' | b'?' | b'}', b'+') => true,
+        (b'(', b'?') => b[i..].starts_with(b"?P=") || b[i..].starts_with(b"?>"),
+        _ => false,
+    });
+    starts && matches!(parse(pattern), Err(Refusal::NotRegular))
+}
+
+/// The reserved spelling of `std/regex`'s whole match, which `=~` over a pattern
+/// that [`backtracks`] calls with the pattern's text.
+pub const BACKTRACK_MATCH: &str = "regex$matchesWhole";
+
 /// Compiles a pattern to a DFA, or returns a readable error.
 ///
 /// Memoized, errors included, once per process: the checker asks for the same

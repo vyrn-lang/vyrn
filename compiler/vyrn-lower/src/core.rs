@@ -709,6 +709,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech, islanded: bool) -
                 // holds the grammar.
                 Expr::Str(pat, _) => match vyrn_frontend::regex::compile(pat).err()? {
                     vyrn_frontend::regex::Refusal::Grammar(_) if islanded => return None,
+                    vyrn_frontend::regex::Refusal::NotRegular => return None,
                     err => {
                         let err = err.to_string();
                         rule!(InvalidRegex, pat, err).render()

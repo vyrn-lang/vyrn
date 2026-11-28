@@ -2320,12 +2320,36 @@ fn backMatch(re: Regex, hay: Array<UInt8>, from: Int64, bt: modify Back) -> Opti
         if end >= 0 {
             return Some(Match { at: at, end: end })
         }
-        if bt.steps > bt.budget {
-            panic("a backtracking pattern ran past its step budget of \{bt.budget} steps")
-        }
+        trapPastBudget(bt)
         at = at + 1
     }
     return None
+}
+
+/// Traps once the steps of `bt` pass its budget.
+fn trapPastBudget(bt: Back) {
+    if bt.steps > bt.budget {
+        panic("a backtracking pattern ran past its step budget of \{bt.budget} steps")
+    }
+}
+
+/// Whether all of `hay` matches `pattern`, which the compiler has checked: `=~`
+/// over a pattern only the backtracking search matches calls it. It traps past the
+/// step budget, as a search does.
+///
+/// ponytail: compiles the pattern on every call. A memo in module state costs
+/// every search of this module 22% more fuel (regexredux, 2026-11-28); a memo the
+/// emitter owns, one slot per pattern, if a program matches often.
+export fn matchesWhole(hay: String, pattern: String) -> Bool {
+    let re = match compile(pattern) {
+        Ok(r) => r,
+        Err(why) => panic("`\{pattern}`: \{why}"),
+    }
+    let raw = bytes(hay)
+    let mut bt = newBack(re, raw, lookBits(re, raw))
+    let end = backRun(re, patternStart(re), raw, 0, raw.length, bt)
+    trapPastBudget(bt)
+    return end == raw.length
 }
 
 /// The leftmost-first match that starts at or after `from`, or `None`. A forward
@@ -3424,6 +3448,15 @@ fn backVerdicts(re: Regex, hay: String) -> Array<String> {
         from = from + 1
     }
     return out
+}
+
+test "a whole match backtracks where the pattern needs it" {
+    assert(matchesWhole("ab-ab", "(\\w+)-\\1"))
+    assert(!matchesWhole("ab-abc", "(\\w+)-\\1"))
+    assert(!matchesWhole("ab", "(?>a|ab)"))
+    assert(matchesWhole("", "(a?)\\1"))
+    assert(matchesWhole("aa", "(a?)\\1"))
+    assert(!matchesWhole("a", "(a)\\1"))
 }
 
 test "an atomic group and a possessive repeat keep what they took" {

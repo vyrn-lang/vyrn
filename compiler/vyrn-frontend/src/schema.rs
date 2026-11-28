@@ -600,7 +600,11 @@ fn convert(
             // an ECMA-262 search does, and `=~` matches whole.
             let mut add_pattern = |p: &str| -> Result<(), String> {
                 let whole = format!("[\\s\\S]*(?:{p})[\\s\\S]*");
-                crate::regex::compile(&whole).map_err(|e| {
+                let checked = match crate::regex::compile(&whole) {
+                    Err(crate::regex::Refusal::NotRegular) => Ok(()),
+                    other => other.map(|_| ()),
+                };
+                checked.map_err(|e| {
                     format!(
                         "{module}: type `{name}`: `pattern` `{p}` is outside Vyrn's \
                          regex subset: {e}"
