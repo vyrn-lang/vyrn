@@ -24,7 +24,7 @@ RegexPattern = RegexAlt (eof / ^StrayParen)
 
 nest RegexAlt = branches:RegexBranch (regexAlternation branches:RegexBranch)*
 RegexBranch = (!('|' / ')' / eof) pieces:RegexPiece)*
-RegexPiece = atom:RegexAtom (op:regexQuantifier / count:RegexQuantifierCount)? lazy:regexQuantifierLazy?
+RegexPiece = atom:RegexAtom (op:regexQuantifier / count:RegexQuantifierCount)? mode:regexQuantifierMode?
 RegexQuantifierCount = '{' (regexNumber / ^CountNumber)
                        ('}' / ',' ('}' / (regexNumber / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
 
@@ -83,13 +83,14 @@ regexGroupFlags = '(?' [ims]* ('-' [ims]+)? ')'
 regexComment = '(?#' (!')' .)* (')' / ^GroupUnclosed)
 
 // A group captures, or holds a form after `(?`: `:` does not capture, a name captures
-// by it, and flags apply inside. Every other form is refused.
+// by it, `>` keeps the first way its body matches, and flags apply inside. Every
+// other form is refused.
 regexGroupEnd = ')'
 regexAlternation = '|'
 regexGroupOpen = '(' ('*' ^PcreControl(form='(*..)') / '?' regexGroupForm)?
 regexGroupForm = ':' / 'P<' regexName ('>' / ^GroupName) / '\'' regexName ('\'' / ^GroupName)
                  / '<' regexName ('>' / ^GroupName)
-                 / '>' ^PcreControl(form='(?>') / 'R' ^PcreControl(form='(?R)')
+                 / '>' / 'R' ^PcreControl(form='(?R)')
                  / [0-9+] ^PcreControl(form='(?N)') / '-' [0-9] ^PcreControl(form='(?N)')
                  / '&' ^PcreControl(form='(?&') / '(' ^PcreControl(form='(?(')
                  / 'C' ^PcreControl(form='(?C') / '|' ^PcreControl(form='(?|')
@@ -98,8 +99,9 @@ regexGroupForm = ':' / 'P<' regexName ('>' / ^GroupName) / '\'' regexName ('\'' 
 regexFlag = [ims] / &[A-Za-z] ^FlagUnknown(f=.)
 regexName = [A-Za-z_] [A-Za-z0-9_]* / ^GroupName
 regexQuantifier = '*' / '+' / '?'
-// After a repeat or a count, `?` makes it lazy: no atom takes a `?`.
-regexQuantifierLazy = '?'
+// After a repeat or a count, `?` makes it lazy and `+` possessive: it keeps what it
+// took. No atom takes a `?` or a `+`.
+regexQuantifierMode = '?' / '+'
 
 // An escape is meaningful or refused. In and out of a class it is a shorthand, a
 // control, a code point or ASCII punctuation, which stands for itself.

@@ -27,13 +27,16 @@ back to its start: one table read per byte.
 group opened before it, and `\k<n>`, `\k'n'`, `\k{n}` and `(?P=n)` by name. A
 backreference matches the text its group spans, or the empty string where the
 group has not closed or took no part; under `i` it folds ASCII case. A reference
-to a group the pattern does not have is refused. A search of a pattern with a
-backreference backtracks from each offset in turn, which takes time exponential
-in the pattern in the worst case, so one call of `find`, `countMatches`,
-`replaceAll` or `captures` takes at most 1000000 steps and 1000 more per byte of
-the haystack, and past them it traps with `a backtracking pattern ran past its
-step budget of N steps`. A repeat that comes back to its loop at the offset it
-left it ends there, as a thread the NFA drops.
+to a group the pattern does not have is refused. `(?>..)` is an atomic group,
+which keeps the first way its body matches, and a `+` after a repeat or a count
+makes it possessive, an atomic group around it. A search of a pattern with a
+backreference, an atomic group or a possessive repeat backtracks from each
+offset in turn, which takes time exponential in the pattern in the worst case,
+so one call of `find`, `countMatches`, `replaceAll` or `captures` takes at most
+1000000 steps and 1000 more per byte of the haystack, and past them it traps
+with `a backtracking pattern ran past its step budget of N steps`. A repeat
+that comes back to its loop at the offset it left it ends there, as a thread
+the NFA drops.
 
 `(?=..)`, `(?!..)`, `(?<=..)` and `(?<!..)` look ahead and behind, nested to any
 depth, and see the whole text, before `from` too. `^` and `$` are the text's ends,

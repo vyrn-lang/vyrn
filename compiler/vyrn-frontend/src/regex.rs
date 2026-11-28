@@ -6,11 +6,12 @@
 //! The language is `std/regex.syntax`, which `std/regex` reads too, and the
 //! pattern is matched whole. [`grammar`] is its parser, and [`Build`] makes the
 //! tree from its matches. Counted repetition expands structurally with bounds
-//! capped at 255. A pattern with a backreference is no regular language: it has
-//! no DFA, and [`compile`] answers [`Refusal::NotRegular`]. Every construct means what
-//! ECMA-262 means on ASCII (`.` excludes `\n` and `\r`), so a pattern round-trips
-//! to a JSON Schema `pattern`. A literal, a class member, `.` and a negated class
-//! are code points, and the DFA reads their UTF-8 bytes.
+//! capped at 255. A pattern with a backreference, an atomic group or a possessive
+//! repeat has no DFA, and [`compile`] answers [`Refusal::NotRegular`]. Every
+//! construct means what ECMA-262 means on ASCII (`.` excludes `\n` and `\r`),
+//! so a pattern round-trips to a JSON Schema `pattern`. A literal, a class
+//! member, `.` and a negated class are code points, and the DFA reads their
+//! UTF-8 bytes.
 //!
 //! The DFA is exact for lookahead and lookbehind too, nested to any depth, so a
 //! finite string type over a pattern with an assertion is proved by containment
@@ -235,6 +236,8 @@ struct Build<'a> {
     /// The group each backreference names, by number or by name: the builder checks
     /// them once the pattern has numbered every group.
     refs: Vec<Backref>,
+    /// Whether the pattern holds an atomic group or a possessive repeat.
+    atomic: bool,
 }
 
 /// The group a backreference names.
@@ -356,6 +359,7 @@ impl Hooks for Build<'_> {
         if name.is_some() || t.len() == 1 {
             self.groups += 1;
         }
+        self.atomic |= t == b"(?>";
         self.flags.push(flags);
         Ok(())
     }
@@ -580,6 +584,13 @@ impl Hooks for Build<'_> {
         Ok(())
     }
 
+    /// A possessive repeat is an atomic group around its term; a lazy one means
+    /// what the greedy one means, for a whole match has one language.
+    fn regex_quantifier_mode(&mut self, start: usize, _end: usize) -> Result<(), String> {
+        self.atomic |= self.b[start] == b'+';
+        Ok(())
+    }
+
     /// A count, at most 255.
     fn regex_number(&mut self, start: usize, end: usize) -> Result<(), String> {
         let v = String::from_utf8_lossy(&self.b[start..end])
@@ -683,9 +694,10 @@ fn say(row: &str, holes: &[(&str, &str)]) -> String {
 
 /// Why a pattern has no DFA: a row the grammar refuses with, which the island check
 /// of a `=~` literal states, or one the builder raises from the tree, each in the
-/// catalogue's sentence; or a pattern that is no regular language, because it holds
-/// a backreference, which only `std/regex`'s backtracking path matches. The builder
-/// alone states its DFA state limit.
+/// catalogue's sentence; or a pattern whose language the backtracking order states,
+/// because it holds a backreference, an atomic group or a possessive repeat, which
+/// only `std/regex`'s backtracking search matches. The builder alone states its DFA
+/// state limit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     Grammar(String),
@@ -697,7 +709,9 @@ impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Refusal::Grammar(s) | Refusal::Builder(s) => f.write_str(s),
-            Refusal::NotRegular => f.write_str("a backreference, which no DFA matches"),
+            Refusal::NotRegular => f.write_str(
+                "a backreference, an atomic group or a possessive repeat, which no DFA matches",
+            ),
         }
     }
 }
@@ -717,6 +731,7 @@ fn parse(pattern: &str) -> Result<Re, Refusal> {
         looks: 0,
         groups: 0,
         refs: Vec::new(),
+        atomic: false,
     };
     let mut scanner = grammar::Scanner::new(pattern, build);
     if let Err(why) = scanner._regex_pattern() {
@@ -733,7 +748,7 @@ fn parse(pattern: &str) -> Result<Re, Refusal> {
     if b.refs.iter().any(missing) {
         return Err(Refusal::Builder(say("BackrefMissing", &[])));
     }
-    if !b.refs.is_empty() {
+    if !b.refs.is_empty() || b.atomic {
         return Err(Refusal::NotRegular);
     }
     // The pattern is one alternation, which leaves one term.
@@ -2365,10 +2380,6 @@ mod tests {
             "a capturing group inside a lookaround: write `(?:..)`",
         );
         says(
-            "(?>a)",
-            "a PCRE control form (`(?>`), which only a backtracking engine has",
-        );
-        says(
             "(?R)",
             "a PCRE control form (`(?R)`), which only a backtracking engine has",
         );
@@ -2396,6 +2407,10 @@ mod tests {
             "\\2(a)(b)",
             "\\k<n>(?<n>a)",
             "(a){0}\\1",
+            "(?>a)",
+            "a*+",
+            "a{2}+b",
+            "(?=a?+)",
         ];
         for p in each {
             assert_eq!(compile(p).err(), Some(Refusal::NotRegular), "{p}");
