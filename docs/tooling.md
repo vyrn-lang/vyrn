@@ -556,8 +556,9 @@ server in a workspace that holds a `vyrn.json`, so a `.calc` file opened first i
 served. In a static `class` or a string literal of a `:class`, completion offers the classes `vyrn_frontend::classes` reads, each with its source: the component's own style block (local), the stylesheets the app's layouts link with `stylesheet "..."`, mapped to the files under the manifest's `public` directory, and the files the `stylesheets` globs name (global); the theme's alphabet follows. Hover shows each rule that defines the class with its file and line, local first, and definition jumps to the first. There a name on an
 import line the module dropped as a repeat maps to the import that kept it, and
 a component tag to the declaration of the view its file provides, so its hover
-shows the props. The module is analysed as a file beside its root, with each
-relative import respelled from there (`loader::generated_modules`).
+shows the props. The module is analysed as the root's load saw it: its text
+under its banner key, with its span table (`LoadOptions::root_spans`), so each
+import resolves beside its author and is judged by it, as an `export to` asks.
 
 Each line that allocates, copies, grows a container, enters an allocating
 function of another file or keeps a check ends in one inlay hint for its rows of

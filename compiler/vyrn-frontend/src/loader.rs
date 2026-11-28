@@ -441,6 +441,14 @@ pub fn generator_call(key: &str) -> Option<&str> {
     rest.split(GEN_SEP).next()
 }
 
+/// Whether the banner keys `a` and `b` name one generation: the same call from files in
+/// the same directory, so a load gives them one module ([`run_generator`]'s identity). A load
+/// keys that module by its first importer, so another load can spell it as the other key.
+pub fn same_generation(a: &str, b: &str) -> bool {
+    let at = |k| Some((generator_call(k)?, dir_of(generated_importer(k)?)));
+    at(a).is_some_and(|x| at(b) == Some(x))
+}
+
 /// The real file at the end of a banner key's chain, and how many generator
 /// outputs the chain holds: 1 for a module a hand-written file imports.
 ///
@@ -634,6 +642,10 @@ pub struct LoadOptions {
     /// names: `vyrn bench`'s harness and `vyrn routes`. The link keeps them and
     /// what they reach ([`drop_unreached`]).
     pub host_calls: &'static [&'static str],
+    /// The span table of a root that is a generated module's text, loaded under its banner
+    /// key ([`generated_modules`]), so each import is judged by its author as in the load
+    /// that generated it. `None` for a hand-written root; a generator's load clears it.
+    pub root_spans: Option<std::sync::Arc<[SpanRow]>>,
 }
 
 /// The generator runs that enclose a load or a check.
@@ -1561,50 +1573,22 @@ pub fn routed_callee<'e>(
     }
 }
 
-/// Returns the generated source of every generator module reachable from the
-/// root, as `(banner, source)` pairs in load order. Runs the whole load, cache
-/// included, and discards the link.
-///
-/// Each source loads as a file beside the root: a relative import resolves
-/// beside its writer ([`spec_base`]), such as the `.vyx` it was copied from,
-/// so it is respelled from the root's directory. Only the specifier moves.
+/// Returns every generated module reachable from the root, as `(banner, source, spans)` in
+/// load order: its text as the load wrote it and its span table. Runs the whole load, cache
+/// included, and discards the link. A module analyzes as the load saw it when its source
+/// loads under its banner with [`LoadOptions::root_spans`] set to its spans.
 pub fn generated_modules(
     root_source: &str,
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
-) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
-    let (modules, root_key, ..) =
+) -> Result<Vec<(String, String, std::sync::Arc<[SpanRow]>)>, Vec<Diagnostic>> {
+    let (modules, ..) =
         load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
-    let dir = dir_of(&root_key);
-    let std_root = opts.std_root.as_deref();
     Ok(modules
         .into_iter()
-        .filter_map(|m| {
-            let mut text = m.generated?.source;
-            let paths = m.program.imports.iter().zip(&m.import_targets);
-            // Last first, so an earlier specifier's offset holds.
-            for (imp, target) in paths.rev() {
-                let ImportSource::Path(spec) = &imp.source else {
-                    continue;
-                };
-                let (line, col) = imp.source_at;
-                let start: usize = text
-                    .split_inclusive('\n')
-                    .take(line - 1)
-                    .map(str::len)
-                    .sum();
-                let at =
-                    (text[start..].char_indices().nth(col - 1)).map_or(start, |(i, _)| start + i);
-                let quoted = format!("\"{spec}\"");
-                if spec.starts_with('.') && text[at..].starts_with(&quoted) {
-                    let respelled = format!("\"{}\"", import_specifier(dir, target, std_root));
-                    text.replace_range(at..at + quoted.len(), &respelled);
-                }
-            }
-            Some((m.key, text))
-        })
+        .filter_map(|m| Some((m.key, m.generated?.source, m.spans.as_deref()?.into())))
         .collect())
 }
 
@@ -1866,6 +1850,12 @@ fn load_modules(
         // The generator call's line and column in the importer.
         let (generated, call) = (generated.map(|(g, _)| g), generated.map(|(_, at)| at));
         let written = generated.map(|g| &g.written);
+        let spans: Option<Rc<[SpanRow]>> = match written {
+            Some(g) => Some(Rc::from(g.spans.as_slice())),
+            None => (opts.root_spans.as_deref())
+                .filter(|_| is_root)
+                .map(Rc::from),
+        };
         // A generated module's errors show where its span table says, and its
         // reports are diagnostics at the generator's severity.
         if let Some(g) = written {
@@ -2063,7 +2053,7 @@ fn load_modules(
             if let ImportSource::Path(path) = &imp.source {
                 let base = spec_base(
                     key,
-                    written.map(|g| (g.spans.as_slice(), text.as_str())),
+                    spans.as_deref().map(|rows| (rows, text.as_str())),
                     imp.source_at,
                 );
                 let target = resolve_spec(path, base, opts).map_err(|e| {
@@ -2185,13 +2175,23 @@ fn load_modules(
             key: key.to_string(),
             program,
             import_targets,
-            generated: generated.map(|g| GenModule {
-                source: text.clone(),
-                inputs: g.inputs.clone(),
-                grammars: g.written.grammars.clone(),
-                islands: g.written.islands.clone(),
-            }),
-            spans: written.map(|g| Rc::from(g.spans.as_slice())),
+            // A root given its span table is a generated module's text, which no
+            // resolver reads: the module holds it, as a generation's does.
+            generated: match generated {
+                Some(g) => Some(GenModule {
+                    source: text.clone(),
+                    inputs: g.inputs.clone(),
+                    grammars: g.written.grammars.clone(),
+                    islands: g.written.islands.clone(),
+                }),
+                None => spans.as_ref().map(|_| GenModule {
+                    source: text.clone(),
+                    inputs: Rc::from([]),
+                    grammars: Vec::new(),
+                    islands: Vec::new(),
+                }),
+            },
+            spans,
             injected: None,
             hash: Some(hash),
             refs: parsed.refs.clone(),
@@ -4389,6 +4389,7 @@ pub(crate) fn generator_opts(opts: &LoadOptions, caller: &str) -> Result<LoadOpt
         return Err(rule!(GenImportsDeep, max = GEN_DEPTH_MAX));
     }
     let mut inner = opts.clone();
+    inner.root_spans = None;
     inner.nest.depth += 1;
     inner.nest.gen = None;
     inner.nest.importers.push(caller.to_string());

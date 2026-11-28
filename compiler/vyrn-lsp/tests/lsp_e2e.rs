@@ -7424,6 +7424,36 @@ fn a_generated_document_answers_definition_hover_and_completion() {
     assert!(labels.iter().any(|l| l == "refused"), "{labels:?}");
 }
 
+/// The document of `calc.editor.vyrn`'s `syntaxReport` module imports names `std/syntaxreport`
+/// exports only to `std/syntax`, its generator: they resolve, as in the load that wrote it. A
+/// member of the namespace over the other generated module jumps into the document the owner
+/// names that module by.
+#[test]
+fn a_generated_document_imports_what_its_generator_may() {
+    let (text, uri, mut client) = open_calc_editor("genreport");
+    let member = definition_at(&mut client, &uri, &text, "reported.reportLedger", 9);
+    let gen_uri = member["uri"].as_str().expect("a location").to_string();
+    let gen = generated_source(&mut client, &gen_uri);
+    did_open(&mut client, &gen_uri, "vyrn", &gen);
+    for (needle, skip) in [("syntaxSentence(rowParts", 2), ("SyntaxRow {", 2)] {
+        let std = definition_at(&mut client, &gen_uri, &gen, needle, skip);
+        let target = std["uri"].as_str().unwrap_or("");
+        assert!(
+            target.ends_with("/std/syntaxreport.vyrn"),
+            "{needle}: {std}"
+        );
+    }
+    let parse = definition_at(&mut client, &gen_uri, &gen, "parsed.parseLedger", 9);
+    let account = definition_at(&mut client, &uri, &text, "x.account.text", 2);
+    assert_eq!(parse["uri"], account["uri"], "{parse}");
+    let (line, col) = pos_after(&gen, "rowParts(e");
+    let hover = hover_value(&mut client, &gen_uri, line, col - 1).unwrap_or_default();
+    assert!(hover.contains("for e: SyntaxError<Row>"), "{hover}");
+    let (line, col) = pos_after(&gen, "value: h0.");
+    let labels = completion_labels(&mut client, &gen_uri, line, col);
+    assert!(labels.iter().any(|l| l == "copy"), "{labels:?}");
+}
+
 /// Opening a generated module's document starts no analysis of it as a file, so nothing
 /// is published for it: the owner's next publish is the first.
 #[test]

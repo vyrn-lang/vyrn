@@ -427,14 +427,21 @@ struct CssIndex {
 struct OwnerSynth {
     /// Signature of the inputs; a mismatch invalidates the whole entry.
     sig: u64,
-    /// Every generated module reachable from the owner, `(banner, gen_source)`.
-    gen_modules: Vec<(String, String)>,
+    /// Every generated module reachable from the owner, `(banner, gen_source, spans)`
+    /// ([`vyrn_frontend::loader::generated_modules`]).
+    gen_modules: Vec<(
+        String,
+        String,
+        std::sync::Arc<[vyrn_frontend::gen::SpanRow]>,
+    )>,
     /// Per banner, the module's analysis, filled on first request.
     analyzed: HashMap<String, Rc<AnalyzedSynth>>,
 }
 
 /// A generated module analyzed once and shared.
 struct AnalyzedSynth {
+    /// Its banner key in the owner's load.
+    banner: String,
     gen_source: String,
     analysis: Rc<Analysis>,
     tokens: Vec<vyrn_frontend::SemToken>,
@@ -1108,11 +1115,15 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
         // A generated module's document generates nothing; its owner does.
         let home = home_uri?;
         let owner = generated_key(&home).map_or(home, |(owner, _)| owner);
-        let target_uri = generated_uri(&owner, module);
-        let target_text = generated_source(server, &owner, module)?;
+        let target = synth_for(server, &owner, module)?;
         return Some(GotoDefinitionResponse::Scalar(Location {
-            uri: target_uri,
-            range: lsp_range(&target_text, r.target_line, r.target_col, r.target_end_col),
+            uri: generated_uri(&owner, &target.banner),
+            range: lsp_range(
+                &target.gen_source,
+                r.target_line,
+                r.target_col,
+                r.target_end_col,
+            ),
         }));
     }
     // A remote module key (`github:...`) is no file, so it has no definition.
@@ -1228,12 +1239,6 @@ fn generated_uri(owner: &Url, module: &str) -> Url {
     uri
 }
 
-/// The text of the generated module `module` of the root `owner`, as `vyrn emit-gen`
-/// prints it.
-fn generated_source(server: &Server, owner: &Url, module: &str) -> Option<String> {
-    Some(synth_for(server, owner, module)?.gen_source.clone())
-}
-
 /// The read-only document of the builtin rows, where a definition of a builtin lands.
 const PRELUDE_URI: &str = "vyrn-builtin:/prelude.vyrn";
 
@@ -1257,7 +1262,7 @@ fn handle_generated_source(server: &Server, params: serde_json::Value) -> Option
         return Some(prelude_document().text);
     }
     let (owner, module) = generated_key(&uri)?;
-    generated_source(server, &owner, &module)
+    Some(synth_for(server, &owner, &module)?.gen_source.clone())
 }
 
 /// The owner and module a [`generated_uri`] names; `None` for another URI.
@@ -1863,30 +1868,32 @@ fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSy
         }
     };
 
-    if let Some(a) = entry.analyzed.get(banner) {
+    let same = |(b, ..): &&(String, _, _)| vyrn_frontend::loader::same_generation(b, banner);
+    let (key, gen_source, spans) = entry.gen_modules.iter().find(same)?;
+    if let Some(a) = entry.analyzed.get(key) {
         return Some(a.clone());
     }
-    let gen_source = entry
-        .gen_modules
-        .iter()
-        .find(|(b, _)| b == banner)
-        .map(|(_, s)| s.clone())?;
-    // A linked root in the owner's directory, so relative imports resolve. Its
-    // diagnostics ("no main") are never read.
-    let synth_path = synth_path_for(&owner_path);
+    let (key, gen_source) = (key.clone(), gen_source.clone());
+    // The module loads under its banner with its span table, as the owner's load saw it.
+    // Its diagnostics ("no main") are never read.
+    let opts = vyrn_frontend::loader::LoadOptions {
+        root_spans: Some(spans.clone()),
+        ..opts
+    };
     let analysis = analyze_judged(
         &gen_source,
-        Some((&synth_path, &opts, &resolver)),
+        Some((&key, &opts, &resolver)),
         Some(&*engine()),
         judge(),
     );
     let tokens = vyrn_frontend::semantic_tokens(&analysis);
     let a = Rc::new(AnalyzedSynth {
+        banner: key.clone(),
         gen_source,
         analysis: Rc::new(analysis),
         tokens,
     });
-    entry.analyzed.insert(banner.to_string(), a.clone());
+    entry.analyzed.insert(key, a.clone());
     Some(a)
 }
 
@@ -1909,15 +1916,6 @@ fn owner_sig(owner_text: &str, owner_path: &str, overlays: &HashMap<String, Stri
         t.hash(&mut h);
     }
     h.finish()
-}
-
-/// A root path for a generated module in the owner's directory, so relative
-/// imports resolve as at generation time.
-fn synth_path_for(owner_path: &str) -> String {
-    match owner_path.rfind('/') {
-        Some(i) => format!("{}/__vyrn_synth__.vyrn", &owner_path[..i]),
-        None => "__vyrn_synth__.vyrn".to_string(),
-    }
 }
 
 /// The document's own top-level declarations, as a flat list. Imported symbols
