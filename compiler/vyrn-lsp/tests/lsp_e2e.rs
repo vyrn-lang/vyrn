@@ -7280,6 +7280,12 @@ pay power x
 /// `examples/dsl` copied to a scratch directory, with `calc.editor.vyrn` open: its text, its
 /// URI and the client.
 fn open_calc_editor(tag: &str) -> (String, String, LspClient) {
+    open_in_dsl(tag, "calc.editor.vyrn", None)
+}
+
+/// `examples/dsl` copied to a scratch directory, with file `name` open, written as `text`
+/// where it is given: its text, its URI and the client.
+fn open_in_dsl(tag: &str, name: &str, text: Option<&str>) -> (String, String, LspClient) {
     let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("vyrn_lsp_{tag}_{}_{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -7294,12 +7300,116 @@ fn open_calc_editor(tag: &str) -> (String, String, LspClient) {
     ] {
         std::fs::copy(example.join(name), dir.join(name)).unwrap();
     }
-    let text = std::fs::read_to_string(dir.join("calc.editor.vyrn")).unwrap();
-    let uri = file_uri(&dir.join("calc.editor.vyrn"));
+    if let Some(text) = text {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    let text = std::fs::read_to_string(dir.join(name)).unwrap();
+    let uri = file_uri(&dir.join(name));
     let mut client = spawn_client();
     did_open(&mut client, &uri, "vyrn", &text);
-    let _ = read_diags_for(&mut client, "calc.editor.vyrn");
+    let _ = read_diags_for(&mut client, name);
     (text, uri, client)
+}
+
+/// A generic record of a module the file names nothing from, the `SyntaxError<Row>` a
+/// generated parser refuses with, offers its fields after a dot and hovers each one.
+#[test]
+fn a_generic_record_of_an_unnamed_module_completes_and_hovers_its_fields() {
+    let src = "import { syntax } from \"std/syntax\"
+import * as parsed from syntax(\"./calc.syntax\")
+
+fn lines(text: String) -> Int64 {
+    let mut n = 0
+    match parsed.parseLedger(text) {
+        Ok(l) => {}
+        Err(errors) => {
+            for e in errors {
+                let r = e.row
+                n = n + e.line
+            }
+        }
+    }
+    return n
+}
+";
+    let (text, uri, mut client) = open_in_dsl("generic_field", "probe.vyrn", Some(src));
+    let (line, ch) = pos_after(&text, "for e");
+    let e = hover_value(&mut client, &uri, line, ch - 1).expect("a hover on `e`");
+    assert!(e.contains("SyntaxError<Row>"), "{e}");
+    let (line, ch) = pos_after(&text, "r = e.");
+    let labels = completion_labels(&mut client, &uri, line, ch);
+    for field in ["row", "line", "col", "end"] {
+        assert!(labels.contains(&field.to_string()), "{field}: {labels:?}");
+    }
+    let row = hover_value(&mut client, &uri, line, ch + 1).expect("a hover on `row`");
+    assert!(row.contains("row:"), "{row}");
+    let (line, ch) = pos_after(&text, "n + e.");
+    let col = hover_value(&mut client, &uri, line, ch + 1).expect("a hover on `line`");
+    assert!(col.contains("line: Int64"), "{col}");
+}
+
+/// A type hint's part for a type another file declares carries the range of the type's name
+/// there, and a definition asked at its start answers: an editor's click on the part asks
+/// there.
+#[test]
+fn a_type_hint_part_of_a_foreign_type_lands_on_its_name() {
+    let src = "import { syntax, SyntaxError } from \"std/syntax\"
+import * as parsed from syntax(\"./calc.syntax\")
+
+fn lines(text: String) -> Int64 {
+    let mut n = 0
+    match parsed.parseLedger(text) {
+        Ok(l) => {}
+        Err(errors) => {
+            for e in errors {
+                n = n + e.line
+            }
+        }
+    }
+    return n
+}
+";
+    let (_, uri, mut client) = open_in_dsl("foreign_part", "probe.vyrn", Some(src));
+    let id = serde_json::json!("foreign-part");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/inlayHint",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 99, "character": 0 } }
+        }
+    }));
+    let resp = client.read_response(&id);
+    let parts = (resp["result"].as_array().expect("hints").iter())
+        .filter_map(|h| h["label"].as_array())
+        .flatten();
+    let part = (parts.into_iter())
+        .find(|p| p["value"] == "SyntaxError")
+        .expect("a SyntaxError part")
+        .clone();
+    let at = &part["location"];
+    let target = at["uri"].as_str().expect("a location").to_string();
+    assert!(target.ends_with("std/syntax.vyrn"), "{part}");
+    let path = lsp_types::Url::parse(&target)
+        .unwrap()
+        .to_file_path()
+        .unwrap();
+    let text = std::fs::read_to_string(&path).expect("std/syntax.vyrn");
+    let (line, from, to) = (
+        at["range"]["start"]["line"].as_u64().unwrap() as usize,
+        at["range"]["start"]["character"].as_u64().unwrap() as usize,
+        at["range"]["end"]["character"].as_u64().unwrap() as usize,
+    );
+    let named = text.lines().nth(line).unwrap_or("").get(from..to);
+    assert_eq!(named, Some("SyntaxError"), "{part}");
+    did_open(&mut client, &target, "vyrn", &text);
+    let _ = read_diags_for(&mut client, "syntax.vyrn");
+    let id = serde_json::json!("foreign-def");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/definition",
+        "params": { "textDocument": { "uri": target }, "position": at["range"]["start"] }
+    }));
+    let def = client.read_response(&id)["result"].clone();
+    assert!(!def.is_null(), "{def}");
 }
 
 /// The definition response at the first `needle` of `text`, the cursor `skip` characters in.

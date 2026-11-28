@@ -2502,6 +2502,20 @@ impl Binder {
 }
 
 impl Program {
+    /// The linked name of the function `name` that the home of language type
+    /// `ty` exports to every module ([`Program::homes`]); `None` where the
+    /// load linked no such home or it exports no `name`.
+    pub fn home_member(&self, ty: &str, name: &str) -> Option<&str> {
+        let home = self.homes.get(ty)?;
+        let member = |f: &&Function| {
+            f.exported
+                && f.export_to.is_empty()
+                && f.module.as_ref() == Some(home)
+                && self.spellings.written(&f.name) == name
+        };
+        self.functions.iter().find(member).map(|f| f.name.as_str())
+    }
+
     /// The id of `body`: the functions, then the projections, tests,
     /// benches, module-state initializers and type-declaration checks, each
     /// in its list's order. The one numbering of source bodies; the lowering

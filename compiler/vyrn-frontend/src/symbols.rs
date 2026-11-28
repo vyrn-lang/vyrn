@@ -1202,11 +1202,19 @@ fn declared_field<'a>(
     tok: &TokenInfo,
     label: &str,
 ) -> Option<(&'a RecordField, (usize, usize, usize))> {
-    let Type::Named(n) = resolve_receiver_type(analysis, tok.line, tok.col)? else {
-        return None;
-    };
+    let ty = resolve_receiver_type(analysis, tok.line, tok.col)?;
+    let n = declared_name(&ty)?;
     let f = (analysis.record_fields.iter()).find(|f| f.of == n && f.completion.label == label)?;
     Some((f, f.at?))
+}
+
+/// The declaration a receiver of type `ty` takes its fields from, an instance's
+/// included (`SyntaxError<Row>`); `None` for a type no declaration names.
+fn declared_name(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Named(n) | Type::App(n, _) => Some(n),
+        _ => None,
+    }
 }
 
 /// The read-only document of the builtin rows, [`crate::prelude::builtins`] in table order.
@@ -1269,7 +1277,7 @@ fn route_site(
     let (prefix, name) = route.split_at(route.find('$')? + 1);
     let rt = (crate::loader::RT_MODULES.iter()).find(|rt| rt.prefix == prefix)?;
     let file = format!("{}/{}.vyrn", std_root?, rt.spec.strip_prefix("std/")?);
-    let line = (declared(&file, resolver, None)?.functions.iter())
+    let line = (declared(&file, resolver, None)?.program.functions.iter())
         .find(|f| f.name == name)?
         .line;
     Some((file, line))
@@ -1578,13 +1586,6 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
     // A named record receiver offers its declaration's fields; an inline
     // structural receiver offers its own.
     match &ty {
-        Type::Named(n) => {
-            for f in &analysis.record_fields {
-                if f.of == *n {
-                    out.push(f.completion.clone());
-                }
-            }
-        }
         Type::Record(fields) => {
             for f in fields {
                 out.push(Completion {
@@ -1595,7 +1596,14 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
                 });
             }
         }
-        _ => {}
+        _ => {
+            let n = declared_name(&ty);
+            let fields = analysis
+                .record_fields
+                .iter()
+                .filter(|f| Some(f.of.as_str()) == n);
+            out.extend(fields.map(|f| f.completion.clone()));
+        }
     }
     // The functions of the home of the receiver's type, which `x.f()` reaches.
     if let Some(key) = crate::types::home_key(&ty) {
@@ -2278,9 +2286,7 @@ fn decl_symbols(
     out
 }
 
-/// The root's declarations, each at its name token. A variant is the first
-/// token of its name between its type's line and the next declaration's. A
-/// test or bench anchors at its keyword, because its name is a string.
+/// The root's declarations, each at its name token ([`place`]).
 fn index_symbols(
     program: &ast::Program,
     tok_info: &[TokenInfo],
@@ -2288,42 +2294,48 @@ fn index_symbols(
     sp: &Spellings,
 ) -> Vec<Symbol> {
     let mut out = Vec::new();
-    for d in decl_symbols(program, sp, |_, _, _| true) {
-        let mut s = d.sym;
-        let anchor = match d.of {
-            Of::Test => "test",
-            Of::Bench => "bench",
-            _ => &s.name,
-        };
-        (s.col, s.end_col) = name_col_on_line(tok_info, anchor, s.line);
-        let next = lines
-            .iter()
-            .find(|&&l| l > s.line)
-            .copied()
-            .unwrap_or(usize::MAX);
-        out.push(s);
-        for mut m in d.members {
-            match m.kind {
-                SymbolKind::Variant => {
-                    let at = (tok_info.iter())
-                        .find(|t| t.text == m.name && t.line >= m.line && t.line < next);
-                    if let Some(t) = at {
-                        (m.line, m.col, m.end_col) = (t.line, t.col, t.end_col);
-                    }
-                }
-                _ => (m.col, m.end_col) = name_col_on_line(tok_info, &m.name, m.line),
-            }
-            out.push(m);
-        }
+    for mut d in decl_symbols(program, sp, |_, _, _| true) {
+        place(&mut d, tok_info, lines);
+        out.push(d.sym);
+        out.extend(d.members);
     }
     out
+}
+
+/// Moves `d` and its members to their name tokens among `tokens`, the
+/// identifiers of the module that declares them; `lines` is its
+/// [`decl_lines`]. A variant is the first token of its name between its
+/// type's line and the next declaration's. A test or bench anchors at its
+/// keyword, because its name is a string. Called before an alias renames
+/// the symbol.
+fn place(d: &mut Decl, tokens: &[TokenInfo], lines: &[usize]) {
+    let s = &mut d.sym;
+    let anchor = match d.of {
+        Of::Test => "test",
+        Of::Bench => "bench",
+        _ => &s.name,
+    };
+    (s.col, s.end_col) = name_col_on_line(tokens, anchor, s.line);
+    let next = (lines.iter().find(|&&l| l > s.line).copied()).unwrap_or(usize::MAX);
+    for m in &mut d.members {
+        match m.kind {
+            SymbolKind::Variant => {
+                let at =
+                    (tokens.iter()).find(|t| t.text == m.name && t.line >= m.line && t.line < next);
+                if let Some(t) = at {
+                    (m.line, m.col, m.end_col) = (t.line, t.col, t.end_col);
+                }
+            }
+            _ => (m.col, m.end_col) = name_col_on_line(tokens, &m.name, m.line),
+        }
+    }
 }
 
 /// Indexes the declarations the root imports, each read from its declaring
 /// module's own parse ([`declared`]), so what the link kept never shows. Only
 /// names the root's imports bring into scope are indexed, with an imported
-/// enum's variants and an imported protocol's methods. Columns are 0, since the
-/// foreign file's tokens are not at hand; `file` names the source module.
+/// enum's variants and an imported protocol's methods, each at its name token
+/// in the module's text ([`place`]); `file` names the source module.
 /// `graph` is the load's, which resolves each root import to its module.
 fn index_imported_symbols(
     root: &ast::Program,
@@ -2349,9 +2361,10 @@ fn index_imported_symbols(
             continue;
         }
         let gen = generated_text(graph, target);
-        let Some(program) = declared(target, resolver, gen) else {
+        let Some(Declared { program, tokens }) = declared(target, resolver, gen) else {
             continue;
         };
+        let lines = decl_lines(&program);
         let own = graph.iter().find(|(k, _, _)| k == target);
         let sp = declared_spellings(
             (&root_key, root, targets),
@@ -2363,7 +2376,8 @@ fn index_imported_symbols(
                 && matches!(of, Of::Function | Of::Protocol | Of::Type)
                 && local_of(name).is_some()
         };
-        for d in decl_symbols(&program, &sp, keep) {
+        for mut d in decl_symbols(&program, &sp, keep) {
+            place(&mut d, &tokens, &lines);
             let mut s = d.sym;
             let local = local_of(&s.name).expect("`keep` admitted it").local();
             if local != s.name {
@@ -2499,9 +2513,10 @@ fn namespace_members(
     resolver: &dyn crate::loader::ModuleResolver,
     gen_source: Option<&str>,
 ) -> Vec<Symbol> {
-    let Some(program) = declared(target, resolver, gen_source) else {
+    let Some(Declared { program, tokens }) = declared(target, resolver, gen_source) else {
         return Vec::new();
     };
+    let lines = decl_lines(&program);
     let file = gen_source.is_none().then(|| target.to_string());
     let mut real_paths = std::collections::HashMap::new();
     let qualified = (program.functions.iter().map(|f| (&f.name, &f.export_to)))
@@ -2516,7 +2531,8 @@ fn namespace_members(
         exported && matches!(of, Of::Function | Of::Protocol | Of::Type) && !shut_out.contains(name)
     };
     let mut out = Vec::new();
-    for d in decl_symbols(&program, &Spellings::default(), exported) {
+    for mut d in decl_symbols(&program, &Spellings::default(), exported) {
+        place(&mut d, &tokens, &lines);
         out.push(Symbol {
             file: file.clone(),
             ..d.sym
@@ -2562,15 +2578,26 @@ fn declared_spellings(
     sp
 }
 
-/// The declarations of `target` as its [`module_text`] writes them, bodies skimmed.
+/// A module's own parse, bodies skimmed, with the identifier tokens of its
+/// text, which [`place`] reads.
+struct Declared {
+    program: ast::Program,
+    tokens: Vec<TokenInfo>,
+}
+
+/// The declarations of `target` as its [`module_text`] writes them.
 /// `None` for a target with no text or one that does not lex.
 fn declared(
     target: &str,
     resolver: &dyn crate::loader::ModuleResolver,
     gen_source: Option<&str>,
-) -> Option<ast::Program> {
+) -> Option<Declared> {
     let text = module_text(target, resolver, gen_source)?;
-    Some(parser::parse_imported(lexer::lex(&text).ok()?, true).0)
+    let lexed = lexer::lex(&text).ok()?;
+    let mut tokens = Vec::new();
+    token_infos(&lexed, (1, 1), &mut tokens);
+    let program = parser::parse_imported(lexed, true).0;
+    Some(Declared { program, tokens })
 }
 
 /// The source of `target`: `gen_source` when it is a generated module, else what
@@ -3661,11 +3688,10 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
     let field = || {
         receiver_before_dot(analysis, tok.line, tok.col)?;
         let is_field = match resolve_receiver_type(analysis, tok.line, tok.col)? {
-            Type::Named(n) => {
-                (analysis.record_fields.iter()).any(|f| f.of == n && f.completion.label == tok.text)
-            }
             Type::Record(fields) => fields.iter().any(|f| f.name == tok.text),
-            _ => false,
+            ty => (analysis.record_fields.iter()).any(|f| {
+                Some(f.of.as_str()) == declared_name(&ty) && f.completion.label == tok.text
+            }),
         };
         is_field.then_some(())
     };

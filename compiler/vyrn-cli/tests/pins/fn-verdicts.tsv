@@ -2865,7 +2865,6 @@ std/runtime.vyrn	runtime$strLen	no, it calls `load8`, which has no body to judge
 std/runtime.vyrn	runtime$strCmp	no, it calls `load8`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$starts	no, it calls `load8`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$intStr	no, it calls `panic`	no, its effect set is alloc, trap
-std/runtime.vyrn	runtime$parseV	no, it calls `addr`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$strI64	no, it calls `load8`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$utf8Valid	no, it calls `load64`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$regexRun	no, it calls `load8`, which has no body to judge	no, it is not trap-free
