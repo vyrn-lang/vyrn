@@ -95,9 +95,11 @@ function activate(context) {
     // `.vyrn` sources, plus `.vyx`, the generator inputs this extension ships a
     // grammar for. The server registers the other inputs a project's
     // `vyrn.json` lists under `inputs`, and the files its languages map names.
+    // A generated module's read-only document is a Vyrn document too.
     documentSelector: [
       { scheme: "file", language: "vyrn" },
       { scheme: "file", language: "vyx" },
+      { scheme: "vyrn-gen", language: "vyrn" },
     ],
     // A function, so a restart reads the setting as it is then.
     initializationOptions: () => ({
