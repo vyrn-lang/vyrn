@@ -374,7 +374,7 @@ struct Server {
     versions: HashMap<Url, i32>,
     /// The [`Analysis`] per Vyrn document, built once per change so a request
     /// never re-parses.
-    analyses: HashMap<Url, Analysis>,
+    analyses: HashMap<Url, Rc<Analysis>>,
     /// A generator input (slash path) -> the Vyrn root whose analysis generated
     /// from it: the root an input's request maps through and an input's edit
     /// re-analyzes. Filled by analysis and by owner discovery.
@@ -427,16 +427,23 @@ struct CssIndex {
 struct OwnerSynth {
     /// Signature of the inputs; a mismatch invalidates the whole entry.
     sig: u64,
-    /// Every generated module reachable from the owner, `(banner, gen_source)`.
-    gen_modules: Vec<(String, String)>,
+    /// Every generated module reachable from the owner, `(banner, gen_source, spans)`
+    /// ([`vyrn_frontend::loader::generated_modules`]).
+    gen_modules: Vec<(
+        String,
+        String,
+        std::sync::Arc<[vyrn_frontend::gen::SpanRow]>,
+    )>,
     /// Per banner, the module's analysis, filled on first request.
     analyzed: HashMap<String, Rc<AnalyzedSynth>>,
 }
 
 /// A generated module analyzed once and shared.
 struct AnalyzedSynth {
+    /// Its banner key in the owner's load.
+    banner: String,
     gen_source: String,
-    analysis: Analysis,
+    analysis: Rc<Analysis>,
     tokens: Vec<vyrn_frontend::SemToken>,
 }
 
@@ -904,7 +911,7 @@ fn handle_cost_lenses(server: &Server, params: serde_json::Value) -> Vec<serde_j
     let (Some((analysis, _)), Some(src)) = (lookup(server, &uri), doc_text(server, &uri)) else {
         return Vec::new();
     };
-    cost::lenses(analysis, uri_path(&uri).as_deref(), &src)
+    cost::lenses(&analysis, uri_path(&uri).as_deref(), &src)
 }
 
 /// `vyrn/costRows`: the cost rows of the document `uri` ([`cost::rows`]), each
@@ -922,7 +929,7 @@ fn handle_cost_rows(server: &Server, params: serde_json::Value) -> Vec<serde_jso
         return Vec::new();
     };
     let path = uri_path(&uri);
-    let rows = cost::rows(analysis, path.as_deref(), &src, 1, usize::MAX);
+    let rows = cost::rows(&analysis, path.as_deref(), &src, 1, usize::MAX);
     (rows.into_iter())
         .map(|r| {
             serde_json::json!({
@@ -1000,10 +1007,10 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     };
     // A resolved name, else a class token, whose hover is not fenced.
     let ordinary = if is_vyrn_uri(uri) {
-        lookup(server, uri).and_then(|(analysis, _)| match resolve(analysis, line, col) {
+        lookup(server, uri).and_then(|(analysis, _)| match resolve(&analysis, line, col) {
             Some(r) => Some(fence_signature(&r)),
             None => (server.docs.get(uri))
-                .and_then(|src| class_hover(server, uri, analysis, src, line, col)),
+                .and_then(|src| class_hover(server, uri, &analysis, src, line, col)),
         })
     } else if let Some(h) = companion_hover(server, uri, line, col) {
         Some(format!("```\n{h}\n```"))
@@ -1043,7 +1050,7 @@ fn cost_hover(server: &Server, uri: &Url, text: &str, pos: Position) -> Option<(
     let (analysis, _) = lookup(server, uri)?;
     let line = pos.line as usize + 1;
     let path = uri_path(uri);
-    let rows = cost::rows(analysis, path.as_deref(), text, line, line);
+    let rows = cost::rows(&analysis, path.as_deref(), text, line, line);
     let key = |p: Position| (p.line, p.character);
     // A span inside another starts no earlier and ends no later, so it is the shorter.
     let width = |r: &Range| {
@@ -1077,10 +1084,10 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     let (r, home_uri) = if is_vyrn_uri(uri) {
         let (analysis, u) = lookup(server, uri)?;
         let src = doc_text(server, uri).unwrap_or_default();
-        if let Some(loc) = class_definition(server, uri, analysis, &src, line, col) {
+        if let Some(loc) = class_definition(server, uri, &analysis, &src, line, col) {
             return Some(loc);
         }
-        (resolve(analysis, line, col)?, Some(u))
+        (resolve(&analysis, line, col)?, Some(u))
     } else {
         if let Some(loc) = input_definition(server, uri, line, col) {
             return Some(loc);
@@ -1105,12 +1112,18 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
         }));
     }
     if let Some(module) = &r.generated {
-        let owner = home_uri?;
-        let target_uri = generated_uri(&owner, module);
-        let target_text = generated_source(server, &owner, module)?;
+        // A generated module's document generates nothing; its owner does.
+        let home = home_uri?;
+        let owner = generated_key(&home).map_or(home, |(owner, _)| owner);
+        let target = synth_for(server, &owner, module)?;
         return Some(GotoDefinitionResponse::Scalar(Location {
-            uri: target_uri,
-            range: lsp_range(&target_text, r.target_line, r.target_col, r.target_end_col),
+            uri: generated_uri(&owner, &target.banner),
+            range: lsp_range(
+                &target.gen_source,
+                r.target_line,
+                r.target_col,
+                r.target_end_col,
+            ),
         }));
     }
     // A remote module key (`github:...`) is no file, so it has no definition.
@@ -1226,12 +1239,6 @@ fn generated_uri(owner: &Url, module: &str) -> Url {
     uri
 }
 
-/// The text of the generated module `module` of the root `owner`, as `vyrn emit-gen`
-/// prints it.
-fn generated_source(server: &Server, owner: &Url, module: &str) -> Option<String> {
-    Some(synth_for(server, owner, module)?.gen_source.clone())
-}
-
 /// The read-only document of the builtin rows, where a definition of a builtin lands.
 const PRELUDE_URI: &str = "vyrn-builtin:/prelude.vyrn";
 
@@ -1254,6 +1261,12 @@ fn handle_generated_source(server: &Server, params: serde_json::Value) -> Option
     if uri.as_str() == PRELUDE_URI {
         return Some(prelude_document().text);
     }
+    let (owner, module) = generated_key(&uri)?;
+    Some(synth_for(server, &owner, &module)?.gen_source.clone())
+}
+
+/// The owner and module a [`generated_uri`] names; `None` for another URI.
+fn generated_key(uri: &Url) -> Option<(Url, String)> {
     if uri.scheme() != GENERATED_SCHEME {
         return None;
     }
@@ -1263,7 +1276,7 @@ fn handle_generated_source(server: &Server, params: serde_json::Value) -> Option
         .collect();
     let key = String::from_utf8(bytes?).ok()?;
     let (owner, module) = key.split_once('\n')?;
-    generated_source(server, &Url::parse(owner).ok()?, module)
+    Some((Url::parse(owner).ok()?, module.to_string()))
 }
 
 /// The local file an import specifier names. A generator's directory argument
@@ -1321,7 +1334,7 @@ fn handle_document_highlight(
     let (line, col) = to_frontend(&text, &p.text_document_position_params.position);
     let refs = if is_vyrn_uri(uri) {
         let (analysis, _) = lookup(server, uri)?;
-        references(analysis, line, col)
+        references(&analysis, line, col)
     } else {
         input_highlights(server, uri, line, col)
     };
@@ -1483,19 +1496,19 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     // In a string literal: the class alphabet for a sequence type (`Tw`), else
     // the language of a finite string type (`t("` -> every key).
     if string_context(&raw, line, col) {
-        if let Some(cls) = class_items(server, uri, analysis, &raw, line, col) {
+        if let Some(cls) = class_items(server, uri, &analysis, &raw, line, col) {
             return Some(class_completion_response(&raw, line, col, cls));
         }
-        let items = string_literal_completions(analysis, &raw, line, col)
+        let items = string_literal_completions(&analysis, &raw, line, col)
             .into_iter()
             .map(to_completion_item)
             .collect();
         return Some(CompletionResponse::Array(items));
     }
     let mut items: Vec<CompletionItem> = if member_context(&raw, line, col) {
-        member_completions(analysis, line, col)
+        member_completions(&analysis, line, col)
     } else {
-        scope_completions(analysis, line)
+        scope_completions(&analysis, line)
     }
     .into_iter()
     .map(to_completion_item)
@@ -1855,30 +1868,32 @@ fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSy
         }
     };
 
-    if let Some(a) = entry.analyzed.get(banner) {
+    let same = |(b, ..): &&(String, _, _)| vyrn_frontend::loader::same_generation(b, banner);
+    let (key, gen_source, spans) = entry.gen_modules.iter().find(same)?;
+    if let Some(a) = entry.analyzed.get(key) {
         return Some(a.clone());
     }
-    let gen_source = entry
-        .gen_modules
-        .iter()
-        .find(|(b, _)| b == banner)
-        .map(|(_, s)| s.clone())?;
-    // A linked root in the owner's directory, so relative imports resolve. Its
-    // diagnostics ("no main") are never read.
-    let synth_path = synth_path_for(&owner_path);
+    let (key, gen_source) = (key.clone(), gen_source.clone());
+    // The module loads under its banner with its span table, as the owner's load saw it.
+    // Its diagnostics ("no main") are never read.
+    let opts = vyrn_frontend::loader::LoadOptions {
+        root_spans: Some(spans.clone()),
+        ..opts
+    };
     let analysis = analyze_judged(
         &gen_source,
-        Some((&synth_path, &opts, &resolver)),
+        Some((&key, &opts, &resolver)),
         Some(&*engine()),
         judge(),
     );
     let tokens = vyrn_frontend::semantic_tokens(&analysis);
     let a = Rc::new(AnalyzedSynth {
+        banner: key.clone(),
         gen_source,
-        analysis,
+        analysis: Rc::new(analysis),
         tokens,
     });
-    entry.analyzed.insert(banner.to_string(), a.clone());
+    entry.analyzed.insert(key, a.clone());
     Some(a)
 }
 
@@ -1901,15 +1916,6 @@ fn owner_sig(owner_text: &str, owner_path: &str, overlays: &HashMap<String, Stri
         t.hash(&mut h);
     }
     h.finish()
-}
-
-/// A root path for a generated module in the owner's directory, so relative
-/// imports resolve as at generation time.
-fn synth_path_for(owner_path: &str) -> String {
-    match owner_path.rfind('/') {
-        Some(i) => format!("{}/__vyrn_synth__.vyrn", &owner_path[..i]),
-        None => "__vyrn_synth__.vyrn".to_string(),
-    }
 }
 
 /// The document's own top-level declarations, as a flat list. Imported symbols
@@ -2115,7 +2121,10 @@ fn handle_semantic_tokens_range(
 fn document_placed(server: &Server, uri: &Url, text: &str) -> Option<Vec<Placed>> {
     let mut placed = placed_tokens(document_sem_tokens(server, uri)?, text);
     if let (true, Some((analysis, _))) = (is_vyrn_uri(uri), lookup(server, uri)) {
-        placed.extend(placed_runs(&island_runs(server, uri, analysis, text), text));
+        placed.extend(placed_runs(
+            &island_runs(server, uri, &analysis, text),
+            text,
+        ));
         placed.sort_by_key(|t| (t.0, t.1));
     }
     Some(placed)
@@ -2169,7 +2178,7 @@ fn island_runs(
 fn document_sem_tokens(server: &Server, uri: &Url) -> Option<Vec<vyrn_frontend::SemToken>> {
     if is_vyrn_uri(uri) {
         let (analysis, _) = lookup(server, uri)?;
-        Some(vyrn_frontend::semantic_tokens(analysis))
+        Some(vyrn_frontend::semantic_tokens(&analysis))
     } else {
         Some(input_semantic_tokens(server, uri))
     }
@@ -2189,7 +2198,7 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
     }
     let (analysis, _) = lookup(server, &p.text_document.uri)?;
     let src = doc_text(server, &p.text_document.uri);
-    let mut hints: Vec<InlayHint> = vyrn_frontend::inlay_hints(analysis)
+    let mut hints: Vec<InlayHint> = vyrn_frontend::inlay_hints(&analysis)
         .into_iter()
         .filter(|h| h.line >= from && h.line <= to)
         .map(|h| {
@@ -2214,12 +2223,12 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
         .collect();
     if let Some(src) = src.as_deref() {
         let home = &p.text_document.uri;
-        let locate = |name: &str| type_location(server, analysis, Some(home), name);
-        hints.extend(type_hints(analysis, src, from, to, &locate));
+        let locate = |name: &str| type_location(server, &analysis, Some(home), name);
+        hints.extend(type_hints(&analysis, src, from, to, &locate));
         if cost_hints() && !cost_decorations() {
             let path = uri_path(&p.text_document.uri);
             let uri = p.text_document.uri.as_str();
-            hints.extend(cost::hints(analysis, uri, path.as_deref(), src, from, to));
+            hints.extend(cost::hints(&analysis, uri, path.as_deref(), src, from, to));
         }
     }
     Some(hints)
@@ -2632,9 +2641,14 @@ fn to_document_symbol(sym: &vyrn_frontend::Symbol, text: &str) -> Option<Documen
     })
 }
 
-/// The cached [`Analysis`] of an open document.
-fn lookup<'s>(server: &'s Server, uri: &Url) -> Option<(&'s Analysis, Url)> {
-    Some((server.analyses.get(uri)?, uri.clone()))
+/// The cached [`Analysis`] of an open document, or of the generated module a
+/// [`generated_uri`] names, whose positions are its text's.
+fn lookup(server: &Server, uri: &Url) -> Option<(Rc<Analysis>, Url)> {
+    let analysis = match generated_key(uri) {
+        Some((owner, module)) => synth_for(server, &owner, &module)?.analysis.clone(),
+        None => server.analyses.get(uri)?.clone(),
+    };
+    Some((analysis, uri.clone()))
 }
 
 /// A document seen through the contract that governs it.
@@ -3052,7 +3066,7 @@ fn install_root(
         }
     }
     server.synth_cache.borrow_mut().remove(root_uri);
-    server.analyses.insert(root_uri.clone(), analysis);
+    server.analyses.insert(root_uri.clone(), Rc::new(analysis));
 }
 
 // Owner discovery: a generator input opened alone has no owner until a `.vyrn`
@@ -3160,7 +3174,7 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
             .iter()
             .any(|m| vyrn_frontend::symbolmap::same_file(&m.file, path))
     };
-    let probed = if server.analyses.values().any(claims) {
+    let probed = if server.analyses.values().any(|a| claims(a)) {
         None
     } else {
         // Only roots that call a map-baking generator, so a hover in a module
@@ -3175,7 +3189,10 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
     // so an unmounted module is probed once.
     let mut grouped: HashMap<String, Vec<MappedSymbol>> = HashMap::new();
     grouped.insert(path.to_string(), Vec::new());
-    for a in probed.iter().chain(server.analyses.values()) {
+    for a in probed
+        .iter()
+        .chain(server.analyses.values().map(Rc::as_ref))
+    {
         for m in &a.symbol_maps {
             grouped
                 .entry(vyrn_frontend::origin::OriginMaps::norm_path_key(&m.file))
@@ -3317,7 +3334,7 @@ fn rename_target(
     let (analysis, _) = lookup(server, uri).ok_or_else(|| {
         "this document has not been analyzed yet \u{2014} save it once and try again".to_string()
     })?;
-    let target = rename::target_at(analysis, &path, line, col)?;
+    let target = rename::target_at(&analysis, &path, line, col)?;
     Ok((target, uri.clone()))
 }
 
@@ -3354,7 +3371,7 @@ fn handle_rename(server: &Server, params: serde_json::Value) -> Result<Workspace
         &decl_text,
         &p.new_name,
         &maps,
-        analysis,
+        &analysis,
         &uri,
         &overlays,
         &opts,
@@ -3715,6 +3732,10 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             }
             if let Some(dir) = file_path(&uri).and_then(|p| p.parent().map(|d| d.to_path_buf())) {
                 register_inputs(connection, server, &dir);
+            }
+            // A generated module's document is analyzed through its owner.
+            if generated_key(&uri).is_some() {
+                return Owed::Nothing;
             }
             return Owed::Analyze(uri);
         }

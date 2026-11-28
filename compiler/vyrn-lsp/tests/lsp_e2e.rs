@@ -7393,6 +7393,91 @@ fn a_declared_field_jumps_to_its_name() {
     assert!(length.is_null(), "{length}");
 }
 
+/// `calc.editor.vyrn`'s client with the document of its `syntax` module open: the
+/// document's text and URI.
+fn open_syntax_document(client: &mut LspClient, uri: &str, text: &str) -> (String, String) {
+    let account = definition_at(client, uri, text, "x.account.text", 2);
+    let gen_uri = account["uri"].as_str().expect("a location").to_string();
+    let gen_text = generated_source(client, &gen_uri);
+    did_open(client, &gen_uri, "vyrn", &gen_text);
+    (gen_text, gen_uri)
+}
+
+/// A generated module's document answers as a file does, at its own positions: a
+/// definition into std and in place, a hover and a member completion.
+#[test]
+fn a_generated_document_answers_definition_hover_and_completion() {
+    let (text, uri, mut client) = open_calc_editor("gendoc");
+    let (gen, gen_uri) = open_syntax_document(&mut client, &uri, &text);
+    let std = definition_at(&mut client, &gen_uri, &gen, "SyntaxError<Row>>,", 2);
+    let target = std["uri"].as_str().unwrap_or("");
+    assert!(target.ends_with("/std/syntax.vyrn"), "{std}");
+    let local = definition_at(&mut client, &gen_uri, &gen, "ruleLedger(text, p)", 2);
+    assert_eq!(local["uri"], gen_uri.as_str(), "{local}");
+    let decl = gen.lines().position(|l| l.starts_with("fn ruleLedger("));
+    assert_eq!(local["range"]["start"]["line"], decl.unwrap(), "{local}");
+    let (line, col) = pos_after(&gen, "let mut p = Parse");
+    let hover = hover_value(&mut client, &gen_uri, line, col - 2).unwrap_or_default();
+    assert!(hover.contains("refused: Bool"), "{hover}");
+    let (line, col) = pos_after(&gen, "if !p.");
+    let labels = completion_labels(&mut client, &gen_uri, line, col);
+    assert!(labels.iter().any(|l| l == "refused"), "{labels:?}");
+}
+
+/// The document of `calc.editor.vyrn`'s `syntaxReport` module imports names `std/syntaxreport`
+/// exports only to `std/syntax`, its generator: they resolve, as in the load that wrote it. A
+/// member of the namespace over the other generated module jumps into the document the owner
+/// names that module by.
+#[test]
+fn a_generated_document_imports_what_its_generator_may() {
+    let (text, uri, mut client) = open_calc_editor("genreport");
+    let member = definition_at(&mut client, &uri, &text, "reported.reportLedger", 9);
+    let gen_uri = member["uri"].as_str().expect("a location").to_string();
+    let gen = generated_source(&mut client, &gen_uri);
+    did_open(&mut client, &gen_uri, "vyrn", &gen);
+    for (needle, skip) in [("syntaxSentence(rowParts", 2), ("SyntaxRow {", 2)] {
+        let std = definition_at(&mut client, &gen_uri, &gen, needle, skip);
+        let target = std["uri"].as_str().unwrap_or("");
+        assert!(
+            target.ends_with("/std/syntaxreport.vyrn"),
+            "{needle}: {std}"
+        );
+    }
+    let parse = definition_at(&mut client, &gen_uri, &gen, "parsed.parseLedger", 9);
+    let account = definition_at(&mut client, &uri, &text, "x.account.text", 2);
+    assert_eq!(parse["uri"], account["uri"], "{parse}");
+    let (line, col) = pos_after(&gen, "rowParts(e");
+    let hover = hover_value(&mut client, &gen_uri, line, col - 1).unwrap_or_default();
+    assert!(hover.contains("for e: SyntaxError<Row>"), "{hover}");
+    let (line, col) = pos_after(&gen, "value: h0.");
+    let labels = completion_labels(&mut client, &gen_uri, line, col);
+    assert!(labels.iter().any(|l| l == "copy"), "{labels:?}");
+}
+
+/// Opening a generated module's document starts no analysis of it as a file, so nothing
+/// is published for it: the owner's next publish is the first.
+#[test]
+fn a_generated_document_publishes_no_diagnostics() {
+    let (text, uri, mut client) = open_calc_editor("gendiag");
+    let (_, gen_uri) = open_syntax_document(&mut client, &uri, &text);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": { "textDocument": { "uri": uri, "version": 2 },
+                    "contentChanges": [{ "text": text }] }
+    }));
+    loop {
+        let msg = client.read().expect("server closed before publishing");
+        let at = msg.json.pointer("/params/uri").and_then(|u| u.as_str());
+        if msg.json["method"] != "textDocument/publishDiagnostics" {
+            continue;
+        }
+        assert_ne!(at, Some(gen_uri.as_str()), "{}", msg.json);
+        if at.is_some_and(|u| u.ends_with("calc.editor.vyrn")) {
+            break;
+        }
+    }
+}
+
 /// The line of the prelude document a definition at the first `needle` of `text` lands on,
 /// `skip` characters in, with the line before it.
 fn prelude_row(
