@@ -1430,7 +1430,7 @@ examples/shelf/shared/types.vyrn	0	cbf29ce484222325	20	16	310894c0c6d9dffa
 examples/shelf/shared/util.vyrn	0	cbf29ce484222325	20	18	e8529151ec8b271e
 examples/shelf/shared/wire.vyrn	0	cbf29ce484222325	20	20	6e405b0ba932cec6
 examples/show.vyrn	0	cbf29ce484222325	20	20	c13623f3678caefc
-examples/showrenders.vyrn	0	cbf29ce484222325	20	17	fd394e3c6f9b7b40
+examples/showrenders.vyrn	0	cbf29ce484222325	20	18	e8a4718a92ca9171
 examples/simd.vyrn	0	cbf29ce484222325	20	15	fb95541472f6b038
 examples/simdbench.vyrn	0	cbf29ce484222325	20	18	6cbfa77a4439d8c6
 examples/simdint.vyrn	0	cbf29ce484222325	20	15	214c7410443fc63f

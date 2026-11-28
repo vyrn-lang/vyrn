@@ -607,7 +607,7 @@ An impl of `MustUse`, `Owned` or `Copy` is declared in the module that declares 
 
 | Protocol | Members | Effect |
 |---|---|---|
-| `Show` | `fn show(self) -> String` | Renders the type in `print`, `toString()` and interpolation. A scalar renders as the language renders it. |
+| `Show` | `fn show(self) -> String` | Renders the type in `print`, `toString()` and interpolation. A scalar renders as the language renders it, and its `x.show()` is `x.toString()`. |
 | `Copy` | `fn copy(self) -> T` | Replaces the structural `x.copy()`. |
 | `Owned` | `fn release(consume self)` | Says how the type is released. A self-referring type must declare it. |
 | `MustUse` | none | A value must be disposed of by name, as a `Stream` must. |

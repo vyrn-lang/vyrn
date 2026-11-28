@@ -5575,6 +5575,28 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // No impl renders a type the language renders, so its `show` is its
+        // `toString`, which the core lowers it to (`Builder::renders`).
+        if proto == crate::types::SHOW && crate::types::renders(&self.base(&recv)) {
+            return self.check_declared_call(
+                &DeclaredCall {
+                    key: name,
+                    shown: name,
+                    params: std::slice::from_ref(&recv),
+                    ret: &sig.ret,
+                    type_params: None,
+                    caps: Some(&vec![sig.recv]),
+                    bounds: None,
+                    recv: Some(&recv),
+                    written: &[],
+                },
+                args,
+                scope,
+                expected,
+                fn_ret,
+                line,
+            );
+        }
         match crate::types::type_key(&recv) {
             Some(key) if self.implements(&proto, &key) => {
                 let mangled = crate::types::impl_method_name(&proto, &key, name);
