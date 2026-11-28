@@ -334,7 +334,7 @@ export fn chapters() -> Array<Chapter> {
             sections: [
                 section("imports", "Importing", [
                     "<code>import { a, b } from \"std/strings\"</code> takes two names. <code>import * as math from \"std/math\"</code> takes the module under one name and reaches its exports as <code>math.min</code>.",
-                    "A top-level name is program-wide, so two linked modules cannot both export <code>parse</code>. The namespace form is the answer, and the compiler suggests it by name when the collision happens.",
+                    "Two linked modules may both export <code>parse</code>. A module that imports both flat cannot tell them apart, so the compiler refuses it and suggests the namespace form by name.",
                     "A remote import names <code>github:</code>, <code>gist:</code> or <code>https:</code>. It is pinned in <code>vyrn.lock</code> and cached under <code>~/.vyrn</code>. <code>--offline</code> refuses to fetch, and <a href=\"/tooling/projects.html\">Projects and dependencies</a> covers the rest.",
                 ], ["imports"]),
             ],

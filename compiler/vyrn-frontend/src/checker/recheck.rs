@@ -454,6 +454,7 @@ fn in_unit(r: &Recorded, unit: u32) -> Recorded {
         islands: r.islands.clone(),
         trapped: r.trapped.iter().map(at).collect(),
         homes: (r.homes.iter()).map(|(k, c)| (at(k), c.clone())).collect(),
+        coercions: r.coercions.clone(),
     }
 }
 

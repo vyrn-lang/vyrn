@@ -239,15 +239,21 @@ pub struct Records {
     /// The declaration a `modify` parameter's type names, by the function's
     /// [`FnId`] index and the parameter's.
     params: Arc<BTreeMap<(usize, usize), String>>,
+    /// Per record node ([`vyrn_frontend::types::record_node`]), the other
+    /// nodes its values reach through the checker's coercions
+    /// ([`vyrn_frontend::checker::Recorded::coercions`]), transitively.
+    reach: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Records {
     /// The records of `program`, whose host-made types are those `roots`
-    /// name and every declared type they hold.
+    /// name and every declared type they hold, and whose values move between
+    /// record types along `coercions`.
     pub fn new<'t>(
         program: &vyrn_frontend::ast::Program,
         roots: impl IntoIterator<Item = &'t Type>,
         decls: &'t HashMap<String, TypeDecl>,
+        coercions: &BTreeMap<String, BTreeSet<String>>,
     ) -> Records {
         let mut host = BTreeSet::new();
         let mut stack: Vec<&Type> = roots.into_iter().collect();
@@ -273,10 +279,30 @@ impl Records {
                 })
             })
             .collect();
+        let mut reach: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for from in coercions.keys() {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![from];
+            while let Some(x) = stack.pop() {
+                for to in coercions.get(x).into_iter().flatten() {
+                    if to != from && seen.insert(to.clone()) {
+                        stack.push(to);
+                    }
+                }
+            }
+            reach.insert(from.clone(), seen);
+        }
         Records {
             host,
             params: Arc::new(params),
+            reach,
         }
+    }
+
+    /// Record node `x` and every node its values reach ([`Records::reach`]).
+    fn reached<'r>(&'r self, x: &'r str) -> impl Iterator<Item = &'r str> {
+        let further = self.reach.get(x).into_iter().flatten();
+        std::iter::once(x).chain(further.map(String::as_str))
     }
 }
 
@@ -294,6 +320,9 @@ enum Part {
 
 /// `sum(k * part) >= 0` over the fields of one record value, parts sorted.
 type RecordFact = Vec<(Part, i64)>;
+
+/// Per record node, the facts a walk saw a value of that type not keep.
+type Broken = BTreeMap<String, BTreeSet<RecordFact>>;
 
 /// The sorted fact of `parts`.
 fn record_fact(mut parts: RecordFact) -> RecordFact {
@@ -323,22 +352,29 @@ fn binds(fact: &RecordFact, fields: &[Field], decls: &HashMap<String, TypeDecl>)
 /// integer field's value or longer.
 #[derive(Debug, Default)]
 pub struct RecordFacts {
-    /// Every fact no round has dropped.
+    /// Every fact some record declaration keeps.
     of: BTreeSet<RecordFact>,
-    /// Per record declaration, the facts it [`binds`].
+    /// Per record node ([`vyrn_frontend::types::record_node`]), the facts of
+    /// `of` a round dropped for it.
+    dead: BTreeMap<String, BTreeSet<RecordFact>>,
+    /// Per record declaration, the facts of `of` it [`binds`] and keeps.
     by_decl: HashMap<String, Vec<RecordFact>>,
     /// [`Records::params`].
     params: Arc<BTreeMap<(usize, usize), String>>,
 }
 
 impl RecordFacts {
+    /// The facts of `of` each record declaration binds, less those `dead`
+    /// drops for it. A fact no declaration keeps leaves `of`.
     fn new(
         of: BTreeSet<RecordFact>,
+        dead: BTreeMap<String, BTreeSet<RecordFact>>,
         decls: &HashMap<String, TypeDecl>,
         params: &Arc<BTreeMap<(usize, usize), String>>,
     ) -> RecordFacts {
         let mut facts = RecordFacts {
             of,
+            dead,
             by_decl: HashMap::new(),
             params: params.clone(),
         };
@@ -350,11 +386,22 @@ impl RecordFacts {
             let Some(fields) = vyrn_frontend::types::record_fields(&ty, decls) else {
                 continue;
             };
-            let within: Vec<RecordFact> = (facts.within(&fields, decls).into_iter())
+            let within: Vec<RecordFact> = (facts.within(name, &fields, decls).into_iter())
                 .cloned()
                 .collect();
             if !within.is_empty() {
                 facts.by_decl.insert(name.clone(), within);
+            }
+        }
+        // With nothing dead, every fact binds the declaration it came from.
+        if !facts.dead.is_empty() {
+            let kept: BTreeSet<&RecordFact> = facts.by_decl.values().flatten().collect();
+            let gone: Vec<RecordFact> = (facts.of.iter())
+                .filter(|f| !kept.contains(f))
+                .cloned()
+                .collect();
+            for f in &gone {
+                facts.of.remove(f);
             }
         }
         facts
@@ -375,26 +422,36 @@ impl RecordFacts {
         Some(self.by_decl.get(d).map_or(&[], Vec::as_slice))
     }
 
-    /// The facts a record of type `ty` [`binds`].
+    /// The facts a record of type `ty` [`binds`] and keeps.
     fn of_type(&self, ty: &Type, decls: &HashMap<String, TypeDecl>) -> Vec<&RecordFact> {
         if self.is_empty() {
             return Vec::new();
         }
         match ty {
             Type::Named(d) | Type::App(d, _) => self.by_decl.get(d).into_iter().flatten().collect(),
-            _ => match vyrn_frontend::types::record_fields(ty, decls) {
-                Some(fs) => self.within(&fs, decls),
-                None => Vec::new(),
-            },
+            Type::Record(fs) => self.within(&record_node(ty), fs, decls),
+            _ => Vec::new(),
         }
     }
 
-    /// The facts a record with `fields` [`binds`].
-    fn within(&self, fields: &[Field], decls: &HashMap<String, TypeDecl>) -> Vec<&RecordFact> {
+    /// The facts a record of node `node` with `fields` [`binds`] and keeps.
+    fn within(
+        &self,
+        node: &str,
+        fields: &[Field],
+        decls: &HashMap<String, TypeDecl>,
+    ) -> Vec<&RecordFact> {
+        let dead = self.dead.get(node);
         (self.of.iter())
-            .filter(|f| binds(f, fields, decls))
+            .filter(|f| binds(f, fields, decls) && !dead.is_some_and(|d| d.contains(*f)))
             .collect()
     }
+}
+
+/// The record node of `ty`, a type a [`RecordFacts`] fact binds: a
+/// declaration or an anonymous record, the only types `of_type` gives facts.
+fn record_node(ty: &Type) -> std::borrow::Cow<'_, str> {
+    vyrn_frontend::types::record_node(ty).expect("a type with record facts names a record")
 }
 
 impl Summaries {
@@ -1530,8 +1587,11 @@ fn solve(
 /// indexes by a constant bound ([`needed_lengths`]), at least that long; each
 /// integer field a body reads into a divisor, at least one.
 ///
-/// Record types are compatible by shape, so a fact is keyed by its field
-/// names and binds every record value with those fields, whatever its type.
+/// A fact is stated over field names and kept per record declaration. A
+/// body that does not prove it of a value drops it for the value's type and
+/// for every type the checker's coercions take that value to
+/// ([`Records::reach`]); a type another type's values reach starts without
+/// the facts those values cannot bind ([`coerced_facts`]).
 /// A walk assumes a record name's facts where the name takes a value it did
 /// not build ([`Walk::restate`]). It tracks the fields of a record that a
 /// literal builds or a row writes a field of ([`Walk::dirty`]), and that
@@ -1633,7 +1693,8 @@ fn invariants(
             of.retain(|f| !binds(f, &fs, decls));
         }
     }
-    let mut facts = RecordFacts::new(of, decls, &records.params);
+    let dead = coerced_facts(&of, decls, records);
+    let mut facts = RecordFacts::new(of, dead, decls, &records.params);
     let maybe: Vec<usize> = (0..bodies.len()).filter(|&i| scans[i].builds).collect();
     let touches = in_parallel(
         &maybe,
@@ -1693,18 +1754,27 @@ fn invariants(
             || (),
             |(), &i| obliged(bodies[touching[i]].1, decls, &facts, lengths),
         );
-        let mut dropped = BTreeSet::new();
-        for (&i, (broken, u)) in batch.iter().zip(outs) {
-            dropped.extend(broken);
+        let mut broken: Broken = BTreeMap::new();
+        for (&i, (b, u)) in batch.iter().zip(outs) {
+            for (x, fs) in b {
+                broken.entry(x).or_default().extend(fs);
+            }
             used[i] = u;
             walked[i] = true;
         }
-        if dropped.is_empty() {
+        if broken.is_empty() {
             continue;
         }
-        let mut of = std::mem::take(&mut facts.of);
-        of.retain(|f| !dropped.contains(f));
-        facts = RecordFacts::new(of, decls, &records.params);
+        let mut dead = std::mem::take(&mut facts.dead);
+        for (x, fs) in &broken {
+            for y in records.reached(x) {
+                dead.entry(y.to_string())
+                    .or_default()
+                    .extend(fs.iter().cloned());
+            }
+        }
+        let dropped: BTreeSet<&RecordFact> = broken.values().flatten().collect();
+        facts = RecordFacts::new(std::mem::take(&mut facts.of), dead, decls, &records.params);
         for i in 0..touching.len() {
             if !queue.contains(&i) && used[i].iter().any(|f| dropped.contains(f)) {
                 queue.push(i);
@@ -1719,6 +1789,32 @@ fn invariants(
         }
     }
     (facts, assumed)
+}
+
+/// Per record node, the facts of `of` a value of another node that reaches
+/// it ([`Records::reach`]) cannot keep: those it does not bind, or every fact
+/// when it is host-made or an anonymous record.
+fn coerced_facts(
+    of: &BTreeSet<RecordFact>,
+    decls: &HashMap<String, TypeDecl>,
+    records: &Records,
+) -> BTreeMap<String, BTreeSet<RecordFact>> {
+    let fields = |x: &str| match records.host.contains(x) {
+        true => None,
+        false => (decls.get(x)).and_then(|d| vyrn_frontend::types::record_fields(&d.base, decls)),
+    };
+    let mut dead: BTreeMap<String, BTreeSet<RecordFact>> = BTreeMap::new();
+    for (x, ys) in &records.reach {
+        let kept = fields(x);
+        let lost = (of.iter()).filter(|f| !kept.as_ref().is_some_and(|fs| binds(f, fs, decls)));
+        let lost: Vec<&RecordFact> = lost.collect();
+        for y in ys {
+            dead.entry(y.clone())
+                .or_default()
+                .extend(lost.iter().copied().cloned());
+        }
+    }
+    dead
 }
 
 /// The facts over the parameters of `b`, a body of `closed`, in a
@@ -2589,7 +2685,8 @@ fn resized_places(s: &St) -> impl Iterator<Item = &Place> {
 }
 
 /// The facts of `facts` that `body` does not prove of a record it builds or
-/// writes, where the record's value leaves the name ([`Walk::keeps`]), and
+/// writes, where the record's value leaves the name ([`Walk::keeps`]), each
+/// with the record node of the name's type, and
 /// the facts the walk assumed ([`Walk::restate`]). The walk starts with the
 /// `pre` `lengths` states of the body.
 fn obliged(
@@ -2597,7 +2694,7 @@ fn obliged(
     decls: &HashMap<String, TypeDecl>,
     facts: &RecordFacts,
     lengths: View<'_>,
-) -> (BTreeSet<RecordFact>, BTreeSet<RecordFact>) {
+) -> (Broken, BTreeSet<RecordFact>) {
     let view = View { facts, ..lengths };
     let none = BTreeSet::new();
     let pre = (body.id.and_then(|f| view.get(f))).map_or(&none, |(_, s)| &s.pre);
@@ -3447,9 +3544,9 @@ struct Walk<'a> {
     /// The record names whose fields the walk tracks from a literal or a row
     /// that wrote a field, rather than assuming their [`RecordFacts`].
     dirty: BTreeSet<Name>,
-    /// While obliging: the facts a record of `dirty` did not prove where its
-    /// value left the name.
-    broken: BTreeSet<RecordFact>,
+    /// While obliging: per record node, the facts a record of `dirty` of that
+    /// type did not prove where its value left the name.
+    broken: Broken,
     /// While obliging: the facts [`Walk::restate`] assumed.
     assumed: BTreeSet<RecordFact>,
     /// While obliging: per array name taken or read from a record name's
@@ -3730,7 +3827,7 @@ impl<'a> Walk<'a> {
             refuted: Vec::new(),
             obliging: false,
             dirty: BTreeSet::new(),
-            broken: BTreeSet::new(),
+            broken: BTreeMap::new(),
             assumed: BTreeSet::new(),
             pushed: BTreeMap::new(),
             borrows: global_borrows(stmts),
@@ -4377,7 +4474,7 @@ impl<'a> Walk<'a> {
                 .and_then(|e| self.element_lin(r, fact, e, push.then_some(f)))
                 .is_some_and(|g| holds(&g));
             if !proved {
-                self.broken.insert(fact.clone());
+                self.broke(r, fact);
             }
         }
     }
@@ -4449,7 +4546,7 @@ impl<'a> Walk<'a> {
                 _ => false,
             };
             if !empty && !listed && !templated && !from.is_some_and(longer) {
-                self.broken.insert(fact.clone());
+                self.broke(n, fact);
             }
         }
     }
@@ -4552,7 +4649,22 @@ impl<'a> Walk<'a> {
         let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
         for (l, f) in self.facts_of(n) {
             if !holds(&l) {
-                self.broken.insert(f.clone());
+                self.broke(n, f);
+            }
+        }
+    }
+
+    /// Notes that record name `n` broke `fact` of its type.
+    fn broke(&mut self, n: Name, fact: &RecordFact) {
+        let node = record_node(&self.body.names[n.index()].ty);
+        match self.broken.get_mut(&*node) {
+            Some(fs) if fs.contains(fact) => {}
+            Some(fs) => {
+                fs.insert(fact.clone());
+            }
+            None => {
+                self.broken
+                    .insert(node.into_owned(), BTreeSet::from([fact.clone()]));
             }
         }
     }

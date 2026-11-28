@@ -1,0 +1,8 @@
+// One module imports `pick` flat from two modules, so it cannot tell them
+// apart, and neither is renamed apart.
+import { pick } from "./a_module_exporting_pick.vyrn"
+import { pick } from "./another_module_exporting_pick.vyrn"
+
+fn main() -> Int64 {
+    return pick()
+}

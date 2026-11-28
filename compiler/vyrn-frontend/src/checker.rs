@@ -1659,6 +1659,11 @@ pub struct Recorded {
     /// The linked callee of each [`crate::ast::CallForm::Home`] call, keyed
     /// by the call node, which the driver writes into the call.
     pub homes: HashMap<NodeId, String>,
+    /// Per record node ([`crate::types::record_node`]), each node whose place
+    /// a value of it took ([`Decls::coerced`]). A value changes its record
+    /// type nowhere else, so check elision closes a record's facts over these
+    /// edges.
+    pub coercions: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 impl Recorded {
@@ -1680,6 +1685,9 @@ impl Recorded {
         }
         self.trapped.extend(tail.trapped);
         self.homes.extend(tail.homes);
+        for (from, tos) in tail.coercions {
+            self.coercions.entry(from).or_default().extend(tos);
+        }
     }
 
     /// Adds `site` unless its literal is one already. A body is typed once per
@@ -1955,6 +1963,19 @@ impl Decls for Checker<'_> {
     fn decl(&self, name: &str) -> Option<&TypeDecl> {
         let types = self.types;
         self.read(name, types.get(name).map(|(d, t)| (*d, *t)))
+    }
+
+    fn coerced(&self, from: &Type, to: &Type) {
+        let nodes = crate::types::record_node(from).zip(crate::types::record_node(to));
+        let Some((from, to)) = nodes.filter(|(a, b)| a != b) else {
+            return;
+        };
+        if let Some(r) = self.acc.borrow_mut().record.as_mut() {
+            if !r.coercions.get(&*from).is_some_and(|t| t.contains(&*to)) {
+                let tos = r.coercions.entry(from.into_owned()).or_default();
+                tos.insert(to.into_owned());
+            }
+        }
     }
 }
 
@@ -5554,6 +5575,28 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // No impl renders a type the language renders, so its `show` is its
+        // `toString`, which the core lowers it to (`Builder::renders`).
+        if proto == crate::types::SHOW && crate::types::renders(&self.base(&recv)) {
+            return self.check_declared_call(
+                &DeclaredCall {
+                    key: name,
+                    shown: name,
+                    params: std::slice::from_ref(&recv),
+                    ret: &sig.ret,
+                    type_params: None,
+                    caps: Some(&vec![sig.recv]),
+                    bounds: None,
+                    recv: Some(&recv),
+                    written: &[],
+                },
+                args,
+                scope,
+                expected,
+                fn_ret,
+                line,
+            );
+        }
         match crate::types::type_key(&recv) {
             Some(key) if self.implements(&proto, &key) => {
                 let mangled = crate::types::impl_method_name(&proto, &key, name);
@@ -8047,6 +8090,28 @@ mod tests {
             panic!("one solved argument: {:?}", calls[0].1)
         };
         assert_eq!((crate::ast::written_param(p), t), ("T", &Type::Int));
+    }
+
+    /// Each width or shape coercion is one edge, and an exact type none.
+    #[test]
+    fn recording_keeps_each_record_coercion_as_an_edge() {
+        let src = "type Big = { n: Int64, m: Int64 }
+                   type Small = { n: Int64 }
+                   type Twin = { n: Int64 }
+                   fn f(s: Small) -> Int64 {
+    return s.n
+}
+                   fn main() -> Int64 {
+    let b = Big { n: 1, m: 2 }
+                       let t: Array<Twin> = [Small { n: 3 }]
+    return f(b) + t[0].n
+}
+";
+        let r = record(&parse(lex(src).unwrap()).unwrap());
+        let edges: Vec<(&str, &str)> = (r.coercions.iter())
+            .flat_map(|(a, bs)| bs.iter().map(move |b| (a.as_str(), b.as_str())))
+            .collect();
+        assert_eq!(edges, [("Big", "Small"), ("Small", "Twin")]);
     }
 
     /// A container with an optional projection.

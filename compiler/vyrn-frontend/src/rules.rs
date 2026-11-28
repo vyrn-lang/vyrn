@@ -1058,8 +1058,8 @@ rules! {
     DeclaredByBoth { name, first, second }
         "`{name}` is declared by both `{first}` and `{second}`";
     DeclaredByBothLinked { name, first, second }
-        "`{name}` is declared by both `{first}` and `{second}`: a top-level name is \
-        program-wide, so two linked modules cannot share one";
+        "`{name}` is declared by both `{first}` and `{second}`, and the link renames \
+        neither apart: a module sees both, or the name keeps its spelling, as an `extern` does";
     SourceTooLong { src_len } "src_len {src_len} exceeds the input buffer";
     NotUtf8 {} "the source is not valid UTF-8";
     UnicodeEscapeBrace {} "`\\u` must be followed by `{{HEX}}`";

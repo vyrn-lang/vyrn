@@ -460,7 +460,8 @@ impl World {
         let roots = (vyrn_frontend::prelude::all().flat_map(sig))
             .chain(externs.flat_map(sig))
             .chain(&prelude_types);
-        let records = crate::elide::Records::new(program, roots, decls);
+        let coercions = &ownership.record.coercions;
+        let records = crate::elide::Records::new(program, roots, decls, coercions);
         let mut world = World {
             ownership,
             private,

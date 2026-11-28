@@ -1,0 +1,3 @@
+export fn pick() -> Int64 {
+    return 1
+}

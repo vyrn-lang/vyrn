@@ -1,0 +1,2 @@
+one_module_imports_a_name_two_modules_export.vyrn:4:0: `pick` is declared by both `a_module_exporting_pick.vyrn` and `another_module_exporting_pick.vyrn`, and the link renames neither apart: a module sees both, or the name keeps its spelling, as an `extern` does
+  note: import one of them as a namespace instead — `import * as another_module_exporting_pick from "./another_module_exporting_pick.vyrn"` reaches its exports as `another_module_exporting_pick.pick` and keeps them out of the flat namespace
