@@ -18,10 +18,22 @@ count makes it lazy. `(?:..)` groups without a name, `(?<n>..)`, `(?P<n>..)`
 and `(?'n'..)` name a group, and `(?#..)` is a comment.
 The flags `i` (ASCII case folding), `s` (`.` takes `\n` and `\r`) and `m` hold
 for the rest of a group after `(?ims-ims)`, or inside `(?ims-ims:..)`, and the
-empty pattern matches the empty string. A Thompson NFA with no backtracking, so
-the time is linear in the pattern size times the input for every pattern. A
-search runs it as two lazy DFAs, one forward to a match's end and one back to its
-start: one table read per byte. It has no backreferences.
+empty pattern matches the empty string. A pattern with no backreference is a
+Thompson NFA with no backtracking, so the time is linear in the pattern size times
+the input. A search runs it as two lazy DFAs, one forward to a match's end and one
+back to its start: one table read per byte.
+
+`\1` to `\99`, `\gN` and `\g{N}` refer to a group by number, `\g{-N}` to the Nth
+group opened before it, and `\k<n>`, `\k'n'`, `\k{n}` and `(?P=n)` by name. A
+backreference matches the text its group spans, or the empty string where the
+group has not closed or took no part; under `i` it folds ASCII case. A reference
+to a group the pattern does not have is refused. A search of a pattern with a
+backreference backtracks from each offset in turn, which takes time exponential
+in the pattern in the worst case, so one call of `find`, `countMatches`,
+`replaceAll` or `captures` takes at most 1000000 steps and 1000 more per byte of
+the haystack, and past them it traps with `a backtracking pattern ran past its
+step budget of N steps`. A repeat that comes back to its loop at the offset it
+left it ends there, as a thread the NFA drops.
 
 `(?=..)`, `(?!..)`, `(?<=..)` and `(?<!..)` look ahead and behind, nested to any
 depth, and see the whole text, before `from` too. `^` and `$` are the text's ends,
@@ -50,12 +62,13 @@ match starts and ends on a character boundary.
 ## Regex
 
 ```vyrn
-type Regex = { fwd: Program, rev: Program, names: Array<String>, looks: Array<Look> }
+type Regex = { fwd: Program, rev: Program, names: Array<String>, looks: Array<Look>, backtrack: Bool }
 ```
 
 A compiled pattern: `fwd` is the pattern after a loop over any byte, so a forward
 pass finds where the leftmost match ends, and `rev`, its reverse, reads that match
-back to its start.
+back to its start. A pattern with a backreference is searched by backtracking
+over `fwd`, and its `rev` serves only its regular lookahead bodies.
 
 ## Match
 
@@ -116,7 +129,7 @@ fn captures(re: Regex, hay: String, from: Int64) -> Option<Captures>
 ```
 
 The first match at or after `from` and its groups, or `None`. The groups cost a
-Thompson simulation over the match alone.
+Thompson simulation over the match alone; a backtracking search has them.
 
 ## capture
 

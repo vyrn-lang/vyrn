@@ -5,8 +5,9 @@
 //!
 //! The language is `std/regex.syntax`, which `std/regex` reads too, and the
 //! pattern is matched whole. [`grammar`] is its parser, and [`Build`] makes the
-//! tree from its matches. Groups have no backreferences, and counted repetition
-//! expands structurally with bounds capped at 255. Every construct means what
+//! tree from its matches. Counted repetition expands structurally with bounds
+//! capped at 255. A pattern with a backreference is no regular language: it has
+//! no DFA, and [`compile`] answers [`Refusal::NotRegular`]. Every construct means what
 //! ECMA-262 means on ASCII (`.` excludes `\n` and `\r`), so a pattern round-trips
 //! to a JSON Schema `pattern`. A literal, a class member, `.` and a negated class
 //! are code points, and the DFA reads their UTF-8 bytes.
@@ -229,6 +230,17 @@ struct Build<'a> {
     names: Vec<Vec<u8>>,
     /// The lookarounds open around the term being read.
     looks: usize,
+    /// The capturing groups opened so far.
+    groups: usize,
+    /// The group each backreference names, by number or by name: the builder checks
+    /// them once the pattern has numbered every group.
+    refs: Vec<Backref>,
+}
+
+/// The group a backreference names.
+enum Backref {
+    Number(usize),
+    Name(Vec<u8>),
 }
 
 /// The flags that change what an atom means: `i` folds ASCII case, `s` lets `.`
@@ -341,6 +353,9 @@ impl Hooks for Build<'_> {
             }
             self.names.push(name.to_vec());
         }
+        if name.is_some() || t.len() == 1 {
+            self.groups += 1;
+        }
         self.flags.push(flags);
         Ok(())
     }
@@ -377,6 +392,27 @@ impl Hooks for Build<'_> {
                 body,
             },
         ));
+        Ok(())
+    }
+
+    /// A backreference is no term of a regular language: it stands as the empty
+    /// string, so the counts charge it one term, and marks the pattern.
+    fn _regex_backref(&mut self, start: usize, end: usize) -> Result<(), String> {
+        let t = &self.b[start..end];
+        let digits = |t: &[u8]| String::from_utf8_lossy(t).parse::<usize>().unwrap_or(0);
+        let r = match (t[1], t.get(2)) {
+            (b'?', _) => Backref::Name(t[4..t.len() - 1].to_vec()),
+            (b'g', Some(b'{')) if t[3] == b'-' => {
+                let back = digits(&t[4..t.len() - 1]);
+                Backref::Number((self.groups + 1).saturating_sub(back))
+            }
+            (b'g', Some(b'{')) => Backref::Number(digits(&t[3..t.len() - 1])),
+            (b'g', _) => Backref::Number(digits(&t[2..])),
+            (b'k', _) => Backref::Name(t[3..t.len() - 1].to_vec()),
+            _ => Backref::Number(digits(&t[1..])),
+        };
+        self.refs.push(r);
+        self.terms.push((start, Re::Empty));
         Ok(())
     }
 
@@ -645,19 +681,24 @@ fn say(row: &str, holes: &[(&str, &str)]) -> String {
     out
 }
 
-/// Why a pattern does not compile, in the catalogue's sentence: a row the grammar
-/// refuses with, which the island check of a `=~` literal states, or one the builder
-/// raises from the tree. The builder alone states its DFA state limit.
+/// Why a pattern has no DFA: a row the grammar refuses with, which the island check
+/// of a `=~` literal states, or one the builder raises from the tree, each in the
+/// catalogue's sentence; or a pattern that is no regular language, because it holds
+/// a backreference, which only `std/regex`'s backtracking path matches. The builder
+/// alone states its DFA state limit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     Grammar(String),
     Builder(String),
+    NotRegular,
 }
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (Refusal::Grammar(s) | Refusal::Builder(s)) = self;
-        f.write_str(s)
+        match self {
+            Refusal::Grammar(s) | Refusal::Builder(s) => f.write_str(s),
+            Refusal::NotRegular => f.write_str("a backreference, which no DFA matches"),
+        }
     }
 }
 
@@ -674,6 +715,8 @@ fn parse(pattern: &str) -> Result<Re, Refusal> {
         flags: vec![Flags::default()],
         names: Vec::new(),
         looks: 0,
+        groups: 0,
+        refs: Vec::new(),
     };
     let mut scanner = grammar::Scanner::new(pattern, build);
     if let Err(why) = scanner._regex_pattern() {
@@ -681,6 +724,17 @@ fn parse(pattern: &str) -> Result<Re, Refusal> {
             true => Refusal::Grammar(why),
             false => Refusal::Builder(why),
         });
+    }
+    let b = &scanner.hooks;
+    let missing = |r: &Backref| match r {
+        Backref::Number(k) => *k == 0 || *k > b.groups,
+        Backref::Name(n) => !b.names.contains(n),
+    };
+    if b.refs.iter().any(missing) {
+        return Err(Refusal::Builder(say("BackrefMissing", &[])));
+    }
+    if !b.refs.is_empty() {
+        return Err(Refusal::NotRegular);
     }
     // The pattern is one alternation, which leaves one term.
     Ok(scanner.hooks.terms.pop().map_or(Re::Empty, |t| t.1))
@@ -2329,16 +2383,46 @@ mod tests {
     }
 
     #[test]
+    fn a_backreference_is_not_regular() {
+        let each = [
+            "(a)\\1",
+            "(a)\\g1",
+            "(a)\\g{1}",
+            "(a)(b)\\g{-2}",
+            "(?<n>a)\\k<n>",
+            "(?<n>a)\\k'n'",
+            "(?<n>a)\\k{n}",
+            "(?P<n>a)(?P=n)",
+            "\\2(a)(b)",
+            "\\k<n>(?<n>a)",
+            "(a){0}\\1",
+        ];
+        for p in each {
+            assert_eq!(compile(p).err(), Some(Refusal::NotRegular), "{p}");
+        }
+        let missing = Some(Refusal::Builder(
+            "a backreference to a group the pattern does not have".to_string(),
+        ));
+        let none = [
+            "\\1",
+            "(a)\\2",
+            "(?:a)\\1",
+            "(a)\\g{-2}",
+            "(a)\\g0",
+            "(?<n>a)\\k<m>",
+        ];
+        for p in none {
+            assert_eq!(compile(p).err(), missing, "{p}");
+        }
+    }
+
+    #[test]
     fn an_escape_with_no_meaning_is_refused() {
         let says = |p: &str| compile(p).err().map(|e| e.to_string());
         let says = |p: &str, s: &str| assert_eq!(says(p).as_deref(), Some(s), "{p}");
         says(
             "\\y",
             "the escape `\\y` means nothing: a backslash makes only ASCII punctuation literal",
-        );
-        says(
-            "\\1",
-            "the escape `\\1` means nothing: a backslash makes only ASCII punctuation literal",
         );
         says(
             "\\b+",

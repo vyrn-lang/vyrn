@@ -375,6 +375,18 @@ mod tests {
     }
 
     #[test]
+    fn a_backreference_has_a_colour_of_its_own() {
+        let g = crate::load(include_str!("../../../std/regex.syntax")).expect("regex.syntax loads");
+        let src = r"(?<n>a)\1\k<n>(?P=n)";
+        let got = runs(&g, g.rule("RegexPattern").expect("a start rule"), src);
+        let found: Vec<_> = (got.iter())
+            .filter(|r| r.scope == Scope::Backref)
+            .map(|r| &src[r.start..r.stop])
+            .collect();
+        assert_eq!(found, [r"\1\k<n>(?P=n)"]);
+    }
+
+    #[test]
     fn the_colours_go_on_past_a_refusal() {
         let g = crate::load(include_str!("../../../std/regex.syntax")).expect("regex.syntax loads");
         let src = "a**[b]|c";

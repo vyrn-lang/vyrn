@@ -986,6 +986,7 @@ compiler/vyrn-cli/tests/refusals/regex/x15_a_group_form_of_no_meaning.vyrn	0	cbf
 compiler/vyrn-cli/tests/refusals/regex/x16_a_group_name_that_is_no_name.vyrn	0	cbf29ce484222325	20	18	81c024d511f7d78c
 compiler/vyrn-cli/tests/refusals/regex/x17_a_group_name_used_twice.vyrn	0	cbf29ce484222325	20	18	81c024d511f7d78c
 compiler/vyrn-cli/tests/refusals/regex/x18_a_capture_in_a_lookaround.vyrn	0	cbf29ce484222325	20	18	81c024d511f7d78c
+compiler/vyrn-cli/tests/refusals/regex/x19_a_backreference_to_no_group.vyrn	0	cbf29ce484222325	20	18	81c024d511f7d78c
 compiler/vyrn-cli/tests/shapes/a-body-taken-whole-lifts-a-lambda-that-captures-a-later-let.vyrn	0	cbf29ce484222325	20	16	49caa7bfc6e1cbca
 compiler/vyrn-cli/tests/shapes/a-borrow-of-a-field-whose-root-is-consumed-after-the-borrow-ends.vyrn	0	cbf29ce484222325	20	14	366002628baf68e9
 compiler/vyrn-cli/tests/shapes/a-borrow-rebound-in-a-let-mut-is-a-copy.vyrn	0	cbf29ce484222325	20	17	788a043f661fe9ac
@@ -1592,7 +1593,7 @@ std/num.vyrn	0	cbf29ce484222325	20	18	1244a8ed3530313c
 std/openapi.vyrn	0	cbf29ce484222325	20	17	34edf93e34b6a193
 std/order.vyrn	0	cbf29ce484222325	20	20	9f8dce88ae707594
 std/random.vyrn	0	cbf29ce484222325	20	16	b5c799d0b8dfb53c
-std/regex.vyrn	0	cbf29ce484222325	20	18	094143c09ce95c58
+std/regex.vyrn	0	cbf29ce484222325	20	19	c435f9336f7d947f
 std/rpc.editor.vyrn	0	cbf29ce484222325	20	15	575d7f57c01048cb
 std/rpc.vyrn	0	cbf29ce484222325	20	17	90a8a8d7138c91a4
 std/runtime.vyrn	0	cbf29ce484222325	20	15	9b6155202bf58172

@@ -3557,7 +3557,8 @@ fn scope_token(s: vyrn_syntax::Scope) -> (u32, u32) {
         | Scope::Quantifier
         | Scope::Alternation
         | Scope::Lookaround
-        | Scope::Anchor => {
+        | Scope::Anchor
+        | Scope::Backref => {
             let custom = vyrn_syntax::CUSTOM_TOKENS.iter().position(|t| t.0 == s);
             (
                 16 + custom.expect("CUSTOM_TOKENS lists the scope") as u32,

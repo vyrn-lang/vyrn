@@ -9,8 +9,8 @@ nest 250 ^TooDeep
 // What each builder raises from the tree, because a grammar compares no numbers: a
 // range that runs backwards, a count above 255, a count whose maximum is below its
 // minimum, counts that expand the pattern past 16384 terms, a code point above
-// 10FFFF or in the surrogates, a group name used twice, and a capturing group inside
-// a lookaround.
+// 10FFFF or in the surrogates, a group name used twice, a capturing group inside a
+// lookaround, and a backreference to a group the pattern does not have.
 row Backwards
 row CountLarge
 row CountOrder
@@ -18,6 +18,7 @@ row CountBudget
 row CodepointRange
 row NameTwice
 row LookCapture
+row BackrefMissing
 
 RegexPattern = RegexAlt (eof / ^StrayParen)
 
@@ -28,8 +29,8 @@ RegexQuantifierCount = '{' (regexNumber / ^CountNumber)
                        ('}' / ',' ('}' / (regexNumber / ^CountNumber) ('}' / ^CountUnclosed)) / ^CountForm)
 
 // The order states the language: a literal is what no other alternative takes.
-RegexAtom = RegexFlags / RegexComment / &'(?' RegexLook / RegexSubpattern / RegexClass / RegexAnchor
-            / RegexEscape
+RegexAtom = RegexFlags / RegexComment / &'(?' RegexLook / &('\\' / '(?P=') RegexBackref / RegexSubpattern / RegexClass
+            / RegexAnchor / RegexEscape
             / RegexClassDot / &('*' / '+' / '?') ^NoTerm / &'{' ^NoCountTerm / &'}' ^StrayBrace
             / RegexLiteral
 // `(?i)` sets flags for the rest of its group, `(?i:..)` for its own; `(?#..)` is a
@@ -41,6 +42,14 @@ RegexSubpattern = open:regexGroupOpen alt:RegexAlt (regexGroupEnd / ^GroupUnclos
 // text's ends, or a line's under `m`; `\b`, `\B`, `\<` and `\>` are word boundaries.
 RegexLook = open:regexLookaroundOpen alt:RegexAlt (regexLookaroundEnd / ^GroupUnclosed) regexNoRepeat?
 RegexAnchor = ('^' / '$' / regexAnchor) regexNoRepeat?
+// A backreference matches the text its group matched last, or the empty string
+// before the group closes: `\N` and `\gN` by number, `\g{-N}` the Nth group opened
+// before it, and `\k<n>`, `\k'n'`, `\k{n}` and `(?P=n)` by name.
+RegexBackref = regexBackref
+regexBackref = '\\' ([1-9] [0-9]? / 'g' ([0-9]+ / '{' '-'? [0-9]+ '}')
+                     / 'k' ('<' regexName ('>' / ^GroupName) / '\'' regexName ('\'' / ^GroupName)
+                            / '{' regexName ('}' / ^GroupName)))
+               / '(?P=' regexName (')' / ^GroupName)
 RegexEscape = '\\' (regexQuote / regexShorthand / regexSense / regexForeign
                     / ^PatternBackslash)
 RegexClassDot = '.'

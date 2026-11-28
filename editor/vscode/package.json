@@ -85,7 +85,8 @@
       { "id": "regexpQuantifier", "superType": "regexp", "description": "keyword.operator.quantifier.regexp" },
       { "id": "regexpAlternation", "superType": "regexp", "description": "keyword.operator.or.regexp" },
       { "id": "regexpLookaround", "superType": "regexp", "description": "keyword.operator.lookaround.regexp" },
-      { "id": "regexpAnchor", "superType": "regexp", "description": "keyword.control.anchor.regexp" }
+      { "id": "regexpAnchor", "superType": "regexp", "description": "keyword.control.anchor.regexp" },
+      { "id": "regexpBackref", "superType": "regexp", "description": "keyword.other.back-reference.regexp" }
     ],
     "semanticTokenScopes": [
       {
@@ -103,6 +104,7 @@
           "regexpAlternation": ["keyword.operator.or.regexp"],
           "regexpLookaround": ["keyword.operator.lookaround.regexp"],
           "regexpAnchor": ["keyword.control.anchor.regexp"],
+          "regexpBackref": ["keyword.other.back-reference.regexp"],
           "*.modification": ["markup.deleted"]
         }
       },
@@ -121,6 +123,7 @@
           "regexpAlternation": ["keyword.operator.or.regexp"],
           "regexpLookaround": ["keyword.operator.lookaround.regexp"],
           "regexpAnchor": ["keyword.control.anchor.regexp"],
+          "regexpBackref": ["keyword.other.back-reference.regexp"],
           "*.modification": ["markup.deleted"]
         }
       }

@@ -597,3 +597,30 @@ fn a_deeply_nested_manifest_above_the_cwd_is_a_diagnostic_not_an_abort() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A pattern with a backreference backtracks, which takes exponential time in the
+/// worst case: a search traps at its step budget instead of running on. The same
+/// pattern without the backreference runs on the NFA and answers.
+#[test]
+fn a_catastrophic_backtracking_pattern_traps_at_its_budget() {
+    let src = |pattern: &str| {
+        format!(
+            "import {{ compile, find }} from \"std/regex\"\n\n\
+             fn main() -> Int64 {{\n    match compile(\"{pattern}\") {{\n        \
+             Ok(re) => match find(re, \"{}\", 0) {{\n            \
+             Some(m) => print(\"found\"),\n            None => print(\"none\"),\n        \
+             }},\n        Err(w) => print(w),\n    }}\n    return 0\n}}\n",
+            "a".repeat(30)
+        )
+    };
+    let regular = run("run", &src("(a|a)*b"), "btregular");
+    assert_eq!(regular.status.code(), Some(0), "{}", text(&regular));
+    assert!(text(&regular).contains("none"), "{}", text(&regular));
+    let over = run("run", &src("(a|a)*b\\\\1"), "btover");
+    let got = text(&over);
+    assert!(
+        got.contains("a backtracking pattern ran past its step budget of 1030000 steps"),
+        "expected the budget trap, got:\n{got}"
+    );
+    assert_eq!(over.status.code(), Some(1), "a trap exits 1:\n{got}");
+}
