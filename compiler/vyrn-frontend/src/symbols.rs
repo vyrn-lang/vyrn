@@ -1202,11 +1202,19 @@ fn declared_field<'a>(
     tok: &TokenInfo,
     label: &str,
 ) -> Option<(&'a RecordField, (usize, usize, usize))> {
-    let Type::Named(n) = resolve_receiver_type(analysis, tok.line, tok.col)? else {
-        return None;
-    };
+    let ty = resolve_receiver_type(analysis, tok.line, tok.col)?;
+    let n = declared_name(&ty)?;
     let f = (analysis.record_fields.iter()).find(|f| f.of == n && f.completion.label == label)?;
     Some((f, f.at?))
+}
+
+/// The declaration a receiver of type `ty` takes its fields from, an instance's
+/// included (`SyntaxError<Row>`); `None` for a type no declaration names.
+fn declared_name(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Named(n) | Type::App(n, _) => Some(n),
+        _ => None,
+    }
 }
 
 /// The read-only document of the builtin rows, [`crate::prelude::builtins`] in table order.
@@ -1578,13 +1586,6 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
     // A named record receiver offers its declaration's fields; an inline
     // structural receiver offers its own.
     match &ty {
-        Type::Named(n) => {
-            for f in &analysis.record_fields {
-                if f.of == *n {
-                    out.push(f.completion.clone());
-                }
-            }
-        }
         Type::Record(fields) => {
             for f in fields {
                 out.push(Completion {
@@ -1595,7 +1596,14 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
                 });
             }
         }
-        _ => {}
+        _ => {
+            let n = declared_name(&ty);
+            let fields = analysis
+                .record_fields
+                .iter()
+                .filter(|f| Some(f.of.as_str()) == n);
+            out.extend(fields.map(|f| f.completion.clone()));
+        }
     }
     // The functions of the home of the receiver's type, which `x.f()` reaches.
     if let Some(key) = crate::types::home_key(&ty) {
@@ -3661,11 +3669,10 @@ fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemM
     let field = || {
         receiver_before_dot(analysis, tok.line, tok.col)?;
         let is_field = match resolve_receiver_type(analysis, tok.line, tok.col)? {
-            Type::Named(n) => {
-                (analysis.record_fields.iter()).any(|f| f.of == n && f.completion.label == tok.text)
-            }
             Type::Record(fields) => fields.iter().any(|f| f.name == tok.text),
-            _ => false,
+            ty => (analysis.record_fields.iter()).any(|f| {
+                Some(f.of.as_str()) == declared_name(&ty) && f.completion.label == tok.text
+            }),
         };
         is_field.then_some(())
     };

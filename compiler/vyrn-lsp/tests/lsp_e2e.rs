@@ -7280,6 +7280,12 @@ pay power x
 /// `examples/dsl` copied to a scratch directory, with `calc.editor.vyrn` open: its text, its
 /// URI and the client.
 fn open_calc_editor(tag: &str) -> (String, String, LspClient) {
+    open_in_dsl(tag, "calc.editor.vyrn", None)
+}
+
+/// `examples/dsl` copied to a scratch directory, with file `name` open, written as `text`
+/// where it is given: its text, its URI and the client.
+fn open_in_dsl(tag: &str, name: &str, text: Option<&str>) -> (String, String, LspClient) {
     let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("vyrn_lsp_{tag}_{}_{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -7294,12 +7300,52 @@ fn open_calc_editor(tag: &str) -> (String, String, LspClient) {
     ] {
         std::fs::copy(example.join(name), dir.join(name)).unwrap();
     }
-    let text = std::fs::read_to_string(dir.join("calc.editor.vyrn")).unwrap();
-    let uri = file_uri(&dir.join("calc.editor.vyrn"));
+    if let Some(text) = text {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    let text = std::fs::read_to_string(dir.join(name)).unwrap();
+    let uri = file_uri(&dir.join(name));
     let mut client = spawn_client();
     did_open(&mut client, &uri, "vyrn", &text);
-    let _ = read_diags_for(&mut client, "calc.editor.vyrn");
+    let _ = read_diags_for(&mut client, name);
     (text, uri, client)
+}
+
+/// A generic record of a module the file names nothing from, the `SyntaxError<Row>` a
+/// generated parser refuses with, offers its fields after a dot and hovers each one.
+#[test]
+fn a_generic_record_of_an_unnamed_module_completes_and_hovers_its_fields() {
+    let src = "import { syntax } from \"std/syntax\"
+import * as parsed from syntax(\"./calc.syntax\")
+
+fn lines(text: String) -> Int64 {
+    let mut n = 0
+    match parsed.parseLedger(text) {
+        Ok(l) => {}
+        Err(errors) => {
+            for e in errors {
+                let r = e.row
+                n = n + e.line
+            }
+        }
+    }
+    return n
+}
+";
+    let (text, uri, mut client) = open_in_dsl("generic_field", "probe.vyrn", Some(src));
+    let (line, ch) = pos_after(&text, "for e");
+    let e = hover_value(&mut client, &uri, line, ch - 1).expect("a hover on `e`");
+    assert!(e.contains("SyntaxError<Row>"), "{e}");
+    let (line, ch) = pos_after(&text, "r = e.");
+    let labels = completion_labels(&mut client, &uri, line, ch);
+    for field in ["row", "line", "col", "end"] {
+        assert!(labels.contains(&field.to_string()), "{field}: {labels:?}");
+    }
+    let row = hover_value(&mut client, &uri, line, ch + 1).expect("a hover on `row`");
+    assert!(row.contains("row:"), "{row}");
+    let (line, ch) = pos_after(&text, "n + e.");
+    let col = hover_value(&mut client, &uri, line, ch + 1).expect("a hover on `line`");
+    assert!(col.contains("line: Int64"), "{col}");
 }
 
 /// The definition response at the first `needle` of `text`, the cursor `skip` characters in.
